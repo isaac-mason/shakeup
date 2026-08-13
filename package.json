@@ -1,0 +1,22 @@
+{
+    "name": "shakeup",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "sideEffects": false,
+    "exports": {
+        ".": "./src/index.ts",
+        "./node": "./src/node/index.ts"
+    },
+    "scripts": {
+        "test": "vitest run"
+    },
+    "devDependencies": {
+        "@types/node": "^26.2.0",
+        "enhanced-resolve": "^5.24.5",
+        "eslint-scope": "^9.1.2",
+        "meriyah": "^7.3.1",
+        "typescript": "^7.0.2",
+        "vitest": "^4.1.10"
+    }
+}
