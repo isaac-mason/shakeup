@@ -4,8 +4,8 @@ import { dirname, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as meriyah from 'meriyah';
 import { parse } from '../src/parser.ts';
-import { createAst, walk, TYPE_NAME, N, A } from '../src/ast.ts';
-import { ESTREE_MAP } from './estree-map.ts';
+import { walk, N, type Node } from '../src/ast.ts';
+import { ESTREE_TYPE } from '../src/estree.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -13,23 +13,30 @@ const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js')
 
 type Counts = Record<string, number>;
 
-/** Count ESTree-mapped node types by walking our flat AST from the root. */
+/**
+ * Count ESTree-mapped node types by walking our type+data AST from the root.
+ * Our payloads carry ESTree names directly (ESTREE_TYPE per numeric type id), so
+ * the comparison is DIRECT — no estree-map layer.
+ */
 function countOurs(src: string): Counts {
-    const { ast, program } = parse(createAst(), src, { ts: false });
-    expect(ast.errors).toEqual([]);
+    const { program, errors } = parse(src, { ts: false });
+    expect(errors).toEqual([]);
     const counts: Counts = {};
-    walk(ast, program, (id) => {
-        const name = ESTREE_MAP[TYPE_NAME[ast.type[id]] as keyof typeof ESTREE_MAP];
-        if (name != null) counts[name] = (counts[name] ?? 0) + 1;
-        // A defaulted param `f(a = 1)` is a Param carrying an `init` for us, but
-        // an AssignmentPattern for meriyah. Param itself maps to null, so count
-        // each Param-with-init as an AssignmentPattern here — together with our
-        // real AssignPattern nodes (nested destructuring defaults) this matches
-        // meriyah's AssignmentPattern total. Documented modelling difference, not
-        // a bug; see notes on Param in estree-map.ts.
-        if (ast.type[id] === N.Param && A.Param.init(ast, id) !== 0) {
-            counts.AssignmentPattern = (counts.AssignmentPattern ?? 0) + 1;
+    walk(program, (n: Node) => {
+        const name = ESTREE_TYPE[n.type];
+        // Param maps to no ESTree node (it's our modelling wrapper), TS* nodes
+        // never appear in plain JS. Skip empty mappings.
+        if (name === 'Param' || name === '') {
+            // A defaulted param `f(a = 1)` is a Param carrying an `init` for us, but
+            // an AssignmentPattern for meriyah. Count each Param-with-init as an
+            // AssignmentPattern here — together with our real AssignPattern nodes
+            // (nested destructuring defaults) this matches meriyah's total.
+            if (n.type === N.FormalParameter && n.data.init !== null) {
+                counts.AssignmentPattern = (counts.AssignmentPattern ?? 0) + 1;
+            }
+            return;
         }
+        counts[name] = (counts[name] ?? 0) + 1;
     });
     return counts;
 }
@@ -61,10 +68,9 @@ function countMeriyah(root: unknown): Counts {
  * KNOWN_DIFFS: the full, documented divergence ledger between our parser's node
  * inventory and meriyah's for three.core.js. Anything NOT covered here that
  * still mismatches is treated as a likely REAL PARSER BUG (the suite fails and
- * prints an actionable diff table). Entries marked `suspectedBug: true` carry a
- * minimal repro and keep the suite green while clearly flagging the issue.
+ * prints an actionable diff table).
  *
- * There are three kinds of entry:
+ * There are two kinds of entry:
  *  - GROUP: sum several ESTree type names into one bucket on BOTH sides before
  *    comparing (used when we and meriyah split the same syntax across different
  *    node types, e.g. expr-vs-pattern for destructuring).
@@ -88,12 +94,18 @@ const GROUPS: Group[] = [
     },
 ];
 
+// NOTE: We split MemberExpression into StaticMemberExpression /
+// ComputedMemberExpression / PrivateFieldExpression (oxc js.rs:508-541); all three
+// serialize as 'MemberExpression' in ESTREE_NAME, so countOurs already sums them
+// into the single 'MemberExpression' bucket and it's compared directly to meriyah
+// (no group/exclusion needed). ChainExpression is likewise now compared directly
+// (its EXCLUDED entry was removed) — the count parity proves placement correctness
+// at corpus scale.
+
 /** type names excluded entirely from the diff, with reasons. */
 const EXCLUDED: Record<string, string> = {
     Identifier:
-        "MetaProperty handling differs: meriyah emits Identifier children (meta/property) under MetaProperty, we treat MetaProp as a leaf. Also destructuring-vs-expression shorthand differences shift Identifier counts. Excluded per spec.",
-    ChainExpression:
-        "meriyah wraps optional-chain roots in a ChainExpression node; we don't create wrapper nodes (optional flag lives on Member/Call). No corresponding node on our side.",
+        "We split Identifier into four roles (BindingIdentifier / IdentifierReference / IdentifierName / LabelIdentifier), all of which serialize as 'Identifier' in ESTREE_NAME so they land in this one bucket. Counts still diverge from meriyah for two reasons: (1) MetaProperty handling — meriyah emits Identifier children (meta/property) under MetaProperty, we treat ImportMeta/NewTarget as leaves; (2) shorthand `{a}` — we now materialize the key (IdentifierName) and value (IdentifierReference/BindingIdentifier) as two distinct nodes, and we keep assignment-side destructuring expression-flavored, both shifting Identifier counts. Excluded per spec.",
     ClassBody:
         "meriyah inserts a ClassBody wrapper node between a Class{Declaration,Expression} and its members; we store members directly on the class node's `body` list, so we have no ClassBody-equivalent node. Pure structural wrapper, no 1:1 bucket. (three.core.js: 219 ClassBody on their side, 0 on ours.)",
 };
@@ -101,8 +113,7 @@ const EXCLUDED: Record<string, string> = {
 /**
  * suspectedBug: a mismatch we believe is a genuine parser divergence, kept out
  * of the strict diff so the suite stays green while flagging it loudly. Each
- * entry pins the exact residual delta (ours - theirs) we expect, so the guard
- * fails the moment the delta drifts (e.g. if the bug is fixed, or worsens).
+ * entry pins the exact residual delta (ours - theirs) we expect.
  */
 type SuspectedBug = { type: string; delta: number; repro: string; analysis: string };
 
@@ -172,15 +183,15 @@ describe('differential vs meriyah (three.core.js)', () => {
     // For.init must be the BARE expression (ESTree semantics), never an ExprStmt.
     it('regression: for-loop expression init is a bare expression', () => {
         const repro = 'for (i = 0; i < n; i++) {}';
-        const { ast, program } = parse(createAst(), repro, { ts: false });
-        expect(ast.errors).toEqual([]);
+        const { program, errors } = parse(repro, { ts: false });
+        expect(errors).toEqual([]);
 
-        let forId = 0;
-        walk(ast, program, (id) => {
-            if (ast.type[id] === N.For) forId = id;
+        let forNode: Node | null = null;
+        walk(program, (n) => {
+            if (n.type === N.ForStatement) forNode = n;
         });
-        expect(forId).toBeGreaterThan(0);
-        const init = A.For.init(ast, forId);
-        expect(TYPE_NAME[ast.type[init]]).toBe('Assign');
+        expect(forNode).not.toBeNull();
+        const init = (forNode as unknown as { data: { init: Node } }).data.init;
+        expect(init.type).toBe(N.AssignmentExpression);
     });
 });

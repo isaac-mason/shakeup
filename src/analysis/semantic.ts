@@ -1,19 +1,18 @@
-/** Scope/symbol/reference tables. Design notes: llm/notes/oxc-internals.md §semantic */
+/** Scope/symbol/reference tables. Design notes: llm/notes/oxc-internals.md §semantic
+ *
+ * SoA architecture (compilecat convergence — load-bearing): scope/symbol columns
+ * are typed arrays indexed by ScopeId/SymbolId; nodeSymbol/nodeScope columns are
+ * sized by nodeCount and indexed by node.id. Only the tree-walk reads node
+ * OBJECTS now (was flat (ast,id)); the tables are unchanged in shape. symDecl and
+ * scopeNode hold the declaring/owning Node (so names read straight off `.name`).
+ */
 
+import { enumeration } from '../util/enumeration';
 import {
-    type Ast,
-    type NodeId,
-    A,
-    FIELD_COUNT,
-    FIELD_INLINE,
-    FIELD_LIST_MASK,
-    FL,
+    type Node,
     N,
-    VAR_KIND,
-    enumeration,
-    listAt,
-    listLen,
-    text,
+    isIdentifier,
+    walkChildren,
 } from '../ast.ts';
 
 /* ------------------------------------------------------------------- flags */
@@ -47,22 +46,22 @@ export type Semantic = {
     /* scope tree (SoA, index = ScopeId; 0 = none) */
     scopeParent: Uint32Array;
     scopeFlags: Uint16Array;
-    scopeNode: Uint32Array; // owning NodeId
+    scopeNode: (Node | null)[]; // owning Node
     scopeCount: number;
 
     /* symbols (SoA, index = SymbolId; 0 = none) */
     symScope: Uint32Array;
-    symDecl: Uint32Array; // declaring Ident NodeId (name = its span)
+    symDecl: (Node | null)[]; // declaring Ident Node (name = its .name)
     symFlags: Uint16Array;
     symCount: number;
 
-    /** NodeId -> SymbolId for declaring AND resolved referencing Idents (0 = none/global) */
+    /** node.id -> SymbolId for declaring AND resolved referencing Idents (0 = none/global) */
     nodeSymbol: Uint32Array;
-    /** NodeId -> ScopeId for scope-owning nodes (0 = none) */
+    /** node.id -> ScopeId for scope-owning nodes (0 = none) */
     nodeScope: Uint32Array;
 
-    /** unresolved value-namespace references (globals like Math): Ident NodeIds */
-    unresolved: number[];
+    /** unresolved value-namespace references (globals like Math): Ident Nodes */
+    unresolved: Node[];
 
     /* interning + binding maps (rebuilt per analyze) */
     names: Map<string, number>;
@@ -76,10 +75,10 @@ export function createSemantic(): Semantic {
     return {
         scopeParent: new Uint32Array(cap),
         scopeFlags: new Uint16Array(cap),
-        scopeNode: new Uint32Array(cap),
+        scopeNode: new Array(cap).fill(null),
         scopeCount: 1,
         symScope: new Uint32Array(cap),
-        symDecl: new Uint32Array(cap),
+        symDecl: new Array(cap).fill(null),
         symFlags: new Uint16Array(cap),
         symCount: 1,
         nodeSymbol: new Uint32Array(cap),
@@ -94,7 +93,6 @@ export function createSemantic(): Semantic {
 /* ----------------------------------------------------------- module state */
 
 let sem: Semantic;
-let ast: Ast;
 let scope = 0; // current ScopeId
 
 const growU32 = (a: Uint32Array): Uint32Array => {
@@ -108,18 +106,17 @@ const growU16 = (a: Uint16Array): Uint16Array => {
     return n;
 };
 
-function newScope(flags: number, node: NodeId): number {
+function newScope(flags: number, node: Node | null): number {
     const id = sem.scopeCount;
     if (id >= sem.scopeParent.length) {
         sem.scopeParent = growU32(sem.scopeParent);
         sem.scopeFlags = growU16(sem.scopeFlags);
-        sem.scopeNode = growU32(sem.scopeNode);
     }
     sem.scopeParent[id] = scope;
     sem.scopeFlags[id] = flags;
     sem.scopeNode[id] = node;
     sem.scopeCount = id + 1;
-    if (node !== 0) sem.nodeScope[node] = id;
+    if (node !== null) sem.nodeScope[node.id] = id;
     return id;
 }
 
@@ -136,20 +133,19 @@ function internName(s: string): number {
     return id;
 }
 
-function declare(identNode: NodeId, flags: number, ns: number, targetScope: number): number {
-    const nameId = internName(text(ast, identNode));
+function declare(identNode: Node, flags: number, ns: number, targetScope: number): number {
+    const nameId = internName(identNode.name);
     const key = bindingKey(targetScope, ns, nameId);
     const existing = sem.bindings.get(key);
     if (existing !== undefined) {
         // redeclaration (var/var, function overloads, etc.) — merge flags, keep first symbol
         sem.symFlags[existing] |= flags;
-        sem.nodeSymbol[identNode] = existing;
+        sem.nodeSymbol[identNode.id] = existing;
         return existing;
     }
     const id = sem.symCount;
     if (id >= sem.symScope.length) {
         sem.symScope = growU32(sem.symScope);
-        sem.symDecl = growU32(sem.symDecl);
         sem.symFlags = growU16(sem.symFlags);
         sem.symNameId = growU32(sem.symNameId);
     }
@@ -159,19 +155,18 @@ function declare(identNode: NodeId, flags: number, ns: number, targetScope: numb
     sem.symNameId[id] = nameId;
     sem.symCount = id + 1;
     sem.bindings.set(key, id);
-    sem.nodeSymbol[identNode] = id;
+    sem.nodeSymbol[identNode.id] = id;
     return id;
 }
 
 /**
  * Declare ONE symbol reachable from both value and type namespaces (classes,
  * enums, type-only imports). Must stay a single symbol per declaration so
- * nodeSymbol, export binding, and rename all point at one identity — two
- * symbols for one ident splits exported-class renames.
+ * nodeSymbol, export binding, and rename all point at one identity.
  */
-function declareDualNs(identNode: NodeId, flags: number, targetScope: number): number {
+function declareDualNs(identNode: Node, flags: number, targetScope: number): number {
     const sym = declare(identNode, flags, NS_VALUE, targetScope);
-    const nameId = internName(text(ast, identNode));
+    const nameId = internName(identNode.name);
     const typeKey = bindingKey(targetScope, NS_TYPE, nameId);
     if (!sem.bindings.has(typeKey)) sem.bindings.set(typeKey, sym);
     return sym;
@@ -188,14 +183,14 @@ function hoistTarget(): number {
     }
 }
 
-function resolveRef(identNode: NodeId, ns: number): void {
-    const nameId = sem.names.get(text(ast, identNode));
+function resolveRef(identNode: Node, ns: number): void {
+    const nameId = sem.names.get(identNode.name);
     if (nameId !== undefined) {
         let s = scope;
         while (s !== 0) {
             const hit = sem.bindings.get(bindingKey(s, ns, nameId));
             if (hit !== undefined) {
-                sem.nodeSymbol[identNode] = hit;
+                sem.nodeSymbol[identNode.id] = hit;
                 return;
             }
             // enums/classes bind in both namespaces; fall through handled by dual declare
@@ -207,7 +202,7 @@ function resolveRef(identNode: NodeId, ns: number): void {
             while (s !== 0) {
                 const hit = sem.bindings.get(bindingKey(s, NS_VALUE, nameId));
                 if (hit !== undefined && (sem.symFlags[hit] & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0) {
-                    sem.nodeSymbol[identNode] = hit;
+                    sem.nodeSymbol[identNode.id] = hit;
                     return;
                 }
                 s = sem.scopeParent[s];
@@ -225,12 +220,11 @@ export type SemanticResult = { semantic: Semantic };
 /**
  * Build scope and symbol tables for `program` into `out` (reset first).
  * Runs a declare pass (scopes + bindings) then a resolve pass that fills
- * `nodeSymbol` for every referencing Ident. LIMIT: no TDZ or redeclaration
- * diagnostics; labels are not tracked as symbols.
+ * `nodeSymbol` for every referencing Ident. `nodeCount` sizes the id-indexed
+ * columns. LIMIT: no TDZ or redeclaration diagnostics; labels are not tracked.
  */
-export function analyze(out: Semantic, sourceAst: Ast, program: NodeId): SemanticResult {
+export function analyze(out: Semantic, program: Node, nodeCount: number): SemanticResult {
     sem = out;
-    ast = sourceAst;
     scope = 0;
 
     // reset (warm capacity persists)
@@ -239,12 +233,12 @@ export function analyze(out: Semantic, sourceAst: Ast, program: NodeId): Semanti
     sem.unresolved.length = 0;
     sem.names.clear();
     sem.bindings.clear();
-    if (sem.nodeSymbol.length < ast.nodeCount) {
-        sem.nodeSymbol = new Uint32Array(ast.nodeCount * 2);
-        sem.nodeScope = new Uint32Array(ast.nodeCount * 2);
+    if (sem.nodeSymbol.length < nodeCount) {
+        sem.nodeSymbol = new Uint32Array(nodeCount * 2);
+        sem.nodeScope = new Uint32Array(nodeCount * 2);
     } else {
-        sem.nodeSymbol.fill(0, 0, ast.nodeCount);
-        sem.nodeScope.fill(0, 0, ast.nodeCount);
+        sem.nodeSymbol.fill(0, 0, nodeCount);
+        sem.nodeScope.fill(0, 0, nodeCount);
     }
 
     const moduleScope = newScope(SCOPE.MODULE, program);
@@ -258,250 +252,214 @@ export function analyze(out: Semantic, sourceAst: Ast, program: NodeId): Semanti
 /* ------------------------------------------------- pass 1: declarations */
 
 /** declare all bindings introduced by a pattern (decl contexts) */
-function declarePattern(node: NodeId, flags: number, targetScope: number): void {
-    if (node === 0) return;
-    switch (ast.type[node]) {
-        case N.Ident:
+function declarePattern(node: Node | null, flags: number, targetScope: number): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.BindingIdentifier: // the only declaring role
             declare(node, flags, NS_VALUE, targetScope);
             return;
-        case N.ArrayPattern: {
-            const ref = A.ArrayPattern.elements(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) declarePattern(listAt(ast, ref, i), flags, targetScope);
+        case N.ArrayPattern:
+            for (const el of node.data.elements) declarePattern(el, flags, targetScope);
             return;
-        }
-        case N.ObjectPattern: {
-            const ref = A.ObjectPattern.props(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) declarePattern(listAt(ast, ref, i), flags, targetScope);
+        case N.ObjectPattern:
+            for (const p of node.data.properties) declarePattern(p, flags, targetScope);
             return;
-        }
-        case N.Property:
-            declarePattern(A.Property.value(ast, node), flags, targetScope);
+        case N.ObjectProperty:
+            declarePattern(node.data.value, flags, targetScope);
             return;
-        case N.AssignPattern:
-            declarePattern(A.AssignPattern.left(ast, node), flags, targetScope);
+        case N.AssignmentPattern:
+            declarePattern(node.data.left, flags, targetScope);
             return; // .right is an expression — resolve pass handles it
         case N.RestElement:
-            declarePattern(A.RestElement.arg(ast, node), flags, targetScope);
+            declarePattern(node.data.argument, flags, targetScope);
             return;
-        case N.Param:
-            declarePattern(A.Param.pattern(ast, node), flags, targetScope);
+        case N.FormalParameter:
+            declarePattern(node.data.pattern, flags, targetScope);
             return;
     }
 }
 
 // LIMIT: params bind into the function scope, shared with the body (spec gives params their own scope).
-function declareParams(listRef: number): void {
-    for (let i = 0; i < listLen(ast, listRef); i++) declarePattern(listAt(ast, listRef, i), SYM.PARAM, scope);
+function declareParams(list: Node[]): void {
+    for (const p of list) declarePattern(p, SYM.PARAM, scope);
 }
 
-function declareTypeParams(node: NodeId): void {
-    if (node === 0) return;
-    const ref = A.TSTypeParams.params(ast, node);
-    for (let i = 0; i < listLen(ast, ref); i++) {
-        const tp = listAt(ast, ref, i);
-        declare(A.TSTypeParam.name(ast, tp), SYM.TYPE, NS_TYPE, scope);
+function declareTypeParams(node: Node | null): void {
+    if (node === null || node.type !== N.TSTypeParameterDeclaration) return;
+    for (const tp of node.data.params) {
+        if (tp.type === N.TSTypeParameter) declare(tp.data.name, SYM.TYPE, NS_TYPE, scope);
     }
 }
 
-function declareInScope(kind: number, node: NodeId, body: () => void): void {
+function declareInScope(kind: number, node: Node, body: () => void): void {
     const prev = scope;
     scope = newScope(kind, node);
     body();
     scope = prev;
 }
 
-function declarePass(node: NodeId): void {
-    if (node === 0) return;
-    const t = ast.type[node];
-    switch (t) {
-        case N.VarDecl: {
-            const kind = ast.flags[node] & VAR_KIND.KIND_MASK;
-            const flags = kind === VAR_KIND.VAR ? SYM.VAR : kind === VAR_KIND.LET ? SYM.LET : SYM.CONST;
-            const target = kind === VAR_KIND.VAR ? hoistTarget() : scope;
-            const ref = A.VarDecl.declarators(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) {
-                const d = listAt(ast, ref, i);
-                declarePattern(A.VarDeclarator.id(ast, d), flags, target);
-                declarePass(A.VarDeclarator.init(ast, d));
+function declarePass(node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.VariableDeclaration: {
+            const kind = node.data.kind;
+            const flags = kind === 'var' ? SYM.VAR : kind === 'let' ? SYM.LET : SYM.CONST;
+            const target = kind === 'var' ? hoistTarget() : scope;
+            for (const d of node.data.declarations) {
+                if (d.type !== N.VariableDeclarator) continue;
+                declarePattern(d.data.id, flags, target);
+                declarePass(d.data.init);
             }
             return;
         }
-        case N.FuncDecl: {
-            const id = A.FuncDecl.id(ast, node);
-            if (id !== 0) declare(id, SYM.FUNCTION, NS_VALUE, hoistTarget());
+        case N.FunctionDeclaration: {
+            const id = node.data.id;
+            if (id !== null) declare(id, SYM.FUNCTION, NS_VALUE, hoistTarget());
             declareInScope(SCOPE.FUNCTION, node, () => {
-                declareTypeParams(A.FuncDecl.typeParams(ast, node));
-                declareParams(A.FuncDecl.params(ast, node));
-                declarePass(A.FuncDecl.body(ast, node));
+                declareTypeParams(node.data.typeParameters);
+                declareParams(node.data.params);
+                declarePass(node.data.body);
             });
             return;
         }
-        case N.FuncExpr: {
+        case N.FunctionExpression: {
             declareInScope(SCOPE.FUNCTION, node, () => {
-                const id = A.FuncExpr.id(ast, node);
-                if (id !== 0) declare(id, SYM.FUNCTION, NS_VALUE, scope);
-                declareTypeParams(A.FuncExpr.typeParams(ast, node));
-                declareParams(A.FuncExpr.params(ast, node));
-                declarePass(A.FuncExpr.body(ast, node));
+                const id = node.data.id;
+                if (id !== null) declare(id, SYM.FUNCTION, NS_VALUE, scope);
+                declareTypeParams(node.data.typeParameters);
+                declareParams(node.data.params);
+                declarePass(node.data.body);
             });
             return;
         }
-        case N.Arrow:
+        case N.ArrowFunctionExpression:
             declareInScope(SCOPE.FUNCTION, node, () => {
-                declareTypeParams(A.Arrow.typeParams(ast, node));
-                declareParams(A.Arrow.params(ast, node));
-                declarePass(A.Arrow.body(ast, node));
+                declareTypeParams(node.data.typeParameters);
+                declareParams(node.data.params);
+                declarePass(node.data.body);
             });
             return;
-        case N.ClassDecl: {
-            const id = A.ClassDecl.id(ast, node);
-            if (id !== 0) declareDualNs(id, SYM.CLASS | SYM.TYPE, scope);
+        case N.ClassDeclaration: {
+            const id = node.data.id;
+            if (id !== null) declareDualNs(id, SYM.CLASS | SYM.TYPE, scope);
             declareInScope(SCOPE.CLASS, node, () => {
-                declareTypeParams(A.ClassDecl.typeParams(ast, node));
-                declareClassBody(A.ClassDecl.body(ast, node));
+                declareTypeParams(node.data.typeParameters);
+                declareClassBody(node.data.body);
             });
-            declarePass(A.ClassDecl.superClass(ast, node));
+            declarePass(node.data.superClass);
             return;
         }
-        case N.ClassExpr:
+        case N.ClassExpression:
             declareInScope(SCOPE.CLASS, node, () => {
-                const id = A.ClassExpr.id(ast, node);
-                if (id !== 0) declare(id, SYM.CLASS, NS_VALUE, scope);
-                declareTypeParams(A.ClassExpr.typeParams(ast, node));
-                declareClassBody(A.ClassExpr.body(ast, node));
+                const id = node.data.id;
+                if (id !== null) declare(id, SYM.CLASS, NS_VALUE, scope);
+                declareTypeParams(node.data.typeParameters);
+                declareClassBody(node.data.body);
             });
-            declarePass(A.ClassExpr.superClass(ast, node));
+            declarePass(node.data.superClass);
             return;
-        case N.Block:
+        case N.BlockStatement:
         case N.StaticBlock:
             declareInScope(SCOPE.BLOCK, node, () => {
-                const ref = A.Block.body(ast, node);
-                for (let i = 0; i < listLen(ast, ref); i++) declarePass(listAt(ast, ref, i));
+                for (const s of node.data.body) declarePass(s);
             });
             return;
-        case N.For:
+        case N.ForStatement:
             declareInScope(SCOPE.FOR, node, () => {
-                declarePass(A.For.init(ast, node));
-                declarePass(A.For.test(ast, node));
-                declarePass(A.For.update(ast, node));
-                declarePass(A.For.body(ast, node));
+                declarePass(node.data.init);
+                declarePass(node.data.test);
+                declarePass(node.data.update);
+                declarePass(node.data.body);
             });
             return;
-        case N.ForIn:
-        case N.ForOf:
+        case N.ForInStatement:
+        case N.ForOfStatement:
             declareInScope(SCOPE.FOR, node, () => {
-                declarePass(A.ForOf.left(ast, node));
-                declarePass(A.ForOf.right(ast, node));
-                declarePass(A.ForOf.body(ast, node));
+                declarePass(node.data.left);
+                declarePass(node.data.right);
+                declarePass(node.data.body);
             });
             return;
-        case N.Switch:
+        case N.SwitchStatement:
             declareInScope(SCOPE.SWITCH, node, () => {
-                declarePass(A.Switch.disc(ast, node));
-                const ref = A.Switch.cases(ast, node);
-                for (let i = 0; i < listLen(ast, ref); i++) declarePass(listAt(ast, ref, i));
+                declarePass(node.data.discriminant);
+                for (const c of node.data.cases) declarePass(c);
             });
             return;
         case N.CatchClause:
             declareInScope(SCOPE.CATCH, node, () => {
-                declarePattern(A.CatchClause.param(ast, node), SYM.CATCH, scope);
-                declarePass(A.CatchClause.body(ast, node));
+                declarePattern(node.data.param, SYM.CATCH, scope);
+                declarePass(node.data.body);
             });
             return;
-        case N.ImportDecl: {
-            const ref = A.ImportDecl.specifiers(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) {
-                const spec = listAt(ast, ref, i);
-                const st = ast.type[spec];
-                const local =
-                    st === N.ImportSpec
-                        ? A.ImportSpec.local(ast, spec)
-                        : st === N.ImportDefaultSpec
-                          ? A.ImportDefaultSpec.local(ast, spec)
-                          : A.ImportNamespaceSpec.local(ast, spec);
-                const typeOnly = (ast.flags[node] | ast.flags[spec]) & FL.TYPE_ONLY;
+        case N.ImportDeclaration: {
+            for (const spec of node.data.specifiers) {
+                let local: Node;
+                if (spec.type === N.ImportSpecifier) local = spec.data.local;
+                else if (spec.type === N.ImportDefaultSpecifier) local = spec.data.local;
+                else if (spec.type === N.ImportNamespaceSpecifier) local = spec.data.local;
+                else continue;
+                const specTypeOnly = spec.type === N.ImportSpecifier && spec.data.importKind === 'type';
+                const typeOnly = node.data.importKind === 'type' || specTypeOnly;
                 if (typeOnly) declareDualNs(local, SYM.IMPORT | SYM.TYPE, scope);
                 else declare(local, SYM.IMPORT, NS_VALUE, scope);
             }
             return;
         }
-        case N.TSInterfaceDecl:
-            declare(A.TSInterfaceDecl.id(ast, node), SYM.TYPE, NS_TYPE, scope);
+        case N.TSInterfaceDeclaration:
+            declare(node.data.id, SYM.TYPE, NS_TYPE, scope);
             declareInScope(SCOPE.TYPE, node, () => {
-                declareTypeParams(A.TSInterfaceDecl.typeParams(ast, node));
+                declareTypeParams(node.data.typeParameters);
             });
             return;
-        case N.TSTypeAliasDecl:
-            declare(A.TSTypeAliasDecl.id(ast, node), SYM.TYPE, NS_TYPE, scope);
+        case N.TSTypeAliasDeclaration:
+            declare(node.data.id, SYM.TYPE, NS_TYPE, scope);
             declareInScope(SCOPE.TYPE, node, () => {
-                declareTypeParams(A.TSTypeAliasDecl.typeParams(ast, node));
+                declareTypeParams(node.data.typeParameters);
             });
             return;
-        case N.TSEnumDecl: {
-            const id = A.TSEnumDecl.id(ast, node);
-            declareDualNs(id, SYM.ENUM | SYM.TYPE, scope);
+        case N.TSEnumDeclaration: {
+            declareDualNs(node.data.id, SYM.ENUM | SYM.TYPE, scope);
             // LIMIT: enum members are not bound inside an enum body scope.
-            const ref = A.TSEnumDecl.members(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) declarePass(A.TSEnumMember.init(ast, listAt(ast, ref, i)));
+            for (const member of node.data.members) {
+                if (member.type === N.TSEnumMember) declarePass(member.data.initializer);
+            }
             return;
         }
-        case N.TSModuleDecl: {
-            const id = A.TSModuleDecl.id(ast, node);
-            if (ast.type[id] === N.Ident) declare(id, SYM.NAMESPACE, NS_VALUE, scope);
+        case N.TSModuleDeclaration: {
+            const id = node.data.id;
+            if (id.type === N.BindingIdentifier) declare(id, SYM.NAMESPACE, NS_VALUE, scope);
             declareInScope(SCOPE.NAMESPACE, node, () => {
-                const ref = A.TSModuleDecl.body(ast, node);
-                for (let i = 0; i < listLen(ast, ref); i++) declarePass(listAt(ast, ref, i));
+                for (const s of node.data.body) declarePass(s);
             });
             return;
         }
         // TS type positions declare nothing (type params handled at their owners)
-        case N.TSTypeAnn:
-        case N.TSTypeRef:
+        case N.TSTypeAnnotation:
+        case N.TSTypeReference:
             return;
     }
-    // default: recurse into children generically via schema tables
-    genericChildren(node, declarePass);
+    // default: recurse into children generically via schema walk
+    walkChildren(node, declarePass);
 }
 
-function declareClassBody(listRef: number): void {
-    for (let i = 0; i < listLen(ast, listRef); i++) {
-        const m = listAt(ast, listRef, i);
-        const mt = ast.type[m];
-        if (mt === N.MethodDef) {
-            if ((ast.flags[m] & FL.COMPUTED) !== 0) declarePass(A.MethodDef.key(ast, m));
-            declarePass(A.MethodDef.value(ast, m));
-        } else if (mt === N.PropDef) {
-            if ((ast.flags[m] & FL.COMPUTED) !== 0) declarePass(A.PropDef.key(ast, m));
-            declarePass(A.PropDef.value(ast, m));
+function declareClassBody(list: Node[]): void {
+    for (const m of list) {
+        if (m.type === N.MethodDefinition) {
+            if (m.data.computed) declarePass(m.data.key);
+            declarePass(m.data.value);
+        } else if (m.type === N.PropertyDefinition) {
+            if (m.data.computed) declarePass(m.data.key);
+            declarePass(m.data.value);
         } else declarePass(m); // StaticBlock
-    }
-}
-
-function genericChildren(node: NodeId, visit: (n: NodeId) => void): void {
-    const t = ast.type[node];
-    const count = FIELD_COUNT[t];
-    if (count === 0) return;
-    const listMask = FIELD_LIST_MASK[t];
-    const inline = FIELD_INLINE[t];
-    const base = ast.a[node];
-    for (let i = 0; i < count; i++) {
-        const v = inline ? (i === 0 ? ast.a[node] : ast.b[node]) : ast.extra[base + i];
-        if (v === 0) continue;
-        if (listMask & (1 << i)) {
-            const len = ast.extra[v];
-            for (let j = 0; j < len; j++) {
-                const child = ast.extra[v + 1 + j];
-                if (child !== 0) visit(child);
-            }
-        } else visit(v);
     }
 }
 
 /* ------------------------------------------------- pass 2: references */
 
 /** enter the scope this node created in pass 1 (if any), run body, restore */
-function inNodeScope(node: NodeId, body: () => void): void {
-    const s = sem.nodeScope[node];
+function inNodeScope(node: Node, body: () => void): void {
+    const s = sem.nodeScope[node.id];
     if (s === 0) {
         body();
         return;
@@ -512,245 +470,244 @@ function inNodeScope(node: NodeId, body: () => void): void {
     scope = prev;
 }
 
-function resolvePattern(node: NodeId): void {
+function resolvePattern(node: Node | null): void {
     // patterns in decl positions: idents are declarations (already bound);
     // defaults + computed keys are expressions to resolve
-    if (node === 0) return;
-    switch (ast.type[node]) {
-        case N.Ident:
+    if (node === null) return;
+    switch (node.type) {
+        case N.BindingIdentifier: // a declaration — already bound, nothing to resolve
             return;
-        case N.ArrayPattern: {
-            const ref = A.ArrayPattern.elements(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) resolvePattern(listAt(ast, ref, i));
+        case N.ArrayPattern:
+            for (const el of node.data.elements) resolvePattern(el);
             return;
-        }
-        case N.ObjectPattern: {
-            const ref = A.ObjectPattern.props(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) resolvePattern(listAt(ast, ref, i));
+        case N.ObjectPattern:
+            for (const p of node.data.properties) resolvePattern(p);
             return;
-        }
-        case N.Property:
-            if ((ast.flags[node] & FL.COMPUTED) !== 0) resolvePass(A.Property.key(ast, node));
-            resolvePattern(A.Property.value(ast, node));
+        case N.ObjectProperty:
+            if (node.data.computed) resolvePass(node.data.key);
+            resolvePattern(node.data.value);
             return;
-        case N.AssignPattern:
-            resolvePattern(A.AssignPattern.left(ast, node));
-            resolvePass(A.AssignPattern.right(ast, node));
+        case N.AssignmentPattern:
+            resolvePattern(node.data.left);
+            resolvePass(node.data.right);
             return;
         case N.RestElement:
-            resolvePattern(A.RestElement.arg(ast, node));
+            resolvePattern(node.data.argument);
             return;
-        case N.Param:
-            resolvePattern(A.Param.pattern(ast, node));
-            resolveType(A.Param.typeAnn(ast, node));
-            resolvePass(A.Param.init(ast, node));
+        case N.FormalParameter:
+            resolvePattern(node.data.pattern);
+            resolveType(node.data.typeAnnotation);
+            resolvePass(node.data.init);
             return;
     }
 }
 
-function resolveParams(listRef: number): void {
-    for (let i = 0; i < listLen(ast, listRef); i++) {
-        const p = listAt(ast, listRef, i);
-        if (ast.type[p] === N.RestElement) {
-            resolvePattern(A.RestElement.arg(ast, p));
-            resolveType(A.RestElement.typeAnn(ast, p));
+function resolveParams(list: Node[]): void {
+    for (const p of list) {
+        if (p.type === N.RestElement) {
+            resolvePattern(p.data.argument);
+            resolveType(p.data.typeAnnotation);
         } else resolvePattern(p);
     }
 }
 
 /** resolve a TS type subtree (type namespace for TSTypeRef heads, value ns for typeof) */
-function resolveType(node: NodeId): void {
-    if (node === 0) return;
-    const t = ast.type[node];
-    switch (t) {
-        case N.TSTypeRef: {
-            const name = A.TSTypeRef.name(ast, node);
-            resolveEntityName(name, NS_TYPE);
-            resolveType(A.TSTypeRef.typeArgs(ast, node));
+function resolveType(node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.TSTypeReference:
+            resolveEntityName(node.data.typeName, NS_TYPE);
+            resolveType(node.data.typeArguments);
             return;
-        }
         case N.TSTypeQuery: // typeof X — value namespace
-            resolveEntityName(A.TSTypeQuery.exprName(ast, node), NS_VALUE);
-            resolveType(A.TSTypeQuery.typeArgs(ast, node));
+            resolveEntityName(node.data.exprName, NS_VALUE);
+            resolveType(node.data.typeArguments);
             return;
-        case N.TSMapped:
+        case N.TSMappedType:
             inNodeScope(node, () => {
                 // LIMIT: mapped-type param not scoped separately; resolve constituents
-                genericChildren(node, resolveType);
+                walkChildren(node, resolveType);
             });
             return;
-        case N.TSPropSig:
-            if ((ast.flags[node] & FL.COMPUTED) !== 0) resolvePass(A.TSPropSig.key(ast, node));
-            resolveType(A.TSPropSig.typeAnn(ast, node));
+        case N.TSPropertySignature:
+            if (node.data.computed) resolvePass(node.data.key);
+            resolveType(node.data.typeAnnotation);
             return;
-        case N.Ident:
-            return; // bare idents inside type structures we don't classify (labels etc.)
     }
-    genericChildren(node, resolveType);
+    // any bare identifier role reached generically inside a type structure is a
+    // leaf we don't resolve here (type-ref heads go through resolveEntityName;
+    // IdentifierName/LabelIdentifier never resolve).
+    if (isIdentifier(node.type)) return;
+    walkChildren(node, resolveType);
 }
 
 /** qualified name head resolves; the rest are member-ish */
-function resolveEntityName(node: NodeId, ns: number): void {
-    if (node === 0) return;
-    if (ast.type[node] === N.Ident) resolveRef(node, ns);
-    else if (ast.type[node] === N.TSQualifiedName) resolveEntityName(A.TSQualifiedName.left(ast, node), ns);
+function resolveEntityName(node: Node | null, ns: number): void {
+    if (node === null) return;
+    // the head of an entity name is an IdentifierReference (type-ref typeName /
+    // typeof exprName); the qualified `.right` spine is IdentifierName (skipped).
+    if (node.type === N.IdentifierReference) resolveRef(node, ns);
+    else if (node.type === N.TSQualifiedName) resolveEntityName(node.data.left, ns);
 }
 
-function resolvePass(node: NodeId): void {
-    if (node === 0) return;
-    const t = ast.type[node];
-    switch (t) {
-        case N.Ident:
+function resolvePass(node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.IdentifierReference: // every expression-position name resolves (value ns)
             resolveRef(node, NS_VALUE);
             return;
-        case N.Member:
-            resolvePass(A.Member.object(ast, node));
-            if ((ast.flags[node] & FL.COMPUTED) !== 0) resolvePass(A.Member.property(ast, node));
+        case N.StaticMemberExpression:
+        case N.PrivateFieldExpression:
+            // property/field is an IdentifierName / PrivateIdentifier — never resolves
+            resolvePass(node.data.object);
             return;
-        case N.Property: // object literal
-            if ((ast.flags[node] & FL.COMPUTED) !== 0) resolvePass(A.Property.key(ast, node));
-            // shorthand `{ a }`: key === value node; resolve once
-            resolvePass(A.Property.value(ast, node));
+        case N.ComputedMemberExpression:
+            resolvePass(node.data.object);
+            resolvePass(node.data.expression);
             return;
-        case N.MethodDef:
-        case N.PropDef:
-            if ((ast.flags[node] & FL.COMPUTED) !== 0) resolvePass(A.MethodDef.key(ast, node));
-            resolvePass(t === N.MethodDef ? A.MethodDef.value(ast, node) : A.PropDef.value(ast, node));
-            if (t === N.PropDef) resolveType(A.PropDef.typeAnn(ast, node));
+        case N.ChainExpression: // transparent wrapper — resolve the wrapped chain
+            resolvePass(node.data.expression);
             return;
-        case N.VarDecl: {
-            const ref = A.VarDecl.declarators(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) {
-                const d = listAt(ast, ref, i);
-                resolvePattern(A.VarDeclarator.id(ast, d));
-                resolveType(A.VarDeclarator.typeAnn(ast, d));
-                resolvePass(A.VarDeclarator.init(ast, d));
+        case N.ObjectProperty: // object literal
+            if (node.data.computed) resolvePass(node.data.key); // key is otherwise an IdentifierName (never resolves)
+            // shorthand `{ a }`: value is a distinct IdentifierReference — resolve it
+            resolvePass(node.data.value);
+            return;
+        case N.MethodDefinition:
+            if (node.data.computed) resolvePass(node.data.key);
+            resolvePass(node.data.value);
+            return;
+        case N.PropertyDefinition:
+            if (node.data.computed) resolvePass(node.data.key);
+            resolvePass(node.data.value);
+            resolveType(node.data.typeAnnotation);
+            return;
+        case N.VariableDeclaration: {
+            for (const d of node.data.declarations) {
+                if (d.type !== N.VariableDeclarator) continue;
+                resolvePattern(d.data.id);
+                resolveType(d.data.typeAnnotation);
+                resolvePass(d.data.init);
             }
             return;
         }
-        case N.FuncDecl:
-        case N.FuncExpr:
+        case N.FunctionDeclaration:
+        case N.FunctionExpression:
             inNodeScope(node, () => {
-                resolveParams(A.FuncDecl.params(ast, node));
-                resolveType(A.FuncDecl.returnType(ast, node));
-                resolvePass(A.FuncDecl.body(ast, node));
+                resolveParams(node.data.params);
+                resolveType(node.data.returnType);
+                resolvePass(node.data.body);
             });
             return;
-        case N.Arrow:
+        case N.ArrowFunctionExpression:
             inNodeScope(node, () => {
-                resolveParams(A.Arrow.params(ast, node));
-                resolveType(A.Arrow.returnType(ast, node));
-                resolvePass(A.Arrow.body(ast, node));
+                resolveParams(node.data.params);
+                resolveType(node.data.returnType);
+                resolvePass(node.data.body);
             });
             return;
-        case N.ClassDecl:
-        case N.ClassExpr: {
-            resolvePass(A.ClassDecl.superClass(ast, node));
+        case N.ClassDeclaration:
+        case N.ClassExpression: {
+            resolvePass(node.data.superClass);
             inNodeScope(node, () => {
-                const impls = A.ClassDecl.implements(ast, node);
-                for (let i = 0; i < listLen(ast, impls); i++) {
-                    const h = listAt(ast, impls, i);
-                    resolveEntityName(A.TSHeritage.expr(ast, h), NS_TYPE);
-                    resolveType(A.TSHeritage.typeArgs(ast, h));
+                for (const h of node.data.implements) {
+                    if (h.type !== N.TSClassImplements) continue;
+                    resolveEntityName(h.data.expression, NS_TYPE);
+                    resolveType(h.data.typeArguments);
                 }
-                resolveType(A.ClassDecl.superTypeArgs(ast, node));
-                const body = A.ClassDecl.body(ast, node);
-                for (let i = 0; i < listLen(ast, body); i++) resolvePass(listAt(ast, body, i));
+                resolveType(node.data.superTypeArguments);
+                for (const m of node.data.body) resolvePass(m);
             });
             return;
         }
-        case N.Block:
+        case N.BlockStatement:
         case N.StaticBlock:
-        case N.For:
-        case N.ForIn:
-        case N.ForOf:
-        case N.Switch:
-        case N.CatchClause:
-        case N.TSModuleDecl:
+        case N.ForStatement:
+        case N.SwitchStatement:
+        case N.TSModuleDeclaration:
             inNodeScope(node, () => {
-                if (t === N.CatchClause) {
-                    resolvePattern(A.CatchClause.param(ast, node));
-                    resolvePass(A.CatchClause.body(ast, node));
-                } else if (t === N.ForIn || t === N.ForOf) {
-                    const left = A.ForOf.left(ast, node);
-                    if (ast.type[left] === N.VarDecl) resolvePass(left);
-                    else resolvePass(left); // assignment-target form: plain expression refs
-                    resolvePass(A.ForOf.right(ast, node));
-                    resolvePass(A.ForOf.body(ast, node));
-                } else genericChildren(node, resolvePass);
+                walkChildren(node, resolvePass);
             });
             return;
-        case N.ImportDecl:
+        case N.CatchClause:
+            inNodeScope(node, () => {
+                resolvePattern(node.data.param);
+                resolvePass(node.data.body);
+            });
+            return;
+        case N.ForInStatement:
+        case N.ForOfStatement:
+            inNodeScope(node, () => {
+                resolvePass(node.data.left);
+                resolvePass(node.data.right);
+                resolvePass(node.data.body);
+            });
+            return;
+        case N.ImportDeclaration:
             return; // no references inside
-        case N.ExportNamed: {
-            const decl = A.ExportNamed.decl(ast, node);
-            if (decl !== 0) {
+        case N.ExportNamedDeclaration: {
+            const decl = node.data.declaration;
+            if (decl !== null) {
                 resolvePass(decl);
                 return;
             }
-            if (A.ExportNamed.source(ast, node) !== 0) return; // re-export: no local refs
-            const specs = A.ExportNamed.specifiers(ast, node);
-            for (let i = 0; i < listLen(ast, specs); i++) {
-                const s = listAt(ast, specs, i);
-                const local = A.ExportSpec.local(ast, s);
-                if (ast.type[local] === N.Ident) resolveRef(local, NS_VALUE);
+            if (node.data.source !== null) return; // re-export: no local refs
+            for (const s of node.data.specifiers) {
+                if (s.type !== N.ExportSpecifier) continue;
+                const local = s.data.local;
+                if (local.type === N.IdentifierReference) resolveRef(local, NS_VALUE);
             }
             return;
         }
-        case N.Labeled: // label ident is not a symbol ref
-            resolvePass(A.Labeled.body(ast, node));
+        case N.LabeledStatement: // label ident is not a symbol ref
+            resolvePass(node.data.body);
             return;
-        case N.Break:
-        case N.Continue:
+        case N.BreakStatement:
+        case N.ContinueStatement:
             return; // label refs are not symbols
-        case N.TSInterfaceDecl:
+        case N.TSInterfaceDeclaration:
             inNodeScope(node, () => {
-                const ext = A.TSInterfaceDecl.extends(ast, node);
-                for (let i = 0; i < listLen(ast, ext); i++) {
-                    const h = listAt(ast, ext, i);
-                    resolveEntityName(A.TSHeritage.expr(ast, h), NS_TYPE);
-                    resolveType(A.TSHeritage.typeArgs(ast, h));
+                for (const h of node.data.extends) {
+                    if (h.type !== N.TSInterfaceHeritage) continue;
+                    resolveEntityName(h.data.expression, NS_TYPE);
+                    resolveType(h.data.typeArguments);
                 }
-                const body = A.TSInterfaceDecl.body(ast, node);
-                for (let i = 0; i < listLen(ast, body); i++) resolveType(listAt(ast, body, i));
+                for (const m of node.data.body) resolveType(m);
             });
             return;
-        case N.TSTypeAliasDecl:
+        case N.TSTypeAliasDeclaration:
             inNodeScope(node, () => {
-                resolveType(A.TSTypeAliasDecl.typeAnn(ast, node));
+                resolveType(node.data.typeAnnotation);
             });
             return;
-        case N.TSEnumDecl: {
-            const ref = A.TSEnumDecl.members(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) resolvePass(A.TSEnumMember.init(ast, listAt(ast, ref, i)));
+        case N.TSEnumDeclaration:
+            for (const member of node.data.members) {
+                if (member.type === N.TSEnumMember) resolvePass(member.data.initializer);
+            }
             return;
-        }
-        case N.TSAs:
-        case N.TSSatisfies:
-            resolvePass(A.TSAs.expr(ast, node));
-            resolveType(A.TSAs.typeAnn(ast, node));
+        case N.TSAsExpression:
+        case N.TSSatisfiesExpression:
+            resolvePass(node.data.expression);
+            resolveType(node.data.typeAnnotation);
             return;
-        case N.TSTypeAnn:
+        case N.TSTypeAnnotation:
             resolveType(node);
             return;
-        case N.Call:
-        case N.New:
-            resolvePass(A.Call.callee(ast, node));
-            resolveType(A.Call.typeArgs(ast, node));
-            {
-                const args = A.Call.args(ast, node);
-                for (let i = 0; i < listLen(ast, args); i++) resolvePass(listAt(ast, args, i));
-            }
+        case N.CallExpression:
+        case N.NewExpression:
+            resolvePass(node.data.callee);
+            resolveType(node.data.typeArguments);
+            for (const a of node.data.arguments) resolvePass(a);
             return;
     }
-    genericChildren(node, resolvePass);
+    walkChildren(node, resolvePass);
 }
 
 /* ------------------------------------------------------------- accessors */
 
 /** Declared name of a symbol (the text of its declaring Ident). */
-export const symbolName = (semantic: Semantic, sourceAst: Ast, symbolId: number): string =>
-    text(sourceAst, semantic.symDecl[symbolId]);
+export const symbolName = (semantic: Semantic, symbolId: number): string =>
+    semantic.symDecl[symbolId]?.name ?? '';
 
 /** Resolved symbol id for an Ident node (0 = unresolved/global). */
-export const symbolOf = (semantic: Semantic, node: NodeId): number => semantic.nodeSymbol[node];
+export const symbolOf = (semantic: Semantic, node: Node): number => semantic.nodeSymbol[node.id];

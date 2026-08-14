@@ -26,7 +26,6 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { createAst, text } from '../src/ast.ts';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
 import { parse } from '../src/parser.ts';
@@ -128,30 +127,28 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('self-oracle: our parser accepts the bundle with 0 errors', () => {
-        const ast = createAst();
-        parse(ast, built.code, { ts: false });
-        expect(ast.errors).toEqual([]);
+        const { errors } = parse(built.code, { ts: false });
+        expect(errors).toEqual([]);
     });
 
     it('self-oracle: no duplicate top-level declarations; unresolved globals are exactly the expected set', () => {
-        const ast = createAst();
-        const { program } = parse(ast, built.code, { ts: false });
-        expect(ast.errors).toEqual([]);
+        const { program, errors, nodeCount } = parse(built.code, { ts: false });
+        expect(errors).toEqual([]);
         const sem = createSemantic();
-        analyze(sem, ast, program);
+        analyze(sem, program, nodeCount);
 
         // module-scope symbol names must be unique (deconflict guarantees this)
-        const moduleScope = sem.nodeScope[program];
+        const moduleScope = sem.nodeScope[program.id];
         const names: string[] = [];
         for (let sym = 1; sym < sem.symCount; sym++) {
             if (sem.symScope[sym] !== moduleScope) continue;
-            names.push(text(ast, sem.symDecl[sym]));
+            names.push(sem.symDecl[sym]!.name);
         }
         expect(new Set(names).size).toBe(names.length);
 
         // unresolved globals: only real ambient globals. The hoisted external
         // (`basename`, `sep`) is bound by the top import, so it must NOT appear.
-        const unresolved = new Set(sem.unresolved.map((n) => text(ast, n)));
+        const unresolved = new Set(sem.unresolved.map((n) => n.name));
         expect(unresolved.has('basename')).toBe(false);
         expect(unresolved.has('sep')).toBe(false);
         // whatever remains must be a known ambient global (Map/Object here)

@@ -1,45 +1,40 @@
-import { A, type Ast, FL, N, type NodeId, walkChildren } from '../ast';
+import { type Node, N, isIdentifier, walkChildren } from '../ast.ts';
 
 /**
- * Visit every Ident in `node`'s subtree that is a reference or binding
- * occurrence, skipping mere-name Idents (non-computed member/object/class keys,
- * labels, import/export specifier names). `cb`'s `shorthandProp` is the
- * shorthand-property node id when the Ident is a shorthand object-property key
- * (`{ a }` / `{ a = 1 }`) and 0 otherwise — renamers must then expand to
- * `a: a$1` rather than replace the span.
+ * Visit every identifier in `node`'s subtree that carries a symbol — i.e. the
+ * two RESOLVING/DECLARING roles `IdentifierReference` and `BindingIdentifier`.
+ * The pure-name roles (`IdentifierName` on member/keys/specifier externals and
+ * `LabelIdentifier`) are distinct node types now, so they're skipped by simply
+ * not matching — the old contextual member/key/label special-casing is gone.
+ *
+ * `cb`'s `shorthandProp` is the shorthand-property node when the identifier is
+ * the VALUE of a shorthand object property (`{ a }` / `{ a = 1 }`) and null
+ * otherwise — renamers must then expand to `a: a$1` rather than replace the span
+ * (the key text stays, only the value name changes).
  */
 export function walkRefIdents(
-    ast: Ast,
-    node: NodeId,
-    cb: (ident: NodeId, shorthandProp: NodeId) => void,
+    node: Node,
+    cb: (ident: Node, shorthandProp: Node | null) => void,
 ): void {
-    const t = ast.type[node];
-    if (t === N.Ident) {
-        cb(node, 0);
+    if (node.type === N.BindingIdentifier || node.type === N.IdentifierReference) {
+        cb(node, null);
         return;
     }
-    if (t === N.Property && (ast.flags[node] & FL.SHORTHAND) !== 0) {
-        const key = A.Property.key(ast, node);
-        const value = A.Property.value(ast, node);
-        if (ast.type[key] === N.Ident) cb(key, node);
-        if (value !== key && ast.type[value] === N.AssignPattern) {
-            walkRefIdents(ast, A.AssignPattern.right(ast, value), cb);
+    if (isIdentifier(node.type)) return; // IdentifierName / LabelIdentifier: pure names, no symbol
+    if (node.type === N.ObjectProperty && node.data.shorthand) {
+        // shorthand `{ a }` / `{ a = 1 }`: key is an IdentifierName (skip); the
+        // value is the ref/binding to expand. The value is either the bare
+        // ident or an AssignmentPattern wrapping it (`{ a = 1 }`).
+        const value = node.data.value;
+        if (value.type === N.BindingIdentifier || value.type === N.IdentifierReference) cb(value, node);
+        else if (value.type === N.AssignmentPattern) {
+            const left = value.data.left;
+            if (left.type === N.BindingIdentifier || left.type === N.IdentifierReference) cb(left, node);
+            walkRefIdents(value.data.right, cb);
         }
         return;
     }
-    if (t === N.Member && (ast.flags[node] & FL.COMPUTED) === 0) {
-        walkRefIdents(ast, A.Member.object(ast, node), cb);
-        return;
-    }
-    if ((t === N.MethodDef || t === N.PropDef || t === N.TSPropSig) && (ast.flags[node] & FL.COMPUTED) === 0) {
-        // walk everything except the non-computed key
-        const key = t === N.MethodDef ? A.MethodDef.key(ast, node) : t === N.PropDef ? A.PropDef.key(ast, node) : A.TSPropSig.key(ast, node);
-        walkChildren(ast, node, (child) => {
-            if (child !== key) walkRefIdents(ast, child, cb);
-        });
-        return;
-    }
-    walkChildren(ast, node, (child) => {
-        walkRefIdents(ast, child, cb);
+    walkChildren(node, (child) => {
+        walkRefIdents(child, cb);
     });
 }

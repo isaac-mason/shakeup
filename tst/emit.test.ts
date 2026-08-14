@@ -4,7 +4,6 @@ import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as meriyah from 'meriyah';
 import { parse } from '../src/parser.ts';
-import { createAst } from '../src/ast.ts';
 import { emitModule } from '../src/emit.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,8 +13,8 @@ const CRASHCAT_SRC = resolve(REPO, '..', 'crashcat', 'src');
 
 /** parse `src` (ts on) and strip to JS. */
 function strip(src: string): string {
-    const { ast, program } = parse(createAst(), src, { ts: true });
-    return emitModule(ast, program, { stripTypes: true });
+    const { program } = parse(src, { ts: true });
+    return emitModule(program, src, { stripTypes: true });
 }
 
 /** collect every .ts file under a dir. */
@@ -31,18 +30,18 @@ function walkTs(dir: string): string[] {
 
 describe('emit — identity (no TS)', () => {
     const source = readFileSync(THREE, 'utf8');
-    const { ast, program } = parse(createAst(), source, { ts: false });
+    const { program, errors } = parse(source, { ts: false });
 
     it('parses three.core.js with no errors', () => {
-        expect(ast.errors).toEqual([]);
+        expect(errors).toEqual([]);
     });
 
     it('stripTypes:false is byte-for-byte identical', () => {
-        expect(emitModule(ast, program, { stripTypes: false })).toBe(source);
+        expect(emitModule(program, source, { stripTypes: false })).toBe(source);
     });
 
     it('stripTypes:true on TS-free source is byte-for-byte identical', () => {
-        expect(emitModule(ast, program, { stripTypes: true })).toBe(source);
+        expect(emitModule(program, source, { stripTypes: true })).toBe(source);
     });
 });
 
@@ -60,8 +59,8 @@ describe('emit — strip oracle (every crashcat file)', () => {
             const stripped = strip(source);
 
             // 1) our parser (ts:false) accepts it with zero errors.
-            const { ast } = parse(createAst(), stripped, { ts: false });
-            expect(ast.errors).toEqual([]);
+            const { errors } = parse(stripped, { ts: false });
+            expect(errors).toEqual([]);
 
             // 2) meriyah (a pure-JS ESTree parser) accepts it -> all TS is gone.
             expect(() => meriyah.parse(stripped, { module: true, next: true })).not.toThrow();
@@ -166,8 +165,8 @@ describe('emit — per-rule snippets', () => {
 describe('emit — invariants', () => {
     it('stripTypes:false returns source verbatim for TS input', () => {
         const src = 'const x: number = 1;';
-        const { ast, program } = parse(createAst(), src, { ts: true });
-        expect(emitModule(ast, program, { stripTypes: false })).toBe(src);
+        const { program } = parse(src, { ts: true });
+        expect(emitModule(program, src, { stripTypes: false })).toBe(src);
     });
 
     it('blanking never changes non-newline whitespace layout offsets', () => {

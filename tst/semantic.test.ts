@@ -1,6 +1,6 @@
 /**
  * G2 semantic differential — eslint-scope over meriyah's ESTree as an
- * independent oracle for our scope/symbol/reference model (src/semantic.ts).
+ * independent oracle for our scope/symbol/reference model (src/analysis/semantic.ts).
  *
  * Three layers:
  *   1. eslint-scope differential on three.core.js (position-keyed): resolved
@@ -12,7 +12,7 @@
  * Discipline (mirrors tst/differential.test.ts's KNOWN_DIFFS): every divergence
  * from the oracle is either (a) a documented structural ADJUSTMENT with a reason
  * and a minimal repro, or (b) a genuine bug that fails the suite with an
- * actionable table. The exceptions ledger starts empty; entries need a reason.
+ * actionable table.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest';
 import * as meriyah from 'meriyah';
 import * as escope from 'eslint-scope';
 import { parse } from '../src/parser.ts';
-import { A, createAst, walk, text, N, type Ast, type NodeId } from '../src/ast.ts';
+import { walk, N, isIdentifier, type Node } from '../src/ast.ts';
 import { analyze, createSemantic, symbolOf, type Semantic } from '../src/analysis/semantic.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,80 +35,73 @@ const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js')
 const pos = (n: unknown): number => (n as { start: number }).start;
 const nameOf = (n: unknown): string => (n as { name: string }).name;
 
-type Analyzed = { ast: Ast; program: NodeId; sem: Semantic };
+type Analyzed = { program: Node; sem: Semantic; nodeCount: number };
 
 function analyzeSource(src: string, ts: boolean): Analyzed {
-    const { ast, program } = parse(createAst(), src, { ts });
-    expect(ast.errors).toEqual([]);
+    const { program, errors, nodeCount } = parse(src, { ts });
+    expect(errors).toEqual([]);
     const sem = createSemantic();
-    analyze(sem, ast, program);
-    return { ast, program, sem };
+    analyze(sem, program, nodeCount);
+    return { program, sem, nodeCount };
 }
 
-/** Map a start offset -> our Ident NodeId (Ident-typed nodes only). */
-function identByStart(ast: Ast): Map<number, NodeId> {
-    const m = new Map<number, NodeId>();
-    for (let id = 1; id < ast.nodeCount; id++) {
-        if (ast.type[id] === N.Ident) m.set(ast.start[id], id);
-    }
+/** Map a start offset -> our symbol-carrying identifier node. Only the resolving
+ * roles (IdentifierReference / BindingIdentifier) are indexed: an eslint-scope
+ * reference always sits at a resolving position, and a pure-name role
+ * (IdentifierName/LabelIdentifier) can share a start with a resolving one (e.g.
+ * `export { a }` — local ref + exported name at the same offset) and must not
+ * shadow it in this map. */
+function identByStart(a: Analyzed): Map<number, Node> {
+    const m = new Map<number, Node>();
+    walk(a.program, (n) => {
+        if (n.type === N.IdentifierReference || n.type === N.BindingIdentifier) m.set(n.start, n);
+    });
     return m;
 }
 
-/** every Ident NodeId (in source order) whose text is `name`. */
-function identsNamed(a: Analyzed, name: string): NodeId[] {
-    const out: NodeId[] = [];
-    walk(a.ast, a.program, (id) => {
-        if (a.ast.type[id] === N.Ident && text(a.ast, id) === name) out.push(id);
+/** every Ident node (in source order) whose name is `name`. */
+function identsNamed(a: Analyzed, name: string): Node[] {
+    const out: Node[] = [];
+    walk(a.program, (n) => {
+        if (isIdentifier(n.type) && n.name === name) out.push(n);
     });
     return out;
 }
 
-/** resolved symbol id for the (single) Ident named `name` matching a predicate. */
+/** resolved symbol id for the (single) Ident named `name` matching a start. */
 function symAt(a: Analyzed, name: string, start: number): number {
-    const id = identsNamed(a, name).find((n) => a.ast.start[n] === start);
+    const id = identsNamed(a, name).find((n) => n.start === start);
     expect(id, `no Ident "${name}" @${start}`).toBeDefined();
     return symbolOf(a.sem, id!);
 }
 
 /** start offset of the declaring Ident for a resolved symbol. */
 function declStart(a: Analyzed, sym: number): number {
-    return a.ast.start[a.sem.symDecl[sym]];
+    return a.sem.symDecl[sym]!.start;
 }
 
 /* ============================================================ LAYER 1: oracle */
 
 /**
- * DOCUMENTED ADJUSTMENTS to the eslint-scope oracle on three.core.js. Each is a
- * structural modelling difference, NOT a silent skip: it carries a reason and a
- * minimal repro. If the residual after applying these is non-empty, the suite
- * fails with a table.
+ * DOCUMENTED ADJUSTMENTS to the eslint-scope oracle on three.core.js.
  *
  * A1 (unresolved `arguments`): eslint-scope materializes an implicit `arguments`
- *     variable inside every non-arrow function scope, so references to
- *     `arguments` resolve there and never appear in globalScope.through. Our v1
- *     does not model the implicit `arguments` binding (see the "Known v1
- *     simplifications" comment in src/semantic.ts — params+body share one scope,
- *     no implicit bindings), so every `arguments` use lands in `unresolved`.
- *     Repro: `function f(){ return arguments.length; }` — eslint-scope resolves
- *     `arguments`; our symbolOf is 0 and it's pushed to `unresolved`.
- *     Adjustment: exclude Idents literally named `arguments` from BOTH the
- *     unresolved-set comparison (they are ours-only) — but assert that the
- *     ours-only residual is EXACTLY the set of `arguments` uses, nothing else.
+ *     variable inside every non-arrow function scope. Our v1 does not model the
+ *     implicit `arguments` binding (params+body share one scope, no implicit
+ *     bindings), so every `arguments` use lands in `unresolved`. Adjustment:
+ *     exclude Idents literally named `arguments` from the unresolved-set
+ *     comparison, and assert the ours-only residual is EXACTLY `arguments` uses.
  *
  * A2 (declared-symbol count): our model gives a class declaration ONE symbol
- *     bound from both namespaces (src/semantic.ts declareDualNs — a single
- *     identity so exports/renames can't split, which the bundler requires).
- *     eslint-scope models a class declaration as TWO variables (the outer-scope
- *     binding + the class's own inner name binding). So:
- *         ours == theirs - namedClassDeclCount
- *     (class EXPRESSIONS have only the inner name on both sides: 1 == 1.)
+ *     bound from both namespaces (declareDualNs). eslint-scope models a class
+ *     declaration as TWO variables (outer-scope binding + inner name binding).
+ *     So: ours == theirs - namedClassDeclCount.
  */
 
-/** collect resolved-reference divergences (position-keyed). */
 type RefDiverge = { start: number; name: string; kind: string; ours: string; theirs: string; excerpt: string };
 
 function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed): RefDiverge[] {
-    const byStart = identByStart(a.ast);
+    const byStart = identByStart(a);
     const diffs: RefDiverge[] = [];
     for (const scope of sm.scopes) {
         for (const r of scope.references) {
@@ -116,8 +109,8 @@ function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed
             if (!v || v.defs.length < 1) continue; // only resolved-to-a-real-def refs
             const start = pos(r.identifier);
             const name = nameOf(r.identifier);
-            const ourId = byStart.get(start);
-            if (ourId === undefined) {
+            const ourNode = byStart.get(start);
+            if (ourNode === undefined) {
                 diffs.push({
                     start,
                     name,
@@ -128,7 +121,7 @@ function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed
                 });
                 continue;
             }
-            const sym = symbolOf(a.sem, ourId);
+            const sym = symbolOf(a.sem, ourNode);
             if (sym === 0) {
                 diffs.push({
                     start,
@@ -141,8 +134,6 @@ function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed
                 continue;
             }
             const ourDecl = declStart(a, sym);
-            // eslint-scope's def name ranges AND the variable's identifier ranges
-            // are both acceptable declaring positions (redeclared vars have many).
             const theirDecls = new Set<number>([
                 ...v.defs.map((d) => pos(d.name)),
                 ...v.identifiers.map((i) => pos(i)),
@@ -175,9 +166,6 @@ function fmtRefTable(diffs: RefDiverge[]): string {
 
 describe('semantic differential vs eslint-scope (three.core.js)', () => {
     const src = readFileSync(THREE, 'utf8');
-    // meriyah's ESTree types differ nominally from @types/estree (and its nodes
-    // carry .start/.end from ranges:true that the estree types don't declare);
-    // eslint-scope only reads structurally, so cast at the boundary.
     const estree = meriyah.parse(src, { module: true, next: true, ranges: true });
     const sm = escope.analyze(estree as unknown as Parameters<typeof escope.analyze>[0], {
         ecmaVersion: 2022,
@@ -194,14 +182,14 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
     it('unresolved-globals set matches (modulo A1: implicit `arguments`)', () => {
         const gs = sm.globalScope!;
         const theirThrough = new Set<number>(gs.through.map((r) => pos(r.identifier)));
-        const ourUnres = new Set<number>(a.sem.unresolved.map((id) => a.ast.start[id]));
+        const ourUnres = new Set<number>(a.sem.unresolved.map((n) => n.start));
 
         const oursOnly = [...ourUnres].filter((s) => !theirThrough.has(s));
         const theirsOnly = [...theirThrough].filter((s) => !ourUnres.has(s));
 
         // A1: the ONLY ours-only entries permitted are `arguments` uses.
         const startToName = new Map<number, string>();
-        for (const id of a.sem.unresolved) startToName.set(a.ast.start[id], text(a.ast, id));
+        for (const n of a.sem.unresolved) startToName.set(n.start, n.name);
         const oursOnlyNonArguments = oursOnly.filter((s) => startToName.get(s) !== 'arguments');
 
         if (oursOnlyNonArguments.length > 0 || theirsOnly.length > 0) {
@@ -218,19 +206,12 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
             );
         }
 
-        // Positive assertion of the adjustment: every ours-only entry is `arguments`.
         expect(oursOnly.every((s) => startToName.get(s) === 'arguments')).toBe(true);
         expect(theirsOnly).toEqual([]);
-        // Sanity: three.core.js really does use `arguments` (non-trivial adjustment).
         expect(oursOnly.length).toBeGreaterThan(0);
     });
 
     it('declared-symbol count matches eslint-scope variables-with-a-def (A2)', () => {
-        // eslint-scope: variables carrying >=1 def. `arguments` variables have 0
-        // defs so they're already excluded; global scope has 0 user variables
-        // (no module/global machinery vars for this input); no `var` redeclaration
-        // and no function-expression-name scopes in three.core.js — all verified
-        // by the spike, so the count is a clean structural comparison.
         let theirVarsWithDef = 0;
         for (const scope of sm.scopes) {
             for (const v of scope.variables) if (v.defs.length >= 1) theirVarsWithDef++;
@@ -239,8 +220,8 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
         // A2 adjustment: eslint-scope's outer+inner class-name pair vs our single
         // dual-namespace symbol — subtract one per NAMED CLASS DECLARATION.
         let namedClassDecls = 0;
-        walk(a.ast, a.program, (id) => {
-            if (a.ast.type[id] === N.ClassDecl && A.ClassDecl.id(a.ast, id) !== 0) namedClassDecls++;
+        walk(a.program, (n) => {
+            if (n.type === N.ClassDeclaration && n.data.id !== null) namedClassDecls++;
         });
         const expected = theirVarsWithDef - namedClassDecls;
         if (ourSymbols !== expected) {
@@ -257,27 +238,18 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
 
 /* ================================================= LAYER 2: TS snippet oracle */
 
-/*
- * (History: this harness originally found that the parser consumed `<T>` lists
- * without emitting TSTypeParams/TSTypeParam nodes — raw list refs were stored
- * into child slots unwrapped, so FuncDecl.typeParams even aliased the first
- * param Ident. Fixed in the main loop: tryParseTypeParams/tryParseTypeArgsInType
- * now wrap their lists in proper nodes; the pinned known-bug guard below became
- * the positive regression test.)
- */
-
 describe('semantic TS snippet expectations', () => {
     it('interface name resolves in the type namespace (TSTypeRef head)', () => {
         const a = analyzeSource('interface Foo {}\nlet x: Foo;', true);
         const decl = identsNamed(a, 'Foo')[0];
-        const use = identsNamed(a, 'Foo').find((id) => a.ast.start[id] === 24)!;
+        const use = identsNamed(a, 'Foo').find((n) => n.start === 24)!;
         expect(symbolOf(a.sem, use)).not.toBe(0);
         expect(a.sem.symDecl[symbolOf(a.sem, use)]).toBe(decl);
     });
 
     it('type-alias name resolves in the type namespace', () => {
         const a = analyzeSource('type Bar = number;\nlet y: Bar;', true);
-        const use = identsNamed(a, 'Bar').find((id) => a.ast.start[id] === 26)!;
+        const use = identsNamed(a, 'Bar').find((n) => n.start === 26)!;
         expect(symbolOf(a.sem, use)).not.toBe(0);
         expect(declStart(a, symbolOf(a.sem, use))).toBe(5);
     });
@@ -288,7 +260,6 @@ describe('semantic TS snippet expectations', () => {
         const valueUse = symAt(a, 'C', 26); // `new C()` — value namespace
         expect(typeUse).not.toBe(0);
         expect(valueUse).not.toBe(0);
-        // both declaring idents are the class name at start 6
         expect(declStart(a, typeUse)).toBe(6);
         expect(declStart(a, valueUse)).toBe(6);
     });
@@ -302,7 +273,6 @@ describe('semantic TS snippet expectations', () => {
         expect(declStart(a, typeUse)).toBe(5);
         expect(declStart(a, valueUse)).toBe(5);
 
-        // enum member initializer references an outer value binding
         const b = analyzeSource('const K = 5;\nenum E2 { X = K }', true);
         const kUse = symAt(b, 'K', 27);
         expect(kUse).not.toBe(0);
@@ -360,13 +330,11 @@ describe('semantic TS snippet expectations', () => {
         ];
         for (const src of forms) {
             const a = analyzeSource(src, true);
-            // a real TSTypeParams node (with its TSTypeParam child) exists
             let tpNodes = 0;
-            walk(a.ast, a.program, (id) => {
-                if (a.ast.type[id] === N.TSTypeParams || a.ast.type[id] === N.TSTypeParam) tpNodes++;
+            walk(a.program, (n) => {
+                if (n.type === N.TSTypeParameterDeclaration || n.type === N.TSTypeParameter) tpNodes++;
             });
             expect(tpNodes, `no type-param nodes for: ${src}`).toBeGreaterThanOrEqual(2);
-            // every `TP` occurrence resolves to the SAME symbol (decl + all refs)
             const ids = identsNamed(a, 'TP');
             expect(ids.length, `no TP idents found in: ${src}`).toBeGreaterThanOrEqual(2);
             const sym = symbolOf(a.sem, ids[0]);
@@ -382,54 +350,50 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
     it('a name declared only in source A does not resolve in source B', () => {
         const sem = createSemantic();
 
-        // Source A: `alpha` is a real binding, referenced.
-        const A1 = parse(createAst(), 'const alpha = 1; alpha;', { ts: false });
-        expect(A1.ast.errors).toEqual([]);
-        analyze(sem, A1.ast, A1.program);
-        const aIdents: NodeId[] = [];
-        walk(A1.ast, A1.program, (id) => {
-            if (A1.ast.type[id] === N.Ident && text(A1.ast, id) === 'alpha') aIdents.push(id);
+        const A1 = parse('const alpha = 1; alpha;', { ts: false });
+        expect(A1.errors).toEqual([]);
+        analyze(sem, A1.program, A1.nodeCount);
+        const aIdents: Node[] = [];
+        walk(A1.program, (n) => {
+            if (isIdentifier(n.type) && n.name === 'alpha') aIdents.push(n);
         });
         expect(aIdents.length).toBe(2);
         expect(symbolOf(sem, aIdents[1])).not.toBe(0); // resolved in A
 
-        // Source B (same Semantic struct): references `alpha` but never declares
-        // it. If A's bindings leaked, `alpha` would (wrongly) resolve here.
-        const B = parse(createAst(), 'const beta = 2; alpha; beta;', { ts: false });
-        expect(B.ast.errors).toEqual([]);
-        analyze(sem, B.ast, B.program);
+        const B = parse('const beta = 2; alpha; beta;', { ts: false });
+        expect(B.errors).toEqual([]);
+        analyze(sem, B.program, B.nodeCount);
 
-        const bAlpha: NodeId[] = [];
-        const bBeta: NodeId[] = [];
-        walk(B.ast, B.program, (id) => {
-            if (B.ast.type[id] !== N.Ident) return;
-            const t = text(B.ast, id);
-            if (t === 'alpha') bAlpha.push(id);
-            if (t === 'beta') bBeta.push(id);
+        const bAlpha: Node[] = [];
+        const bBeta: Node[] = [];
+        walk(B.program, (n) => {
+            if (!isIdentifier(n.type)) return;
+            if (n.name === 'alpha') bAlpha.push(n);
+            if (n.name === 'beta') bBeta.push(n);
         });
 
         // `alpha` is now a stale name from A: must be unresolved in B.
         expect(bAlpha.length).toBe(1);
         expect(symbolOf(sem, bAlpha[0])).toBe(0);
-        expect(sem.unresolved.map((id) => text(B.ast, id))).toContain('alpha');
+        expect(sem.unresolved.map((n) => n.name)).toContain('alpha');
 
         // `beta` (declared in B) resolves normally.
-        const betaUse = bBeta.find((id) => symbolOf(sem, id) !== 0 && B.ast.start[id] > 16);
+        const betaUse = bBeta.find((n) => symbolOf(sem, n) !== 0 && n.start > 16);
         expect(betaUse).toBeDefined();
         expect(symbolOf(sem, betaUse!)).not.toBe(0);
-        expect(sem.unresolved.map((id) => text(B.ast, id))).not.toContain('beta');
+        expect(sem.unresolved.map((n) => n.name)).not.toContain('beta');
     });
 
     it('symbol tables reset between runs (symCount reflects only the latest source)', () => {
         const sem = createSemantic();
 
-        const big = parse(createAst(), 'const a=1,b=2,c=3,d=4,e=5;', { ts: false });
-        analyze(sem, big.ast, big.program);
+        const big = parse('const a=1,b=2,c=3,d=4,e=5;', { ts: false });
+        analyze(sem, big.program, big.nodeCount);
         const afterBig = sem.symCount;
         expect(afterBig - 1).toBe(5);
 
-        const small = parse(createAst(), 'const only = 1;', { ts: false });
-        analyze(sem, small.ast, small.program);
+        const small = parse('const only = 1;', { ts: false });
+        analyze(sem, small.program, small.nodeCount);
         expect(sem.symCount - 1).toBe(1); // not carried over from the bigger run
     });
 });

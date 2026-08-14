@@ -121,7 +121,7 @@ describe('plugin pipeline', () => {
             name: 'spy',
             moduleParsed: (_ctx, info) => {
                 seen.push(info.id);
-                expect(info.ast.nodeCount).toBeGreaterThan(1);
+                expect(info.nodeCount).toBeGreaterThan(1);
                 expect(info.semantic.symCount).toBeGreaterThan(0);
             },
         };

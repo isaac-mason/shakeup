@@ -2,7 +2,7 @@
 // Fully synchronous. Transforms run pre-parse so later spans always refer to
 // the settled post-transform source. Design notes: llm/PLAN.md P4.
 
-import type { Ast, NodeId } from './ast';
+import type { Program } from './ast';
 import { type Edit, applyEdits } from './emit';
 import type { Fs } from './fs';
 import type { Semantic } from './analysis/semantic';
@@ -31,8 +31,9 @@ export type WithFilter<F> = F | { filter?: HookFilter; handler: F };
 export type ModuleParsedInfo = {
     id: string;
     source: string;
-    ast: Ast;
-    program: NodeId;
+    program: Program;
+    /** number of nodes in the module (ids run 1..nodeCount-1). */
+    nodeCount: number;
     semantic: Semantic;
 };
 

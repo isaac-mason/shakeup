@@ -3,7 +3,7 @@
 // rewrite import/export syntax + identifiers, then concat in execution order.
 // LIMIT: mutated `let` exports lose live-binding fidelity in namespace objects.
 
-import { A, FL, N, type NodeId, listAt, listLen, text } from './ast';
+import { type Node, N } from './ast';
 import { walkRefIdents } from './analysis/refs';
 import { type Edit, applyEdits, collectStripEdits } from './emit';
 import { type Graph, type GraphOptions, type Module, buildGraph } from './graph';
@@ -43,13 +43,13 @@ type EmitCtx = {
     mod: Module;
     edits: Edit[];
     warnings: string[];
-    /** live top-level statements for this module (null = keep everything) */
+    /** live top-level statement node ids for this module (null = keep everything) */
     live: Set<number> | null;
 };
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
-function renameOf(ctx: EmitCtx, identNode: NodeId): string | null {
-    const sym = ctx.mod.semantic.nodeSymbol[identNode];
+function renameOf(ctx: EmitCtx, identNode: Node): string | null {
+    const sym = ctx.mod.semantic.nodeSymbol[identNode.id];
     if (sym === 0) return null;
     const imp = ctx.mod.namedImports.get(sym);
     if (imp !== undefined) {
@@ -75,16 +75,15 @@ function nameOfBind(linked: Linked, bind: ImportBind): string | null {
 }
 
 /** Walk an expression/statement subtree adding rename edits (shorthand-aware). */
-function renameWalk(ctx: EmitCtx, node: NodeId): void {
-    const ast = ctx.mod.ast;
-    walkRefIdents(ast, node, (ident, shorthandProp) => {
+function renameWalk(ctx: EmitCtx, node: Node): void {
+    walkRefIdents(node, (ident, shorthandProp) => {
         const newName = renameOf(ctx, ident);
-        if (newName === null || newName === text(ast, ident)) return;
+        if (newName === null || newName === ident.name) return;
         ctx.edits.push({
-            start: ast.start[ident],
-            end: ast.end[ident],
+            start: ident.start,
+            end: ident.end,
             // shorthand `{ a }` must expand to `{ a: a$1 }` — bare span replace would rename the key too
-            text: shorthandProp !== 0 ? `${text(ast, ident)}: ${newName}` : newName,
+            text: shorthandProp !== null ? `${ident.name}: ${newName}` : newName,
         });
     });
 }
@@ -93,72 +92,64 @@ function renameWalk(ctx: EmitCtx, node: NodeId): void {
 
 function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
     const { mod } = ctx;
-    const ast = mod.ast;
-    const body = A.Program.body(ast, mod.program);
-    for (let i = 0; i < listLen(ast, body); i++) {
-        const stmt = listAt(ast, body, i);
-        const t = ast.type[stmt];
-
-        if (ctx.live !== null && !ctx.live.has(stmt)) {
+    const src = mod.source;
+    for (const stmt of mod.program.data.body) {
+        if (ctx.live !== null && !ctx.live.has(stmt.id)) {
             // shaken: blank the whole statement, no renames, no export handling
-            ctx.edits.push({ start: ast.start[stmt], end: ast.end[stmt] });
+            ctx.edits.push({ start: stmt.start, end: stmt.end });
             continue;
         }
 
-        if (t === N.ImportDecl) {
-            if ((ast.flags[stmt] & FL.TYPE_ONLY) === 0) {
+        if (stmt.type === N.ImportDeclaration) {
+            if (stmt.data.importKind !== 'type') {
                 // side-effect-only external import must survive (hoisted)
-                const specs = A.ImportDecl.specifiers(ast, stmt);
-                const source = A.ImportDecl.source(ast, stmt);
-                if (source !== 0 && listLen(ast, specs) === 0) {
-                    const spec = ast.src.slice(ast.start[source] + 1, ast.end[source] - 1);
+                const source = stmt.data.source;
+                if (source.type === N.StringLiteral && stmt.data.specifiers.length === 0) {
+                    const spec = src.slice(source.start + 1, source.end - 1);
                     const rec = mod.importRecords.find((r) => r.specifier === spec);
                     if (rec?.external) sideEffectSpecs.add(spec);
                 }
             }
-            ctx.edits.push({ start: ast.start[stmt], end: ast.end[stmt] });
+            ctx.edits.push({ start: stmt.start, end: stmt.end });
             continue;
         }
 
-        if (t === N.ExportAll) {
-            const source = A.ExportAll.source(ast, stmt);
-            const spec = source !== 0 ? ast.src.slice(ast.start[source] + 1, ast.end[source] - 1) : '';
+        if (stmt.type === N.ExportAllDeclaration) {
+            const source = stmt.data.source;
+            const spec = source.type === N.StringLiteral ? src.slice(source.start + 1, source.end - 1) : '';
             const rec = mod.importRecords.find((r) => r.specifier === spec);
             if (rec?.external) {
                 if (isEntry) entryStarSpecs.push(spec);
                 else ctx.warnings.push(`'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`);
             }
-            ctx.edits.push({ start: ast.start[stmt], end: ast.end[stmt] });
+            ctx.edits.push({ start: stmt.start, end: stmt.end });
             continue;
         }
 
-        if (t === N.ExportNamed) {
-            if (ast.flags[stmt] & FL.TYPE_ONLY) continue; // strip pass blanks it
-            const decl = A.ExportNamed.decl(ast, stmt);
-            if (decl !== 0) {
-                const dt = ast.type[decl];
-                if (dt === N.TSEnumDecl || dt === N.TSInterfaceDecl || dt === N.TSTypeAliasDecl) continue; // strip pass owns these
+        if (stmt.type === N.ExportNamedDeclaration) {
+            if (stmt.data.exportKind === 'type') continue; // strip pass blanks it
+            const decl = stmt.data.declaration;
+            if (decl !== null) {
+                if (decl.type === N.TSEnumDeclaration || decl.type === N.TSInterfaceDeclaration || decl.type === N.TSTypeAliasDeclaration) continue; // strip pass owns these
                 // keep the declaration, blank the `export ` prefix
-                ctx.edits.push({ start: ast.start[stmt], end: ast.start[decl] });
+                ctx.edits.push({ start: stmt.start, end: decl.start });
                 renameWalk(ctx, decl);
             } else {
-                ctx.edits.push({ start: ast.start[stmt], end: ast.end[stmt] });
+                ctx.edits.push({ start: stmt.start, end: stmt.end });
             }
             continue;
         }
 
-        if (t === N.ExportDefault) {
-            const decl = A.ExportDefault.decl(ast, stmt);
-            const dt = ast.type[decl];
+        if (stmt.type === N.ExportDefaultDeclaration) {
+            const decl = stmt.data.declaration;
             const named =
-                (dt === N.FuncDecl || dt === N.ClassDecl) &&
-                A[dt === N.FuncDecl ? 'FuncDecl' : 'ClassDecl'].id(ast, decl) !== 0;
+                (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) && decl.data.id !== null;
             if (named) {
-                ctx.edits.push({ start: ast.start[stmt], end: ast.start[decl] });
+                ctx.edits.push({ start: stmt.start, end: decl.start });
             } else {
                 const ref = ctx.linked.defaultRefs.get(mod.idx);
                 const name = ref !== undefined ? finalNameOf(ctx.linked, ref) : `${mod.idx}_default`;
-                ctx.edits.push({ start: ast.start[stmt], end: ast.start[decl], text: `const ${name} = ` });
+                ctx.edits.push({ start: stmt.start, end: decl.start, text: `const ${name} = ` });
             }
             renameWalk(ctx, decl);
             continue;
@@ -247,20 +238,18 @@ export function bundle(options: BundleOptions): BundleResult {
         const mod = graph.modules[idx];
         const live = shaken === null ? null : shaken.live[idx];
         // LIMIT: only the enum's own name is renamed; idents inside enum initializer expressions are not.
-        const enumFinalName = (idNode: number): string | null => {
-            const sym = mod.semantic.nodeSymbol[idNode];
+        const enumFinalName = (idNode: Node): string | null => {
+            const sym = mod.semantic.nodeSymbol[idNode.id];
             if (sym === 0) return null;
             return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
         };
-        let stripEdits = collectStripEdits(mod.ast, mod.program, true, enumFinalName);
+        let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName);
         if (live !== null) {
             // drop strip edits (e.g. enum lowerings) inside statements that the
             // shaker blanks wholesale — the blank owns the span
             const deadSpans: [number, number][] = [];
-            const body = A.Program.body(mod.ast, mod.program);
-            for (let i = 0; i < listLen(mod.ast, body); i++) {
-                const stmt = listAt(mod.ast, body, i);
-                if (!live.has(stmt)) deadSpans.push([mod.ast.start[stmt], mod.ast.end[stmt]]);
+            for (const stmt of mod.program.data.body) {
+                if (!live.has(stmt.id)) deadSpans.push([stmt.start, stmt.end]);
             }
             stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
         }

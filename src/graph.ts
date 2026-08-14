@@ -2,7 +2,7 @@
 // ESM-only record model (llm/notes/rolldown-internals.md).
 // LIMIT: no CommonJS; an unresolvable specifier is external or a build error.
 
-import { type Ast, type NodeId, A, FL, N, createAst, listAt, listLen, text } from './ast';
+import { type Node, type Program, N } from './ast';
 import { type Fs, dirnameOf, joinPath } from './fs';
 import { type Pipeline, type Plugin, type PluginCtx, compilePipeline, runLoad, runResolveId, runTransform } from './plugin';
 import { parse } from './parser';
@@ -39,8 +39,8 @@ export type NamedExport = {
     rec: number;
     /** name on the re-export source ('*' for `export * as ns`) */
     sourceName: string;
-    /** for `export default <expr>`: the expression NodeId (else 0) */
-    exprNode: NodeId;
+    /** for `export default <expr>`: the expression Node (else null) */
+    exprNode: Node | null;
 };
 
 /** A parsed, analyzed module with its extracted import/export records. */
@@ -48,9 +48,11 @@ export type Module = {
     idx: number;
     /** resolved id (path or virtual id) */
     id: string;
+    /** module source (retained — the emit edit engine rewrites spans over it). */
     source: string;
-    ast: Ast;
-    program: NodeId;
+    program: Program;
+    /** number of nodes (ids run 1..nodeCount-1); sizes the semantic id tables. */
+    nodeCount: number;
     semantic: Semantic;
     importRecords: ImportRecord[];
     /** local SymbolId -> import info */
@@ -109,31 +111,27 @@ function isExternal(options: GraphOptions, specifier: string): boolean {
 
 /* ------------------------------------------------------- record extraction */
 
-/** Collect every bound Ident in a binding pattern into `out`. */
-function collectPatternIdents(ast: Ast, node: NodeId, out: NodeId[]): void {
-    if (node === 0) return;
-    switch (ast.type[node]) {
-        case N.Ident:
+/** Collect every BindingIdentifier in a binding pattern into `out`. */
+function collectPatternIdents(node: Node | null, out: Node[]): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.BindingIdentifier: // the declaring leaf in every pattern position
             out.push(node);
             return;
-        case N.ArrayPattern: {
-            const ref = A.ArrayPattern.elements(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) collectPatternIdents(ast, listAt(ast, ref, i), out);
+        case N.ArrayPattern:
+            for (const el of node.data.elements) collectPatternIdents(el, out);
             return;
-        }
-        case N.ObjectPattern: {
-            const ref = A.ObjectPattern.props(ast, node);
-            for (let i = 0; i < listLen(ast, ref); i++) collectPatternIdents(ast, listAt(ast, ref, i), out);
+        case N.ObjectPattern:
+            for (const p of node.data.properties) collectPatternIdents(p, out);
             return;
-        }
-        case N.Property:
-            collectPatternIdents(ast, A.Property.value(ast, node), out);
+        case N.ObjectProperty:
+            collectPatternIdents(node.data.value, out);
             return;
-        case N.AssignPattern:
-            collectPatternIdents(ast, A.AssignPattern.left(ast, node), out);
+        case N.AssignmentPattern:
+            collectPatternIdents(node.data.left, out);
             return;
         case N.RestElement:
-            collectPatternIdents(ast, A.RestElement.arg(ast, node), out);
+            collectPatternIdents(node.data.argument, out);
             return;
     }
 }
@@ -147,109 +145,100 @@ function addRecord(mod: Module, specifier: string): number {
     return mod.importRecords.length - 1;
 }
 
-const strValue = (ast: Ast, node: NodeId): string => ast.src.slice(ast.start[node] + 1, ast.end[node] - 1);
+/** The inner value of a string literal node (quotes stripped), read from source. */
+const strValue = (source: string, node: Node): string => source.slice(node.start + 1, node.end - 1);
 
 /** Extract import/export records from the module's top-level statements. */
 function extractRecords(mod: Module): void {
-    const { ast, semantic } = mod;
-    const body = A.Program.body(ast, mod.program);
-    for (let i = 0; i < listLen(ast, body); i++) {
-        const stmt = listAt(ast, body, i);
-        const t = ast.type[stmt];
-
-        if (t === N.ImportDecl) {
-            if (ast.flags[stmt] & FL.TYPE_ONLY) continue;
-            const source = A.ImportDecl.source(ast, stmt);
-            if (source === 0) continue;
-            const rec = addRecord(mod, strValue(ast, source));
-            const specs = A.ImportDecl.specifiers(ast, stmt);
-            for (let j = 0; j < listLen(ast, specs); j++) {
-                const spec = listAt(ast, specs, j);
-                const st = ast.type[spec];
-                if (ast.flags[spec] & FL.TYPE_ONLY) continue;
-                let local: NodeId;
+    const { semantic, source } = mod;
+    for (const stmt of mod.program.data.body) {
+        if (stmt.type === N.ImportDeclaration) {
+            if (stmt.data.importKind === 'type') continue;
+            const src = stmt.data.source;
+            if (src.type !== N.StringLiteral) continue;
+            const rec = addRecord(mod, strValue(source, src));
+            for (const spec of stmt.data.specifiers) {
+                let local: Node;
                 let name: string;
-                if (st === N.ImportSpec) {
-                    local = A.ImportSpec.local(ast, spec);
-                    const imported = A.ImportSpec.imported(ast, spec);
-                    name = ast.type[imported] === N.Str ? strValue(ast, imported) : text(ast, imported);
-                } else if (st === N.ImportDefaultSpec) {
-                    local = A.ImportDefaultSpec.local(ast, spec);
+                if (spec.type === N.ImportSpecifier) {
+                    if (spec.data.importKind === 'type') continue;
+                    local = spec.data.local;
+                    const imported = spec.data.imported;
+                    name = imported.type === N.StringLiteral ? strValue(source, imported) : imported.name;
+                } else if (spec.type === N.ImportDefaultSpecifier) {
+                    local = spec.data.local;
                     name = NAME_DEFAULT;
-                } else {
-                    local = A.ImportNamespaceSpec.local(ast, spec);
+                } else if (spec.type === N.ImportNamespaceSpecifier) {
+                    local = spec.data.local;
                     name = NAME_NAMESPACE;
-                }
-                const sym = semantic.nodeSymbol[local];
+                } else continue;
+                const sym = semantic.nodeSymbol[local.id];
                 if (sym !== 0) mod.namedImports.set(sym, { rec, name });
             }
             continue;
         }
 
-        if (t === N.ExportNamed) {
-            if (ast.flags[stmt] & FL.TYPE_ONLY) continue;
-            const decl = A.ExportNamed.decl(ast, stmt);
-            if (decl !== 0) {
-                const dt = ast.type[decl];
-                if (dt === N.FuncDecl || dt === N.ClassDecl || dt === N.TSEnumDecl) {
-                    const id = A[dt === N.FuncDecl ? 'FuncDecl' : dt === N.ClassDecl ? 'ClassDecl' : 'TSEnumDecl'].id(ast, decl);
-                    if (id !== 0) {
-                        mod.namedExports.set(text(ast, id), {
-                            symbol: semantic.nodeSymbol[id],
+        if (stmt.type === N.ExportNamedDeclaration) {
+            if (stmt.data.exportKind === 'type') continue;
+            const decl = stmt.data.declaration;
+            if (decl !== null) {
+                if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration || decl.type === N.TSEnumDeclaration) {
+                    const id = decl.data.id;
+                    if (id !== null) {
+                        mod.namedExports.set(id.name, {
+                            symbol: semantic.nodeSymbol[id.id],
                             rec: -1,
                             sourceName: '',
-                            exprNode: 0,
+                            exprNode: null,
                         });
                     }
-                } else if (dt === N.VarDecl) {
-                    const decls = A.VarDecl.declarators(ast, decl);
-                    const idents: NodeId[] = [];
-                    for (let j = 0; j < listLen(ast, decls); j++)
-                        collectPatternIdents(ast, A.VarDeclarator.id(ast, listAt(ast, decls, j)), idents);
+                } else if (decl.type === N.VariableDeclaration) {
+                    const idents: Node[] = [];
+                    for (const d of decl.data.declarations) {
+                        if (d.type === N.VariableDeclarator) collectPatternIdents(d.data.id, idents);
+                    }
                     for (const id of idents) {
-                        mod.namedExports.set(text(ast, id), {
-                            symbol: semantic.nodeSymbol[id],
+                        mod.namedExports.set(id.name, {
+                            symbol: semantic.nodeSymbol[id.id],
                             rec: -1,
                             sourceName: '',
-                            exprNode: 0,
+                            exprNode: null,
                         });
                     }
                 }
                 // TSInterfaceDecl / TSTypeAliasDecl: type-only, no runtime export
                 continue;
             }
-            const source = A.ExportNamed.source(ast, stmt);
-            const rec = source !== 0 ? addRecord(mod, strValue(ast, source)) : -1;
-            const specs = A.ExportNamed.specifiers(ast, stmt);
-            for (let j = 0; j < listLen(ast, specs); j++) {
-                const spec = listAt(ast, specs, j);
-                if (ast.flags[spec] & FL.TYPE_ONLY) continue;
-                const local = A.ExportSpec.local(ast, spec);
-                const exported = A.ExportSpec.exported(ast, spec);
-                const exportedName = ast.type[exported] === N.Str ? strValue(ast, exported) : text(ast, exported);
+            const src = stmt.data.source;
+            const rec = src !== null && src.type === N.StringLiteral ? addRecord(mod, strValue(source, src)) : -1;
+            for (const spec of stmt.data.specifiers) {
+                if (spec.type !== N.ExportSpecifier) continue;
+                if (spec.data.exportKind === 'type') continue;
+                const local = spec.data.local;
+                const exported = spec.data.exported;
+                const exportedName = exported.type === N.StringLiteral ? strValue(source, exported) : exported.name;
                 if (rec >= 0) {
-                    const sourceName = ast.type[local] === N.Str ? strValue(ast, local) : text(ast, local);
-                    mod.namedExports.set(exportedName, { symbol: 0, rec, sourceName, exprNode: 0 });
+                    const sourceName = local.type === N.StringLiteral ? strValue(source, local) : local.name;
+                    mod.namedExports.set(exportedName, { symbol: 0, rec, sourceName, exprNode: null });
                 } else {
                     mod.namedExports.set(exportedName, {
-                        symbol: semantic.nodeSymbol[local],
+                        symbol: semantic.nodeSymbol[local.id],
                         rec: -1,
                         sourceName: '',
-                        exprNode: 0,
+                        exprNode: null,
                     });
                 }
             }
             continue;
         }
 
-        if (t === N.ExportDefault) {
-            const decl = A.ExportDefault.decl(ast, stmt);
-            const dt = ast.type[decl];
+        if (stmt.type === N.ExportDefaultDeclaration) {
+            const decl = stmt.data.declaration;
             let symbol = 0;
-            let exprNode = 0;
-            if (dt === N.FuncDecl || dt === N.ClassDecl) {
-                const id = A[dt === N.FuncDecl ? 'FuncDecl' : 'ClassDecl'].id(ast, decl);
-                if (id !== 0) symbol = mod.semantic.nodeSymbol[id];
+            let exprNode: Node | null = null;
+            if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) {
+                const id = decl.data.id;
+                if (id !== null) symbol = semantic.nodeSymbol[id.id];
                 else exprNode = decl; // anonymous default fn/class
             } else {
                 exprNode = decl;
@@ -258,14 +247,14 @@ function extractRecords(mod: Module): void {
             continue;
         }
 
-        if (t === N.ExportAll) {
-            const source = A.ExportAll.source(ast, stmt);
-            if (source === 0) continue;
-            const rec = addRecord(mod, strValue(ast, source));
-            const exported = A.ExportAll.exported(ast, stmt);
-            if (exported !== 0) {
+        if (stmt.type === N.ExportAllDeclaration) {
+            const src = stmt.data.source;
+            if (src.type !== N.StringLiteral) continue;
+            const rec = addRecord(mod, strValue(source, src));
+            const exported = stmt.data.exported;
+            if (exported !== null) {
                 // `export * as ns from '...'`
-                mod.namedExports.set(text(ast, exported), { symbol: 0, rec, sourceName: NAME_NAMESPACE, exprNode: 0 });
+                mod.namedExports.set(exported.name, { symbol: 0, rec, sourceName: NAME_NAMESPACE, exprNode: null });
             } else {
                 mod.starExports.push(rec);
             }
@@ -303,17 +292,16 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             return -1;
         }
         source = runTransform(pipe, ctx, source, id);
-        const ast = createAst();
-        const { program } = parse(ast, source, { ts: true });
-        for (const e of ast.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
+        const { program, errors, nodeCount } = parse(source, { ts: true });
+        for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
         const semantic = createSemantic();
-        analyze(semantic, ast, program);
+        analyze(semantic, program, nodeCount);
         const mod: Module = {
             idx: graph.modules.length,
             id,
             source,
-            ast,
             program,
+            nodeCount,
             semantic,
             importRecords: [],
             namedImports: new Map(),
@@ -325,7 +313,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         graph.byId.set(id, mod.idx);
         extractRecords(mod);
         for (const hook of pipe.moduleParsed) {
-            hook.handler(ctx, { id, source, ast, program, semantic });
+            hook.handler(ctx, { id, source, program, nodeCount, semantic });
         }
         // resolve edges (depth-first; cycles land as already-registered idx)
         for (const rec of mod.importRecords) {

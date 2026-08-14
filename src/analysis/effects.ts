@@ -1,77 +1,75 @@
-// Conservative (sound, not sharp) expression/statement purity over (Ast, NodeId).
+// Conservative (sound, not sharp) expression/statement purity over type+data Nodes.
 // LIMIT: calls/new/member-reads/spreads are all treated effectful; no @__PURE__ (lexer drops comments).
 
-import { A, type Ast, FL, N, type NodeId, listAt, listLen } from '../ast';
+import { type Node, N } from '../ast.ts';
 
 /** Conservatively true if evaluating this expression has no observable side effects. */
-export function isPureExpr(ast: Ast, node: NodeId): boolean {
-    if (node === 0) return true;
-    const t = ast.type[node];
-    switch (t) {
-        case N.Ident:
-        case N.Num:
-        case N.Str:
-        case N.Bool:
-        case N.Null:
-        case N.Regex:
-        case N.BigInt:
-        case N.ThisExpr:
-        case N.MetaProp:
-        case N.Arrow:
-        case N.FuncExpr:
+export function isPureExpr(node: Node | null): boolean {
+    if (node === null) return true;
+    switch (node.type) {
+        // any identifier ROLE — a bare name reference/leaf has no side effect
+        case N.BindingIdentifier:
+        case N.IdentifierReference:
+        case N.IdentifierName:
+        case N.LabelIdentifier:
+        case N.NumericLiteral:
+        case N.StringLiteral:
+        case N.BooleanLiteral:
+        case N.NullLiteral:
+        case N.RegExpLiteral:
+        case N.BigIntLiteral:
+        case N.ThisExpression:
+        case N.ImportMeta:
+        case N.NewTarget:
+        case N.ArrowFunctionExpression:
+        case N.FunctionExpression:
             return true;
-        case N.ClassExpr:
+        case N.ClassExpression:
             // pure when there's no superclass expression and no static effects
-            return A.ClassExpr.superClass(ast, node) === 0 && !classHasStaticEffects(ast, node);
+            return node.data.superClass === null && !classHasStaticEffects(node);
         case N.TemplateLiteral: {
-            const exprs = A.TemplateLiteral.exprs(ast, node);
-            for (let i = 0; i < listLen(ast, exprs); i++) if (!isPureExpr(ast, listAt(ast, exprs, i))) return false;
+            for (const e of node.data.expressions) if (!isPureExpr(e)) return false;
             return true; // stringification of pure operands — accepted
         }
-        case N.ArrayExpr: {
-            const els = A.ArrayExpr.elements(ast, node);
-            for (let i = 0; i < listLen(ast, els); i++) {
-                const el = listAt(ast, els, i);
-                if (el === 0) continue;
-                if (ast.type[el] === N.Spread) return false; // iterators
-                if (!isPureExpr(ast, el)) return false;
+        case N.ArrayExpression: {
+            for (const el of node.data.elements) {
+                if (el === null) continue;
+                if (el.type === N.SpreadElement) return false; // iterators
+                if (!isPureExpr(el)) return false;
             }
             return true;
         }
-        case N.ObjectExpr: {
-            const props = A.ObjectExpr.props(ast, node);
-            for (let i = 0; i < listLen(ast, props); i++) {
-                const p = listAt(ast, props, i);
-                if (ast.type[p] === N.Spread) return false; // getters via spread
-                if ((ast.flags[p] & FL.COMPUTED) !== 0 && !isPureExpr(ast, A.Property.key(ast, p))) return false;
-                const kind = (ast.flags[p] >> FL.KIND_SHIFT) & 3;
-                if (kind === 0 && !isPureExpr(ast, A.Property.value(ast, p))) return false;
+        case N.ObjectExpression: {
+            for (const p of node.data.properties) {
+                if (p.type === N.SpreadElement) return false; // getters via spread
+                if (p.type !== N.ObjectProperty) continue;
+                if (p.data.computed && !isPureExpr(p.data.key)) return false;
+                if (p.data.kind === 'init' && !isPureExpr(p.data.value)) return false;
                 // getters/setters define, not invoke — pure
             }
             return true;
         }
-        case N.Unary:
-            return (ast.flags[node] & 63) !== 32 /* OP.DELETE */ && isPureExpr(ast, A.Unary.arg(ast, node));
-        case N.Binary:
-            return isPureExpr(ast, A.Binary.left(ast, node)) && isPureExpr(ast, A.Binary.right(ast, node));
-        case N.Logical:
-            return isPureExpr(ast, A.Logical.left(ast, node)) && isPureExpr(ast, A.Logical.right(ast, node));
-        case N.Cond:
+        case N.UnaryExpression:
+            return node.data.operator !== 'delete' && isPureExpr(node.data.argument);
+        case N.BinaryExpression:
+            return isPureExpr(node.data.left) && isPureExpr(node.data.right);
+        case N.LogicalExpression:
+            return isPureExpr(node.data.left) && isPureExpr(node.data.right);
+        case N.ConditionalExpression:
             return (
-                isPureExpr(ast, A.Cond.test(ast, node)) &&
-                isPureExpr(ast, A.Cond.consequent(ast, node)) &&
-                isPureExpr(ast, A.Cond.alternate(ast, node))
+                isPureExpr(node.data.test) &&
+                isPureExpr(node.data.consequent) &&
+                isPureExpr(node.data.alternate)
             );
-        case N.Seq: {
-            const exprs = A.Seq.exprs(ast, node);
-            for (let i = 0; i < listLen(ast, exprs); i++) if (!isPureExpr(ast, listAt(ast, exprs, i))) return false;
+        case N.SequenceExpression: {
+            for (const e of node.data.expressions) if (!isPureExpr(e)) return false;
             return true;
         }
-        case N.TSAs:
-        case N.TSSatisfies:
-            return isPureExpr(ast, A.TSAs.expr(ast, node));
-        case N.TSNonNull:
-            return isPureExpr(ast, A.TSNonNull.expr(ast, node));
+        case N.TSAsExpression:
+        case N.TSSatisfiesExpression:
+            return isPureExpr(node.data.expression);
+        case N.TSNonNullExpression:
+            return isPureExpr(node.data.expression);
         default:
             // Member (getters), Call, New, Assign, Update, Await, Yield,
             // TaggedTemplate, ImportExpr, ... — effectful.
@@ -80,16 +78,13 @@ export function isPureExpr(ast: Ast, node: NodeId): boolean {
 }
 
 /** True if evaluating a class declaration/expression runs static side effects (static blocks, impure static/computed keys). */
-export function classHasStaticEffects(ast: Ast, classNode: NodeId): boolean {
-    const body = A[ast.type[classNode] === N.ClassDecl ? 'ClassDecl' : 'ClassExpr'].body(ast, classNode);
-    for (let i = 0; i < listLen(ast, body); i++) {
-        const m = listAt(ast, body, i);
-        const mt = ast.type[m];
-        if (mt === N.StaticBlock) return true;
-        if (mt === N.PropDef && (ast.flags[m] & FL.STATIC) !== 0 && !isPureExpr(ast, A.PropDef.value(ast, m))) return true;
-        if ((ast.flags[m] & FL.COMPUTED) !== 0) {
-            const key = mt === N.MethodDef ? A.MethodDef.key(ast, m) : A.PropDef.key(ast, m);
-            if (!isPureExpr(ast, key)) return true;
+export function classHasStaticEffects(classNode: Node): boolean {
+    if (classNode.type !== N.ClassDeclaration && classNode.type !== N.ClassExpression) return false;
+    for (const m of classNode.data.body) {
+        if (m.type === N.StaticBlock) return true;
+        if (m.type === N.PropertyDefinition && m.data.static && !isPureExpr(m.data.value)) return true;
+        if ((m.type === N.MethodDefinition || m.type === N.PropertyDefinition) && m.data.computed) {
+            if (!isPureExpr(m.data.key)) return true;
         }
     }
     return false;
@@ -100,36 +95,34 @@ export function classHasStaticEffects(ast: Ast, classNode: NodeId): boolean {
  * effects. Declarations count as pure (liveness is the caller's policy);
  * ImportDecl is pure here since import side-effect policy is a graph concern.
  */
-export function isPureStatement(ast: Ast, stmt: NodeId): boolean {
-    switch (ast.type[stmt]) {
-        case N.FuncDecl:
-        case N.TSInterfaceDecl:
-        case N.TSTypeAliasDecl:
-        case N.ImportDecl:
-        case N.ExportAll:
-        case N.Empty:
+export function isPureStatement(stmt: Node): boolean {
+    switch (stmt.type) {
+        case N.FunctionDeclaration:
+        case N.TSInterfaceDeclaration:
+        case N.TSTypeAliasDeclaration:
+        case N.ImportDeclaration:
+        case N.ExportAllDeclaration:
+        case N.EmptyStatement:
             return true;
-        case N.TSEnumDecl:
+        case N.TSEnumDeclaration:
             return true; // lowering writes only its own var
-        case N.ClassDecl:
-            return A.ClassDecl.superClass(ast, stmt) === 0 && !classHasStaticEffects(ast, stmt);
-        case N.VarDecl: {
-            const decls = A.VarDecl.declarators(ast, stmt);
-            for (let i = 0; i < listLen(ast, decls); i++) {
-                if (!isPureExpr(ast, A.VarDeclarator.init(ast, listAt(ast, decls, i)))) return false;
+        case N.ClassDeclaration:
+            return stmt.data.superClass === null && !classHasStaticEffects(stmt);
+        case N.VariableDeclaration: {
+            for (const d of stmt.data.declarations) {
+                if (d.type === N.VariableDeclarator && !isPureExpr(d.data.init)) return false;
             }
             return true;
         }
-        case N.ExportNamed: {
-            const decl = A.ExportNamed.decl(ast, stmt);
-            return decl === 0 ? true : isPureStatement(ast, decl);
+        case N.ExportNamedDeclaration: {
+            const decl = stmt.data.declaration;
+            return decl === null ? true : isPureStatement(decl);
         }
-        case N.ExportDefault: {
-            const decl = A.ExportDefault.decl(ast, stmt);
-            const t = ast.type[decl];
-            if (t === N.FuncDecl) return true;
-            if (t === N.ClassDecl) return isPureStatement(ast, decl);
-            return isPureExpr(ast, decl);
+        case N.ExportDefaultDeclaration: {
+            const decl = stmt.data.declaration;
+            if (decl.type === N.FunctionDeclaration) return true;
+            if (decl.type === N.ClassDeclaration) return isPureStatement(decl);
+            return isPureExpr(decl);
         }
         default:
             return false; // expression statements, loops, ifs, ... — effectful

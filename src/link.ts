@@ -2,7 +2,6 @@
 // and deconflict top-level names. ESM-only port of rolldown's
 // bind_imports_and_exports. Design notes: PLAN.md §6.
 
-import { text } from './ast';
 import { type Graph, type Module, NAME_DEFAULT, NAME_NAMESPACE } from './graph';
 
 /* -------------------------------------------------------------- SymbolRef */
@@ -86,7 +85,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             return matchImport(ctx, target, exp.sourceName, seen);
         }
         if (exp.symbol !== 0) return { kind: 'found', ref: packRef(module.idx, exp.symbol) };
-        if (exp.exprNode !== 0) {
+        if (exp.exprNode !== null) {
             // anonymous `export default <expr>`: synthesize a binding emitted as
             // `const <name> = <expr>` in place of the export statement.
             const existing = ctx.linked.defaultRefs.get(module.idx);
@@ -212,7 +211,7 @@ function deconflict(ctx: LinkCtx): void {
     const taken = new Set<string>(RESERVED);
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
-        for (const node of mod.semantic.unresolved) taken.add(text(mod.ast, node));
+        for (const node of mod.semantic.unresolved) taken.add(node.name);
     }
     const claim = (base: string): string => {
         let name = base;
@@ -223,13 +222,13 @@ function deconflict(ctx: LinkCtx): void {
     };
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
-        const moduleScope = mod.semantic.nodeScope[mod.program];
+        const moduleScope = mod.semantic.nodeScope[mod.program.id];
         const sem = mod.semantic;
         for (let sym = 1; sym < sem.symCount; sym++) {
             if (sem.symScope[sym] !== moduleScope) continue;
             // import locals are rewritten to their canonical target's name — skip
             if (mod.namedImports.has(sym)) continue;
-            const original = text(mod.ast, sem.symDecl[sym]);
+            const original = sem.symDecl[sym]!.name;
             const final = claim(original);
             if (final !== original) linked.finalNames.set(packRef(idx, sym), final);
         }
@@ -250,7 +249,7 @@ function deconflict(ctx: LinkCtx): void {
     for (const [ref, bind] of linked.binds) {
         if (bind.kind !== 'external') continue;
         const mod = graph.modules[refMod(ref)];
-        const localName = text(mod.ast, mod.semantic.symDecl[refSym(ref)]);
+        const localName = mod.semantic.symDecl[refSym(ref)]!.name;
         claimExternal(bind.specifier, bind.name, localName);
     }
     for (const map of linked.exportMaps.values()) {
@@ -311,7 +310,7 @@ export function linkGraph(graph: Graph): Linked {
         }
         // ensure the module's own anonymous default synthetic exists if exported
         const def = mod.namedExports.get(NAME_DEFAULT);
-        if (def !== undefined && def.symbol === 0 && def.rec < 0 && def.exprNode !== 0) {
+        if (def !== undefined && def.symbol === 0 && def.rec < 0 && def.exprNode !== null) {
             matchImport(ctx, mod, NAME_DEFAULT, new Set());
         }
     }
@@ -331,5 +330,5 @@ export function finalNameOf(linked: Linked, ref: number): string {
     const synth = linked.syntheticNames.get(ref);
     if (synth !== undefined) return synth;
     const mod = linked.graph.modules[refMod(ref)];
-    return text(mod.ast, mod.semantic.symDecl[refSym(ref)]);
+    return mod.semantic.symDecl[refSym(ref)]!.name;
 }
