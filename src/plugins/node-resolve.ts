@@ -1,62 +1,30 @@
-// npm resolution plugin — bare-specifier resolution over the sync Fs seam.
-//
-// Distilled from esbuild internal/resolver/{resolver.go,package_json.go}; see
-// llm/notes/npm-resolution.md for the design and file:line citations. Browser-
-// first, ESM-only. Every directory-listing `entries.Get(base)` in esbuild
-// becomes an `Fs.exists(join(dir, base))` here (drops case-mismatch warnings).
-//
-// Scope: bare specifiers only. Relative/absolute specifiers return null so core
-// handles them. Failure modes return null AFTER ctx.warn(...) with esbuild's
-// diagnostic patterns; see the header of resolveId for the warn-vs-error caveat.
-
 import { type Fs, dirnameOf, joinPath, normalizePath } from '../fs';
 import type { Plugin, PluginCtx } from '../plugin';
 
-/* ------------------------------------------------------------------ options */
-
 export type NodeResolveOptions = {
-    /** filesystem seam (same instance the bundle uses; PluginCtx has no Fs) */
     fs: Fs;
-    /** active exports/imports conditions; membership-only. Default browser set. */
     conditions?: string[];
-    /** legacy file-probe extensions. */
     extensions?: string[];
-    /** legacy main field order. */
     mainFields?: string[];
 };
 
-const DEFAULT_CONDITIONS = ['import', 'browser', 'default']; // esbuild resolver.go:283-296 / rolldown resolver_config.rs:34-44
-const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json']; // rolldown resolver_config.rs:119
+const DEFAULT_CONDITIONS = ['import', 'browser', 'default'];
+const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json'];
 const DEFAULT_MAIN_FIELDS = ['browser', 'module', 'main'];
 
 /** Sentinel id for a `browser: false` / disabled module. Load hook returns ''. */
 export const EMPTY_MODULE_ID = '\0empty';
 
-/* -------------------------------------------------------------- pkg parsing */
-
 /** The subset of package.json this resolver reads (parse-cached per dir). */
 type PkgJson = {
     dir: string;
     name: string | undefined;
-    /** raw exports value (string | array | object), or undefined */
     exports: unknown;
-    /**
-     * The `browser` field: string form (whole-package remap) OR object map
-     * (relPath -> string remap | false disable). Kept as one field per the
-     * cache contract {name, exports, browser, module, main}.
-     */
     browser: string | Record<string, string | false> | undefined;
     module: string | undefined;
     main: string | undefined;
 };
 
-/* ------------------------------------------------------------- name parsing */
-
-/**
- * Split a bare specifier into (name, subpath). subpath is "." + rest.
- * Mirrors esmParsePackageName (package_json.go:1320-1349). Returns null when
- * the specifier is not a valid package specifier.
- */
 function parsePackageName(spec: string): { name: string; subpath: string } | null {
     if (spec === '') return null;
     let name: string;
@@ -64,7 +32,7 @@ function parsePackageName(spec: string): { name: string; subpath: string } | nul
     if (!spec.startsWith('@')) {
         name = slash === -1 ? spec : spec.slice(0, slash);
     } else {
-        if (slash === -1) return null; // "@scope" alone is not a package
+        if (slash === -1) return null;
         const slash2 = spec.indexOf('/', slash + 1);
         name = slash2 === -1 ? spec : spec.slice(0, slash2);
     }
@@ -73,16 +41,13 @@ function parsePackageName(spec: string): { name: string; subpath: string } | nul
     return { name, subpath };
 }
 
-/* -------------------------------------------------------- exports resolution */
-
-// pjStatus — resolution outcomes from esmPackageTargetResolve.
 type PjResult =
-    | { status: 'exact'; value: string } // exact target (existence check only)
-    | { status: 'inexact'; value: string } // legacy `/`-suffixed key: probe
-    | { status: 'null'; blocked: boolean } // null result; blocked = author null literal
-    | { status: 'undefined' } // no applicable branch (keep searching)
-    | { status: 'no-conditions'; conditions: string[] } // condition map, none matched
-    | { status: 'invalid'; reason: string }; // invalid package target
+    | { status: 'exact'; value: string }
+    | { status: 'inexact'; value: string }
+    | { status: 'null'; blocked: boolean }
+    | { status: 'undefined' }
+    | { status: 'no-conditions'; conditions: string[] }
+    | { status: 'invalid'; reason: string };
 
 const isUndefinedish = (r: PjResult): boolean => r.status === 'undefined' || r.status === 'no-conditions';
 
@@ -111,11 +76,6 @@ function findInvalidSegment(p: string): string {
     return '';
 }
 
-/**
- * esmPackageTargetResolve (package_json.go:1096-1318). Resolves a single target
- * (string | object condition map | array fallback | null) with the captured
- * `subpath` (the `*` expansion for pattern keys).
- */
 function targetResolve(
     packageUrl: string,
     target: unknown,
@@ -123,7 +83,6 @@ function targetResolve(
     pattern: boolean,
     conditions: Set<string>,
 ): PjResult {
-    // string target
     if (typeof target === 'string') {
         if (!pattern && subpath !== '' && !target.endsWith('/')) {
             return { status: 'invalid', reason: 'because it doesn\'t end in "/"' };
@@ -153,12 +112,10 @@ function targetResolve(
         return { status: 'exact', value: normalizePath(`${resolvedTarget}/${subpath}`) };
     }
 
-    // null target = author-blocked (null literal -> "explicitly disabled")
     if (target === null) {
         return { status: 'null', blocked: true };
     }
 
-    // array fallback
     if (Array.isArray(target)) {
         if (target.length === 0) return { status: 'null', blocked: false };
         let last: PjResult = { status: 'undefined' };
@@ -174,7 +131,6 @@ function targetResolve(
         return last;
     }
 
-    // condition object — author key order, first applicable wins
     if (typeof target === 'object') {
         const map = target as Record<string, unknown>;
         const keys = Object.keys(map);
@@ -189,9 +145,6 @@ function targetResolve(
                 return r;
             }
         }
-        // no condition applied — friendly "no conditions match" (only for
-        // condition maps, not subpath maps). Complain about the nested map if a
-        // top-level key matched but its sub-conditions didn't (go:1233-1272).
         if (keys.length > 0) {
             let listing = keys;
             if (
@@ -216,11 +169,6 @@ function keysStartWithDot(obj: Record<string, unknown>): boolean {
     return keys.length > 0 && keys[0].startsWith('.');
 }
 
-/**
- * Specificity comparator for expansion keys (package_json.go:578-629):
- * longer base wins; no-`*` beats `*`; longer key wins on tie. Returns <0 if a
- * should come before b.
- */
 function expansionLess(a: string, b: string): number {
     const starA = a.indexOf('*');
     const starB = b.indexOf('*');
@@ -228,31 +176,25 @@ function expansionLess(a: string, b: string): number {
     const baseB = starB >= 0 ? starB : b.length;
     if (baseA > baseB) return -1;
     if (baseB > baseA) return 1;
-    if (starA < 0) return 1; // a has no star -> b wins ordering (a is "less" only if...); mirror go
+    if (starA < 0) return 1;
     if (starB < 0) return -1;
     if (a.length > b.length) return -1;
     if (b.length > a.length) return 1;
     return 0;
 }
 
-/**
- * esmPackageImportsExportsResolve (package_json.go:997-1070). Matches matchKey
- * against a subpath object: exact key first, then expansion keys by specificity.
- */
 function subpathResolve(
     matchKey: string,
     matchObj: Record<string, unknown>,
     packageUrl: string,
     conditions: Set<string>,
 ): PjResult {
-    // exact match (key not ending "/" and not containing "*")
     if (!matchKey.endsWith('/') && !matchKey.includes('*')) {
         if (Object.prototype.hasOwnProperty.call(matchObj, matchKey)) {
             return targetResolve(packageUrl, matchObj[matchKey], '', false, conditions);
         }
     }
 
-    // expansion keys: those ending in "/" or containing "*"
     const expansionKeys = Object.keys(matchObj).filter((k) => k.endsWith('/') || k.includes('*'));
     expansionKeys.sort(expansionLess);
 
@@ -271,7 +213,6 @@ function subpathResolve(
                 }
             }
         } else {
-            // key ends in "/": prefix match, inexact (probes)
             if (matchKey.startsWith(key)) {
                 const captured = matchKey.slice(key.length);
                 const r = targetResolve(packageUrl, matchObj[key], captured, false, conditions);
@@ -281,14 +222,9 @@ function subpathResolve(
         }
     }
 
-    return { status: 'null', blocked: false }; // no keys matched -> "not exported"
+    return { status: 'null', blocked: false };
 }
 
-/**
- * esmPackageExportsResolve (package_json.go:960-995). Entry into the exports
- * engine for a subpath ("." or "./..."). Distinguishes sugar form (conditions
- * for ".") from subpath form.
- */
 function exportsResolve(
     exports: unknown,
     subpath: string,
@@ -307,8 +243,6 @@ function exportsResolve(
             mainExport = (exports as Record<string, unknown>)['.'];
         }
         if (mainExport !== undefined) {
-            // esbuild returns any non-undefined status directly (go:974-980); a
-            // null literal surfaces as the "explicitly disabled" diagnosis.
             const r = targetResolve(packageUrl, mainExport, '', false, conditions);
             if (r.status !== 'undefined') return r;
         }
@@ -316,17 +250,13 @@ function exportsResolve(
         const r = subpathResolve(subpath, exports, packageUrl, conditions);
         if (r.status !== 'undefined') return r;
     }
-    return { status: 'undefined' }; // "not exported"
+    return { status: 'undefined' };
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
     return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
-/**
- * Detect mixed `.`/non-`.` keys in an exports object (invalid configuration,
- * package_json.go:695-708). Returns the conflicting key pair, or null.
- */
 function mixedExportsKeys(exports: unknown): { key: string; prev: string } | null {
     if (!isPlainObject(exports)) return null;
     const keys = Object.keys(exports);
@@ -338,15 +268,12 @@ function mixedExportsKeys(exports: unknown): { key: string; prev: string } | nul
     return null;
 }
 
-/* ------------------------------------------------------------------ plugin */
-
 export function nodeResolve(options: NodeResolveOptions): Plugin {
     const fs = options.fs;
     const conditions = new Set(options.conditions ?? DEFAULT_CONDITIONS);
     const extensions = options.extensions ?? DEFAULT_EXTENSIONS;
     const mainFields = options.mainFields ?? DEFAULT_MAIN_FIELDS;
 
-    // package.json parse cache keyed by package dir. `null` = no/invalid pkg here.
     const pkgCache = new Map<string, PkgJson | null>();
 
     const readPkg = (dir: string): PkgJson | null => {
@@ -379,8 +306,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         const pkg: PkgJson = {
             dir,
             name: typeof raw.name === 'string' ? raw.name : undefined,
-            // esbuild parses `exports: null` as NO exports map -> legacy fallback
-            // (package_json.go:808-810); normalize so the terminal rule doesn't fire
             exports: raw.exports === null ? undefined : raw.exports,
             browser,
             module: typeof raw.module === 'string' ? raw.module : undefined,
@@ -390,9 +315,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return pkg;
     };
 
-    /* ------------------------------------------- legacy file/dir probing */
-
-    // Try `path` exactly, then with each extension.
     const loadAsFile = (path: string): string | null => {
         if (fs.exists(path)) return path;
         for (const ext of extensions) {
@@ -401,8 +323,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    // Try `dir` as a directory: mainFields (only for the package root dir where
-    // pkg lives), then index probing. `pkg` is the enclosing package.json.
     const loadAsIndex = (dir: string): string | null => {
         for (const ext of extensions) {
             const cand = `${dir}/index${ext}`;
@@ -411,13 +331,9 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    // Apply a package's browser-object remap to an absolute path. Returns the
-    // remapped absolute path, EMPTY_MODULE_ID for `false`, or the same path.
     const applyBrowserRemap = (pkg: PkgJson, absPath: string): string => {
         const map = pkg.browser;
-        if (map === undefined || typeof map === 'string') return absPath; // only object form remaps files
-        // browser keys are package-relative like "./node-impl.js"; build the
-        // relative form of absPath against the package dir.
+        if (map === undefined || typeof map === 'string') return absPath;
         const rel = relativeTo(pkg.dir, absPath);
         for (const candidate of browserKeyCandidates(rel, extensions)) {
             if (Object.prototype.hasOwnProperty.call(map, candidate)) {
@@ -429,16 +345,13 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return absPath;
     };
 
-    // loadAsFileOrDirectory over a package subpath (legacy, no exports).
     const loadAsFileOrDirectory = (pkg: PkgJson, absPath: string): string | null => {
         const remapped = applyBrowserRemap(pkg, absPath);
         if (remapped === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
         const asFile = loadAsFile(remapped);
         if (asFile !== null) {
-            // a probed file may itself be browser-remapped (e.g. index.js -> false)
             return finishBrowserRemap(pkg, asFile);
         }
-        // directory: index probing (mainFields handled only at package root)
         const asIndex = loadAsIndex(remapped);
         if (asIndex !== null) return finishBrowserRemap(pkg, asIndex);
         return null;
@@ -448,13 +361,10 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         const r = applyBrowserRemap(pkg, absPath);
         if (r === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
         if (r === absPath) return absPath;
-        // remap pointed elsewhere; probe the new target as a file
         const f = loadAsFile(r);
         return f ?? r;
     };
 
-    // Resolve a package root via mainFields, then index. `pkgDir` is the package
-    // directory (where package.json lives). subpath is "." here.
     const loadPackageRoot = (pkg: PkgJson): string | null => {
         const fields: Record<string, string | undefined> = {
             browser: typeof pkg.browser === 'string' ? pkg.browser : undefined,
@@ -468,18 +378,11 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             const hit = loadAsFileOrDirectory(pkg, abs);
             if (hit !== null) return hit;
         }
-        // no main field resolved: index probing at package root (with browser remap)
         const idx = loadAsIndex(pkg.dir);
         if (idx !== null) return finishBrowserRemap(pkg, idx);
         return null;
     };
 
-    /* --------------------------------------------------- exports outcome */
-
-    // Turn a PjResult into a resolved id (checking existence) or a warning key.
-    // Returns { id } on success, { warn } to surface a diagnostic, or null to
-    // fall through (only for the not-exported → still search? no: exports are
-    // terminal, so undefined here means "not exported" = warn).
     const finishExports = (
         ctx: PluginCtx,
         pkg: PkgJson,
@@ -524,38 +427,24 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         }
     };
 
-    /* -------------------------------------------------------- resolveId */
-
-    // NOTE (warn-vs-error friction): core (src/graph.ts) treats a bare specifier
-    // that resolveId leaves null as EXTERNAL, not a build error — only relative/
-    // absolute misses error. So a diagnosed npm miss can't be turned into a hard
-    // build error from here; we attach the rich diagnosis via ctx.warn and return
-    // null. See final report.
     const resolveId = (
         ctx: PluginCtx,
         specifier: string,
         importer: string | null,
         skipBrowserMap = false,
     ): string | null | undefined => {
-        // virtual ids — leave to core.
         if (specifier.startsWith('\0')) return null;
 
-        // relative / absolute specifiers: core normally handles them, but a
-        // package's own `browser` object map remaps its relative files (incl.
-        // `false` -> empty module). Only intercept when the importer sits inside
-        // a browser-map package; otherwise pass to core.
         if (specifier.startsWith('.') || specifier.startsWith('/')) {
             if (importer === null) return null;
             const owner = findBrowserMapOwner(readPkg, dirnameOf(importer));
             if (owner === null) return null;
             const abs = joinPath(dirnameOf(importer), specifier);
             const hit = loadAsFileOrDirectory(owner, abs);
-            // only claim the resolution when the browser map actually applied;
-            // else let core resolve (avoids swallowing genuine misses/probing diffs)
             if (hit === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
             const remapped = applyBrowserRemap(owner, abs);
-            if (remapped !== abs) return hit; // a remap fired -> our result wins
-            return null; // no remap for this file -> core handles
+            if (remapped !== abs) return hit;
+            return null;
         }
 
         const parsed = parsePackageName(specifier);
@@ -564,10 +453,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
 
         const importerDir = importer === null ? '' : dirnameOf(importer);
 
-        // 0. package-name browser remap: the importer's enclosing browser map may
-        //    remap or disable a BARE specifier (esbuild checkPackage +
-        //    checkBrowserMap packagePathKind, resolver.go:1051-1071). This is how
-        //    postcss stubs "source-map-js"/"path"/"fs" for browsers.
         if (!skipBrowserMap) {
             const owner = findBrowserMapOwner(readPkg, importerDir);
             if (owner !== null) {
@@ -579,16 +464,12 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
                         const hit = loadAsFileOrDirectory(owner, normalizePath(`${owner.dir}/${mapped}`));
                         if (hit !== null) return hit;
                     } else {
-                        // remap to another package: re-resolve, skipping the map
-                        // so a self-mapping can't loop
                         return resolveId(ctx, mapped, importer, true);
                     }
                 }
             }
         }
 
-        // 1. self-reference: nearest enclosing package.json whose name === name
-        //    AND has exports.
         const selfPkg = findEnclosingPackage(readPkg, importerDir, name);
         if (selfPkg !== null && selfPkg.exports !== undefined) {
             const mixed = mixedExportsKeys(selfPkg.exports);
@@ -600,14 +481,12 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             return finishExports(ctx, selfPkg, specifier, subpath, r);
         }
 
-        // 2. walk node_modules upward.
         for (let dir: string | null = importerDir; dir !== null; dir = parentDir(dir)) {
-            if (baseName(dir) === 'node_modules') continue; // don't nest node_modules/node_modules
+            if (baseName(dir) === 'node_modules') continue;
             const pkgDir = joinPath(dir, `node_modules/${name}`);
             const pkg = readPkg(pkgDir);
             if (pkg === null) continue;
 
-            // exports present → terminal.
             if (pkg.exports !== undefined) {
                 const mixed = mixedExportsKeys(pkg.exports);
                 if (mixed !== null) {
@@ -618,7 +497,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
                 return finishExports(ctx, pkg, specifier, subpath, r);
             }
 
-            // legacy path.
             if (subpath === '.') {
                 const hit = loadPackageRoot(pkg);
                 if (hit !== null) return hit;
@@ -627,12 +505,10 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
                 const hit = loadAsFileOrDirectory(pkg, abs);
                 if (hit !== null) return hit;
             }
-            // package found but subpath unresolved → not found on fs.
             warn(ctx, specifier, `The module "${specifier}" was not found on the file system`);
             return null;
         }
 
-        // not found in any node_modules — no diagnosis to add; core marks external.
         return null;
     };
 
@@ -642,8 +518,6 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         load: (_ctx, id) => (id === EMPTY_MODULE_ID ? '' : null),
     };
 }
-
-/* ---------------------------------------------------------------- helpers */
 
 function warn(ctx: PluginCtx, spec: string, note: string): void {
     ctx.warn(`Could not resolve "${spec}": ${note}`);
@@ -672,12 +546,6 @@ function relativeTo(pkgDir: string, absPath: string): string {
     return absPath;
 }
 
-/**
- * Browser-map key candidates for a relative path: as written, without the
- * leading "./", with a known extension stripped, and with a trailing "/index"
- * stripped — mirroring esbuild's implicit-extension/index matching direction
- * (checkPath, package_json.go:134-178).
- */
 function browserKeyCandidates(rel: string, extensions: string[]): string[] {
     const out: string[] = [];
     const add = (r: string): void => {
@@ -700,11 +568,6 @@ function relativeForMsg(pkg: PkgJson, absPath: string): string {
     return relativeTo(pkg.dir, absPath);
 }
 
-/**
- * Find the nearest enclosing package.json (walking up from `dir`) whose name
- * matches `name`. Stops at the first package.json encountered (self-reference
- * only considers the immediately enclosing package).
- */
 function findEnclosingPackage(
     readPkg: (dir: string) => PkgJson | null,
     startDir: string,
@@ -714,24 +577,16 @@ function findEnclosingPackage(
         if (baseName(dir) === 'node_modules') return null;
         const pkg = readPkg(dir);
         if (pkg !== null) {
-            return pkg.name === name ? pkg : null; // nearest pkg only
+            return pkg.name === name ? pkg : null;
         }
     }
     return null;
 }
 
-/**
- * Nearest enclosing package.json (walking up from `startDir`) that carries an
- * object-form `browser` map — the scope within which relative imports get
- * browser-remapped. Returns null if none.
- */
 function findBrowserMapOwner(
     readPkg: (dir: string) => PkgJson | null,
     startDir: string,
 ): PkgJson | null {
-    // esbuild's enclosingBrowserScope (resolver.go:1592-1625): the scope is the
-    // nearest ancestor WITH an object browser map; intermediate package.jsons
-    // without one do not reset it.
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         const pkg = readPkg(dir);
         if (pkg !== null && pkg.browser !== undefined && typeof pkg.browser !== 'string') return pkg;

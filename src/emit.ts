@@ -1,14 +1,14 @@
-// TS type stripping by span blanking (ts-blank-space model) plus enum lowering.
-// AST-driven: a single walk collects edits that are sorted and applied by slicing.
-// Edits are spans over the module SOURCE (the edit engine); the type+data tree
-// carries .start/.end, and the source is supplied by the caller.
-
-import { type Node, N, isTypeOnlyNode, walk } from './ast.ts';
+import { type Node, N, isTypeOnlyNode, walk, walkChildren } from './ast.ts';
 
 /** Emit options; `stripTypes: false` yields byte-identical passthrough. */
 export type EmitOptions = { stripTypes: boolean };
 
-/* ------------------------------------------------------------------ edits */
+/** JSX lowering hooks the bundler supplies (plan §5). null => JSX is passed
+ * through unchanged (parse/AST only — the emit-only strip path). */
+export type JSXLower = {
+    runtimeName: (kind: 'jsx' | 'jsxs' | 'Fragment' | 'createElement') => string;
+    renameIdent: (idNode: Node) => string | null;
+};
 
 /** An edit over the source. `text` present => replacement; absent => blank. */
 export type Edit = { start: number; end: number; text?: string };
@@ -17,11 +17,9 @@ type Ctx = {
     src: string;
     edits: Edit[];
     root: Node;
-    /** bundling mode: lowered enums emit `var` instead of `export var` (the
-     * bundler removes module export syntax and re-exports at the entry) */
     dropExportKeyword: boolean;
-    /** bundling: final (deconflicted) name for an enum's declaring Ident node */
     enumFinalName: ((idNode: Node) => string | null) | null;
+    jsx: JSXLower | null;
 };
 
 /** blank [start, end): each char -> space, but keep \n and \r for line parity. */
@@ -43,8 +41,6 @@ function blankText(src: string, start: number, end: number): string {
     }
     return out;
 }
-
-/* --------------------------------------------------------- char scanning */
 
 function isWs(c: number): boolean {
     return c === 32 || c === 9 || c === 10 || c === 13 || c === 12 || c === 11;
@@ -70,17 +66,13 @@ function readWord(src: string, from: number, end: number): string {
     return src.slice(from, i);
 }
 
-/**
- * Scan [from, limit) for the exact keyword `kw` at an identifier boundary;
- * return its start offset, or -1. Skips any intervening non-word chars.
- */
 function scanForwardKeyword(ctx: Ctx, from: number, limit: number, kw: string): number {
     const src = ctx.src;
     for (let i = from; i + kw.length <= limit; i++) {
         if (isIdentStart(src.charCodeAt(i))) {
             const w = readWord(src, i, limit);
             if (w === kw) return i;
-            i += w.length - 1; // skip past this word
+            i += w.length - 1;
         }
     }
     return -1;
@@ -93,38 +85,23 @@ function scanForwardChar(ctx: Ctx, from: number, limit: number, cc: number): num
     return -1;
 }
 
-/* --------------------------------------------------------- blanking rules */
-
 /** blank a whole node's span. */
 function blankNode(ctx: Ctx, n: Node | null): void {
     if (n !== null) blank(ctx, n.start, n.end);
 }
 
-/**
- * Blank an optional `?` that sits immediately after `afterEnd` (skipping ws).
- * Used for optional params and optional class members.
- */
 function blankTrailingQuestion(ctx: Ctx, afterEnd: number, limit: number): void {
     const src = ctx.src;
     const i = skipWs(src, afterEnd, limit);
-    if (i < limit && src.charCodeAt(i) === 63 /* ? */) blank(ctx, i, i + 1);
+    if (i < limit && src.charCodeAt(i) === 63 ) blank(ctx, i, i + 1);
 }
 
-/**
- * Blank a definite-assignment `!` that sits between the id/key span end and the
- * next child (typeAnn) or the declarator/prop end.
- */
 function blankDefinite(ctx: Ctx, afterEnd: number, limit: number): void {
     const src = ctx.src;
     const i = skipWs(src, afterEnd, limit);
-    if (i < limit && src.charCodeAt(i) === 33 /* ! */) blank(ctx, i, i + 1);
+    if (i < limit && src.charCodeAt(i) === 33 ) blank(ctx, i, i + 1);
 }
 
-/**
- * Blank leading member-modifier keywords in [start, keyStart): the erasable
- * TS ones (accessibility, readonly, abstract, override, declare). Real JS
- * modifiers (static, get, set, async, *) are kept.
- */
 const ERASABLE_MEMBER_MODS = new Set(['public', 'private', 'protected', 'readonly', 'abstract', 'override', 'declare']);
 const KEEP_MEMBER_MODS = new Set(['static', 'get', 'set', 'async']);
 function blankMemberModifiers(ctx: Ctx, start: number, keyStart: number): void {
@@ -134,7 +111,7 @@ function blankMemberModifiers(ctx: Ctx, start: number, keyStart: number): void {
         i = skipWs(src, i, keyStart);
         if (i >= keyStart) break;
         const c = src.charCodeAt(i);
-        if (!isIdentStart(c)) break; // '[', '#', '*', '"', '(' etc. — key region
+        if (!isIdentStart(c)) break;
         const word = readWord(src, i, keyStart);
         const wordEnd = i + word.length;
         if (ERASABLE_MEMBER_MODS.has(word)) {
@@ -146,14 +123,10 @@ function blankMemberModifiers(ctx: Ctx, start: number, keyStart: number): void {
             i = wordEnd;
             continue;
         }
-        break; // the key itself (an identifier name)
+        break;
     }
 }
 
-/**
- * Blank an `implements` clause: from the `implements` keyword (char-scanned
- * back from the first heritage node) through the last heritage node's end.
- */
 function blankImplements(ctx: Ctx, impl: Node[]): void {
     const n = impl.length;
     if (n === 0) return;
@@ -171,20 +144,6 @@ function blankImplements(ctx: Ctx, impl: Node[]): void {
     }
 }
 
-/* ------------------------------------------------------------ enum lowering */
-
-/**
- * Lower a TSEnumDecl to the standard tsc runtime form:
- *
- *   var E;
- *   (function (E) {
- *       E[E["A"] = 0] = "A";        // numeric: reverse-mapped
- *       E["S"] = "str";             // string: forward only
- *   })(E || (E = {}));
- *
- * `exportNode` non-null (enum is an ExportNamed.decl) replaces the whole export
- * span with an `export var` form. LIMIT: const enums lowered identically.
- */
 function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration }, exportNode: Node | null): void {
     const src = ctx.src;
     const nameNode = enumNode.data.id;
@@ -192,13 +151,12 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
     const members = enumNode.data.members;
 
     let body = '';
-    let autoNext = 0; // next auto-increment value (numeric)
-    let autoOk = true; // whether auto-increment is currently valid
+    let autoNext = 0;
+    let autoOk = true;
 
     for (const memberNode of members) {
         if (memberNode.type !== N.TSEnumMember) continue;
         const memId = memberNode.data.id;
-        // member key: Ident text, or Str -> its inner value (quotes stripped)
         let key: string;
         if (memId.type === N.StringLiteral) {
             key = src.slice(memId.start + 1, memId.end - 1);
@@ -218,9 +176,7 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
             continue;
         }
 
-        // Raw initializer text: slice AFTER the `=` to member end, NOT the init
-        // node's own span — the parser excludes wrapping parens from expression spans.
-        const eq = scanForwardChar(ctx, memId.end, memberNode.end, 61 /* = */);
+        const eq = scanForwardChar(ctx, memId.end, memberNode.end, 61 );
         const raw = src.slice(eq + 1, memberNode.end).trim();
 
         if (init.type === N.StringLiteral) {
@@ -249,12 +205,6 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
     replace(ctx, start, end, out);
 }
 
-/* ---------------------------------------------------------- specifier lists */
-
-/**
- * In a value import/export, blank the type-only specifiers plus exactly one
- * adjacent comma so the surviving list stays syntactically valid.
- */
 function stripTypeOnlySpecifiers(ctx: Ctx, specs: Node[]): void {
     const src = ctx.src;
     for (const specNode of specs) {
@@ -265,12 +215,12 @@ function stripTypeOnlySpecifiers(ctx: Ctx, specs: Node[]): void {
         const s = specNode.start;
         let e = specNode.end;
         const after = skipWs(src, e, src.length);
-        if (after < src.length && src.charCodeAt(after) === 44 /* , */) {
+        if (after < src.length && src.charCodeAt(after) === 44 ) {
             e = after + 1;
         } else {
             let b = s;
             while (b > 0 && isWs(src.charCodeAt(b - 1))) b--;
-            if (b > 0 && src.charCodeAt(b - 1) === 44 /* , */) {
+            if (b > 0 && src.charCodeAt(b - 1) === 44 ) {
                 blank(ctx, b - 1, e);
                 continue;
             }
@@ -279,7 +229,233 @@ function stripTypeOnlySpecifiers(ctx: Ctx, specs: Node[]): void {
     }
 }
 
-/* --------------------------------------------------------------- the walk */
+function renderNode(ctx: Ctx, node: Node): string {
+    const sub: Ctx = { ...ctx, edits: [] };
+    collect(sub, node);
+    if (ctx.jsx !== null) {
+        const rename = ctx.jsx.renameIdent;
+        collectRenameEdits(node, (idNode, shorthandProp) => {
+            const nn = rename(idNode);
+            if (nn === null || nn === idNode.name) return;
+            sub.edits.push({
+                start: idNode.start,
+                end: idNode.end,
+                text: shorthandProp ? `${idNode.name}: ${nn}` : nn,
+            });
+        });
+    }
+    return applyEditsRange(ctx.src, node.start, node.end, sub.edits);
+}
+
+function collectRenameEdits(node: Node, cb: (idNode: Node, shorthand: boolean) => void): void {
+    if (node.type === N.BindingIdentifier || node.type === N.IdentifierReference) { cb(node, false); return; }
+    if (node.type === N.IdentifierName || node.type === N.LabelIdentifier || node.type === N.PrivateIdentifier) return;
+    if (node.type === N.ObjectProperty && node.data.shorthand) {
+        const value = node.data.value;
+        if (value.type === N.BindingIdentifier || value.type === N.IdentifierReference) cb(value, true);
+        else if (value.type === N.AssignmentPattern) {
+            const left = value.data.left;
+            if (left.type === N.BindingIdentifier || left.type === N.IdentifierReference) cb(left, true);
+            collectRenameEdits(value.data.right, cb);
+        }
+        return;
+    }
+    walkChildren(node, (child) => { collectRenameEdits(child, cb); });
+}
+
+/** Apply `edits` (spans over `src`) restricted to `[from,to)`, returning the
+ * transformed slice. Edits outside the range are ignored; overlaps clamp. */
+function applyEditsRange(src: string, from: number, to: number, edits: Edit[]): string {
+    const inRange = edits.filter((e) => e.start >= from && e.end <= to).sort((a, b) => a.start - b.start || a.end - b.end);
+    let out = '';
+    let cursor = from;
+    for (const e of inRange) {
+        if (e.start < cursor) { if (e.end <= cursor) continue; out += e.text ?? blankText(src, cursor, e.end); cursor = e.end; continue; }
+        out += src.slice(cursor, e.start);
+        out += e.text ?? blankText(src, e.start, e.end);
+        cursor = e.end;
+    }
+    out += src.slice(cursor, to);
+    return out;
+}
+
+const JSX_NAMED_ENTITIES: Record<string, string> = {
+    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', copy: '©', reg: '®',
+    trade: '™', hellip: '…', mdash: '—', ndash: '–', bull: '•', middot: '·',
+    deg: '°', laquo: '«', raquo: '»', times: '×', divide: '÷', euro: '€',
+    pound: '£', cent: '¢', yen: '¥', sect: '§', para: '¶', dagger: '†',
+    Dagger: '‡', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+};
+function decodeJSXEntities(s: string): string {
+    return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
+        if (body[0] === '#') {
+            const cp = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+            return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+        }
+        const named = JSX_NAMED_ENTITIES[body];
+        return named !== undefined ? named : m;
+    });
+}
+
+function normalizeJSXText(raw: string): string | null {
+    const lines = raw.split('\n');
+    let acc = '';
+    let first = true;
+    for (let i = 0; i < lines.length; i++) {
+        let line = lines[i].replace(/\r$/, '');
+        if (i !== 0) line = line.replace(/^[ \t\v\f ]+/, '');
+        if (i !== lines.length - 1) line = line.replace(/[ \t\v\f ]+$/, '');
+        if (line === '') continue;
+        if (!first) acc += ' ';
+        acc += line;
+        first = false;
+    }
+    if (acc === '') return null;
+    return decodeJSXEntities(acc);
+}
+
+/** Lower a JSX element name to its runtime `tag` argument text. */
+function lowerJSXTag(ctx: Ctx, name: Node): string {
+    switch (name.type) {
+        case N.JSXIdentifier:
+            return JSON.stringify(name.name);
+        case N.IdentifierReference: {
+            const nn = ctx.jsx!.renameIdent(name);
+            return nn ?? name.name;
+        }
+        case N.ThisExpression:
+            return 'this';
+        case N.JSXMemberExpression:
+            return `${lowerJSXTag(ctx, name.data.object)}.${(name.data.property as Node).name}`;
+        case N.JSXNamespacedName:
+            return JSON.stringify(`${(name.data.namespace as Node).name}:${(name.data.name as Node).name}`);
+        default:
+            return ctx.src.slice(name.start, name.end);
+    }
+}
+
+/** A single attribute-name as an object-key text (identifier or quoted string). */
+function attrKeyText(name: Node): string {
+    const raw = name.type === N.JSXNamespacedName
+        ? `${(name.data.namespace as Node).name}:${(name.data.name as Node).name}`
+        : name.name;
+    return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(raw) ? raw : JSON.stringify(raw);
+}
+
+/** Render an attribute VALUE as an expression string. `null` value = `true`. */
+function attrValueText(ctx: Ctx, value: Node | null): string {
+    if (value === null) return 'true';
+    if (value.type === N.StringLiteral) {
+        const inner = ctx.src.slice(value.start + 1, value.end - 1);
+        return JSON.stringify(decodeJSXEntities(inner));
+    }
+    if (value.type === N.JSXExpressionContainer) return renderNode(ctx, value.data.expression);
+    if (value.type === N.JSXElement || value.type === N.JSXFragment) return renderNode(ctx, value);
+    return renderNode(ctx, value);
+}
+
+function lowerJSXChildren(ctx: Ctx, children: Node[]): string[] {
+    const out: string[] = [];
+    for (const child of children) {
+        if (child.type === N.JSXText) {
+            const t = normalizeJSXText(child.name);
+            if (t !== null) out.push(JSON.stringify(t));
+        } else if (child.type === N.JSXExpressionContainer) {
+            const expr = child.data.expression;
+            if (expr.type === N.JSXEmptyExpression) continue;
+            out.push(renderNode(ctx, expr));
+        } else if (child.type === N.JSXSpreadChild) {
+            out.push(`...${renderNode(ctx, child.data.expression)}`);
+        } else if (child.type === N.JSXElement || child.type === N.JSXFragment) {
+            out.push(renderNode(ctx, child));
+        }
+    }
+    return out;
+}
+
+/** True when the folded children form a static ARRAY (jsxs): >1 child, or a
+ * single spread child (esbuild js_parser.go:14013-14028). */
+function childrenAreStatic(childTexts: string[]): boolean {
+    if (childTexts.length > 1) return true;
+    return childTexts.length === 1 && childTexts[0].startsWith('...');
+}
+
+/** Build the `children:` prop value text (0 → null meaning absent; 1 → value;
+ * >1 → array). Returns null when there are no children. */
+function childrenPropText(childTexts: string[]): string | null {
+    if (childTexts.length === 0) return null;
+    if (childTexts.length === 1 && !childTexts[0].startsWith('...')) return childTexts[0];
+    return `[${childTexts.join(', ')}]`;
+}
+
+/** Lower a JSXElement/JSXFragment to its automatic-runtime call text (§5a). */
+function lowerJSX(ctx: Ctx, node: Node): string {
+    const jsx = ctx.jsx!;
+    let tag: string;
+    let attributes: Node[];
+    let children: Node[];
+    if (node.type === N.JSXFragment) {
+        const d = (node as Node & { type: typeof N.JSXFragment }).data;
+        tag = jsx.runtimeName('Fragment');
+        attributes = [];
+        children = d.children;
+    } else {
+        const d = (node as Node & { type: typeof N.JSXElement }).data;
+        const opening = d.openingElement as Node & { type: typeof N.JSXOpeningElement };
+        tag = lowerJSXTag(ctx, opening.data.name);
+        attributes = opening.data.attributes;
+        children = d.children;
+    }
+
+    const childTexts = lowerJSXChildren(ctx, children);
+    const keyAfterSpread = attrsHaveKeyAfterSpreadEmit(attributes);
+
+    if (keyAfterSpread) {
+        const propParts: string[] = [];
+        for (const a of attributes) {
+            if (a.type === N.JSXSpreadAttribute) propParts.push(`...${renderNode(ctx, a.data.argument)}`);
+            else if (a.type === N.JSXAttribute) propParts.push(`${attrKeyText(a.data.name)}: ${attrValueText(ctx, a.data.value)}`);
+        }
+        const props = propParts.length > 0 ? `{ ${propParts.join(', ')} }` : 'null';
+        const args = [tag, props, ...childTexts];
+        return `${jsx.runtimeName('createElement')}(${args.join(', ')})`;
+    }
+
+    let keyText: string | null = null;
+    const propParts: string[] = [];
+    for (const a of attributes) {
+        if (a.type === N.JSXSpreadAttribute) {
+            propParts.push(`...${renderNode(ctx, a.data.argument)}`);
+        } else if (a.type === N.JSXAttribute) {
+            const name = a.data.name;
+            if (name.type === N.JSXIdentifier && name.name === 'key') {
+                keyText = attrValueText(ctx, a.data.value);
+                continue;
+            }
+            propParts.push(`${attrKeyText(name)}: ${attrValueText(ctx, a.data.value)}`);
+        }
+    }
+    const childrenProp = childrenPropText(childTexts);
+    if (childrenProp !== null) propParts.push(`children: ${childrenProp}`);
+    const props = propParts.length > 0 ? `{ ${propParts.join(', ')} }` : '{}';
+
+    const fn = childrenAreStatic(childTexts) ? jsx.runtimeName('jsxs') : jsx.runtimeName('jsx');
+    const args = keyText !== null ? `${tag}, ${props}, ${keyText}` : `${tag}, ${props}`;
+    return `${fn}(${args})`;
+}
+
+/** Local copy of the key-after-spread check (emit side; graph has its own). */
+function attrsHaveKeyAfterSpreadEmit(attrs: Node[]): boolean {
+    let sawSpread = false;
+    for (const a of attrs) {
+        if (a.type === N.JSXSpreadAttribute) sawSpread = true;
+        else if (a.type === N.JSXAttribute) {
+            const name = a.data.name;
+            if (sawSpread && name.type === N.JSXIdentifier && name.name === 'key') return true;
+        }
+    }
+    return false;
+}
 
 /** true if this statement is a bare TS-erasable statement (whole span blanks). */
 function isErasableStatement(n: Node): boolean {
@@ -294,16 +470,18 @@ function isErasableStatement(n: Node): boolean {
     return false;
 }
 
-/** collect all edits for the module. */
-function collect(ctx: Ctx): void {
-    walk(ctx.root, (n: Node): boolean | void => {
-        // whole-statement erasure -----------------------------------------
+/** collect all edits for the module (or a subtree when `root` is given). */
+function collect(ctx: Ctx, root?: Node): void {
+    walk(root ?? ctx.root, (n: Node): boolean | void => {
+        if (ctx.jsx !== null && (n.type === N.JSXElement || n.type === N.JSXFragment)) {
+            replace(ctx, n.start, n.end, lowerJSX(ctx, n));
+            return false;
+        }
         if (isErasableStatement(n)) {
             blankNode(ctx, n);
-            return false; // don't descend
+            return false;
         }
 
-        // pure type nodes: blank the whole subtree, skip children ----------
         if (isTypeOnlyNode(n.type)) {
             blankNode(ctx, n);
             return false;
@@ -339,13 +517,11 @@ function collect(ctx: Ctx): void {
             }
 
             case N.FunctionDeclaration: {
-                // bodyless FuncDecl is an overload signature -> whole node blanks
                 if (n.data.body === null) {
                     blankNode(ctx, n);
                     return false;
                 }
                 blankNode(ctx, n.data.typeParameters);
-                // returnType is a TSTypeAnn -> blanked by the type-node rule.
                 return;
             }
             case N.FunctionExpression: {
@@ -391,7 +567,6 @@ function collect(ctx: Ctx): void {
 
             case N.CallExpression:
             case N.NewExpression: {
-                // typeArgs child (TSTypeArgs) blanked by the type-node rule.
                 return;
             }
 
@@ -401,12 +576,12 @@ function collect(ctx: Ctx): void {
                 const kw = n.type === N.TSAsExpression ? 'as' : 'satisfies';
                 const kwStart = scanForwardKeyword(ctx, expr.end, n.end, kw);
                 if (kwStart >= 0) blank(ctx, kwStart, n.end);
-                return; // descend into expr (may contain nested strips)
+                return;
             }
 
             case N.TSNonNullExpression: {
                 const expr = n.data.expression;
-                const bang = scanForwardChar(ctx, expr.end, n.end, 33 /* ! */);
+                const bang = scanForwardChar(ctx, expr.end, n.end, 33 );
                 if (bang >= 0) blank(ctx, bang, bang + 1);
                 return;
             }
@@ -429,10 +604,6 @@ function blankAbstractKeyword(ctx: Ctx, classNode: Node): void {
     if (src.slice(i, kwEnd) === 'abstract') blank(ctx, i, kwEnd);
 }
 
-/**
- * MethodDef. Returns true if the whole member was blanked (abstract / overload
- * signature with no body -> caller skips descent).
- */
 function blankMethodDef(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition }): boolean {
     const value = n.data.value;
     const abstractOrOverload =
@@ -443,14 +614,10 @@ function blankMethodDef(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition })
     }
     const key = n.data.key;
     blankMemberModifiers(ctx, n.start, key.start);
-    // optional `?` after the key (on a method with a body).
     if (n.data.optional) blankTrailingQuestion(ctx, key.end, n.end);
     return false;
 }
 
-/**
- * PropDef. Returns true if the whole member was blanked (declare / abstract).
- */
 function blankPropDef(ctx: Ctx, n: Node & { type: typeof N.PropertyDefinition }): boolean {
     if (n.data.declare || n.data.abstract) {
         blankNode(ctx, n);
@@ -460,7 +627,6 @@ function blankPropDef(ctx: Ctx, n: Node & { type: typeof N.PropertyDefinition })
     blankMemberModifiers(ctx, n.start, key.start);
     if (n.data.optional) blankTrailingQuestion(ctx, key.end, n.end);
     if (n.data.definite) blankDefinite(ctx, key.end, n.end);
-    // typeAnn (TSTypeAnn child) blanked by the type-node rule.
     return false;
 }
 
@@ -476,10 +642,7 @@ function blankParam(ctx: Ctx, n: Node & { type: typeof N.FormalParameter }): voi
         const limit = typeAnn !== null ? typeAnn.start : init !== null ? init.start : n.end;
         blankTrailingQuestion(ctx, pattern.end, limit);
     }
-    // typeAnn (TSTypeAnn) blanked by the type-node rule.
 }
-
-/* ---------------------------------------------------------------- assembly */
 
 /**
  * Sort and apply `edits` to `src`. Edits are expected non-overlapping (outer
@@ -505,25 +668,25 @@ export function applyEdits(src: string, edits: Edit[]): string {
     return out;
 }
 
-/* ------------------------------------------------------------------ entry */
-
 /**
  * Emit the module rooted at `program` over its `source`. With `stripTypes: false`
  * (or a module with no TS syntax) the result is byte-for-byte identical to source.
  */
 export function emitModule(program: Node, source: string, options: EmitOptions): string {
     if (!options.stripTypes) return source;
-    return applyEdits(source, collectStripEdits(program, source, false, null));
+    return applyEdits(source, collectStripEdits(program, source, false, null, null));
 }
 
-/** The type-strip pass as reusable edits (the bundler merges these with its own). */
+/** The type-strip pass as reusable edits (the bundler merges these with its own).
+ * `jsx` non-null lowers JSX to runtime calls; null passes JSX through (strip only). */
 export function collectStripEdits(
     program: Node,
     source: string,
     dropExportKeyword: boolean,
     enumFinalName: ((idNode: Node) => string | null) | null,
+    jsx: JSXLower | null,
 ): Edit[] {
-    const ctx: Ctx = { src: source, edits: [], root: program, dropExportKeyword, enumFinalName };
+    const ctx: Ctx = { src: source, edits: [], root: program, dropExportKeyword, enumFinalName, jsx };
     collect(ctx);
     return ctx.edits;
 }

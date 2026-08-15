@@ -13,24 +13,13 @@ const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js')
 
 type Counts = Record<string, number>;
 
-/**
- * Count ESTree-mapped node types by walking our type+data AST from the root.
- * Our payloads carry ESTree names directly (ESTREE_TYPE per numeric type id), so
- * the comparison is DIRECT — no estree-map layer.
- */
 function countOurs(src: string): Counts {
-    const { program, errors } = parse(src, { ts: false });
+    const { program, errors } = parse(src, { ts: false, jsx: false });
     expect(errors).toEqual([]);
     const counts: Counts = {};
     walk(program, (n: Node) => {
         const name = ESTREE_TYPE[n.type];
-        // Param maps to no ESTree node (it's our modelling wrapper), TS* nodes
-        // never appear in plain JS. Skip empty mappings.
         if (name === 'Param' || name === '') {
-            // A defaulted param `f(a = 1)` is a Param carrying an `init` for us, but
-            // an AssignmentPattern for meriyah. Count each Param-with-init as an
-            // AssignmentPattern here — together with our real AssignPattern nodes
-            // (nested destructuring defaults) this matches meriyah's total.
             if (n.type === N.FormalParameter && n.data.init !== null) {
                 counts.AssignmentPattern = (counts.AssignmentPattern ?? 0) + 1;
             }
@@ -64,19 +53,6 @@ function countMeriyah(root: unknown): Counts {
     return counts;
 }
 
-/**
- * KNOWN_DIFFS: the full, documented divergence ledger between our parser's node
- * inventory and meriyah's for three.core.js. Anything NOT covered here that
- * still mismatches is treated as a likely REAL PARSER BUG (the suite fails and
- * prints an actionable diff table).
- *
- * There are two kinds of entry:
- *  - GROUP: sum several ESTree type names into one bucket on BOTH sides before
- *    comparing (used when we and meriyah split the same syntax across different
- *    node types, e.g. expr-vs-pattern for destructuring).
- *  - EXCLUDE: drop a type from the diff entirely (used when the count difference
- *    is inherent to a structural modelling choice with no clean 1:1 bucket).
- */
 type Group = { name: string; members: string[]; reason: string };
 
 const GROUPS: Group[] = [
@@ -94,14 +70,6 @@ const GROUPS: Group[] = [
     },
 ];
 
-// NOTE: We split MemberExpression into StaticMemberExpression /
-// ComputedMemberExpression / PrivateFieldExpression (oxc js.rs:508-541); all three
-// serialize as 'MemberExpression' in ESTREE_NAME, so countOurs already sums them
-// into the single 'MemberExpression' bucket and it's compared directly to meriyah
-// (no group/exclusion needed). ChainExpression is likewise now compared directly
-// (its EXCLUDED entry was removed) — the count parity proves placement correctness
-// at corpus scale.
-
 /** type names excluded entirely from the diff, with reasons. */
 const EXCLUDED: Record<string, string> = {
     Identifier:
@@ -110,16 +78,9 @@ const EXCLUDED: Record<string, string> = {
         "meriyah inserts a ClassBody wrapper node between a Class{Declaration,Expression} and its members; we store members directly on the class node's `body` list, so we have no ClassBody-equivalent node. Pure structural wrapper, no 1:1 bucket. (three.core.js: 219 ClassBody on their side, 0 on ours.)",
 };
 
-/**
- * suspectedBug: a mismatch we believe is a genuine parser divergence, kept out
- * of the strict diff so the suite stays green while flagging it loudly. Each
- * entry pins the exact residual delta (ours - theirs) we expect.
- */
 type SuspectedBug = { type: string; delta: number; repro: string; analysis: string };
 
 const SUSPECTED_BUGS: SuspectedBug[] = [
-    // (empty — the for-init ExprStmt wrapping bug this harness found was fixed:
-    //  For.init is now the bare expression, per ESTree and our own schema.)
 ];
 
 /** collapse counts according to GROUPS (members summed under group name). */
@@ -144,9 +105,6 @@ describe('differential vs meriyah (three.core.js)', () => {
         const ours = applyGroups(countOurs(src));
         const theirs = applyGroups(countMeriyah(meriyah.parse(src, { module: true, next: true })));
 
-        // Neutralize known/suspected-bug deltas so the suite stays green while
-        // flagging them. Pinning the exact delta means the guard re-fires if the
-        // delta ever drifts (bug fixed, or regressed further).
         for (const b of SUSPECTED_BUGS) {
             ours[b.type] = (ours[b.type] ?? 0) - b.delta;
         }
@@ -179,11 +137,9 @@ describe('differential vs meriyah (three.core.js)', () => {
         expect(diffs).toEqual([]);
     });
 
-    // Regression guard for the for-init bug this harness originally found:
-    // For.init must be the BARE expression (ESTree semantics), never an ExprStmt.
     it('regression: for-loop expression init is a bare expression', () => {
         const repro = 'for (i = 0; i < n; i++) {}';
-        const { program, errors } = parse(repro, { ts: false });
+        const { program, errors } = parse(repro, { ts: false, jsx: false });
         expect(errors).toEqual([]);
 
         let forNode: Node | null = null;

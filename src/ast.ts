@@ -1,545 +1,459 @@
 import { enumeration } from './util/enumeration';
 
-export const NODE_TYPE_NAMES = [
-    'Program',
-    // Four identifier ROLES (oxc js.rs:189-267). All map to 'Identifier' in
-    // ESTREE_NAME; kept CONTIGUOUS so isIdentifier is a range check. The parser
-    // classifies at construction; semantic declares off BindingIdentifier and
-    // resolves off IdentifierReference (IdentifierName/LabelIdentifier never resolve).
-    'BindingIdentifier', 'IdentifierReference', 'IdentifierName', 'LabelIdentifier',
-    'PrivateIdentifier', 'NumericLiteral', 'StringLiteral', 'BooleanLiteral', 'NullLiteral', 'RegExpLiteral', 'BigIntLiteral',
-    'TemplateElement', 'ThisExpression', 'Super', 'ImportMeta', 'NewTarget',
-    'TemplateLiteral', 'TaggedTemplateExpression', 'ArrayExpression', 'ObjectExpression', 'ObjectProperty', 'SpreadElement',
-    'BinaryExpression', 'LogicalExpression', 'AssignmentExpression', 'UnaryExpression', 'UpdateExpression', 'ConditionalExpression', 'CallExpression', 'NewExpression',
-    // Member access split three ways (oxc js.rs:508-541, their field names). The
-    // `computed` payload boolean dies; `optional` stays per-type. Kept CONTIGUOUS
-    // where MemberExpression sat. All three map to 'MemberExpression' in ESTREE_NAME.
-    'StaticMemberExpression', 'ComputedMemberExpression', 'PrivateFieldExpression',
-    // ESTree-semantics wrapper around the OUTERMOST link of an optional chain (a
-    // chain containing any `?.` link; parentheses TERMINATE the chain). Transparent
-    // wrapper — pureness/rewriting/TS-stripping all see through it.
-    'ChainExpression',
-    'SequenceExpression', 'ArrowFunctionExpression', 'FunctionExpression', 'ClassExpression', 'YieldExpression', 'AwaitExpression', 'ImportExpression',
-    'ExpressionStatement', 'VariableDeclaration', 'VariableDeclarator', 'BlockStatement', 'IfStatement', 'ForStatement', 'ForInStatement', 'ForOfStatement',
-    'WhileStatement', 'DoWhileStatement', 'SwitchStatement', 'SwitchCase', 'TryStatement', 'CatchClause', 'ReturnStatement', 'ThrowStatement',
-    'BreakStatement', 'ContinueStatement', 'LabeledStatement', 'EmptyStatement', 'DebuggerStatement', 'FunctionDeclaration', 'ClassDeclaration',
-    'MethodDefinition', 'PropertyDefinition', 'StaticBlock',
-    'ObjectPattern', 'ArrayPattern', 'AssignmentPattern', 'RestElement', 'FormalParameter',
-    'ImportDeclaration', 'ImportSpecifier', 'ImportDefaultSpecifier', 'ImportNamespaceSpecifier',
-    'ExportNamedDeclaration', 'ExportSpecifier', 'ExportDefaultDeclaration', 'ExportAllDeclaration',
-    'TSTypeAnnotation',
-    // 14 keyword leaves — kept CONTIGUOUS (TSAnyKeyword..TSThisType) so isTypeOnlyNode's
-    // range check stays a bounds test; see isTypeOnlyNode below.
-    'TSAnyKeyword', 'TSStringKeyword', 'TSNumberKeyword', 'TSBooleanKeyword', 'TSBigIntKeyword',
-    'TSSymbolKeyword', 'TSObjectKeyword', 'TSVoidKeyword', 'TSUndefinedKeyword', 'TSNullKeyword',
-    'TSNeverKeyword', 'TSUnknownKeyword', 'TSIntrinsicKeyword', 'TSThisType',
-    'TSTypeReference', 'TSQualifiedName', 'TSTypeParameterInstantiation', 'TSTypeParameterDeclaration',
-    'TSTypeParameter', 'TSTupleType', 'TSNamedTupleMember', 'TSTypeLiteral', 'TSPropertySignature', 'TSMethodSignature',
-    'TSIndexSignature', 'TSCallSignatureDeclaration', 'TSConstructSignatureDeclaration', 'TSUnionType', 'TSIntersectionType', 'TSFunctionType',
-    'TSConstructorType', 'TSArrayType', 'TSIndexedAccessType', 'TSTypeOperator', 'TSTypeQuery',
-    'TSConditionalType', 'TSInferType', 'TSMappedType', 'TSLiteralType', 'TSTemplateLiteralType',
-    // Heritage split (phase 4): TSClassImplements under class `implements`,
-    // TSInterfaceHeritage under interface `extends`; same payload shape. Kept
-    // adjacent so the isTypeOnlyNode range check (…TSInterfaceHeritage) stays a
-    // bounds test. Each maps to its canonical name in estree.ts.
-    'TSImportType', 'TSInterfaceDeclaration', 'TSClassImplements', 'TSInterfaceHeritage', 'TSTypeAliasDeclaration', 'TSEnumDeclaration',
-    'TSEnumMember', 'TSAsExpression', 'TSSatisfiesExpression', 'TSNonNullExpression', 'TSModuleDeclaration',
+type ChildSchema = { kind: 'child' };
+const child: ChildSchema = { kind: 'child' };
+
+type BooleanSchema = { kind: 'boolean' };
+const boolean: BooleanSchema = { kind: 'boolean' };
+
+type StringSchema = { kind: 'string' };
+const string: StringSchema = { kind: 'string' };
+
+type NumberSchema = { kind: 'number' };
+const number: NumberSchema = { kind: 'number' };
+
+type ScalarSchema<U> = { kind: 'scalar'; t?: U };
+const scalar = <const U>(): ScalarSchema<U> => ({ kind: 'scalar' });
+
+type NullableSchema<M> = { kind: 'nullable'; of: M };
+const nullable = <const M extends PrimitiveSchema>(of: M): NullableSchema<M> => ({ kind: 'nullable', of });
+
+type ListSchema<M> = { kind: 'list'; of: M };
+const list = <const M extends ElementSchema>(of: M): ListSchema<M> => ({ kind: 'list', of });
+
+type PrimitiveSchema = ChildSchema | BooleanSchema | StringSchema | NumberSchema | ScalarSchema<unknown>;
+
+type ElementSchema = PrimitiveSchema | NullableSchema<PrimitiveSchema>;
+
+type Schema = ElementSchema | ListSchema<ElementSchema>;
+
+type Infer<M> =
+    M extends NullableSchema<infer X>
+        ? Infer<X> | null
+        : M extends ListSchema<infer X>
+          ? Infer<X>[]
+          : M extends ScalarSchema<infer U>
+            ? Exclude<U, undefined>
+            : M extends ChildSchema
+              ? Node
+              : M extends BooleanSchema
+                ? boolean
+                : M extends StringSchema
+                  ? string
+                  : M extends NumberSchema
+                    ? number
+                    : never;
+type NodeDef = Record<string, Schema> | null;
+const def = <const Name extends string, const D extends NodeDef>(name: Name, fields: D): { name: Name; fields: D } => ({
+    name,
+    fields,
+});
+
+const DEFS = [
+    def('Program', { body: list(child) }),
+    def('BindingIdentifier', null),
+    def('IdentifierReference', null),
+    def('IdentifierName', null),
+    def('LabelIdentifier', null),
+    def('PrivateIdentifier', null),
+    def('NumericLiteral', null),
+    def('StringLiteral', null),
+    def('BooleanLiteral', null),
+    def('NullLiteral', null),
+    def('RegExpLiteral', null),
+    def('BigIntLiteral', null),
+    def('TemplateElement', null),
+    def('ThisExpression', null),
+    def('Super', null),
+    def('ImportMeta', null),
+    def('NewTarget', null),
+    def('TemplateLiteral', { quasis: list(child), expressions: list(child) }),
+    def('TaggedTemplateExpression', { tag: child, quasi: child }),
+    def('ArrayExpression', { elements: list(nullable(child)) }),
+    def('ObjectExpression', { properties: list(child) }),
+    def('ObjectProperty', {
+        key: child,
+        value: child,
+        kind: scalar<'init' | 'get' | 'set'>(),
+        computed: boolean,
+        shorthand: boolean,
+    }),
+    def('SpreadElement', { argument: child }),
+    def('BinaryExpression', { operator: string, left: child, right: child }),
+    def('LogicalExpression', { operator: string, left: child, right: child }),
+    def('AssignmentExpression', { operator: string, left: child, right: child }),
+    def('UnaryExpression', { operator: string, prefix: boolean, argument: child }),
+    def('UpdateExpression', { operator: string, prefix: boolean, argument: child }),
+    def('ConditionalExpression', { test: child, consequent: child, alternate: child }),
+    def('CallExpression', { callee: child, arguments: list(child), optional: boolean, typeArguments: nullable(child) }),
+    def('NewExpression', { callee: child, arguments: list(child), typeArguments: nullable(child) }),
+    def('StaticMemberExpression', { object: child, property: child, optional: boolean }),
+    def('ComputedMemberExpression', { object: child, expression: child, optional: boolean }),
+    def('PrivateFieldExpression', { object: child, field: child, optional: boolean }),
+    def('ChainExpression', { expression: child }),
+    def('SequenceExpression', { expressions: list(child) }),
+    def('ArrowFunctionExpression', {
+        typeParameters: nullable(child),
+        params: list(child),
+        returnType: nullable(child),
+        body: child,
+        async: boolean,
+        expression: boolean,
+    }),
+    def('FunctionExpression', {
+        id: nullable(child),
+        typeParameters: nullable(child),
+        params: list(child),
+        returnType: nullable(child),
+        body: nullable(child),
+        async: boolean,
+        generator: boolean,
+    }),
+    def('ClassExpression', {
+        id: nullable(child),
+        typeParameters: nullable(child),
+        superClass: nullable(child),
+        superTypeArguments: nullable(child),
+        implements: list(child),
+        body: list(child),
+    }),
+    def('YieldExpression', { argument: nullable(child), delegate: boolean }),
+    def('AwaitExpression', { argument: child }),
+    def('ImportExpression', { source: child, options: nullable(child) }),
+    def('ExpressionStatement', { expression: child }),
+    def('VariableDeclaration', { declarations: list(child), kind: scalar<'var' | 'let' | 'const'>(), declare: boolean }),
+    def('VariableDeclarator', { id: child, typeAnnotation: nullable(child), init: nullable(child), definite: boolean }),
+    def('BlockStatement', { body: list(child) }),
+    def('IfStatement', { test: child, consequent: child, alternate: nullable(child) }),
+    def('ForStatement', { init: nullable(child), test: nullable(child), update: nullable(child), body: child }),
+    def('ForInStatement', { left: child, right: child, body: child }),
+    def('ForOfStatement', { left: child, right: child, body: child, await: boolean }),
+    def('WhileStatement', { test: child, body: child }),
+    def('DoWhileStatement', { body: child, test: child }),
+    def('SwitchStatement', { discriminant: child, cases: list(child) }),
+    def('SwitchCase', { test: nullable(child), consequent: list(child) }),
+    def('TryStatement', { block: child, handler: nullable(child), finalizer: nullable(child) }),
+    def('CatchClause', { param: nullable(child), body: child }),
+    def('ReturnStatement', { argument: nullable(child) }),
+    def('ThrowStatement', { argument: child }),
+    def('BreakStatement', { label: nullable(child) }),
+    def('ContinueStatement', { label: nullable(child) }),
+    def('LabeledStatement', { label: child, body: child }),
+    def('EmptyStatement', null),
+    def('DebuggerStatement', null),
+    def('FunctionDeclaration', {
+        id: nullable(child),
+        typeParameters: nullable(child),
+        params: list(child),
+        returnType: nullable(child),
+        body: nullable(child),
+        async: boolean,
+        generator: boolean,
+        declare: boolean,
+    }),
+    def('ClassDeclaration', {
+        id: nullable(child),
+        typeParameters: nullable(child),
+        superClass: nullable(child),
+        superTypeArguments: nullable(child),
+        implements: list(child),
+        body: list(child),
+        abstract: boolean,
+        declare: boolean,
+    }),
+    def('MethodDefinition', {
+        key: child,
+        value: child,
+        kind: scalar<'method' | 'get' | 'set' | 'constructor'>(),
+        static: boolean,
+        computed: boolean,
+        optional: boolean,
+        abstract: boolean,
+        accessibility: scalar<Accessibility>(),
+    }),
+    def('PropertyDefinition', {
+        key: child,
+        typeAnnotation: nullable(child),
+        value: nullable(child),
+        static: boolean,
+        computed: boolean,
+        readonly: boolean,
+        optional: boolean,
+        definite: boolean,
+        declare: boolean,
+        abstract: boolean,
+        accessibility: scalar<Accessibility>(),
+    }),
+    def('StaticBlock', { body: list(child) }),
+    def('ObjectPattern', { properties: list(child) }),
+    def('ArrayPattern', { elements: list(nullable(child)) }),
+    def('AssignmentPattern', { left: child, right: child }),
+    def('RestElement', { argument: child, typeAnnotation: nullable(child) }),
+    def('FormalParameter', {
+        pattern: child,
+        typeAnnotation: nullable(child),
+        init: nullable(child),
+        optional: boolean,
+        readonly: boolean,
+        accessibility: scalar<Accessibility>(),
+    }),
+    def('ImportDeclaration', { specifiers: list(child), source: child, importKind: scalar<'value' | 'type'>() }),
+    def('ImportSpecifier', { local: child, imported: child, importKind: scalar<'value' | 'type'>() }),
+    def('ImportDefaultSpecifier', { local: child }),
+    def('ImportNamespaceSpecifier', { local: child }),
+    def('ExportNamedDeclaration', {
+        declaration: nullable(child),
+        specifiers: list(child),
+        source: nullable(child),
+        exportKind: scalar<'value' | 'type'>(),
+    }),
+    def('ExportSpecifier', { local: child, exported: child, exportKind: scalar<'value' | 'type'>() }),
+    def('ExportDefaultDeclaration', { declaration: child }),
+    def('ExportAllDeclaration', { source: child, exported: nullable(child) }),
+    def('TSTypeAnnotation', { typeAnnotation: child }),
+    def('TSAnyKeyword', null),
+    def('TSStringKeyword', null),
+    def('TSNumberKeyword', null),
+    def('TSBooleanKeyword', null),
+    def('TSBigIntKeyword', null),
+    def('TSSymbolKeyword', null),
+    def('TSObjectKeyword', null),
+    def('TSVoidKeyword', null),
+    def('TSUndefinedKeyword', null),
+    def('TSNullKeyword', null),
+    def('TSNeverKeyword', null),
+    def('TSUnknownKeyword', null),
+    def('TSIntrinsicKeyword', null),
+    def('TSThisType', null),
+    def('TSTypeReference', { typeName: child, typeArguments: nullable(child) }),
+    def('TSQualifiedName', { left: child, right: child }),
+    def('TSTypeParameterInstantiation', { params: list(child) }),
+    def('TSTypeParameterDeclaration', { params: list(child) }),
+    def('TSTypeParameter', {
+        name: child,
+        constraint: nullable(child),
+        default: nullable(child),
+        in: boolean,
+        out: boolean,
+        const: boolean,
+    }),
+    def('TSTupleType', { elementTypes: list(child) }),
+    def('TSNamedTupleMember', { label: child, elementType: child, optional: boolean }),
+    def('TSTypeLiteral', { members: list(child) }),
+    def('TSPropertySignature', {
+        key: child,
+        typeAnnotation: nullable(child),
+        optional: boolean,
+        readonly: boolean,
+        computed: boolean,
+    }),
+    def('TSMethodSignature', {
+        key: child,
+        typeParameters: nullable(child),
+        params: list(child),
+        returnType: nullable(child),
+        optional: boolean,
+        kind: scalar<'method' | 'get' | 'set'>(),
+        computed: boolean,
+    }),
+    def('TSIndexSignature', { parameter: child, typeAnnotation: nullable(child), readonly: boolean }),
+    def('TSCallSignatureDeclaration', { typeParameters: nullable(child), params: list(child), returnType: nullable(child) }),
+    def('TSConstructSignatureDeclaration', { typeParameters: nullable(child), params: list(child), returnType: nullable(child) }),
+    def('TSUnionType', { types: list(child) }),
+    def('TSIntersectionType', { types: list(child) }),
+    def('TSFunctionType', { typeParameters: nullable(child), params: list(child), returnType: nullable(child) }),
+    def('TSConstructorType', {
+        typeParameters: nullable(child),
+        params: list(child),
+        returnType: nullable(child),
+        abstract: boolean,
+    }),
+    def('TSArrayType', { elementType: child }),
+    def('TSIndexedAccessType', { objectType: child, indexType: child }),
+    def('TSTypeOperator', { operator: string, typeAnnotation: child }),
+    def('TSTypeQuery', { exprName: child, typeArguments: nullable(child) }),
+    def('TSConditionalType', { checkType: child, extendsType: child, trueType: child, falseType: child }),
+    def('TSInferType', { typeParameter: child }),
+    def('TSMappedType', {
+        typeParameter: child,
+        nameType: nullable(child),
+        typeAnnotation: nullable(child),
+        readonlyMod: number,
+        optionalMod: number,
+    }),
+    def('TSLiteralType', { literal: child }),
+    def('TSTemplateLiteralType', { quasis: list(child), types: list(child) }),
+    def('TSImportType', { source: child, qualifier: nullable(child), typeArguments: nullable(child) }),
+    def('TSInterfaceDeclaration', {
+        id: child,
+        typeParameters: nullable(child),
+        extends: list(child),
+        body: list(child),
+        declare: boolean,
+    }),
+    def('TSClassImplements', { expression: child, typeArguments: nullable(child) }),
+    def('TSInterfaceHeritage', { expression: child, typeArguments: nullable(child) }),
+    def('TSTypeAliasDeclaration', { id: child, typeParameters: nullable(child), typeAnnotation: child, declare: boolean }),
+    def('TSEnumDeclaration', { id: child, members: list(child), const: boolean, declare: boolean }),
+    def('TSEnumMember', { id: child, initializer: nullable(child) }),
+    def('TSAsExpression', { expression: child, typeAnnotation: child }),
+    def('TSSatisfiesExpression', { expression: child, typeAnnotation: child }),
+    def('TSNonNullExpression', { expression: child }),
+    def('TSModuleDeclaration', { id: child, body: list(child), declare: boolean, namespace: boolean }),
+    def('JSXElement', { openingElement: child, children: list(child), closingElement: nullable(child) }),
+    def('JSXOpeningElement', { name: child, typeArguments: nullable(child), attributes: list(child) }),
+    def('JSXClosingElement', { name: child }),
+    def('JSXFragment', { openingFragment: child, children: list(child), closingFragment: child }),
+    def('JSXOpeningFragment', null),
+    def('JSXClosingFragment', null),
+    def('JSXNamespacedName', { namespace: child, name: child }),
+    def('JSXMemberExpression', { object: child, property: child }),
+    def('JSXExpressionContainer', { expression: child }),
+    def('JSXEmptyExpression', null),
+    def('JSXAttribute', { name: child, value: nullable(child) }),
+    def('JSXSpreadAttribute', { argument: child }),
+    def('JSXSpreadChild', { expression: child }),
+    def('JSXIdentifier', null),
+    def('JSXText', null),
 ] as const;
 
-export type TypeName = (typeof NODE_TYPE_NAMES)[number];
+type Defs = typeof DEFS;
+type DefOf<T extends TypeName> = Extract<Defs[number], { name: T }>;
 
-export const N = enumeration(...NODE_TYPE_NAMES);
+type PayloadOf<D extends NodeDef> = D extends null ? null : { [K in keyof D]: D[K] extends Schema ? Infer<D[K]> : never } & {};
 
-/** number of type ids, including the reserved 0 slot */
+export type TypeName = Defs[number]['name'];
+
+type IdsOf<
+    D extends readonly { name: string }[],
+    Acc = unknown,
+    Len extends readonly unknown[] = [unknown],
+> = D extends readonly [infer H extends { name: string }, ...infer R extends readonly { name: string }[]]
+    ? IdsOf<R, Acc & Record<H['name'], Len['length']>, [...Len, unknown]>
+    : { [K in keyof Acc]: Acc[K] };
+type IdMap = IdsOf<Defs>;
+type IdOf<T extends TypeName> = T extends keyof IdMap ? IdMap[T] & number : never;
+
+export const NODE_TYPE_NAMES: readonly TypeName[] = DEFS.map((d) => d.name);
+
+export const N = enumeration(...NODE_TYPE_NAMES) as { readonly [T in TypeName]: IdOf<T> };
+
 export const TYPE_COUNT = NODE_TYPE_NAMES.length + 1;
-/** type-name per numeric id (index 0 reserved). */
-export const TYPE_NAME: string[] = ['<null>'];
-for (let i = 0; i < NODE_TYPE_NAMES.length; i++) TYPE_NAME[i + 1] = NODE_TYPE_NAMES[i];
+export const TYPE_NAME: readonly string[] = ['<null>', ...NODE_TYPE_NAMES];
 
-/* ---------------------------------------------------- type-only-node helper */
-
-/** Is this node type TS-type-only syntax (erased by emit)? Enums/namespaces are
- * runtime; TSAs/TSSatisfies/TSNonNull wrap a VALUE expression (not type-only —
- * emit strips just the type suffix). Interfaces and type aliases are type-only. */
 export const isTypeOnlyNode = (type: number): boolean => {
     if (type === N.TSInterfaceDeclaration || type === N.TSTypeAliasDeclaration) return true;
-    // the pure TS-type structural nodes span the contiguous id range
-    // [TSTypeAnnotation .. TSInterfaceHeritage] — this includes the 14 keyword
-    // leaves (TSAnyKeyword..TSThisType, kept contiguous) and the two heritage
-    // forms (TSClassImplements/TSInterfaceHeritage, kept adjacent), and excludes
-    // the runtime decls (enum/enum-member/module) and the value-wrapping exprs
-    // (TSAsExpression/TSSatisfiesExpression/TSNonNullExpression) which fall after
-    // TSInterfaceHeritage.
     return type >= N.TSTypeAnnotation && type <= N.TSInterfaceHeritage;
 };
 
-/** Is this type id any of the four identifier roles (contiguous range)? All four
- * are `data:null` leaves carrying the name in the name slot and serialize as
- * `'Identifier'`. */
-export const isIdentifier = (type: number): boolean =>
-    type >= N.BindingIdentifier && type <= N.LabelIdentifier;
+export const isIdentifier = (type: number): boolean => type >= N.BindingIdentifier && type <= N.LabelIdentifier;
+
+export const isJSXNode = (type: number): boolean => type >= N.JSXElement && type <= N.JSXText;
 
 export type Accessibility = 'public' | 'private' | 'protected' | null;
 
-// ---- expressions ----
-export type TemplateLiteralData = { quasis: Node[]; expressions: Node[]; }
-export type TaggedTemplateExpressionData = { tag: Node; quasi: Node; }
-export type ArrayExpressionData = { elements: (Node | null)[]; }
-export type ObjectExpressionData = { properties: Node[]; }
-export type ObjectPropertyData = { key: Node; value: Node; kind: 'init' | 'get' | 'set'; computed: boolean; shorthand: boolean; }
-export type SpreadElementData = { argument: Node; }
-export type BinaryExpressionData = { operator: string; left: Node; right: Node; }
-export type LogicalExpressionData = { operator: string; left: Node; right: Node; }
-export type AssignmentExpressionData = { operator: string; left: Node; right: Node; }
-export type UnaryExpressionData = { operator: string; prefix: boolean; argument: Node; }
-export type UpdateExpressionData = { operator: string; prefix: boolean; argument: Node; }
-export type ConditionalExpressionData = { test: Node; consequent: Node; alternate: Node; }
-export type CallExpressionData = { callee: Node; arguments: Node[]; optional: boolean; typeArguments: Node | null; }
-export type NewExpressionData = { callee: Node; arguments: Node[]; typeArguments: Node | null; }
-export type StaticMemberExpressionData = { object: Node; property: Node; optional: boolean; }
-export type ComputedMemberExpressionData = { object: Node; expression: Node; optional: boolean; }
-export type PrivateFieldExpressionData = { object: Node; field: Node; optional: boolean; }
-export type ChainExpressionData = { expression: Node; }
-export type SequenceExpressionData = { expressions: Node[]; }
-export type ArrowFunctionExpressionData = { typeParameters: Node | null; params: Node[]; returnType: Node | null; body: Node; async: boolean; expression: boolean; }
-export type FunctionExpressionData = { id: Node | null; typeParameters: Node | null; params: Node[]; returnType: Node | null; body: Node | null; async: boolean; generator: boolean; }
-export type ClassExpressionData = { id: Node | null; typeParameters: Node | null; superClass: Node | null; superTypeArguments: Node | null; implements: Node[]; body: Node[]; }
-export type YieldExpressionData = { argument: Node | null; delegate: boolean; }
-export type AwaitExpressionData = { argument: Node; }
-export type ImportExpressionData = { source: Node; options: Node | null; }
+export type DataOf<T extends TypeName> = PayloadOf<DefOf<T>['fields']>;
 
-// ---- statements / declarations ----
-export type ExpressionStatementData = { expression: Node; }
-export type VariableDeclarationData = { declarations: Node[]; kind: 'var' | 'let' | 'const'; declare: boolean; }
-export type VariableDeclaratorData = { id: Node; typeAnnotation: Node | null; init: Node | null; definite: boolean; }
-export type BlockStatementData = { body: Node[]; }
-export type IfStatementData = { test: Node; consequent: Node; alternate: Node | null; }
-export type ForStatementData = { init: Node | null; test: Node | null; update: Node | null; body: Node; }
-export type ForInStatementData = { left: Node; right: Node; body: Node; }
-export type ForOfStatementData = { left: Node; right: Node; body: Node; await: boolean; }
-export type WhileStatementData = { test: Node; body: Node; }
-export type DoWhileStatementData = { body: Node; test: Node; }
-export type SwitchStatementData = { discriminant: Node; cases: Node[]; }
-export type SwitchCaseData = { test: Node | null; consequent: Node[]; }
-export type TryStatementData = { block: Node; handler: Node | null; finalizer: Node | null; }
-export type CatchClauseData = { param: Node | null; body: Node; }
-export type ReturnStatementData = { argument: Node | null; }
-export type ThrowStatementData = { argument: Node; }
-export type BreakStatementData = { label: Node | null; }
-export type ContinueStatementData = { label: Node | null; }
-export type LabeledStatementData = { label: Node; body: Node; }
-export type FunctionDeclarationData = { id: Node | null; typeParameters: Node | null; params: Node[]; returnType: Node | null; body: Node | null; async: boolean; generator: boolean; declare: boolean; }
-export type ClassDeclarationData = { id: Node | null; typeParameters: Node | null; superClass: Node | null; superTypeArguments: Node | null; implements: Node[]; body: Node[]; abstract: boolean; declare: boolean; }
-export type MethodDefinitionData = { key: Node; value: Node; kind: 'method' | 'get' | 'set' | 'constructor'; static: boolean; computed: boolean; optional: boolean; abstract: boolean; accessibility: Accessibility; }
-export type PropertyDefinitionData = { key: Node; typeAnnotation: Node | null; value: Node | null; static: boolean; computed: boolean; readonly: boolean; optional: boolean; definite: boolean; declare: boolean; abstract: boolean; accessibility: Accessibility; }
-export type StaticBlockData = { body: Node[]; }
-
-// ---- patterns ----
-export type ObjectPatternData = { properties: Node[]; }
-export type ArrayPatternData = { elements: (Node | null)[]; }
-export type AssignmentPatternData = { left: Node; right: Node; }
-export type RestElementData = { argument: Node; typeAnnotation: Node | null; }
-export type FormalParameterData = { pattern: Node; typeAnnotation: Node | null; init: Node | null; optional: boolean; readonly: boolean; accessibility: Accessibility; }
-
-// ---- modules ----
-export type ImportDeclarationData = { specifiers: Node[]; source: Node; importKind: 'value' | 'type'; }
-export type ImportSpecifierData = { local: Node; imported: Node; importKind: 'value' | 'type'; }
-export type ImportDefaultSpecifierData = { local: Node; }
-export type ImportNamespaceSpecifierData = { local: Node; }
-export type ExportNamedDeclarationData = { declaration: Node | null; specifiers: Node[]; source: Node | null; exportKind: 'value' | 'type'; }
-export type ExportSpecifierData = { local: Node; exported: Node; exportKind: 'value' | 'type'; }
-export type ExportDefaultDeclarationData = { declaration: Node; }
-export type ExportAllDeclarationData = { source: Node; exported: Node | null; }
-
-// ---- typescript ----
-export type TSTypeAnnotationData = { typeAnnotation: Node; }
-export type TSTypeReferenceData = { typeName: Node; typeArguments: Node | null; }
-export type TSQualifiedNameData = { left: Node; right: Node; }
-export type TSTypeParameterInstantiationData = { params: Node[]; }
-export type TSTypeParameterDeclarationData = { params: Node[]; }
-export type TSTypeParameterData = { name: Node; constraint: Node | null; default: Node | null; in: boolean; out: boolean; const: boolean; }
-export type TSTupleTypeData = { elementTypes: Node[]; }
-export type TSNamedTupleMemberData = { label: Node; elementType: Node; optional: boolean; }
-export type TSTypeLiteralData = { members: Node[]; }
-export type TSPropertySignatureData = { key: Node; typeAnnotation: Node | null; optional: boolean; readonly: boolean; computed: boolean; }
-export type TSMethodSignatureData = { key: Node; typeParameters: Node | null; params: Node[]; returnType: Node | null; optional: boolean; kind: 'method' | 'get' | 'set'; computed: boolean; }
-export type TSIndexSignatureData = { parameter: Node; typeAnnotation: Node | null; readonly: boolean; }
-export type TSCallSignatureDeclarationData = { typeParameters: Node | null; params: Node[]; returnType: Node | null; }
-export type TSConstructSignatureDeclarationData = { typeParameters: Node | null; params: Node[]; returnType: Node | null; }
-export type TSUnionTypeData = { types: Node[]; }
-export type TSIntersectionTypeData = { types: Node[]; }
-export type TSFunctionTypeData = { typeParameters: Node | null; params: Node[]; returnType: Node | null; }
-export type TSConstructorTypeData = { typeParameters: Node | null; params: Node[]; returnType: Node | null; abstract: boolean; }
-export type TSArrayTypeData = { elementType: Node; }
-export type TSIndexedAccessTypeData = { objectType: Node; indexType: Node; }
-export type TSTypeOperatorData = { operator: string; typeAnnotation: Node; }
-export type TSTypeQueryData = { exprName: Node; typeArguments: Node | null; }
-export type TSConditionalTypeData = { checkType: Node; extendsType: Node; trueType: Node; falseType: Node; }
-export type TSInferTypeData = { typeParameter: Node; }
-export type TSMappedTypeData = { typeParameter: Node; nameType: Node | null; typeAnnotation: Node | null; readonlyMod: number; optionalMod: number; }
-export type TSLiteralTypeData = { literal: Node; }
-export type TSTemplateLiteralTypeData = { quasis: Node[]; types: Node[]; }
-export type TSImportTypeData = { source: Node; qualifier: Node | null; typeArguments: Node | null; }
-export type TSInterfaceDeclarationData = { id: Node; typeParameters: Node | null; extends: Node[]; body: Node[]; declare: boolean; }
-export type TSClassImplementsData = { expression: Node; typeArguments: Node | null; }
-export type TSInterfaceHeritageData = { expression: Node; typeArguments: Node | null; }
-export type TSTypeAliasDeclarationData = { id: Node; typeParameters: Node | null; typeAnnotation: Node; declare: boolean; }
-export type TSEnumDeclarationData = { id: Node; members: Node[]; const: boolean; declare: boolean; }
-export type TSEnumMemberData = { id: Node; initializer: Node | null; }
-export type TSAsExpressionData = { expression: Node; typeAnnotation: Node; }
-export type TSSatisfiesExpressionData = { expression: Node; typeAnnotation: Node; }
-export type TSNonNullExpressionData = { expression: Node; }
-export type TSModuleDeclarationData = { id: Node; body: Node[]; declare: boolean; namespace: boolean; }
-export type ProgramData = { body: Node[]; }
-
-/* ============================================== payload-by-type mapping table
- *
- * The mapped type that makes `type` a real discriminant. `DataOf` maps each N
- * literal to its payload interface (null for leaves). `NodeOf<K>` is the outer
- * node fixed to one type; `Node` is the union over all of them — identical key
- * order (id,type,start,end,name,data) at every arm, so `if (n.type === N.IfStatement)`
- * narrows `n.data` to IfStatementData and nothing else.
- */
-
-export type DataMap = {
-    [N.Program]: ProgramData;
-    [N.BindingIdentifier]: null; [N.IdentifierReference]: null; [N.IdentifierName]: null; [N.LabelIdentifier]: null;
-    [N.PrivateIdentifier]: null;
-    [N.NumericLiteral]: null; [N.StringLiteral]: null; [N.BooleanLiteral]: null;
-    [N.NullLiteral]: null; [N.RegExpLiteral]: null; [N.BigIntLiteral]: null;
-    [N.TemplateElement]: null; [N.ThisExpression]: null; [N.Super]: null; [N.ImportMeta]: null; [N.NewTarget]: null;
-    [N.TemplateLiteral]: TemplateLiteralData; [N.TaggedTemplateExpression]: TaggedTemplateExpressionData;
-    [N.ArrayExpression]: ArrayExpressionData; [N.ObjectExpression]: ObjectExpressionData; [N.ObjectProperty]: ObjectPropertyData; [N.SpreadElement]: SpreadElementData;
-    [N.BinaryExpression]: BinaryExpressionData; [N.LogicalExpression]: LogicalExpressionData; [N.AssignmentExpression]: AssignmentExpressionData; [N.UnaryExpression]: UnaryExpressionData; [N.UpdateExpression]: UpdateExpressionData;
-    [N.ConditionalExpression]: ConditionalExpressionData; [N.CallExpression]: CallExpressionData; [N.NewExpression]: NewExpressionData;
-    [N.StaticMemberExpression]: StaticMemberExpressionData; [N.ComputedMemberExpression]: ComputedMemberExpressionData; [N.PrivateFieldExpression]: PrivateFieldExpressionData; [N.ChainExpression]: ChainExpressionData;
-    [N.SequenceExpression]: SequenceExpressionData;
-    [N.ArrowFunctionExpression]: ArrowFunctionExpressionData; [N.FunctionExpression]: FunctionExpressionData; [N.ClassExpression]: ClassExpressionData; [N.YieldExpression]: YieldExpressionData; [N.AwaitExpression]: AwaitExpressionData;
-    [N.ImportExpression]: ImportExpressionData;
-    [N.ExpressionStatement]: ExpressionStatementData; [N.VariableDeclaration]: VariableDeclarationData; [N.VariableDeclarator]: VariableDeclaratorData; [N.BlockStatement]: BlockStatementData;
-    [N.IfStatement]: IfStatementData; [N.ForStatement]: ForStatementData; [N.ForInStatement]: ForInStatementData; [N.ForOfStatement]: ForOfStatementData; [N.WhileStatement]: WhileStatementData; [N.DoWhileStatement]: DoWhileStatementData;
-    [N.SwitchStatement]: SwitchStatementData; [N.SwitchCase]: SwitchCaseData; [N.TryStatement]: TryStatementData; [N.CatchClause]: CatchClauseData;
-    [N.ReturnStatement]: ReturnStatementData; [N.ThrowStatement]: ThrowStatementData; [N.BreakStatement]: BreakStatementData; [N.ContinueStatement]: ContinueStatementData; [N.LabeledStatement]: LabeledStatementData;
-    [N.EmptyStatement]: null; [N.DebuggerStatement]: null; [N.FunctionDeclaration]: FunctionDeclarationData; [N.ClassDeclaration]: ClassDeclarationData;
-    [N.MethodDefinition]: MethodDefinitionData; [N.PropertyDefinition]: PropertyDefinitionData; [N.StaticBlock]: StaticBlockData;
-    [N.ObjectPattern]: ObjectPatternData; [N.ArrayPattern]: ArrayPatternData; [N.AssignmentPattern]: AssignmentPatternData;
-    [N.RestElement]: RestElementData; [N.FormalParameter]: FormalParameterData;
-    [N.ImportDeclaration]: ImportDeclarationData; [N.ImportSpecifier]: ImportSpecifierData; [N.ImportDefaultSpecifier]: ImportDefaultSpecifierData;
-    [N.ImportNamespaceSpecifier]: ImportNamespaceSpecifierData;
-    [N.ExportNamedDeclaration]: ExportNamedDeclarationData; [N.ExportSpecifier]: ExportSpecifierData; [N.ExportDefaultDeclaration]: ExportDefaultDeclarationData; [N.ExportAllDeclaration]: ExportAllDeclarationData;
-    [N.TSTypeAnnotation]: TSTypeAnnotationData;
-    [N.TSAnyKeyword]: null; [N.TSStringKeyword]: null; [N.TSNumberKeyword]: null; [N.TSBooleanKeyword]: null;
-    [N.TSBigIntKeyword]: null; [N.TSSymbolKeyword]: null; [N.TSObjectKeyword]: null; [N.TSVoidKeyword]: null;
-    [N.TSUndefinedKeyword]: null; [N.TSNullKeyword]: null; [N.TSNeverKeyword]: null; [N.TSUnknownKeyword]: null;
-    [N.TSIntrinsicKeyword]: null; [N.TSThisType]: null;
-    [N.TSTypeReference]: TSTypeReferenceData; [N.TSQualifiedName]: TSQualifiedNameData;
-    [N.TSTypeParameterInstantiation]: TSTypeParameterInstantiationData; [N.TSTypeParameterDeclaration]: TSTypeParameterDeclarationData; [N.TSTypeParameter]: TSTypeParameterData;
-    [N.TSTupleType]: TSTupleTypeData; [N.TSNamedTupleMember]: TSNamedTupleMemberData; [N.TSTypeLiteral]: TSTypeLiteralData;
-    [N.TSPropertySignature]: TSPropertySignatureData; [N.TSMethodSignature]: TSMethodSignatureData; [N.TSIndexSignature]: TSIndexSignatureData;
-    [N.TSCallSignatureDeclaration]: TSCallSignatureDeclarationData; [N.TSConstructSignatureDeclaration]: TSConstructSignatureDeclarationData; [N.TSUnionType]: TSUnionTypeData; [N.TSIntersectionType]: TSIntersectionTypeData;
-    [N.TSFunctionType]: TSFunctionTypeData; [N.TSConstructorType]: TSConstructorTypeData; [N.TSArrayType]: TSArrayTypeData;
-    [N.TSIndexedAccessType]: TSIndexedAccessTypeData; [N.TSTypeOperator]: TSTypeOperatorData; [N.TSTypeQuery]: TSTypeQueryData;
-    [N.TSConditionalType]: TSConditionalTypeData; [N.TSInferType]: TSInferTypeData; [N.TSMappedType]: TSMappedTypeData; [N.TSLiteralType]: TSLiteralTypeData;
-    [N.TSTemplateLiteralType]: TSTemplateLiteralTypeData; [N.TSImportType]: TSImportTypeData;
-    [N.TSInterfaceDeclaration]: TSInterfaceDeclarationData; [N.TSClassImplements]: TSClassImplementsData; [N.TSInterfaceHeritage]: TSInterfaceHeritageData; [N.TSTypeAliasDeclaration]: TSTypeAliasDeclarationData;
-    [N.TSEnumDeclaration]: TSEnumDeclarationData; [N.TSEnumMember]: TSEnumMemberData; [N.TSAsExpression]: TSAsExpressionData; [N.TSSatisfiesExpression]: TSSatisfiesExpressionData;
-    [N.TSNonNullExpression]: TSNonNullExpressionData; [N.TSModuleDeclaration]: TSModuleDeclarationData;
-}
-
-export type NodeType = keyof DataMap;
-export type DataOf<K extends NodeType> = DataMap[K];
-
-/** One outer node, fixed to a single type. Identical key order for every K:
- * id, type, start, end, name, data. `name` carries the leaf payload (Identifier
- * name / Literal raw) — empty string for interior nodes. `id` is the per-parse
- * sequential id keying all side tables. */
-export type NodeOf<K extends NodeType> = {
+export type NodeOf<T extends TypeName> = {
     id: number;
-    type: K;
+    type: IdOf<T>;
     start: number;
     end: number;
     name: string;
-    data: DataOf<K>;
-}
+    data: DataOf<T>;
+};
 
-/** The node union — a distributive map over every N literal. `n.type` is a real
- * discriminant: narrowing on `n.type === N.BinaryExpression` narrows `n.data` to BinaryExpressionData. */
-export type Node = { [K in NodeType]: NodeOf<K> }[NodeType];
+export type Node = { [T in TypeName]: NodeOf<T> }[TypeName];
 
-/** Convenience aliases for the reading surface (payload-typed narrowings). */
-export type Program = NodeOf<typeof N.Program>;
-export type BindingIdentifier = NodeOf<typeof N.BindingIdentifier>;
-export type IdentifierReference = NodeOf<typeof N.IdentifierReference>;
-export type IdentifierName = NodeOf<typeof N.IdentifierName>;
-export type LabelIdentifier = NodeOf<typeof N.LabelIdentifier>;
+export type NodeType = IdOf<TypeName>;
 
-/* ============================================================= schema layout
- *
- * Declarative child layout, one row per type, tsc-checked against the payload
- * interfaces (the interfaces stay the source of truth). Only child/list fields
- * appear; scalars live in the payload directly.
- */
+export type Program = NodeOf<'Program'>;
+export type BindingIdentifier = NodeOf<'BindingIdentifier'>;
+export type IdentifierReference = NodeOf<'IdentifierReference'>;
+export type IdentifierName = NodeOf<'IdentifierName'>;
+export type LabelIdentifier = NodeOf<'LabelIdentifier'>;
 
-/** Child-field spec: a payload key that holds a Node / Node[] child. */
 export type FieldSpec = { name: string; list: boolean };
-const f = <const K extends string>(name: K): { name: K; list: false } => ({ name, list: false });
-const fl = <const K extends string>(name: K): { name: K; list: true } => ({ name, list: true });
 
-/** Keys of a payload that hold children (Node, Node|null, Node[], (Node|null)[]). */
-type ChildKeyOf<Id extends NodeType> = DataOf<Id> extends null ? never
-    : { [K in keyof DataOf<Id>]-?: NonNullable<DataOf<Id>[K]> extends Node | readonly (Node | null)[] ? K & string : never }[keyof DataOf<Id>];
+type HoldsChild<M> = M extends ChildSchema
+    ? true
+    : M extends NullableSchema<infer X>
+      ? HoldsChild<X>
+      : M extends ListSchema<infer X>
+        ? HoldsChild<X>
+        : false;
 
-/** Child-field layout per type, in schema (walk) order. Checked against the
- * payload interfaces: a misspelled or non-child field name is a compile error,
- * a missing type is a compile error, and a child field left out of its row is
- * caught by the completeness assertion below. */
-export const CHILD_FIELDS = {
-    Program: [fl('body')],
-    BindingIdentifier: [],
-    IdentifierReference: [],
-    IdentifierName: [],
-    LabelIdentifier: [],
-    PrivateIdentifier: [],
-    NumericLiteral: [],
-    StringLiteral: [],
-    BooleanLiteral: [],
-    NullLiteral: [],
-    RegExpLiteral: [],
-    BigIntLiteral: [],
-    TemplateElement: [],
-    ThisExpression: [],
-    Super: [],
-    ImportMeta: [],
-    NewTarget: [],
-    TemplateLiteral: [fl('quasis'), fl('expressions')],
-    TaggedTemplateExpression: [f('tag'), f('quasi')],
-    ArrayExpression: [fl('elements')],
-    ObjectExpression: [fl('properties')],
-    ObjectProperty: [f('key'), f('value')],
-    SpreadElement: [f('argument')],
-    BinaryExpression: [f('left'), f('right')],
-    LogicalExpression: [f('left'), f('right')],
-    AssignmentExpression: [f('left'), f('right')],
-    UnaryExpression: [f('argument')],
-    UpdateExpression: [f('argument')],
-    ConditionalExpression: [f('test'), f('consequent'), f('alternate')],
-    CallExpression: [f('callee'), fl('arguments'), f('typeArguments')],
-    NewExpression: [f('callee'), fl('arguments'), f('typeArguments')],
-    StaticMemberExpression: [f('object'), f('property')],
-    ComputedMemberExpression: [f('object'), f('expression')],
-    PrivateFieldExpression: [f('object'), f('field')],
-    ChainExpression: [f('expression')],
-    SequenceExpression: [fl('expressions')],
-    ArrowFunctionExpression: [f('typeParameters'), fl('params'), f('returnType'), f('body')],
-    FunctionExpression: [f('id'), f('typeParameters'), fl('params'), f('returnType'), f('body')],
-    ClassExpression: [f('id'), f('typeParameters'), f('superClass'), f('superTypeArguments'), fl('implements'), fl('body')],
-    YieldExpression: [f('argument')],
-    AwaitExpression: [f('argument')],
-    ImportExpression: [f('source'), f('options')],
-    ExpressionStatement: [f('expression')],
-    VariableDeclaration: [fl('declarations')],
-    VariableDeclarator: [f('id'), f('typeAnnotation'), f('init')],
-    BlockStatement: [fl('body')],
-    IfStatement: [f('test'), f('consequent'), f('alternate')],
-    ForStatement: [f('init'), f('test'), f('update'), f('body')],
-    ForInStatement: [f('left'), f('right'), f('body')],
-    ForOfStatement: [f('left'), f('right'), f('body')],
-    WhileStatement: [f('test'), f('body')],
-    DoWhileStatement: [f('body'), f('test')],
-    SwitchStatement: [f('discriminant'), fl('cases')],
-    SwitchCase: [f('test'), fl('consequent')],
-    TryStatement: [f('block'), f('handler'), f('finalizer')],
-    CatchClause: [f('param'), f('body')],
-    ReturnStatement: [f('argument')],
-    ThrowStatement: [f('argument')],
-    BreakStatement: [f('label')],
-    ContinueStatement: [f('label')],
-    LabeledStatement: [f('label'), f('body')],
-    EmptyStatement: [],
-    DebuggerStatement: [],
-    FunctionDeclaration: [f('id'), f('typeParameters'), fl('params'), f('returnType'), f('body')],
-    ClassDeclaration: [f('id'), f('typeParameters'), f('superClass'), f('superTypeArguments'), fl('implements'), fl('body')],
-    MethodDefinition: [f('key'), f('value')],
-    PropertyDefinition: [f('key'), f('typeAnnotation'), f('value')],
-    StaticBlock: [fl('body')],
-    ObjectPattern: [fl('properties')],
-    ArrayPattern: [fl('elements')],
-    AssignmentPattern: [f('left'), f('right')],
-    RestElement: [f('argument'), f('typeAnnotation')],
-    FormalParameter: [f('pattern'), f('typeAnnotation'), f('init')],
-    ImportDeclaration: [fl('specifiers'), f('source')],
-    ImportSpecifier: [f('local'), f('imported')],
-    ImportDefaultSpecifier: [f('local')],
-    ImportNamespaceSpecifier: [f('local')],
-    ExportNamedDeclaration: [f('declaration'), fl('specifiers'), f('source')],
-    ExportSpecifier: [f('local'), f('exported')],
-    ExportDefaultDeclaration: [f('declaration')],
-    ExportAllDeclaration: [f('source'), f('exported')],
-    TSTypeAnnotation: [f('typeAnnotation')],
-    TSAnyKeyword: [],
-    TSStringKeyword: [],
-    TSNumberKeyword: [],
-    TSBooleanKeyword: [],
-    TSBigIntKeyword: [],
-    TSSymbolKeyword: [],
-    TSObjectKeyword: [],
-    TSVoidKeyword: [],
-    TSUndefinedKeyword: [],
-    TSNullKeyword: [],
-    TSNeverKeyword: [],
-    TSUnknownKeyword: [],
-    TSIntrinsicKeyword: [],
-    TSThisType: [],
-    TSTypeReference: [f('typeName'), f('typeArguments')],
-    TSQualifiedName: [f('left'), f('right')],
-    TSTypeParameterInstantiation: [fl('params')],
-    TSTypeParameterDeclaration: [fl('params')],
-    TSTypeParameter: [f('name'), f('constraint'), f('default')],
-    TSTupleType: [fl('elementTypes')],
-    TSNamedTupleMember: [f('label'), f('elementType')],
-    TSTypeLiteral: [fl('members')],
-    TSPropertySignature: [f('key'), f('typeAnnotation')],
-    TSMethodSignature: [f('key'), f('typeParameters'), fl('params'), f('returnType')],
-    TSIndexSignature: [f('parameter'), f('typeAnnotation')],
-    TSCallSignatureDeclaration: [f('typeParameters'), fl('params'), f('returnType')],
-    TSConstructSignatureDeclaration: [f('typeParameters'), fl('params'), f('returnType')],
-    TSUnionType: [fl('types')],
-    TSIntersectionType: [fl('types')],
-    TSFunctionType: [f('typeParameters'), fl('params'), f('returnType')],
-    TSConstructorType: [f('typeParameters'), fl('params'), f('returnType')],
-    TSArrayType: [f('elementType')],
-    TSIndexedAccessType: [f('objectType'), f('indexType')],
-    TSTypeOperator: [f('typeAnnotation')],
-    TSTypeQuery: [f('exprName'), f('typeArguments')],
-    TSConditionalType: [f('checkType'), f('extendsType'), f('trueType'), f('falseType')],
-    TSInferType: [f('typeParameter')],
-    TSMappedType: [f('typeParameter'), f('nameType'), f('typeAnnotation')],
-    TSLiteralType: [f('literal')],
-    TSTemplateLiteralType: [fl('quasis'), fl('types')],
-    TSImportType: [f('source'), f('qualifier'), f('typeArguments')],
-    TSInterfaceDeclaration: [f('id'), f('typeParameters'), fl('extends'), fl('body')],
-    TSClassImplements: [f('expression'), f('typeArguments')],
-    TSInterfaceHeritage: [f('expression'), f('typeArguments')],
-    TSTypeAliasDeclaration: [f('id'), f('typeParameters'), f('typeAnnotation')],
-    TSEnumDeclaration: [f('id'), fl('members')],
-    TSEnumMember: [f('id'), f('initializer')],
-    TSAsExpression: [f('expression'), f('typeAnnotation')],
-    TSSatisfiesExpression: [f('expression'), f('typeAnnotation')],
-    TSNonNullExpression: [f('expression')],
-    TSModuleDeclaration: [f('id'), fl('body')],
-} satisfies { [T in TypeName]: readonly { name: ChildKeyOf<(typeof N)[T]>; list: boolean }[] };
+type ChildFieldNames<D extends NodeDef> = D extends null
+    ? never
+    : { [K in keyof D]: HoldsChild<D[K]> extends true ? K & string : never }[keyof D];
 
-type AssertNever<T extends never> = T;
-/** Compile-time completeness proof: every child key of every payload appears in
- * its CHILD_FIELDS row (a forgotten field surfaces here as a constraint error
- * naming it). */
-export type ChildFieldsComplete = AssertNever<{
-    [T in TypeName]: Exclude<ChildKeyOf<(typeof N)[T]>, (typeof CHILD_FIELDS)[T][number]['name']>;
-}[TypeName]>;
+const baseOf = (m: Schema): Schema => (m.kind === 'nullable' || m.kind === 'list' ? baseOf(m.of) : m);
+const holdsChild = (m: Schema): boolean => baseOf(m).kind === 'child';
+const isList = (m: Schema): boolean => m.kind === 'list' || (m.kind === 'nullable' && isList(m.of));
 
-/** Child-field layout per numeric id (derived; no holes by construction). */
+/** child fields per type, in def (walk) order — derived from the defs */
+export const CHILD_FIELDS = Object.fromEntries(
+    DEFS.map((d) => [
+        d.name,
+        d.fields === null
+            ? []
+            : Object.entries(d.fields)
+                  .filter(([, m]) => holdsChild(m as Schema))
+                  .map(([name, m]) => ({ name, list: isList(m as Schema) })),
+    ]),
+) as { [T in TypeName]: { name: ChildFieldNames<DefOf<T>['fields']>; list: boolean }[] };
+
 export const FIELDS: FieldSpec[][] = new Array(TYPE_COUNT);
-for (const t of NODE_TYPE_NAMES) FIELDS[N[t]] = CHILD_FIELDS[t] as readonly FieldSpec[] as FieldSpec[];
+for (const t of NODE_TYPE_NAMES) FIELDS[N[t]] = CHILD_FIELDS[t] as FieldSpec[];
 
-/* ================================================================ line table
- *
- * The line table is a plain function the parser calls at the end of a parse and
- * returns to the caller. Offset->line/col is served source-free from this table.
- */
-
-export function buildLineTable(src: string): Uint32Array {
-    const starts: number[] = [0];
-    for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) starts.push(i + 1);
-    return Uint32Array.from(starts);
-}
 export function lineColOf(lines: Uint32Array, offset: number): { line: number; column: number } {
-    let lo = 0, hi = lines.length - 1;
+    let lo = 0,
+        hi = lines.length - 1;
     while (lo < hi) {
         const mid = (lo + hi + 1) >> 1;
-        if (lines[mid] <= offset) lo = mid; else hi = mid - 1;
+        if (lines[mid] <= offset) lo = mid;
+        else hi = mid - 1;
     }
     return { line: lo + 1, column: offset - lines[lo] };
 }
 
-/* ============================================================= node internals
- *
- * The loosely-typed internal node view for the machinery (walk/clone/access) and
- * the shape-fixing constructor. THE shape invariant: every node — parser-built or
- * programmatically built — is created with the SAME outer key order
- * { id, type, start, end, name, data }, so the whole tree is one hidden class.
- * The parser inlines this key order at each grammar site (its own constructors).
- */
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyPayload = Record<string, unknown> | null;
-/** The uniform untyped view generic (schema-driven) machinery works on. */
-export interface RawNode { id: number; type: number; start: number; end: number; name: string; data: AnyPayload; }
-
-/** Typed->raw boundary. Plain structural widening — every NodeOf<K> is a RawNode. */
-const raw = (n: Node): RawNode => n;
-/** Raw->typed boundary — constructors handing fresh nodes back to the typed world. */
-const typed = (r: RawNode): Node => r as Node;
-
-/* ================================================================= node ids
- *
- * ONE id space for the whole process: the parser resets it per parse (from 0)
- * and draws parsed-node ids from it; programmatic construction (make/cloneNode/
- * makeIdentifierReference) draws from the SAME counter so synthesized nodes never collide
- * with parsed ones (a transform can clone-and-reanalyze safely). Ids start at 1
- * (0 = null parity).
- */
+/** the one untyped window: generic machinery reads `data` fields by name */
+const payload = (n: Node): Record<string, unknown> | null => n.data as Record<string, unknown> | null;
 
 let idCounter = 0;
-/** Next node id (shared by parse and programmatic build). */
 export const nextNodeId = (): number => ++idCounter;
-/** Reset the id counter (the parser calls this at the start of each parse). */
-export const resetNodeIds = (): void => { idCounter = 0; };
-/** The highest id assigned so far (parse returns this + 1 as nodeCount). */
+export const resetNodeIds = (): void => {
+    idCounter = 0;
+};
 export const peekNodeId = (): number => idCounter;
 
-/* ========================================================= programmatic build
- *
- * Synthesis constructs nodes as plain object literals over `node()` — the
- * payload types make that fully checked. Explicit make helpers are added here
- * only when a real transform earns them (the parser owns its own inline
- * constructors and never goes through this surface).
- */
+/** Payload demanded by a given node-type id — the def's DataOf, selected by IdOf match. */
+type DataForId<Id extends NodeType> = { [T in TypeName]: IdOf<T> extends Id ? DataOf<T> : never }[TypeName];
 
-function node(type: number, start: number, end: number, name: string, data: AnyPayload): RawNode {
-    return { id: nextNodeId(), type, start, end, name, data };
+export function node<Id extends NodeType>(type: Id, start: number, end: number, name: string, data: DataForId<Id>): Node {
+    return { id: nextNodeId(), type, start, end, name, data } as Node;
 }
 
-/** Synthetic identifier REFERENCE (an expression-position name — the kind a
- * transform building `x` -> `y` rewrites; the name IS the payload). */
 export function makeIdentifierReference(name: string): Node {
-    return typed(node(N.IdentifierReference, 0, 0, name, null));
+    return node(N.IdentifierReference, 0, 0, name, null);
 }
-/** Synthetic BINDING identifier (a declaring name — for transforms that emit a
- * fresh binding, e.g. hoisting an inlined param to a local). */
+
 export function makeBindingIdentifier(name: string): Node {
-    return typed(node(N.BindingIdentifier, 0, 0, name, null));
+    return node(N.BindingIdentifier, 0, 0, name, null);
 }
 
-/* =============================================================== numeric type */
-
-export function nodeType(n: Node): number { return raw(n).type; }
-
-/* ============================================================== walk */
-
-/** Generic (schema-driven) walk of direct children. `fieldIndex`/`listIndex`
- * locate the child; `listIndex` is -1 for a direct slot. */
+/** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
 export function walkChildren(n: Node, cb: (child: Node, fieldIndex: number, listIndex: number) => boolean | void): void {
-    const r = raw(n);
-    const fields = FIELDS[r.type];
-    const data = r.data;
-    if (data === null) return;              // leaf: no children
+    const fields = FIELDS[n.type];
+    const data = payload(n);
+    if (data === null) return;
     for (let i = 0; i < fields.length; i++) {
         const v = data[fields[i].name];
         if (v == null) continue;
         if (fields[i].list) {
-            const list = v as (Node | null)[];
-            for (let j = 0; j < list.length; j++) {
-                const c = list[j];
+            const arr = v as (Node | null)[];
+            for (let j = 0; j < arr.length; j++) {
+                const c = arr[j];
                 if (c != null && cb(c, i, j) === false) return;
             }
         } else if (cb(v as Node, i, -1) === false) return;
@@ -551,8 +465,9 @@ export function walkChildren(n: Node, cb: (child: Node, fieldIndex: number, list
  * shape — the drift test in tst/ast.test.ts pins it to CHILD_FIELDS. */
 export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Node) => void): void {
     if (enter(n) === false) return;
-    const d = raw(n).data;
-    if (d !== null) switch (raw(n).type) {
+    const d = payload(n);
+    if (d !== null)
+        switch (n.type) {
         case N.Program:
         case N.BlockStatement:
         case N.StaticBlock:
@@ -586,6 +501,7 @@ export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Nod
         case N.AwaitExpression:
         case N.ReturnStatement:
         case N.ThrowStatement:
+        case N.JSXSpreadAttribute:
             if (d.argument != null) walk(d.argument as Node, enter, exit);
             break;
         case N.BinaryExpression:
@@ -609,6 +525,7 @@ export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Nod
             if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
             break;
         case N.StaticMemberExpression:
+        case N.JSXMemberExpression:
             if (d.object != null) walk(d.object as Node, enter, exit);
             if (d.property != null) walk(d.property as Node, enter, exit);
             break;
@@ -621,6 +538,10 @@ export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Nod
             if (d.field != null) walk(d.field as Node, enter, exit);
             break;
         case N.ChainExpression:
+        case N.ExpressionStatement:
+        case N.TSNonNullExpression:
+        case N.JSXExpressionContainer:
+        case N.JSXSpreadChild:
             if (d.expression != null) walk(d.expression as Node, enter, exit);
             break;
         case N.SequenceExpression:
@@ -652,10 +573,6 @@ export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Nod
         case N.ImportExpression:
             if (d.source != null) walk(d.source as Node, enter, exit);
             if (d.options != null) walk(d.options as Node, enter, exit);
-            break;
-        case N.ExpressionStatement:
-        case N.TSNonNullExpression:
-            if (d.expression != null) walk(d.expression as Node, enter, exit);
             break;
         case N.VariableDeclaration:
             { const l = d.declarations as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
@@ -875,36 +792,49 @@ export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Nod
             if (d.id != null) walk(d.id as Node, enter, exit);
             { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
             break;
-    }
+        case N.JSXElement:
+            if (d.openingElement != null) walk(d.openingElement as Node, enter, exit);
+            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.closingElement != null) walk(d.closingElement as Node, enter, exit);
+            break;
+        case N.JSXOpeningElement:
+            if (d.name != null) walk(d.name as Node, enter, exit);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            { const l = d.attributes as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            break;
+        case N.JSXClosingElement:
+            if (d.name != null) walk(d.name as Node, enter, exit);
+            break;
+        case N.JSXFragment:
+            if (d.openingFragment != null) walk(d.openingFragment as Node, enter, exit);
+            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.closingFragment != null) walk(d.closingFragment as Node, enter, exit);
+            break;
+        case N.JSXNamespacedName:
+            if (d.namespace != null) walk(d.namespace as Node, enter, exit);
+            if (d.name != null) walk(d.name as Node, enter, exit);
+            break;
+        case N.JSXAttribute:
+            if (d.name != null) walk(d.name as Node, enter, exit);
+            if (d.value != null) walk(d.value as Node, enter, exit);
+            break;
+        }
     exit?.(n);
 }
 
-/* ============================================================== clone
- *
- * Structural clone: fresh outer node (same hidden class) + fresh payload with
- * recursed children. Leaves copy their name slot; `data:null` stays null.
- * `substitute` swaps a subtree (inlining). GC owns the result.
- */
-
-export function cloneNode(
-    n: Node | null,
-    substitute?: (n: Node) => Node | null,
-): Node | null {
+export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null): Node | null {
     if (n === null) return null;
     if (substitute) {
         const sub = substitute(n);
         if (sub !== null) return sub;
     }
-    const r = raw(n);
-    const id = r.type;
-    if (r.data === null) return typed(node(id, r.start, r.end, r.name, null));
+    const id = n.type;
+    const srcData = payload(n);
+    if (srcData === null) return rebuild(id, n.start, n.end, n.name, null);
     const fields = FIELDS[id];
-    const srcData = r.data;
-    const outData: AnyPayload = {};
-    const fieldNames = new Set<string>();
+    const outData: Record<string, unknown> = { ...srcData };
     for (let i = 0; i < fields.length; i++) {
         const spec = fields[i];
-        fieldNames.add(spec.name);
         const v = srcData[spec.name];
         if (spec.list) {
             const list = v as (Node | null)[];
@@ -915,19 +845,12 @@ export function cloneNode(
             outData[spec.name] = v == null ? null : cloneNode(v as Node, substitute);
         }
     }
-    // copy scalar payload fields (operator/kind/booleans) verbatim
-    for (const k in srcData) {
-        if (fieldNames.has(k)) continue;
-        outData[k] = srcData[k];
-    }
-    return typed(node(id, r.start, r.end, r.name, outData));
+    return rebuild(id, n.start, n.end, n.name, outData);
 }
 
-/* ------------------------------------------------------------ reading glue */
+/** Generic reconstruction path for cloneNode: rebuilds an already-valid payload
+ * whose shape can't be pinned to one def (id is the whole union). */
+function rebuild(type: number, start: number, end: number, name: string, data: unknown): Node {
+    return { id: nextNodeId(), type, start, end, name, data } as Node;
+}
 
-/** Leaf text: Identifier name / Literal raw (materialized in the name slot). */
-export const text = (n: Node): string => raw(n).name;
-export const nodeName = (n: Node): string => raw(n).name;
-export const setName = (n: Node, v: string): void => { raw(n).name = v; };
-export const nodeStart = (n: Node): number => n.start;
-export const nodeEnd = (n: Node): number => n.end;

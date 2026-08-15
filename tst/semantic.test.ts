@@ -1,19 +1,3 @@
-/**
- * G2 semantic differential — eslint-scope over meriyah's ESTree as an
- * independent oracle for our scope/symbol/reference model (src/analysis/semantic.ts).
- *
- * Three layers:
- *   1. eslint-scope differential on three.core.js (position-keyed): resolved
- *      references, unresolved-globals set, declared-symbol count.
- *   2. TS-side hand-written snippet expectations (eslint-scope can't oracle TS).
- *   3. Reuse/warm test: re-analyze with the same Semantic struct on a second
- *      source; no bindings from the first source may leak.
- *
- * Discipline (mirrors tst/differential.test.ts's KNOWN_DIFFS): every divergence
- * from the oracle is either (a) a documented structural ADJUSTMENT with a reason
- * and a minimal repro, or (b) a genuine bug that fails the suite with an
- * actionable table.
- */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -28,8 +12,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
 const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js');
 
-/* ------------------------------------------------------------------ helpers */
-
 /** meriyah with `ranges:true` puts .start/.end on every node; the estree types
  *  don't declare them, so read positions through this narrowing helper. */
 const pos = (n: unknown): number => (n as { start: number }).start;
@@ -38,19 +20,13 @@ const nameOf = (n: unknown): string => (n as { name: string }).name;
 type Analyzed = { program: Node; sem: Semantic; nodeCount: number };
 
 function analyzeSource(src: string, ts: boolean): Analyzed {
-    const { program, errors, nodeCount } = parse(src, { ts });
+    const { program, errors, nodeCount } = parse(src, { ts, jsx: false });
     expect(errors).toEqual([]);
     const sem = createSemantic();
     analyze(sem, program, nodeCount);
     return { program, sem, nodeCount };
 }
 
-/** Map a start offset -> our symbol-carrying identifier node. Only the resolving
- * roles (IdentifierReference / BindingIdentifier) are indexed: an eslint-scope
- * reference always sits at a resolving position, and a pure-name role
- * (IdentifierName/LabelIdentifier) can share a start with a resolving one (e.g.
- * `export { a }` — local ref + exported name at the same offset) and must not
- * shadow it in this map. */
 function identByStart(a: Analyzed): Map<number, Node> {
     const m = new Map<number, Node>();
     walk(a.program, (n) => {
@@ -80,24 +56,6 @@ function declStart(a: Analyzed, sym: number): number {
     return a.sem.symDecl[sym]!.start;
 }
 
-/* ============================================================ LAYER 1: oracle */
-
-/**
- * DOCUMENTED ADJUSTMENTS to the eslint-scope oracle on three.core.js.
- *
- * A1 (unresolved `arguments`): eslint-scope materializes an implicit `arguments`
- *     variable inside every non-arrow function scope. Our v1 does not model the
- *     implicit `arguments` binding (params+body share one scope, no implicit
- *     bindings), so every `arguments` use lands in `unresolved`. Adjustment:
- *     exclude Idents literally named `arguments` from the unresolved-set
- *     comparison, and assert the ours-only residual is EXACTLY `arguments` uses.
- *
- * A2 (declared-symbol count): our model gives a class declaration ONE symbol
- *     bound from both namespaces (declareDualNs). eslint-scope models a class
- *     declaration as TWO variables (outer-scope binding + inner name binding).
- *     So: ours == theirs - namedClassDeclCount.
- */
-
 type RefDiverge = { start: number; name: string; kind: string; ours: string; theirs: string; excerpt: string };
 
 function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed): RefDiverge[] {
@@ -106,7 +64,7 @@ function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed
     for (const scope of sm.scopes) {
         for (const r of scope.references) {
             const v = r.resolved;
-            if (!v || v.defs.length < 1) continue; // only resolved-to-a-real-def refs
+            if (!v || v.defs.length < 1) continue;
             const start = pos(r.identifier);
             const name = nameOf(r.identifier);
             const ourNode = byStart.get(start);
@@ -187,7 +145,6 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
         const oursOnly = [...ourUnres].filter((s) => !theirThrough.has(s));
         const theirsOnly = [...theirThrough].filter((s) => !ourUnres.has(s));
 
-        // A1: the ONLY ours-only entries permitted are `arguments` uses.
         const startToName = new Map<number, string>();
         for (const n of a.sem.unresolved) startToName.set(n.start, n.name);
         const oursOnlyNonArguments = oursOnly.filter((s) => startToName.get(s) !== 'arguments');
@@ -217,8 +174,6 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
             for (const v of scope.variables) if (v.defs.length >= 1) theirVarsWithDef++;
         }
         const ourSymbols = a.sem.symCount - 1;
-        // A2 adjustment: eslint-scope's outer+inner class-name pair vs our single
-        // dual-namespace symbol — subtract one per NAMED CLASS DECLARATION.
         let namedClassDecls = 0;
         walk(a.program, (n) => {
             if (n.type === N.ClassDeclaration && n.data.id !== null) namedClassDecls++;
@@ -235,8 +190,6 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
         expect(ourSymbols).toBe(expected);
     });
 });
-
-/* ================================================= LAYER 2: TS snippet oracle */
 
 describe('semantic TS snippet expectations', () => {
     it('interface name resolves in the type namespace (TSTypeRef head)', () => {
@@ -256,8 +209,8 @@ describe('semantic TS snippet expectations', () => {
 
     it('class resolves from BOTH value and type namespaces', () => {
         const a = analyzeSource('class C {}\nlet z: C = new C();', true);
-        const typeUse = symAt(a, 'C', 18); // `: C` — type namespace
-        const valueUse = symAt(a, 'C', 26); // `new C()` — value namespace
+        const typeUse = symAt(a, 'C', 18);
+        const valueUse = symAt(a, 'C', 26);
         expect(typeUse).not.toBe(0);
         expect(valueUse).not.toBe(0);
         expect(declStart(a, typeUse)).toBe(6);
@@ -266,8 +219,8 @@ describe('semantic TS snippet expectations', () => {
 
     it('enum resolves from both namespaces; member init sees outer const (value ns)', () => {
         const a = analyzeSource('enum E { A, B }\nlet e: E = E.A;', true);
-        const typeUse = symAt(a, 'E', 23); // `: E`
-        const valueUse = symAt(a, 'E', 27); // `E.A`
+        const typeUse = symAt(a, 'E', 23);
+        const valueUse = symAt(a, 'E', 27);
         expect(typeUse).not.toBe(0);
         expect(valueUse).not.toBe(0);
         expect(declStart(a, typeUse)).toBe(5);
@@ -283,33 +236,33 @@ describe('semantic TS snippet expectations', () => {
         const a = analyzeSource('import type { T } from "./m";\nlet a: T;', true);
         const use = symAt(a, 'T', 37);
         expect(use).not.toBe(0);
-        expect(declStart(a, use)).toBe(14); // the imported local `T`
+        expect(declStart(a, use)).toBe(14);
     });
 
     it('`typeof X` in type position resolves X in the VALUE namespace', () => {
         const a = analyzeSource('const obj = { a: 1 };\ntype O = typeof obj;', true);
-        const use = symAt(a, 'obj', 38); // inside `typeof obj`
+        const use = symAt(a, 'obj', 38);
         expect(use).not.toBe(0);
-        expect(declStart(a, use)).toBe(6); // the const `obj`
+        expect(declStart(a, use)).toBe(6);
     });
 
     it('shadowing across nested functions resolves to the specific declaring ident', () => {
         const a = analyzeSource('const v = 1;\nfunction g() { const v = 2; return v; }', false);
-        const outer = symAt(a, 'v', 6); // outer const v
-        const innerDecl = symAt(a, 'v', 34); // inner const v
-        const innerUse = symAt(a, 'v', 48); // `return v` -> inner
+        const outer = symAt(a, 'v', 6);
+        const innerDecl = symAt(a, 'v', 34);
+        const innerUse = symAt(a, 'v', 48);
         expect(declStart(a, outer)).toBe(6);
         expect(declStart(a, innerDecl)).toBe(34);
-        expect(declStart(a, innerUse)).toBe(34); // shadows outer
+        expect(declStart(a, innerUse)).toBe(34);
         expect(outer).not.toBe(innerUse);
     });
 
     it('var declarations hoist out of blocks to the enclosing function/module scope', () => {
         const a = analyzeSource('{ var h = 1; }\nh;', false);
         const decl = symAt(a, 'h', 6);
-        const use = symAt(a, 'h', 15); // `h;` after the block
+        const use = symAt(a, 'h', 15);
         expect(decl).not.toBe(0);
-        expect(use).toBe(decl); // hoisted binding is visible outside the block
+        expect(use).toBe(decl);
     });
 
     it('catch parameter binds and its body reference resolves to it', () => {
@@ -344,13 +297,11 @@ describe('semantic TS snippet expectations', () => {
     });
 });
 
-/* ================================================ LAYER 3: reuse / warm reruns */
-
 describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
     it('a name declared only in source A does not resolve in source B', () => {
         const sem = createSemantic();
 
-        const A1 = parse('const alpha = 1; alpha;', { ts: false });
+        const A1 = parse('const alpha = 1; alpha;', { ts: false, jsx: false });
         expect(A1.errors).toEqual([]);
         analyze(sem, A1.program, A1.nodeCount);
         const aIdents: Node[] = [];
@@ -358,9 +309,9 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
             if (isIdentifier(n.type) && n.name === 'alpha') aIdents.push(n);
         });
         expect(aIdents.length).toBe(2);
-        expect(symbolOf(sem, aIdents[1])).not.toBe(0); // resolved in A
+        expect(symbolOf(sem, aIdents[1])).not.toBe(0);
 
-        const B = parse('const beta = 2; alpha; beta;', { ts: false });
+        const B = parse('const beta = 2; alpha; beta;', { ts: false, jsx: false });
         expect(B.errors).toEqual([]);
         analyze(sem, B.program, B.nodeCount);
 
@@ -372,12 +323,10 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
             if (n.name === 'beta') bBeta.push(n);
         });
 
-        // `alpha` is now a stale name from A: must be unresolved in B.
         expect(bAlpha.length).toBe(1);
         expect(symbolOf(sem, bAlpha[0])).toBe(0);
         expect(sem.unresolved.map((n) => n.name)).toContain('alpha');
 
-        // `beta` (declared in B) resolves normally.
         const betaUse = bBeta.find((n) => symbolOf(sem, n) !== 0 && n.start > 16);
         expect(betaUse).toBeDefined();
         expect(symbolOf(sem, betaUse!)).not.toBe(0);
@@ -387,13 +336,102 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
     it('symbol tables reset between runs (symCount reflects only the latest source)', () => {
         const sem = createSemantic();
 
-        const big = parse('const a=1,b=2,c=3,d=4,e=5;', { ts: false });
+        const big = parse('const a=1,b=2,c=3,d=4,e=5;', { ts: false, jsx: false });
         analyze(sem, big.program, big.nodeCount);
         const afterBig = sem.symCount;
         expect(afterBig - 1).toBe(5);
 
-        const small = parse('const only = 1;', { ts: false });
+        const small = parse('const only = 1;', { ts: false, jsx: false });
         analyze(sem, small.program, small.nodeCount);
-        expect(sem.symCount - 1).toBe(1); // not carried over from the bigger run
+        expect(sem.symCount - 1).toBe(1);
+    });
+});
+
+function analyzeJSX(src: string): Analyzed {
+    const { program, errors, nodeCount } = parse(src, { ts: false, jsx: true });
+    expect(errors).toEqual([]);
+    const sem = createSemantic();
+    analyze(sem, program, nodeCount);
+    return { program, sem, nodeCount };
+}
+
+const JSX_ORACLE_SOURCE = `
+import { Card, Icon } from './ui';
+function Avatar(props) {
+    const size = props.size;
+    return <img className="a" width={size} alt={props.name} {...props.rest} />;
+}
+function List(items, onSelect) {
+    const filtered = items.filter((it) => it.active);
+    return (
+        <ul data-count={filtered.length}>
+            {filtered.map((it) => (
+                <li key={it.id} onClick={() => onSelect(it)}>
+                    <Avatar user={it} />
+                    <span>{it.name}</span>
+                    {it.admin ? <Icon name="star" /> : null}
+                </li>
+            ))}
+        </ul>
+    );
+}
+const app = <Card><List items={[]} onSelect={(u) => u} /></Card>;
+export { Avatar, List, app };
+`;
+
+describe('G-JSX-4: JSX semantic differential vs eslint-scope', () => {
+    const src = JSX_ORACLE_SOURCE;
+    const estree = meriyah.parse(src, { module: true, next: true, ranges: true, jsx: true });
+    const sm = escope.analyze(estree as unknown as Parameters<typeof escope.analyze>[0], {
+        ecmaVersion: 2022,
+        sourceType: 'module',
+    });
+    const a = analyzeJSX(src);
+
+    it('every reference eslint-scope resolves inside JSX resolves to the same decl for us (0 divergences)', () => {
+        const diffs = collectRefDivergences(src, sm, a);
+        if (diffs.length > 0) expect.fail(fmtRefTable(diffs));
+        expect(diffs).toEqual([]);
+    });
+
+    it('the oracle actually exercised JSX-interior references (non-empty resolved set inside containers)', () => {
+        let resolved = 0;
+        for (const scope of sm.scopes) for (const r of scope.references) if (r.resolved && r.resolved.defs.length >= 1) resolved++;
+        expect(resolved).toBeGreaterThan(5);
+    });
+});
+
+describe('JSX head-role split targeted unit tests (eslint-scope blind spot)', () => {
+    it('a capitalized tag head is a resolving IdentifierReference (imported component)', () => {
+        const a = analyzeJSX("import { Card } from './ui';\nconst x = <Card />;");
+        const head = identsNamed(a, 'Card').find((n) => n.type === N.IdentifierReference && n.start > 20)!;
+        expect(head, 'capitalized head IdentifierReference').toBeDefined();
+        const sym = symbolOf(a.sem, head);
+        expect(sym).not.toBe(0);
+        expect(a.sem.symDecl[sym]!.start).toBe(9);
+    });
+
+    it('a lowercase intrinsic tag is a JSXIdentifier that never resolves', () => {
+        const a = analyzeJSX('const x = <div />;');
+        const tags: Node[] = [];
+        walk(a.program, (n) => { if (n.type === N.JSXIdentifier && n.name === 'div') tags.push(n); });
+        expect(tags.length).toBe(1);
+        expect(tags[0].type).toBe(N.JSXIdentifier);
+        expect(symbolOf(a.sem, tags[0])).toBe(0);
+        expect(identsNamed(a, 'div').length).toBe(0);
+    });
+
+    it('a member-head `A.B` resolves the head `A` in the value namespace', () => {
+        const a = analyzeJSX("import { Menu } from './m';\nconst x = <Menu.Item />;");
+        const head = identsNamed(a, 'Menu').find((n) => n.type === N.IdentifierReference)!;
+        expect(head).toBeDefined();
+        expect(symbolOf(a.sem, head)).not.toBe(0);
+        expect(a.sem.symDecl[symbolOf(a.sem, head)]!.start).toBe(9);
+    });
+
+    it('a JSX component reference keeps the binding used (renames + shake see it)', () => {
+        const a = analyzeJSX("import { Widget } from './w';\nexport const x = <Widget a={1} />;");
+        const head = identsNamed(a, 'Widget').find((n) => n.type === N.IdentifierReference)!;
+        expect(symbolOf(a.sem, head)).not.toBe(0);
     });
 });

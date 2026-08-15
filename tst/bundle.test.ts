@@ -26,13 +26,12 @@ describe('bundle: executable output', () => {
                 'export function scale(v: number, s: number): number { return v * s; }',
             ].join('\n'),
             '/util.ts': [
-                // deliberate collision with math's `add`
                 'const add = (x: number): number => x + 1;',
                 'export const one = (): number => add(0);',
             ].join('\n'),
         });
         const mod = await run(code);
-        expect(mod.result).toBe(3); // one() = 1, add(1, 2) = 3
+        expect(mod.result).toBe(3);
         expect((mod.scale as (a: number, b: number) => number)(3, 4)).toBe(12);
     });
 
@@ -83,7 +82,7 @@ describe('bundle: executable output', () => {
             },
             ['node:process'],
         );
-        expect(code.match(/from 'node:process'/g)?.length).toBe(1); // hoisted + deduped
+        expect(code.match(/from 'node:process'/g)?.length).toBe(1);
         const mod = await run(code);
         expect(typeof mod.p).toBe('string');
         expect(typeof mod.arch).toBe('string');
@@ -92,7 +91,6 @@ describe('bundle: executable output', () => {
     it('shorthand object properties survive renames', async () => {
         const { code } = build({
             '/main.ts': ["import { pack } from './a';", 'const value = 5;', 'export const packed = pack(value);'].join('\n'),
-            // `value` here collides with main's `value`; shorthand `{ value }` must expand
             '/a.ts': 'const value = 10;\nexport const pack = (v: number) => ({ value, v });',
         });
         const mod = await run(code);

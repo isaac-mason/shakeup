@@ -1,26 +1,14 @@
-// Bundle: linked graph -> one executable ESM chunk (rolldown generate stage cut
-// to a single chunk). Per module, reuse the emit edit engine to strip types and
-// rewrite import/export syntax + identifiers, then concat in execution order.
-// LIMIT: mutated `let` exports lose live-binding fidelity in namespace objects.
-
-import { type Node, N } from './ast';
+import { type Node, N, walk } from './ast';
 import { walkRefIdents } from './analysis/refs';
-import { type Edit, applyEdits, collectStripEdits } from './emit';
-import { type Graph, type GraphOptions, type Module, buildGraph } from './graph';
+import { type Edit, type JSXLower, applyEdits, collectStripEdits } from './emit';
+import { type Graph, type GraphOptions, type JSXRuntime, type Module, buildGraph, resolveJSXOptions } from './graph';
 import { type PluginCtx, compilePipeline } from './plugin';
+import { setJsxPurity } from './analysis/effects';
 import { type Shaken, shake } from './shake';
-import {
-    type ImportBind,
-    type Linked,
-    externalKey,
-    finalNameOf,
-    linkGraph,
-    packRef,
-} from './link';
+import { type ImportBind, type Linked, externalKey, finalNameOf, linkGraph, packRef } from './link';
 
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
-    /** statement-level tree shaking (default true) */
     treeshake?: boolean;
 };
 
@@ -31,11 +19,8 @@ export type BundleResult = {
     warnings: string[];
     graph: Graph | null;
     linked: Linked | null;
-    /** statements removed by tree shaking (empty when treeshake: false) */
     shaken: Shaken | null;
 };
-
-/* --------------------------------------------------------------- renaming */
 
 type EmitCtx = {
     graph: Graph;
@@ -43,7 +28,6 @@ type EmitCtx = {
     mod: Module;
     edits: Edit[];
     warnings: string[];
-    /** live top-level statement node ids for this module (null = keep everything) */
     live: Set<number> | null;
 };
 
@@ -59,6 +43,17 @@ function renameOf(ctx: EmitCtx, identNode: Node): string | null {
     }
     const renamed = ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym));
     return renamed ?? null;
+}
+
+/** Final output name for a module-local SymbolId (import-bound or renamed). */
+function finalNameOfSymbol(ctx: EmitCtx, sym: number): string | null {
+    const imp = ctx.mod.namedImports.get(sym);
+    if (imp !== undefined) {
+        const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
+        if (bind === undefined) return null;
+        return nameOfBind(ctx.linked, bind);
+    }
+    return ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym)) ?? null;
 }
 
 function nameOfBind(linked: Linked, bind: ImportBind): string | null {
@@ -82,27 +77,22 @@ function renameWalk(ctx: EmitCtx, node: Node): void {
         ctx.edits.push({
             start: ident.start,
             end: ident.end,
-            // shorthand `{ a }` must expand to `{ a: a$1 }` — bare span replace would rename the key too
             text: shorthandProp !== null ? `${ident.name}: ${newName}` : newName,
         });
     });
 }
-
-/* ---------------------------------------------------- per-module rewriting */
 
 function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
     const { mod } = ctx;
     const src = mod.source;
     for (const stmt of mod.program.data.body) {
         if (ctx.live !== null && !ctx.live.has(stmt.id)) {
-            // shaken: blank the whole statement, no renames, no export handling
             ctx.edits.push({ start: stmt.start, end: stmt.end });
             continue;
         }
 
         if (stmt.type === N.ImportDeclaration) {
             if (stmt.data.importKind !== 'type') {
-                // side-effect-only external import must survive (hoisted)
                 const source = stmt.data.source;
                 if (source.type === N.StringLiteral && stmt.data.specifiers.length === 0) {
                     const spec = src.slice(source.start + 1, source.end - 1);
@@ -120,18 +110,25 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
             const rec = mod.importRecords.find((r) => r.specifier === spec);
             if (rec?.external) {
                 if (isEntry) entryStarSpecs.push(spec);
-                else ctx.warnings.push(`'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`);
+                else
+                    ctx.warnings.push(
+                        `'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`,
+                    );
             }
             ctx.edits.push({ start: stmt.start, end: stmt.end });
             continue;
         }
 
         if (stmt.type === N.ExportNamedDeclaration) {
-            if (stmt.data.exportKind === 'type') continue; // strip pass blanks it
+            if (stmt.data.exportKind === 'type') continue;
             const decl = stmt.data.declaration;
             if (decl !== null) {
-                if (decl.type === N.TSEnumDeclaration || decl.type === N.TSInterfaceDeclaration || decl.type === N.TSTypeAliasDeclaration) continue; // strip pass owns these
-                // keep the declaration, blank the `export ` prefix
+                if (
+                    decl.type === N.TSEnumDeclaration ||
+                    decl.type === N.TSInterfaceDeclaration ||
+                    decl.type === N.TSTypeAliasDeclaration
+                )
+                    continue;
                 ctx.edits.push({ start: stmt.start, end: decl.start });
                 renameWalk(ctx, decl);
             } else {
@@ -142,8 +139,7 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
 
         if (stmt.type === N.ExportDefaultDeclaration) {
             const decl = stmt.data.declaration;
-            const named =
-                (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) && decl.data.id !== null;
+            const named = (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) && decl.data.id !== null;
             if (named) {
                 ctx.edits.push({ start: stmt.start, end: decl.start });
             } else {
@@ -159,22 +155,65 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
     }
 }
 
-/* ------------------------------------------------------- external imports */
+/** True if the module has at least one live statement containing JSX (so its
+ * injected runtime import is genuinely needed). `live === null` = no shaking. */
+function moduleHasLiveJSX(mod: Module, live: Set<number> | null): boolean {
+    for (const stmt of mod.program.data.body) {
+        if (live !== null && !live.has(stmt.id)) continue;
+        let found = false;
+        walk(stmt, (n) => {
+            if (n.type === N.JSXElement || n.type === N.JSXFragment) found = true;
+        });
+        if (found) return true;
+    }
+    return false;
+}
+
+/** Remove injected-runtime external locals that no live JSX demands, unless an
+ * AUTHORED import shares the same (specifier, name) — those stay. */
+function pruneUnusedRuntimeExternals(graph: Graph, linked: Linked): void {
+    const authored = new Set<string>();
+    for (const mod of graph.modules) {
+        const injected = mod.jsxRuntime;
+        const injectedSyms =
+            injected === null ? null : new Set([injected.jsx, injected.jsxs, injected.Fragment, injected.createElement]);
+        for (const [sym, imp] of mod.namedImports) {
+            if (injectedSyms !== null && injectedSyms.has(sym)) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (rec.external) authored.add(externalKey(rec.specifier, imp.name));
+        }
+    }
+    for (const mod of graph.modules) {
+        const injected = mod.jsxRuntime;
+        if (injected === null) continue;
+        for (const sym of [injected.jsx, injected.jsxs, injected.Fragment, injected.createElement]) {
+            if (sym === 0) continue;
+            const imp = mod.namedImports.get(sym);
+            if (imp === undefined) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (!rec.external) continue;
+            const key = externalKey(rec.specifier, imp.name);
+            if (!authored.has(key)) linked.externalLocals.delete(key);
+        }
+    }
+}
 
 function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): string[] {
-    // group hoisted locals by specifier
     const bySpec = new Map<string, { name: string; local: string }[]>();
     for (const [key, local] of linked.externalLocals) {
         const sep = key.indexOf('\x00');
         const spec = key.slice(0, sep);
         const name = key.slice(sep + 1);
         let list = bySpec.get(spec);
-        if (list === undefined) bySpec.set(spec, (list = []));
+        if (list === undefined) {
+            list = [];
+            bySpec.set(spec, list);
+        }
         list.push({ name, local });
     }
     const lines: string[] = [];
     for (const [spec, entries] of bySpec) {
-        sideEffectSpecs.delete(spec); // a binding import already runs the module
+        sideEffectSpecs.delete(spec);
         const star = entries.find((e) => e.name === '*');
         if (star !== undefined) lines.push(`import * as ${star.local} from '${spec}';`);
         const def = entries.find((e) => e.name === 'default');
@@ -192,8 +231,6 @@ function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): st
     return lines;
 }
 
-/* -------------------------------------------------------------- namespaces */
-
 const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
 
 function renderNamespaceObject(linked: Linked, modIdx: number): string {
@@ -209,8 +246,6 @@ function renderNamespaceObject(linked: Linked, modIdx: number): string {
     }
     return `const ${nsName} = Object.freeze({ ${entries.join(', ')} });`;
 }
-
-/* ------------------------------------------------------------------ entry */
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
 export function bundle(options: BundleOptions): BundleResult {
@@ -231,22 +266,34 @@ export function bundle(options: BundleOptions): BundleResult {
     const parts: string[] = [];
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
+    setJsxPurity(resolveJSXOptions(options.jsx).pure);
     const shaken = options.treeshake === false ? null : shake(graph, linked);
+
+    let anyLiveJSX = false;
 
     const moduleTexts: string[] = [];
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
         const live = shaken === null ? null : shaken.live[idx];
-        // LIMIT: only the enum's own name is renamed; idents inside enum initializer expressions are not.
+        if (mod.jsxRuntime !== null && moduleHasLiveJSX(mod, live)) anyLiveJSX = true;
         const enumFinalName = (idNode: Node): string | null => {
             const sym = mod.semantic.nodeSymbol[idNode.id];
             if (sym === 0) return null;
             return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
         };
-        let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName);
+        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live };
+        const jsxLower: JSXLower | null =
+            mod.jsxRuntime === null
+                ? null
+                : {
+                      renameIdent: (idNode: Node): string | null => renameOf(jsxCtx, idNode),
+                      runtimeName: (kind: keyof JSXRuntime): string => {
+                          const sym = mod.jsxRuntime![kind];
+                          return finalNameOfSymbol(jsxCtx, sym) ?? kind;
+                      },
+                  };
+        let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName, jsxLower);
         if (live !== null) {
-            // drop strip edits (e.g. enum lowerings) inside statements that the
-            // shaker blanks wholesale — the blank owns the span
             const deadSpans: [number, number][] = [];
             for (const stmt of mod.program.data.body) {
                 if (!live.has(stmt.id)) deadSpans.push([stmt.start, stmt.end]);
@@ -262,10 +309,11 @@ export function bundle(options: BundleOptions): BundleResult {
         if (out !== '') moduleTexts.push(out);
     }
 
+    if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
+
     parts.push(...renderExternalImports(linked, sideEffectSpecs));
     parts.push(...moduleTexts);
 
-    // entry export surface
     const entryMap = linked.exportMaps.get(graph.entry);
     if (entryMap !== undefined && entryMap.size > 0) {
         const specifiers: string[] = [];

@@ -1,19 +1,11 @@
-// Rollup-shaped plugin hooks: resolveId/load first-wins, transform sequential.
-// Fully synchronous. Transforms run pre-parse so later spans always refer to
-// the settled post-transform source. Design notes: llm/PLAN.md P4.
-
 import type { Program } from './ast';
 import { type Edit, applyEdits } from './emit';
 import type { Fs } from './fs';
 import type { Semantic } from './analysis/semantic';
 
-/* ------------------------------------------------------------------ types */
-
 /** Context passed to every plugin hook. */
 export type PluginCtx = {
-    /** attach a build warning (lands in BundleResult.warnings) */
     warn(message: string): void;
-    /** the build's Fs seam — plugins should use this, not their own handles */
     fs: Fs;
 };
 
@@ -32,7 +24,6 @@ export type ModuleParsedInfo = {
     id: string;
     source: string;
     program: Program;
-    /** number of nodes in the module (ids run 1..nodeCount-1). */
     nodeCount: number;
     semantic: Semantic;
 };
@@ -48,8 +39,6 @@ export type Plugin = {
     renderChunk?: (ctx: PluginCtx, code: string) => string | null | undefined;
     buildEnd?: (ctx: PluginCtx) => void;
 };
-
-/* --------------------------------------------------------------- pipeline */
 
 type Compiled<F> = { plugin: string; matches: ((id: string) => boolean) | null; handler: F };
 
@@ -106,8 +95,6 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
     }
     return pipeline;
 }
-
-/* ------------------------------------------------------------ hook drivers */
 
 /** first-wins resolveId over the compiled pipeline (string | false | null) */
 export function runResolveId(

@@ -23,7 +23,6 @@ describe('graph + link', () => {
                 ].join('\n'),
                 '/math.ts': 'export const add = (a: number, b: number) => a + b;\nexport function scale(v: number, s: number) { return v * s; }',
                 '/util.ts': "export { one } from './impl';",
-                // deliberate top-level collision: impl.ts also declares `add`
                 '/impl.ts': 'const add = (x: number) => x + 1;\nexport const one = () => add(0);',
             },
             ['external-pkg'],
@@ -31,29 +30,23 @@ describe('graph + link', () => {
 
         expect(linked.errors).toEqual([]);
 
-        // execution order: dependencies before dependents, entry last
         const order = linked.order.map((i) => graph.modules[i].id);
         expect(order[order.length - 1]).toBe('/main.ts');
         expect(order.indexOf('/math.ts')).toBeLessThan(order.indexOf('/main.ts'));
         expect(order.indexOf('/impl.ts')).toBeLessThan(order.indexOf('/util.ts'));
 
-        // main's `add` import binds through to math's symbol
         const main = graph.modules[graph.entry];
         const mathIdx = graph.byId.get('/math.ts')!;
         const addBinds = [...linked.binds.entries()].filter(([ref]) => refMod(ref) === main.idx);
         const found = addBinds.map(([, b]) => b);
         expect(found.some((b) => b.kind === 'found' && refMod(b.ref) === mathIdx)).toBe(true);
-        // external import stays external
         expect(found.some((b) => b.kind === 'external' && b.specifier === 'external-pkg')).toBe(true);
-        // namespace import synthesizes util's namespace object
         const utilIdx = graph.byId.get('/util.ts')!;
         expect(linked.namespaceOf.has(utilIdx)).toBe(true);
 
-        // collision: two modules declare `add`; exactly one got renamed
         const renamed = [...linked.finalNames.values()];
         expect(renamed).toContain('add$1');
 
-        // entry export surface: scale (re-export) + result (local)
         const entryExports = linked.exportMaps.get(graph.entry)!;
         expect([...entryExports.keys()].sort()).toEqual(['result', 'scale']);
         const scale = entryExports.get('scale')!;
@@ -118,17 +111,14 @@ describe('graph + link', () => {
         expect(linked.errors).toEqual([]);
         const typesIdx = graph.byId.get('/types.ts')!;
         const exports = linked.exportMaps.get(typesIdx) ?? new Map();
-        // building types' export map on demand isn't required by this graph; check records instead
         const types = graph.modules[typesIdx];
         expect([...types.namedExports.keys()]).toEqual(['real']);
         expect(exports.size === 0 || exports.has('real')).toBe(true);
-        // main has exactly one bound import (real); Shape is type-only
         const mainBinds = [...linked.binds.entries()].filter(([ref]) => refMod(ref) === graph.entry);
         expect(mainBinds.length).toBe(1);
     });
 });
 
-// keep packRef exercised as public API surface
 it('packRef/refMod roundtrip', () => {
     expect(refMod(packRef(3, 12345))).toBe(3);
 });

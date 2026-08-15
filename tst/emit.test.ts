@@ -13,7 +13,7 @@ const CRASHCAT_SRC = resolve(REPO, '..', 'crashcat', 'src');
 
 /** parse `src` (ts on) and strip to JS. */
 function strip(src: string): string {
-    const { program } = parse(src, { ts: true });
+    const { program } = parse(src, { ts: true, jsx: false });
     return emitModule(program, src, { stripTypes: true });
 }
 
@@ -30,7 +30,7 @@ function walkTs(dir: string): string[] {
 
 describe('emit — identity (no TS)', () => {
     const source = readFileSync(THREE, 'utf8');
-    const { program, errors } = parse(source, { ts: false });
+    const { program, errors } = parse(source, { ts: false, jsx: false });
 
     it('parses three.core.js with no errors', () => {
         expect(errors).toEqual([]);
@@ -58,11 +58,9 @@ describe('emit — strip oracle (every crashcat file)', () => {
             const source = readFileSync(file, 'utf8');
             const stripped = strip(source);
 
-            // 1) our parser (ts:false) accepts it with zero errors.
-            const { errors } = parse(stripped, { ts: false });
+            const { errors } = parse(stripped, { ts: false, jsx: false });
             expect(errors).toEqual([]);
 
-            // 2) meriyah (a pure-JS ESTree parser) accepts it -> all TS is gone.
             expect(() => meriyah.parse(stripped, { module: true, next: true })).not.toThrow();
         });
     }
@@ -74,7 +72,6 @@ describe('emit — position preservation', () => {
         const off = src.indexOf('keep');
         const out = strip(src);
         expect(out.indexOf('keep')).toBe(off);
-        // line count preserved
         const nl = (s: string) => (s.match(/\n/g) ?? []).length;
         const multi = 'interface I {\n  a: number;\n}\nconst x = 1;';
         expect(nl(strip(multi))).toBe(nl(multi));
@@ -87,18 +84,15 @@ describe('emit — enum execution', () => {
         const code = strip(src);
         const mod = await import('data:text/javascript,' + encodeURIComponent(code));
         const E = mod.E;
-        // forward mappings
         expect(E.A).toBe(0);
         expect(E.B).toBe(5);
         expect(E.C).toBe(6);
         expect(E.S).toBe('str');
         expect(E.X).toBe(16);
-        // reverse mappings for numeric members
         expect(E[0]).toBe('A');
         expect(E[5]).toBe('B');
         expect(E[6]).toBe('C');
         expect(E[16]).toBe('X');
-        // no reverse mapping for the string member
         expect(E['str']).toBeUndefined();
     });
 
@@ -165,7 +159,7 @@ describe('emit — per-rule snippets', () => {
 describe('emit — invariants', () => {
     it('stripTypes:false returns source verbatim for TS input', () => {
         const src = 'const x: number = 1;';
-        const { program } = parse(src, { ts: true });
+        const { program } = parse(src, { ts: true, jsx: false });
         expect(emitModule(program, src, { stripTypes: false })).toBe(src);
     });
 
@@ -173,17 +167,14 @@ describe('emit — invariants', () => {
         const src = 'function f(a: number, b: string): void {\n  return;\n}';
         const out = strip(src);
         expect(out.length).toBe(src.length);
-        // every newline preserved at its offset
         for (let i = 0; i < src.length; i++) {
             if (src[i] === '\n') expect(out[i]).toBe('\n');
         }
     });
 
-    // guards against emit accidentally touching value identifiers
     it('leaves value code intact', () => {
         const src = 'const add = (a: number, b: number): number => a + b;';
         const out = strip(src);
-        // reconstruct: value tokens survive
         expect(out).toContain('const add =');
         expect(out).toContain('=> a + b;');
     });

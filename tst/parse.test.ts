@@ -11,10 +11,8 @@ const REPO = resolve(__dirname, '..');
 const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js');
 const CRASHCAT_SRC = '/Users/isaacmason/Development/crashcat/src';
 
-// Each parse is standalone (no shared arena in the typedata model); parse
-// returns { program, errors, lines, nodeCount }.
 function parseFresh(source: string, ts: boolean) {
-    return parse(source, { ts });
+    return parse(source, { ts, jsx: false });
 }
 
 describe('three.core.js', () => {
@@ -79,7 +77,6 @@ describe('tricky snippet corpus', () => {
         'nested generics >> split': 'let m: Map<string, Map<string, number>>; let d: Array<Array<Array<number>>>;',
         'indexed access + keyof': 'type V = Record<string, number>[keyof Record<string, number>];',
         'union/intersection': 'type U = A | B | C; type X = A & B & { c: number };',
-        // regressions from the emit-agent bug report
         'extends generic superclass': 'class C extends Base<number> { m() { return 1; } } interface I extends A<T>, B {}',
         'optional method': 'class C { m?(): void; n?(x: number) { return x; } } interface J { o?(): void }',
         'class index signature': 'class C { [k: string]: number; x = 1; }',
@@ -102,8 +99,6 @@ describe('tricky snippet corpus', () => {
 });
 
 describe('fixed parser regressions', () => {
-    // Originally a suspected-bug guard: labeled rest tuple members were rejected.
-    // Both rest forms must parse now.
     it('regression: labeled and unlabeled rest tuple members parse', () => {
         const unlabeled = parseFresh('type P = [x: number, ...string[]];', true);
         expect(unlabeled.errors).toEqual([]);
@@ -114,11 +109,6 @@ describe('fixed parser regressions', () => {
 });
 
 describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () => {
-    // A ChainExpression wraps the OUTERMOST link of an optional chain; parentheses
-    // TERMINATE the chain. `a?.b.c` short-circuits the whole chain if `a` is
-    // nullish; `(a?.b).c` throws (member access on undefined outside the chain).
-    // Before phase 3b these parsed byte-identically — a latent miscompile. Now
-    // their wrapper PLACEMENT must differ.
     const shape = (src: string): string => {
         const { program, errors } = parseFresh(src, false);
         expect(errors, JSON.stringify(errors)).toEqual([]);
@@ -137,9 +127,7 @@ describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () =
         const chained = shape('x = a?.b.c;');
         const parened = shape('x = (a?.b).c;');
         expect(chained).not.toEqual(parened);
-        // chained: ChainExpression wraps the outermost (.c) member
         expect(chained).toContain('ChainExpression StaticMemberExpression');
-        // parened: ChainExpression sits INSIDE, wrapping only the inner (a?.b)
         expect(parened).toContain('StaticMemberExpression ChainExpression');
     });
 
@@ -147,30 +135,24 @@ describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () =
         const chained = shape('a?.b();');
         const parened = shape('(a?.b)();');
         expect(chained).not.toEqual(parened);
-        // chained: wrapper is outermost, over the CallExpression
         expect(chained).toContain('ChainExpression CallExpression');
-        // parened: wrapper is the callee, inside the CallExpression
         expect(parened).toContain('CallExpression ChainExpression');
     });
 
     it('exactly one ChainExpression per chain, regardless of link count', () => {
         expect(countChains('a?.b?.c?.d;')).toBe(1);
-        expect(countChains('a.b?.c.d.e;')).toBe(1); // one optional anywhere wraps the whole run
+        expect(countChains('a.b?.c.d.e;')).toBe(1);
         expect(countChains('a?.[b];')).toBe(1);
-        expect(countChains('a.b.c;')).toBe(0); // no optional link -> no wrapper
+        expect(countChains('a.b.c;')).toBe(0);
     });
 
     it('parentheses terminate a chain: `(a?.b.c).d?.e` yields TWO ChainExpressions', () => {
-        // inner run `a?.b.c` wraps once (terminated by `)`), outer run `.d?.e` wraps again
         expect(countChains('(a?.b.c).d?.e;')).toBe(2);
     });
 
     it('a nested/deep chain still wraps exactly its outermost link', () => {
-        // `a.b().c?.d` — the call `a.b()` is non-optional but inside the chain
-        // because `?.d` follows; exactly one wrapper over the whole thing.
         expect(countChains('a.b().c?.d;')).toBe(1);
         const s = shape('a.b().c?.d;');
-        // wrapper is the very outermost node in the expression statement
         expect(s).toContain('ExpressionStatement ChainExpression');
     });
 });
@@ -187,11 +169,8 @@ describe('termination on malformed input (must return synchronously, no hang)', 
 
     for (const [name, { src, ts }] of Object.entries(bad)) {
         it(`terminates: ${name}`, () => {
-            // Just reaching the assertion proves the parse returned (no hang);
-            // errors > 0 is allowed but not required.
             const { program } = parseFresh(src, ts);
             expect(program.id).toBeGreaterThan(0);
-            // walk must also terminate over whatever partial tree was produced
             let n = 0;
             walk(program, () => {
                 n++;

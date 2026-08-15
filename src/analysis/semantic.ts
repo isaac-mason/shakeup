@@ -1,12 +1,3 @@
-/** Scope/symbol/reference tables. Design notes: llm/notes/oxc-internals.md §semantic
- *
- * SoA architecture (compilecat convergence — load-bearing): scope/symbol columns
- * are typed arrays indexed by ScopeId/SymbolId; nodeSymbol/nodeScope columns are
- * sized by nodeCount and indexed by node.id. Only the tree-walk reads node
- * OBJECTS now (was flat (ast,id)); the tables are unchanged in shape. symDecl and
- * scopeNode hold the declaring/owning Node (so names read straight off `.name`).
- */
-
 import { enumeration } from '../util/enumeration';
 import {
     type Node,
@@ -14,8 +5,6 @@ import {
     isIdentifier,
     walkChildren,
 } from '../ast.ts';
-
-/* ------------------------------------------------------------------- flags */
 
 /** Scope kinds, stored in `Semantic.scopeFlags`. */
 export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');
@@ -30,7 +19,7 @@ export const SYM = {
     PARAM: 1 << 5,
     IMPORT: 1 << 6,
     CATCH: 1 << 7,
-    TYPE: 1 << 8, // interface / type alias / type param — type namespace
+    TYPE: 1 << 8,
     ENUM: 1 << 9,
     NAMESPACE: 1 << 10,
 } as const;
@@ -39,33 +28,25 @@ export const SYM = {
 const NS_VALUE = 0;
 const NS_TYPE = 1;
 
-/* ------------------------------------------------------------------ struct */
-
 /** Flat scope/symbol tables over one module's AST; reusable across analyze() calls (warm capacity persists). */
 export type Semantic = {
-    /* scope tree (SoA, index = ScopeId; 0 = none) */
     scopeParent: Uint32Array;
     scopeFlags: Uint16Array;
-    scopeNode: (Node | null)[]; // owning Node
+    scopeNode: (Node | null)[];
     scopeCount: number;
 
-    /* symbols (SoA, index = SymbolId; 0 = none) */
     symScope: Uint32Array;
-    symDecl: (Node | null)[]; // declaring Ident Node (name = its .name)
+    symDecl: (Node | null)[];
     symFlags: Uint16Array;
     symCount: number;
 
-    /** node.id -> SymbolId for declaring AND resolved referencing Idents (0 = none/global) */
     nodeSymbol: Uint32Array;
-    /** node.id -> ScopeId for scope-owning nodes (0 = none) */
     nodeScope: Uint32Array;
 
-    /** unresolved value-namespace references (globals like Math): Ident Nodes */
     unresolved: Node[];
 
-    /* interning + binding maps (rebuilt per analyze) */
     names: Map<string, number>;
-    bindings: Map<number, number>; // key(scope, ns, nameId) -> SymbolId
+    bindings: Map<number, number>;
     symNameId: Uint32Array;
 };
 
@@ -90,10 +71,8 @@ export function createSemantic(): Semantic {
     };
 }
 
-/* ----------------------------------------------------------- module state */
-
 let sem: Semantic;
-let scope = 0; // current ScopeId
+let scope = 0;
 
 const growU32 = (a: Uint32Array): Uint32Array => {
     const n = new Uint32Array(a.length * 2);
@@ -122,8 +101,6 @@ function newScope(flags: number, node: Node | null): number {
 
 const bindingKey = (scopeId: number, ns: number, nameId: number): number => (scopeId * 2 + ns) * 0x400000 + nameId;
 
-// LIMIT: interning allocates one string per distinct occurrence via a Map;
-// the hash-then-verify zero-alloc scheme (llm/notes/ast-format.md) is unused.
 function internName(s: string): number {
     let id = sem.names.get(s);
     if (id === undefined) {
@@ -138,7 +115,6 @@ function declare(identNode: Node, flags: number, ns: number, targetScope: number
     const key = bindingKey(targetScope, ns, nameId);
     const existing = sem.bindings.get(key);
     if (existing !== undefined) {
-        // redeclaration (var/var, function overloads, etc.) — merge flags, keep first symbol
         sem.symFlags[existing] |= flags;
         sem.nodeSymbol[identNode.id] = existing;
         return existing;
@@ -159,11 +135,6 @@ function declare(identNode: Node, flags: number, ns: number, targetScope: number
     return id;
 }
 
-/**
- * Declare ONE symbol reachable from both value and type namespaces (classes,
- * enums, type-only imports). Must stay a single symbol per declaration so
- * nodeSymbol, export binding, and rename all point at one identity.
- */
 function declareDualNs(identNode: Node, flags: number, targetScope: number): number {
     const sym = declare(identNode, flags, NS_VALUE, targetScope);
     const nameId = internName(identNode.name);
@@ -193,11 +164,9 @@ function resolveRef(identNode: Node, ns: number): void {
                 sem.nodeSymbol[identNode.id] = hit;
                 return;
             }
-            // enums/classes bind in both namespaces; fall through handled by dual declare
             s = sem.scopeParent[s];
         }
         if (ns === NS_TYPE) {
-            // a type ref may legally name a class/enum declared value-side first
             s = scope;
             while (s !== 0) {
                 const hit = sem.bindings.get(bindingKey(s, NS_VALUE, nameId));
@@ -212,8 +181,6 @@ function resolveRef(identNode: Node, ns: number): void {
     if (ns === NS_VALUE) sem.unresolved.push(identNode);
 }
 
-/* ------------------------------------------------------------ entry point */
-
 /** Return value of {@link analyze}. */
 export type SemanticResult = { semantic: Semantic };
 
@@ -227,7 +194,6 @@ export function analyze(out: Semantic, program: Node, nodeCount: number): Semant
     sem = out;
     scope = 0;
 
-    // reset (warm capacity persists)
     sem.scopeCount = 1;
     sem.symCount = 1;
     sem.unresolved.length = 0;
@@ -249,13 +215,11 @@ export function analyze(out: Semantic, program: Node, nodeCount: number): Semant
     return { semantic: sem };
 }
 
-/* ------------------------------------------------- pass 1: declarations */
-
 /** declare all bindings introduced by a pattern (decl contexts) */
 function declarePattern(node: Node | null, flags: number, targetScope: number): void {
     if (node === null) return;
     switch (node.type) {
-        case N.BindingIdentifier: // the only declaring role
+        case N.BindingIdentifier:
             declare(node, flags, NS_VALUE, targetScope);
             return;
         case N.ArrayPattern:
@@ -269,7 +233,7 @@ function declarePattern(node: Node | null, flags: number, targetScope: number): 
             return;
         case N.AssignmentPattern:
             declarePattern(node.data.left, flags, targetScope);
-            return; // .right is an expression — resolve pass handles it
+            return;
         case N.RestElement:
             declarePattern(node.data.argument, flags, targetScope);
             return;
@@ -279,7 +243,6 @@ function declarePattern(node: Node | null, flags: number, targetScope: number): 
     }
 }
 
-// LIMIT: params bind into the function scope, shared with the body (spec gives params their own scope).
 function declareParams(list: Node[]): void {
     for (const p of list) declarePattern(p, SYM.PARAM, scope);
 }
@@ -420,7 +383,6 @@ function declarePass(node: Node | null): void {
             return;
         case N.TSEnumDeclaration: {
             declareDualNs(node.data.id, SYM.ENUM | SYM.TYPE, scope);
-            // LIMIT: enum members are not bound inside an enum body scope.
             for (const member of node.data.members) {
                 if (member.type === N.TSEnumMember) declarePass(member.data.initializer);
             }
@@ -434,12 +396,10 @@ function declarePass(node: Node | null): void {
             });
             return;
         }
-        // TS type positions declare nothing (type params handled at their owners)
         case N.TSTypeAnnotation:
         case N.TSTypeReference:
             return;
     }
-    // default: recurse into children generically via schema walk
     walkChildren(node, declarePass);
 }
 
@@ -451,11 +411,9 @@ function declareClassBody(list: Node[]): void {
         } else if (m.type === N.PropertyDefinition) {
             if (m.data.computed) declarePass(m.data.key);
             declarePass(m.data.value);
-        } else declarePass(m); // StaticBlock
+        } else declarePass(m);
     }
 }
-
-/* ------------------------------------------------- pass 2: references */
 
 /** enter the scope this node created in pass 1 (if any), run body, restore */
 function inNodeScope(node: Node, body: () => void): void {
@@ -471,11 +429,9 @@ function inNodeScope(node: Node, body: () => void): void {
 }
 
 function resolvePattern(node: Node | null): void {
-    // patterns in decl positions: idents are declarations (already bound);
-    // defaults + computed keys are expressions to resolve
     if (node === null) return;
     switch (node.type) {
-        case N.BindingIdentifier: // a declaration — already bound, nothing to resolve
+        case N.BindingIdentifier:
             return;
         case N.ArrayPattern:
             for (const el of node.data.elements) resolvePattern(el);
@@ -519,13 +475,12 @@ function resolveType(node: Node | null): void {
             resolveEntityName(node.data.typeName, NS_TYPE);
             resolveType(node.data.typeArguments);
             return;
-        case N.TSTypeQuery: // typeof X — value namespace
+        case N.TSTypeQuery:
             resolveEntityName(node.data.exprName, NS_VALUE);
             resolveType(node.data.typeArguments);
             return;
         case N.TSMappedType:
             inNodeScope(node, () => {
-                // LIMIT: mapped-type param not scoped separately; resolve constituents
                 walkChildren(node, resolveType);
             });
             return;
@@ -534,9 +489,6 @@ function resolveType(node: Node | null): void {
             resolveType(node.data.typeAnnotation);
             return;
     }
-    // any bare identifier role reached generically inside a type structure is a
-    // leaf we don't resolve here (type-ref heads go through resolveEntityName;
-    // IdentifierName/LabelIdentifier never resolve).
     if (isIdentifier(node.type)) return;
     walkChildren(node, resolveType);
 }
@@ -544,8 +496,6 @@ function resolveType(node: Node | null): void {
 /** qualified name head resolves; the rest are member-ish */
 function resolveEntityName(node: Node | null, ns: number): void {
     if (node === null) return;
-    // the head of an entity name is an IdentifierReference (type-ref typeName /
-    // typeof exprName); the qualified `.right` spine is IdentifierName (skipped).
     if (node.type === N.IdentifierReference) resolveRef(node, ns);
     else if (node.type === N.TSQualifiedName) resolveEntityName(node.data.left, ns);
 }
@@ -553,24 +503,22 @@ function resolveEntityName(node: Node | null, ns: number): void {
 function resolvePass(node: Node | null): void {
     if (node === null) return;
     switch (node.type) {
-        case N.IdentifierReference: // every expression-position name resolves (value ns)
+        case N.IdentifierReference:
             resolveRef(node, NS_VALUE);
             return;
         case N.StaticMemberExpression:
         case N.PrivateFieldExpression:
-            // property/field is an IdentifierName / PrivateIdentifier — never resolves
             resolvePass(node.data.object);
             return;
         case N.ComputedMemberExpression:
             resolvePass(node.data.object);
             resolvePass(node.data.expression);
             return;
-        case N.ChainExpression: // transparent wrapper — resolve the wrapped chain
+        case N.ChainExpression:
             resolvePass(node.data.expression);
             return;
-        case N.ObjectProperty: // object literal
-            if (node.data.computed) resolvePass(node.data.key); // key is otherwise an IdentifierName (never resolves)
-            // shorthand `{ a }`: value is a distinct IdentifierReference — resolve it
+        case N.ObjectProperty:
+            if (node.data.computed) resolvePass(node.data.key);
             resolvePass(node.data.value);
             return;
         case N.MethodDefinition:
@@ -644,14 +592,14 @@ function resolvePass(node: Node | null): void {
             });
             return;
         case N.ImportDeclaration:
-            return; // no references inside
+            return;
         case N.ExportNamedDeclaration: {
             const decl = node.data.declaration;
             if (decl !== null) {
                 resolvePass(decl);
                 return;
             }
-            if (node.data.source !== null) return; // re-export: no local refs
+            if (node.data.source !== null) return;
             for (const s of node.data.specifiers) {
                 if (s.type !== N.ExportSpecifier) continue;
                 const local = s.data.local;
@@ -659,12 +607,12 @@ function resolvePass(node: Node | null): void {
             }
             return;
         }
-        case N.LabeledStatement: // label ident is not a symbol ref
+        case N.LabeledStatement:
             resolvePass(node.data.body);
             return;
         case N.BreakStatement:
         case N.ContinueStatement:
-            return; // label refs are not symbols
+            return;
         case N.TSInterfaceDeclaration:
             inNodeScope(node, () => {
                 for (const h of node.data.extends) {
@@ -703,7 +651,43 @@ function resolvePass(node: Node | null): void {
     walkChildren(node, resolvePass);
 }
 
-/* ------------------------------------------------------------- accessors */
+/**
+ * Declare a synthetic IMPORT binding into an already-analyzed module's semantic
+ * (plan §5c: the injected automatic-runtime locals jsx/jsxs/Fragment/
+ * createElement). `identNode` is a fresh BindingIdentifier whose node id sits at
+ * or beyond `nodeCount`; the SoA columns grow to fit. The symbol lands in the
+ * module scope so deconflict renames it and link binds it like any import.
+ * Returns the new SymbolId.
+ */
+export function declareSyntheticImport(semantic: Semantic, identNode: Node): number {
+    let ms = 1;
+    for (let s = 1; s < semantic.scopeCount; s++) {
+        if (semantic.scopeFlags[s] === SCOPE.MODULE) { ms = s; break; }
+    }
+
+    const id = semantic.symCount;
+    if (id >= semantic.symScope.length) {
+        semantic.symScope = growU32(semantic.symScope);
+        semantic.symFlags = growU16(semantic.symFlags);
+        semantic.symNameId = growU32(semantic.symNameId);
+    }
+    semantic.symScope[id] = ms;
+    semantic.symDecl[id] = identNode;
+    semantic.symFlags[id] = SYM.IMPORT;
+    semantic.symNameId[id] = 0;
+    semantic.symCount = id + 1;
+
+    if (identNode.id >= semantic.nodeSymbol.length) {
+        const grown = new Uint32Array((identNode.id + 1) * 2);
+        grown.set(semantic.nodeSymbol);
+        semantic.nodeSymbol = grown;
+        const grownScope = new Uint32Array((identNode.id + 1) * 2);
+        grownScope.set(semantic.nodeScope);
+        semantic.nodeScope = grownScope;
+    }
+    semantic.nodeSymbol[identNode.id] = id;
+    return id;
+}
 
 /** Declared name of a symbol (the text of its declaring Ident). */
 export const symbolName = (semantic: Semantic, symbolId: number): string =>

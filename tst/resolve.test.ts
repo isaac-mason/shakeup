@@ -5,12 +5,9 @@ import type { Plugin, PluginCtx, ResolveIdResult } from '../src/plugin.ts';
 import { EMPTY_MODULE_ID, nodeResolve } from '../src/plugins/node-resolve.ts';
 import { loadResolveFixtures } from './fixtures/resolve.ts';
 
-/* --------------------------------------------------------------- harness */
-
 type Probe = {
     fs: Fs;
     plugin: Plugin;
-    /** call resolveId directly; returns { id, warnings } */
     resolve(specifier: string, importer: string | null): { id: ResolveIdResult; warnings: string[] };
 };
 
@@ -37,8 +34,6 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 
 const APP = '/app/main.ts';
 
-/* --------------------------------------------------------------- exports */
-
 describe('nodeResolve: bare-specifier detection', () => {
     it('passes relative/absolute/virtual specifiers to core (null)', () => {
         const p = probe();
@@ -52,7 +47,6 @@ describe('nodeResolve: bare-specifier detection', () => {
         const p = probe();
         expect(p.resolve('@scope/pkg', APP).id).toBe('/app/node_modules/@scope/pkg/index.js');
         expect(p.resolve('@scope/pkg/feature', APP).id).toBe('/app/node_modules/@scope/pkg/feature.js');
-        // "@scope" alone is not a valid package specifier -> pass to core
         expect(p.resolve('@scope', APP).id).toBe(null);
     });
 });
@@ -210,8 +204,6 @@ describe('nodeResolve: node_modules shadowing', () => {
     });
 });
 
-/* ------------------------------------------------------------------ e2e */
-
 describe('nodeResolve: end-to-end bundle + execute', () => {
     const buildAndRun = async (mainSource: string): Promise<Record<string, unknown>> => {
         const files = loadResolveFixtures();
@@ -245,8 +237,8 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
             "import { impl, stubKeys } from 'browser-object-pkg';\n" +
                 'export const impl2 = impl, keys2 = stubKeys;',
         );
-        expect(mod.impl2).toBe('browser-impl'); // node-impl.js remapped to browser-impl.js
-        expect(mod.keys2).toBe(0); // disabled.js -> empty module
+        expect(mod.impl2).toBe('browser-impl');
+        expect(mod.keys2).toBe(0);
     });
 
     it('nested shadowing resolves deep dep for a deep importer', async () => {
@@ -255,12 +247,6 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
     });
 });
 
-/* ================================================================
- * Alignment-audit regressions (audit vs esbuild, 2026-08-14):
- * D3 package-name browser remaps, D2 exports:null, D4 extensionless
- * browser keys, D1 percent-encoded targets. Grounding cites in
- * src/plugins/node-resolve.ts at each rule.
- * ================================================================ */
 import { createMemoryFs as mkFs } from '../src/fs.ts';
 
 function probeFs(files: Record<string, string>, overrides: Partial<Parameters<typeof nodeResolve>[0]> = {}) {
@@ -354,11 +340,9 @@ describe('alignment regressions (vs esbuild)', () => {
     it('D5: defaults align to lineage — no module condition, TS-first extensions', () => {
         const p = probeFs({
             '/app/src/a.js': '',
-            // package whose exports keys ONLY "module" — must not match by default
             '/app/node_modules/mod-cond/package.json': '{ "name": "mod-cond", "exports": { "module": "./m.js", "default": "./d.js" } }',
             '/app/node_modules/mod-cond/m.js': '',
             '/app/node_modules/mod-cond/d.js': '',
-            // extensionless probe prefers .ts over .js (rolldown order)
             '/app/node_modules/ts-first/package.json': '{ "main": "./impl" }',
             '/app/node_modules/ts-first/impl.ts': '',
             '/app/node_modules/ts-first/impl.js': '',

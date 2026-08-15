@@ -1,13 +1,15 @@
-// Conservative (sound, not sharp) expression/statement purity over type+data Nodes.
-// LIMIT: calls/new/member-reads/spreads are all treated effectful; no @__PURE__ (lexer drops comments).
-
 import { type Node, N } from '../ast.ts';
+
+let jsxTreatedPure = true;
+/** Configure JSX purity for subsequent {@link isPureExpr}/{@link isPureStatement} calls. */
+export function setJsxPurity(pure: boolean): void {
+    jsxTreatedPure = pure;
+}
 
 /** Conservatively true if evaluating this expression has no observable side effects. */
 export function isPureExpr(node: Node | null): boolean {
     if (node === null) return true;
     switch (node.type) {
-        // any identifier ROLE — a bare name reference/leaf has no side effect
         case N.BindingIdentifier:
         case N.IdentifierReference:
         case N.IdentifierName:
@@ -25,27 +27,25 @@ export function isPureExpr(node: Node | null): boolean {
         case N.FunctionExpression:
             return true;
         case N.ClassExpression:
-            // pure when there's no superclass expression and no static effects
             return node.data.superClass === null && !classHasStaticEffects(node);
         case N.TemplateLiteral: {
             for (const e of node.data.expressions) if (!isPureExpr(e)) return false;
-            return true; // stringification of pure operands — accepted
+            return true;
         }
         case N.ArrayExpression: {
             for (const el of node.data.elements) {
                 if (el === null) continue;
-                if (el.type === N.SpreadElement) return false; // iterators
+                if (el.type === N.SpreadElement) return false;
                 if (!isPureExpr(el)) return false;
             }
             return true;
         }
         case N.ObjectExpression: {
             for (const p of node.data.properties) {
-                if (p.type === N.SpreadElement) return false; // getters via spread
+                if (p.type === N.SpreadElement) return false;
                 if (p.type !== N.ObjectProperty) continue;
                 if (p.data.computed && !isPureExpr(p.data.key)) return false;
                 if (p.data.kind === 'init' && !isPureExpr(p.data.value)) return false;
-                // getters/setters define, not invoke — pure
             }
             return true;
         }
@@ -68,13 +68,52 @@ export function isPureExpr(node: Node | null): boolean {
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
             return isPureExpr(node.data.expression);
-        case N.TSNonNullExpression:
-            return isPureExpr(node.data.expression);
+        case N.JSXElement:
+            return jsxTreatedPure && jsxElementPure(node);
+        case N.JSXFragment:
+            return jsxTreatedPure && jsxChildrenPure(node.data.children);
         default:
-            // Member (getters), Call, New, Assign, Update, Await, Yield,
-            // TaggedTemplate, ImportExpr, ... — effectful.
             return false;
     }
+}
+
+function jsxElementPure(node: Node & { type: typeof N.JSXElement }): boolean {
+    const opening = node.data.openingElement as Node & { type: typeof N.JSXOpeningElement };
+    for (const a of opening.data.attributes) {
+        if (a.type === N.JSXSpreadAttribute) {
+            if (!isPureExpr(a.data.argument)) return false;
+        } else if (a.type === N.JSXAttribute) {
+            const v = a.data.value;
+            if (v !== null && !jsxAttrValuePure(v)) return false;
+        }
+    }
+    return jsxChildrenPure(node.data.children);
+}
+
+function jsxAttrValuePure(value: Node): boolean {
+    if (value.type === N.StringLiteral) return true;
+    if (value.type === N.JSXExpressionContainer) {
+        const e = value.data.expression;
+        return e.type === N.JSXEmptyExpression || isPureExpr(e);
+    }
+    if (value.type === N.JSXElement || value.type === N.JSXFragment) return isPureExpr(value);
+    return isPureExpr(value);
+}
+
+function jsxChildrenPure(children: Node[]): boolean {
+    for (const child of children) {
+        if (child.type === N.JSXText) continue;
+        if (child.type === N.JSXExpressionContainer) {
+            const e = child.data.expression;
+            if (e.type === N.JSXEmptyExpression) continue;
+            if (!isPureExpr(e)) return false;
+        } else if (child.type === N.JSXSpreadChild) {
+            if (!isPureExpr(child.data.expression)) return false;
+        } else if (child.type === N.JSXElement || child.type === N.JSXFragment) {
+            if (!isPureExpr(child)) return false;
+        }
+    }
+    return true;
 }
 
 /** True if evaluating a class declaration/expression runs static side effects (static blocks, impure static/computed keys). */
@@ -105,7 +144,7 @@ export function isPureStatement(stmt: Node): boolean {
         case N.EmptyStatement:
             return true;
         case N.TSEnumDeclaration:
-            return true; // lowering writes only its own var
+            return true;
         case N.ClassDeclaration:
             return stmt.data.superClass === null && !classHasStaticEffects(stmt);
         case N.VariableDeclaration: {
@@ -125,6 +164,6 @@ export function isPureStatement(stmt: Node): boolean {
             return isPureExpr(decl);
         }
         default:
-            return false; // expression statements, loops, ifs, ... — effectful
+            return false;
     }
 }

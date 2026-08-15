@@ -1,14 +1,8 @@
-// Module graph: resolve -> load -> parse -> analyze -> extract module records.
-// ESM-only record model (llm/notes/rolldown-internals.md).
-// LIMIT: no CommonJS; an unresolvable specifier is external or a build error.
-
-import { type Node, type Program, N } from './ast';
+import { type Node, type Program, N, isJSXNode, makeBindingIdentifier, walk } from './ast';
 import { type Fs, dirnameOf, joinPath } from './fs';
 import { type Pipeline, type Plugin, type PluginCtx, compilePipeline, runLoad, runResolveId, runTransform } from './plugin';
 import { parse } from './parser';
-import { type Semantic, analyze, createSemantic } from './analysis/semantic';
-
-/* ------------------------------------------------------------------ types */
+import { type Semantic, analyze, createSemantic, declareSyntheticImport } from './analysis/semantic';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';
@@ -18,51 +12,50 @@ export const NAME_DEFAULT = 'default';
 /** A resolved edge to another module (deduped per specifier). */
 export type ImportRecord = {
     specifier: string;
-    /** resolved module idx; -1 = external */
     resolved: number;
     external: boolean;
 };
 
 /** A local binding that aliases an imported name. */
 export type NamedImport = {
-    /** index into module.importRecords */
     rec: number;
-    /** imported name on the source module ('default', '*', or a named export) */
     name: string;
 };
 
 /** An exported name: local binding, re-export, or default expression. */
 export type NamedExport = {
-    /** local SymbolId (0 when re-exported or when default-exporting an expression) */
     symbol: number;
-    /** re-export source record (-1 = local export) */
     rec: number;
-    /** name on the re-export source ('*' for `export * as ns`) */
     sourceName: string;
-    /** for `export default <expr>`: the expression Node (else null) */
     exprNode: Node | null;
+};
+
+/** Deconflict-able local SymbolIds for the injected automatic-runtime bindings
+ * (plan §5c option A). Present only on modules that contain JSX; `createElement`
+ * is populated only when a key-after-spread fallback (§5a.6) fired. Each is a
+ * real IMPORT symbol declared in the module's semantic, so link binds it to the
+ * resolved runtime module's export and deconflict renames it like any import. */
+export type JSXRuntime = {
+    jsx: number;
+    jsxs: number;
+    Fragment: number;
+    createElement: number;
 };
 
 /** A parsed, analyzed module with its extracted import/export records. */
 export type Module = {
     idx: number;
-    /** resolved id (path or virtual id) */
     id: string;
-    /** module source (retained — the emit edit engine rewrites spans over it). */
     source: string;
     program: Program;
-    /** number of nodes (ids run 1..nodeCount-1); sizes the semantic id tables. */
     nodeCount: number;
     semantic: Semantic;
     importRecords: ImportRecord[];
-    /** local SymbolId -> import info */
     namedImports: Map<number, NamedImport>;
-    /** exported name -> export info */
     namedExports: Map<string, NamedExport>;
-    /** record indexes of bare `export * from '...'` */
     starExports: number[];
-    /** execution order assigned by link (topo) */
     execOrder: number;
+    jsxRuntime: JSXRuntime | null;
 };
 
 /** The built module graph rooted at `entry` (an index into `modules`). */
@@ -74,25 +67,32 @@ export type Graph = {
     warnings: string[];
 };
 
+/** Automatic-runtime JSX options (plan §4b, P2 subset). No `runtime`/`factory`/
+ * `fragment`/`development` — automatic runtime only. */
+export type JSXOptions = {
+    importSource?: string;
+    pure?: boolean;
+};
+
+/** Resolve JSX options against defaults (importSource 'react', pure true). */
+export function resolveJSXOptions(jsx: JSXOptions | undefined): { importSource: string; pure: boolean } {
+    return { importSource: jsx?.importSource ?? 'react', pure: jsx?.pure ?? true };
+}
+
 /** Inputs to {@link buildGraph}. */
 export type GraphOptions = {
     entry: string;
-    /** the environment seam — real fs, memory map, HTTP cache, anything (src/fs.ts) */
     fs: Fs;
-    /** specifiers treated as external (exact match or custom predicate) */
     external?: string[] | ((specifier: string) => boolean);
-    /** override resolution: return resolved id, or null for "not found" */
     resolve?: (specifier: string, importer: string | null) => string | null;
-    /** plugin pipeline (rollup-shaped hooks; see src/plugin.ts) */
     plugins?: Plugin[];
+    jsx?: JSXOptions;
 };
-
-/* ---------------------------------------------------------------- resolve */
 
 const EXTENSION_PROBES = ['', '.ts', '.js', '/index.ts', '/index.js'];
 
 function defaultResolve(fs: Fs, specifier: string, importer: string | null): string | null {
-    if (!specifier.startsWith('./') && !specifier.startsWith('../') && !specifier.startsWith('/')) return null; // bare: external-or-error
+    if (!specifier.startsWith('./') && !specifier.startsWith('../') && !specifier.startsWith('/')) return null;
     const base =
         specifier.startsWith('/') || importer === null ? specifier : joinPath(dirnameOf(importer), specifier);
     for (const ext of EXTENSION_PROBES) {
@@ -109,13 +109,11 @@ function isExternal(options: GraphOptions, specifier: string): boolean {
     return ext.includes(specifier);
 }
 
-/* ------------------------------------------------------- record extraction */
-
 /** Collect every BindingIdentifier in a binding pattern into `out`. */
 function collectPatternIdents(node: Node | null, out: Node[]): void {
     if (node === null) return;
     switch (node.type) {
-        case N.BindingIdentifier: // the declaring leaf in every pattern position
+        case N.BindingIdentifier:
             out.push(node);
             return;
         case N.ArrayPattern:
@@ -137,7 +135,6 @@ function collectPatternIdents(node: Node | null, out: Node[]): void {
 }
 
 function addRecord(mod: Module, specifier: string): number {
-    // dedupe by specifier (multiple imports from the same module share a record)
     for (let i = 0; i < mod.importRecords.length; i++) {
         if (mod.importRecords[i].specifier === specifier) return i;
     }
@@ -206,7 +203,6 @@ function extractRecords(mod: Module): void {
                         });
                     }
                 }
-                // TSInterfaceDecl / TSTypeAliasDecl: type-only, no runtime export
                 continue;
             }
             const src = stmt.data.source;
@@ -239,7 +235,7 @@ function extractRecords(mod: Module): void {
             if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) {
                 const id = decl.data.id;
                 if (id !== null) symbol = semantic.nodeSymbol[id.id];
-                else exprNode = decl; // anonymous default fn/class
+                else exprNode = decl;
             } else {
                 exprNode = decl;
             }
@@ -253,7 +249,6 @@ function extractRecords(mod: Module): void {
             const rec = addRecord(mod, strValue(source, src));
             const exported = stmt.data.exported;
             if (exported !== null) {
-                // `export * as ns from '...'`
                 mod.namedExports.set(exported.name, { symbol: 0, rec, sourceName: NAME_NAMESPACE, exprNode: null });
             } else {
                 mod.starExports.push(rec);
@@ -263,11 +258,64 @@ function extractRecords(mod: Module): void {
     }
 }
 
-/* ------------------------------------------------------------- graph build */
+/** True if `openingName`-carrying attrs put a `key` attribute AFTER a spread
+ * (the key-after-spread createElement fallback, plan §5a.6). */
+function attrsHaveKeyAfterSpread(attrs: Node[]): boolean {
+    let sawSpread = false;
+    for (const a of attrs) {
+        if (a.type === N.JSXSpreadAttribute) {
+            sawSpread = true;
+        } else if (a.type === N.JSXAttribute) {
+            const name = a.data.name;
+            if (sawSpread && name.type === N.JSXIdentifier && name.name === 'key') return true;
+        }
+    }
+    return false;
+}
+
+function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement: boolean } {
+    let hasJSX = false;
+    let needsCreateElement = false;
+    walk(program, (n: Node) => {
+        if (!isJSXNode(n.type)) return;
+        hasJSX = true;
+        if (n.type === N.JSXOpeningElement && attrsHaveKeyAfterSpread(n.data.attributes)) {
+            needsCreateElement = true;
+        }
+    });
+    return { hasJSX, needsCreateElement };
+}
+
+function injectJSXRuntime(mod: Module, importSource: string): void {
+    const { hasJSX, needsCreateElement } = scanJSX(mod.program);
+    if (!hasJSX) return;
+
+    const runtimeRec = addRecord(mod, `${importSource}/jsx-runtime`);
+    const named = (name: string): number => {
+        const local = makeBindingIdentifier(name);
+        const sym = declareSyntheticImport(mod.semantic, local);
+        mod.namedImports.set(sym, { rec: runtimeRec, name });
+        return sym;
+    };
+    const jsx = named('jsx');
+    const jsxs = named('jsxs');
+    const Fragment = named('Fragment');
+
+    let createElement = 0;
+    if (needsCreateElement) {
+        const rootRec = addRecord(mod, importSource);
+        const local = makeBindingIdentifier('createElement');
+        createElement = declareSyntheticImport(mod.semantic, local);
+        mod.namedImports.set(createElement, { rec: rootRec, name: 'createElement' });
+    }
+
+    mod.jsxRuntime = { jsx, jsxs, Fragment, createElement };
+}
 
 /** Resolve, load, parse, and analyze the module graph reachable from the entry. */
 export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entry: -1, errors: [], warnings: [] };
+    const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const ctx: PluginCtx = { warn: (m) => graph.warnings.push(m), fs: options.fs };
     const baseResolve = options.resolve ?? ((s: string, i: string | null) => defaultResolve(options.fs, s, i));
@@ -292,7 +340,8 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             return -1;
         }
         source = runTransform(pipe, ctx, source, id);
-        const { program, errors, nodeCount } = parse(source, { ts: true });
+        const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
+        const { program, errors, nodeCount } = parse(source, { ts: true, jsx });
         for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
         const semantic = createSemantic();
         analyze(semantic, program, nodeCount);
@@ -308,14 +357,15 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             namedExports: new Map(),
             starExports: [],
             execOrder: -1,
+            jsxRuntime: null,
         };
         graph.modules.push(mod);
         graph.byId.set(id, mod.idx);
         extractRecords(mod);
+        if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
         for (const hook of pipe.moduleParsed) {
             hook.handler(ctx, { id, source, program, nodeCount, semantic });
         }
-        // resolve edges (depth-first; cycles land as already-registered idx)
         for (const rec of mod.importRecords) {
             if (isExternal(options, rec.specifier) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
@@ -326,10 +376,6 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 if (rec.specifier.startsWith('.') || rec.specifier.startsWith('/')) {
                     graph.errors.push(`cannot resolve '${rec.specifier}' from '${id}'`);
                 } else {
-                    // rollup parity: unresolved bare specifiers externalize with a
-                    // LOUD warning (never silently) — import maps may resolve them
-                    // at runtime; otherwise list them in `external` or add a
-                    // resolver plugin (nodeResolve)
                     graph.warnings.push(
                         `'${rec.specifier}' (imported by '${id}') could not be resolved — treated as external. Add it to \`external\` or use a resolver plugin to silence this.`,
                     );
@@ -337,7 +383,6 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            // canonical identity: symlinked paths collapse to one module
             rec.resolved = addModule(options.fs.realpath?.(resolved) ?? resolved);
         }
         return mod.idx;

@@ -80,7 +80,7 @@ export const ESTREE_NAME = {
     ArrayPattern: 'ArrayPattern',
     AssignmentPattern: 'AssignmentPattern',
     RestElement: 'RestElement',
-    FormalParameter: null, // our modelling wrapper; differential counts FormalParameter-with-init as AssignmentPattern
+    FormalParameter: null,
     ImportDeclaration: 'ImportDeclaration',
     ImportSpecifier: 'ImportSpecifier',
     ImportDefaultSpecifier: 'ImportDefaultSpecifier',
@@ -141,6 +141,21 @@ export const ESTREE_NAME = {
     TSSatisfiesExpression: 'TSSatisfiesExpression',
     TSNonNullExpression: 'TSNonNullExpression',
     TSModuleDeclaration: 'TSModuleDeclaration',
+    JSXElement: 'JSXElement',
+    JSXOpeningElement: 'JSXOpeningElement',
+    JSXClosingElement: 'JSXClosingElement',
+    JSXFragment: 'JSXFragment',
+    JSXOpeningFragment: 'JSXOpeningFragment',
+    JSXClosingFragment: 'JSXClosingFragment',
+    JSXNamespacedName: 'JSXNamespacedName',
+    JSXMemberExpression: 'JSXMemberExpression',
+    JSXExpressionContainer: 'JSXExpressionContainer',
+    JSXEmptyExpression: 'JSXEmptyExpression',
+    JSXAttribute: 'JSXAttribute',
+    JSXSpreadAttribute: 'JSXSpreadAttribute',
+    JSXSpreadChild: 'JSXSpreadChild',
+    JSXIdentifier: 'JSXIdentifier',
+    JSXText: 'JSXText',
 } satisfies Record<TypeName, ESTreeTypeName | null>;
 
 /** ESTree type name per numeric type id (derived). */

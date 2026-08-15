@@ -1,7 +1,3 @@
-/**
- * Demo: parse real code into the TYPE+DATA AST, walk it, run a small transform.
- * Run: node examples/demo.ts   (Node >= 23 strips types natively)
- */
 import { readFileSync } from 'node:fs';
 import {
     type Node,
@@ -14,7 +10,6 @@ import {
 } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
 
-/* 1 — parse a snippet and dump it */
 const snippet = `
 export interface Vec3 { x: number; y: number; z: number }
 export const add = (a: Vec3, b: Vec3): Vec3 => ({ x: a.x + b.x, y: a.y + b.y, z: a.z + b.z });
@@ -22,11 +17,10 @@ export function scale(v: Vec3, s: number): Vec3 {
     return { x: v.x * s, y: v.y * s, z: v.z * s };
 }
 `;
-const { program, errors, nodeCount } = parse(snippet, { ts: true });
+const { program, errors, nodeCount } = parse(snippet, { ts: true, jsx: false });
 console.log('— snippet parse:', nodeCount - 1, 'nodes,', errors.length, 'errors');
 if (errors.length) console.log(errors);
 
-/* 2 — transform demo: count + collect every member access path like `a.x` */
 const memberPaths: string[] = [];
 walk(program, (n) => {
     if (n.type === N.StaticMemberExpression) {
@@ -37,9 +31,6 @@ walk(program, (n) => {
 });
 console.log('— member accesses:', memberPaths.join(' '));
 
-/* 3 — transform demo: constant-fold `x * 1` and `x + 0` in place. The type+data
- * node is one mutable object: fold by overwriting its slots with the left child's
- * (native narrowing gives us .operator/.left/.right directly). */
 let folds = 0;
 walk(program, (n): void => {
     if (n.type !== N.BinaryExpression) return;
@@ -47,7 +38,6 @@ walk(program, (n): void => {
     if (right.type !== N.NumericLiteral) return;
     if ((n.data.operator === '*' && right.name === '1') || (n.data.operator === '+' && right.name === '0')) {
         const left = n.data.left as Node;
-        // become the left operand in place (cheapest fold — slot copy on the object)
         const raw = n as unknown as { type: number; start: number; end: number; name: string; data: unknown };
         const lraw = left as unknown as { type: number; start: number; end: number; name: string; data: unknown };
         raw.type = lraw.type;
@@ -60,22 +50,19 @@ walk(program, (n): void => {
 });
 console.log('— folded', folds, 'no-op arithmetic nodes (x*1, x+0)');
 
-/* 4 — clone-with-substitution demo (the inlining primitive) */
-const src2 = parse('const doubled = v.x * 2 + v.y * 2;', { ts: true });
+const src2 = parse('const doubled = v.x * 2 + v.y * 2;', { ts: true, jsx: false });
 let decl: Node | null = null;
 walk(src2.program, (n) => {
     if (n.type === N.BinaryExpression && decl === null) { decl = n; return false; }
     return;
 });
-// clone `v.x * 2 + v.y * 2`, renaming `v` -> `vec` (a synthetic named ident)
 const renamed = cloneNode(decl, (n) => {
     if (n.type === N.IdentifierReference && n.name === 'v') return makeIdentifierReference('vec');
     return null;
 })!;
 console.log('— clone ok:', TYPE_NAME[renamed.type], 'root, rebuilt subtree standalone (source droppable)');
 
-/* 5 — TS-awareness demo: read tuple arity / interface fields (the compilecat queries) */
-const ts = parse('interface V { x: number; y: number }; type T3 = [number, number, number];', { ts: true });
+const ts = parse('interface V { x: number; y: number }; type T3 = [number, number, number];', { ts: true, jsx: false });
 walk(ts.program, (n) => {
     if (n.type === N.TSInterfaceDeclaration) {
         const fields: string[] = [];
@@ -89,7 +76,6 @@ walk(ts.program, (n) => {
     }
 });
 
-/* 6 — the real test: parse the fixtures */
 for (const [name, path, isTs] of [
     ['three.core.js', new URL('../llm/spikes/node_modules/three/build/three.core.js', import.meta.url), false],
     ['crashcat concat', null, true],
@@ -111,7 +97,7 @@ for (const [name, path, isTs] of [
         source = files.join('\n');
     }
     const t0 = performance.now();
-    const r = parse(source, { ts: isTs });
+    const r = parse(source, { ts: isTs, jsx: false });
     const dt = performance.now() - t0;
     const mb = source.length / 1024 / 1024;
     console.log(

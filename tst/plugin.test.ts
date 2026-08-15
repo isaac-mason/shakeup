@@ -68,7 +68,7 @@ describe('plugin pipeline', () => {
             },
             [special],
         );
-        expect(calls).toBe(1); // only the .special.ts module, not /main.ts
+        expect(calls).toBe(1);
     });
 
     it('json plugin: import a .json file, tree-shaking friendly', async () => {

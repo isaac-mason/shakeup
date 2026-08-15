@@ -28,7 +28,6 @@ describe('tree shaking', () => {
         expect(code).not.toContain('DEAD_MARKER_EXPORT');
         expect(code).not.toContain('DEAD_MARKER_LOCAL');
         expect(code).not.toContain('DEAD_MARKER_CONST');
-        // the transitively-used helper survives
         expect(code).toContain('DEAD_MARKER_KEEP_ALIVE_CHECK');
         expect(shaken!.dropped.length).toBe(3);
         const mod = await run(code);
@@ -48,7 +47,6 @@ describe('tree shaking', () => {
             '/main.ts': ["import { keep } from './used';", 'export const v = keep;'].join('\n'),
             '/used.ts': ["export { keep } from './deep';", 'export const DEAD_BARREL_ONLY = 1;'].join('\n'),
             '/deep.ts': 'export const keep = 7;',
-            // never imported at all — graph never loads it, but also assert via barrel
         });
         expect(code).not.toContain('DEAD_BARREL_ONLY');
     });
@@ -63,8 +61,8 @@ describe('tree shaking', () => {
             '/registry.ts': 'export const registry: string[] = [];',
             '/effects.ts': [
                 "import { registry } from './registry';",
-                "registry.push('effect-ran');", // effectful statement: must survive
-                'export const neverImported = "DEAD_MARKER_FX";', // pure: shaken
+                "registry.push('effect-ran');",
+                'export const neverImported = "DEAD_MARKER_FX";',
             ].join('\n'),
         });
         expect(code).not.toContain('DEAD_MARKER_FX');
@@ -89,7 +87,7 @@ describe('tree shaking', () => {
             '/main.ts': ["import { pure } from './lib';", 'export const out = pure;'].join('\n'),
             '/lib.ts': [
                 'export const pure = 1;',
-                'const kept = Math.max(1, 2);', // call: conservatively effectful, kept
+                'const kept = Math.max(1, 2);',
             ].join('\n'),
         });
         expect(code).toContain('Math.max');
@@ -102,7 +100,6 @@ describe('tree shaking', () => {
             '/main.ts': ["import * as ops from './ops';", 'export const r = ops.a();'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
-        // b is unused through the namespace but must exist on the ns object
         const mod = await run(code);
         expect((mod.r as number)).toBe(1);
         expect(code).toContain('b:');

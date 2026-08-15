@@ -1,12 +1,6 @@
-// Link: bind imports to their defining exports, order modules for execution,
-// and deconflict top-level names. ESM-only port of rolldown's
-// bind_imports_and_exports. Design notes: PLAN.md §6.
-
 import { type Graph, type Module, NAME_DEFAULT, NAME_NAMESPACE } from './graph';
 
-/* -------------------------------------------------------------- SymbolRef */
-
-const MOD_SHIFT = 0x200000; // 2^21 symbols per module
+const MOD_SHIFT = 0x200000;
 
 /** Pack (moduleIdx, symbolId) into one SymbolRef number: `mod * 2^21 + sym`. Caps at 2M symbols/module. */
 export const packRef = (mod: number, sym: number): number => mod * MOD_SHIFT + sym;
@@ -14,8 +8,6 @@ export const packRef = (mod: number, sym: number): number => mod * MOD_SHIFT + s
 export const refMod = (ref: number): number => Math.floor(ref / MOD_SHIFT);
 /** Symbol id of a packed SymbolRef. */
 export const refSym = (ref: number): number => ref % MOD_SHIFT;
-
-/* ------------------------------------------------------------------ types */
 
 /** Where an import resolves: a graph symbol, an external, a module namespace, or unresolved. */
 export type ImportBind =
@@ -27,21 +19,13 @@ export type ImportBind =
 /** Result of linking: binds, exec order, final names, and synthesized namespaces. */
 export type Linked = {
     graph: Graph;
-    /** execution order: module idxs, dependencies first (cycle-tolerant) */
     order: number[];
-    /** packed local SymbolRef (importer-side) -> bind */
     binds: Map<number, ImportBind>;
-    /** packed SymbolRef -> final output name (only when it differs or is synthetic) */
     finalNames: Map<number, string>;
-    /** modules whose namespace object must be synthesized (module idx -> ns name) */
     namespaceOf: Map<number, string>;
-    /** per module: resolved export map (name -> bind), memoized; entry's drives output */
     exportMaps: Map<number, Map<string, ImportBind>>;
-    /** synthetic symbol names: packed ref -> declared name */
     syntheticNames: Map<number, string>;
-    /** hoisted external binding: `${specifier}\x00${importedName}` -> final local name */
     externalLocals: Map<string, string>;
-    /** per module: synthetic ref for its anonymous `export default <expr>` */
     defaultRefs: Map<number, number>;
     errors: string[];
 };
@@ -49,12 +33,10 @@ export type Linked = {
 /** Key for the shared local of an external import: `${specifier}\x00${importedName}`. */
 export const externalKey = (specifier: string, name: string): string => `${specifier}\x00${name}`;
 
-/* ----------------------------------------------------------- match import */
-
 type LinkCtx = {
     graph: Graph;
     linked: Linked;
-    nextSynthetic: number[]; // per module: next synthetic symbol id
+    nextSynthetic: number[];
 };
 
 function syntheticRef(ctx: LinkCtx, mod: number, name: string): number {
@@ -64,15 +46,10 @@ function syntheticRef(ctx: LinkCtx, mod: number, name: string): number {
     return ref;
 }
 
-/**
- * Resolve `name` against `module`'s exports, chasing re-exports and searching
- * star exports (with ambiguity detection). `seen` guards re-export cycles —
- * rolldown's MatchImportKind::Cycle case degrades to `none` with an error.
- */
 function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<number>): ImportBind {
     const { graph } = ctx;
     const seenKey = packRef(module.idx, 0) + hashName(name);
-    if (seen.has(seenKey)) return { kind: 'none' }; // circular re-export
+    if (seen.has(seenKey)) return { kind: 'none' };
     seen.add(seenKey);
 
     const exp = module.namedExports.get(name);
@@ -81,13 +58,11 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             const rec = module.importRecords[exp.rec];
             if (rec.external) return { kind: 'external', specifier: rec.specifier, name: exp.sourceName };
             const target = graph.modules[rec.resolved];
-            if (exp.sourceName === NAME_NAMESPACE) return namespaceBind(ctx, target); // export * as ns
+            if (exp.sourceName === NAME_NAMESPACE) return namespaceBind(ctx, target);
             return matchImport(ctx, target, exp.sourceName, seen);
         }
         if (exp.symbol !== 0) return { kind: 'found', ref: packRef(module.idx, exp.symbol) };
         if (exp.exprNode !== null) {
-            // anonymous `export default <expr>`: synthesize a binding emitted as
-            // `const <name> = <expr>` in place of the export statement.
             const existing = ctx.linked.defaultRefs.get(module.idx);
             if (existing !== undefined) return { kind: 'found', ref: existing };
             const synth = syntheticRef(ctx, module.idx, `${reprName(module)}_default`);
@@ -97,12 +72,11 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
         return { kind: 'none' };
     }
 
-    // star-export search ('default' is never re-exported through stars per spec)
     if (name !== NAME_DEFAULT) {
         let found: ImportBind | null = null;
         for (const recIdx of module.starExports) {
             const rec = module.importRecords[recIdx];
-            if (rec.external) continue; // can't see into external stars
+            if (rec.external) continue;
             const candidate = matchImport(ctx, graph.modules[rec.resolved], name, new Set(seen));
             if (candidate.kind === 'none') continue;
             if (found === null) found = candidate;
@@ -145,15 +119,12 @@ function hashName(s: string): number {
     return (h >>> 0) % 0x1fffff;
 }
 
-/* ------------------------------------------------------- resolved exports */
-
 /** Full resolved export surface of a module (own exports plus star-inherited), memoized. */
 export function exportMapOf(ctx: LinkCtx, module: Module): Map<string, ImportBind> {
     const cached = ctx.linked.exportMaps.get(module.idx);
     if (cached !== undefined) return cached;
     const map = new Map<string, ImportBind>();
-    ctx.linked.exportMaps.set(module.idx, map); // set-before-fill breaks cycles
-    // star-inherited first (own exports shadow them)
+    ctx.linked.exportMaps.set(module.idx, map);
     for (const recIdx of module.starExports) {
         const rec = module.importRecords[recIdx];
         if (rec.external) continue;
@@ -162,7 +133,7 @@ export function exportMapOf(ctx: LinkCtx, module: Module): Map<string, ImportBin
             if (name === NAME_DEFAULT) continue;
             const prior = map.get(name);
             if (prior !== undefined && !sameBind(prior, bind)) {
-                map.set(name, { kind: 'none' }); // ambiguous through stars — poisoned
+                map.set(name, { kind: 'none' });
             } else map.set(name, bind);
         }
     }
@@ -172,13 +143,11 @@ export function exportMapOf(ctx: LinkCtx, module: Module): Map<string, ImportBin
     return map;
 }
 
-/* ------------------------------------------------------------- exec order */
-
 function sortModules(graph: Graph): number[] {
     const order: number[] = [];
-    const state = new Uint8Array(graph.modules.length); // 0 new, 1 visiting, 2 done
+    const state = new Uint8Array(graph.modules.length);
     const visit = (idx: number): void => {
-        if (idx < 0 || state[idx] !== 0) return; // cycle tolerance: visiting => skip
+        if (idx < 0 || state[idx] !== 0) return;
         state[idx] = 1;
         const mod = graph.modules[idx];
         for (const rec of mod.importRecords) {
@@ -191,8 +160,6 @@ function sortModules(graph: Graph): number[] {
     return order;
 }
 
-/* -------------------------------------------------------------- deconflict */
-
 const RESERVED = new Set([
     'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else',
     'export', 'extends', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new',
@@ -200,12 +167,6 @@ const RESERVED = new Set([
     'await', 'static', 'enum', 'implements', 'interface', 'package', 'private', 'protected', 'public',
 ]);
 
-/**
- * Assign final names for every top-level symbol of every included module, all
- * synthetic symbols, and every namespace object. Names must not collide with:
- * each other, any module's unresolved globals (Math, console, ...), or
- * reserved words. First-come keeps its name; later collisions get `name$N`.
- */
 function deconflict(ctx: LinkCtx): void {
     const { graph, linked } = ctx;
     const taken = new Set<string>(RESERVED);
@@ -226,7 +187,6 @@ function deconflict(ctx: LinkCtx): void {
         const sem = mod.semantic;
         for (let sym = 1; sym < sem.symCount; sym++) {
             if (sem.symScope[sym] !== moduleScope) continue;
-            // import locals are rewritten to their canonical target's name — skip
             if (mod.namedImports.has(sym)) continue;
             const original = sem.symDecl[sym]!.name;
             const final = claim(original);
@@ -239,8 +199,6 @@ function deconflict(ctx: LinkCtx): void {
     for (const [modIdx, base] of linked.namespaceOf) {
         linked.namespaceOf.set(modIdx, claim(base));
     }
-    // hoisted external bindings: one shared local per (specifier, imported name),
-    // preferring the first importer's local name as the base
     const claimExternal = (specifier: string, name: string, base: string): void => {
         const key = externalKey(specifier, name);
         if (linked.externalLocals.has(key)) return;
@@ -266,8 +224,6 @@ function deconflict(ctx: LinkCtx): void {
     }
 }
 
-/* ------------------------------------------------------------------ entry */
-
 /** Bind imports/exports across `graph`, order modules, and deconflict names into a {@link Linked}. */
 export function linkGraph(graph: Graph): Linked {
     const linked: Linked = {
@@ -288,7 +244,6 @@ export function linkGraph(graph: Graph): Linked {
         nextSynthetic: graph.modules.map((m) => m.semantic.symCount),
     };
 
-    // bind every named import of every included module
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
         for (const [localSym, imp] of mod.namedImports) {
@@ -308,14 +263,12 @@ export function linkGraph(graph: Graph): Linked {
             }
             linked.binds.set(packRef(idx, localSym), bind);
         }
-        // ensure the module's own anonymous default synthetic exists if exported
         const def = mod.namedExports.get(NAME_DEFAULT);
         if (def !== undefined && def.symbol === 0 && def.rec < 0 && def.exprNode !== null) {
             matchImport(ctx, mod, NAME_DEFAULT, new Set());
         }
     }
 
-    // materialize export maps for namespace-synthesized modules + the entry
     for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
     if (graph.entry >= 0) exportMapOf(ctx, graph.modules[graph.entry]);
 

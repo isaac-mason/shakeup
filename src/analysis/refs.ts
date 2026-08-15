@@ -20,11 +20,8 @@ export function walkRefIdents(
         cb(node, null);
         return;
     }
-    if (isIdentifier(node.type)) return; // IdentifierName / LabelIdentifier: pure names, no symbol
+    if (isIdentifier(node.type)) return;
     if (node.type === N.ObjectProperty && node.data.shorthand) {
-        // shorthand `{ a }` / `{ a = 1 }`: key is an IdentifierName (skip); the
-        // value is the ref/binding to expand. The value is either the bare
-        // ident or an AssignmentPattern wrapping it (`{ a = 1 }`).
         const value = node.data.value;
         if (value.type === N.BindingIdentifier || value.type === N.IdentifierReference) cb(value, node);
         else if (value.type === N.AssignmentPattern) {

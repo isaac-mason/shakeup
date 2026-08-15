@@ -4,15 +4,8 @@
  * the browser stays a first-class target. Paths are posix-style strings.
  */
 export type Fs = {
-    /** Source text for a resolved id, or null if it doesn't exist. */
     read(id: string): string | null;
-    /** Cheap existence probe (resolution runs many of these). */
     exists(id: string): boolean;
-    /**
-     * Canonicalize an id (resolve symlinks); identity when absent. Required for
-     * pnpm-workspace correctness: one real file via two symlink paths must be
-     * ONE module, and nested .pnpm dependency walks start from the real path.
-     */
     realpath?(id: string): string;
 };
 
@@ -24,8 +17,6 @@ export function createMemoryFs(files: Map<string, string> | Record<string, strin
         exists: (id) => map.has(id),
     };
 }
-
-/* ---------------------------------------------------- pure path utilities */
 
 /** Normalize a posix path: resolve '.' and '..' segments, collapse '//'. */
 export function normalizePath(path: string): string {

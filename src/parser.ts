@@ -1,45 +1,17 @@
-// src-typedata/parser.ts — fused lexer + parser emitting the TYPE+DATA tree
-// directly (src-typedata/ast.ts). Round 6 of the AST-model tournament.
-//
-// ROUND 6: this parser is now TYPEDATA'S OWN — no longer a costume over estree's
-// shared `make.X` dispatcher. It OWNS node construction: at each grammar site it
-// builds the outer `{ type, start, end, name, data }` literal DIRECTLY via a local
-// per-type constructor `m.X(start, end, flags, ...children)`. Each `m.X` writes
-// the outer keys in IDENTICAL order and returns a plain object literal, so the
-// whole tree remains ONE hidden class (the shape invariant is structural — every
-// constructor emits the same 5-slot key order). There is no `makeBuilder` switch,
-// no `mkNode` indirection, no Record lookup on the hot path: the estree-skeleton
-// dispatch is gone.
-//
-// THE POOL IS GONE. Source, the line table and the error sink are the PARSER's
-// own module-level state (fused, invisible to callers — the house pattern from
-// src/parser.ts). Leaves materialize their name/raw from `src` at scan time (and
-// intern identifier names — round-6 lever i3), so after `parse` returns nothing
-// references the source. Public API: `parse(source, options): { program, errors,
-// lines }` — no pool anywhere.
-//
-// The GRAMMAR is the reference parser's (src/parser.ts), ported faithfully: same
-// token machinery, same lookaheads, same TS corners (optional methods, class
-// index signatures, labeled rest tuples, generic-arrow / type-args speculation,
-// `>>`-splitting in type-arg context, declare-prefix rewrites).
-//
-// LIMIT (same as reference): no JSX; assignment-target destructuring stays as
-// literal expression nodes (patterns parsed only in binding positions).
-
 import { enumeration } from './util/enumeration';
 import {
+    node,
     type Node,
     type Program,
     type BindingIdentifier,
     type IdentifierReference,
     type IdentifierName,
     type LabelIdentifier,
-    type RawNode,
-    nodeType,
     N,
     nextNodeId,
     resetNodeIds,
     peekNodeId,
+    lineColOf,
     type Accessibility,
 } from './ast.ts';
 
@@ -47,18 +19,12 @@ import {
  * node whose role is fixed by the constructing call site. */
 type Identifier = BindingIdentifier | IdentifierReference | IdentifierName | LabelIdentifier;
 
-/* Identifier-role type ids, aliased for readable call sites (a name node's role
- * is a grammatical property of where it sits — the parser fixes it here). */
-const R_BIND = N.BindingIdentifier;   // declaring positions (var/fn/class/param/import-local/type-param names)
-const R_REF = N.IdentifierReference;  // resolving positions (expressions, assignment targets, export-local, type refs)
-const R_NAME = N.IdentifierName;      // pure names that never resolve (member props, keys, import/export externals, qualified-name right)
-const R_LABEL = N.LabelIdentifier;    // statement labels (decl + break/continue targets)
+const R_BIND = N.BindingIdentifier;
+const R_REF = N.IdentifierReference;
+const R_NAME = N.IdentifierName;
+const R_LABEL = N.LabelIdentifier;
 
-/* shared flag bits — the ints the parser computes and decodes into tight
- * payloads. NOT stored on the node (payloads carry every boolean/kind/operator
- * as a real field); this table is the parser's internal decode key (module-private). */
 const FL = {
-    /** Ident/PrivateIdent only: name lives in the name slot, not the span */
     NAMED: 1 << 0,
     ASYNC: 1 << 0,
     GENERATOR: 1 << 1,
@@ -77,39 +43,26 @@ const FL = {
     DEFINITE: 1 << 10,
     CONST_ENUM: 1 << 10,
     NAMESPACE: 1 << 11,
-    // 2-bit groups
-    KIND_SHIFT: 12, // Property/MethodDef kind: 0 init/method, 1 get, 2 set, 3 ctor
-    ACCESS_SHIFT: 14, // 0 none, 1 public, 2 private, 3 protected
+    KIND_SHIFT: 12,
+    ACCESS_SHIFT: 14,
 } as const;
 
-// VarDecl kinds in low bits
 const VAR_KIND = { VAR: 1, LET: 2, CONST: 3, KIND_MASK: 3 } as const;
 
-// operator codes (Binary/Logical/Assign/Unary/Update flags low 6 bits; must stay < 64)
 const OP = enumeration(
-    // binary
     'ADD', 'SUB', 'MUL', 'DIV', 'MOD', 'EXP',
     'SHL', 'SHR', 'USHR', 'BIT_AND', 'BIT_OR', 'BIT_XOR',
     'LT', 'GT', 'LE', 'GE', 'EQ', 'NE', 'SEQ', 'SNE',
     'IN', 'INSTANCEOF',
-    // logical
     'AND', 'OR', 'NULLISH',
-    // unary
     'NEG', 'POS', 'NOT', 'BIT_NOT', 'TYPEOF', 'VOID', 'DELETE',
-    // update
     'INC', 'DEC',
-    // assign
     'ASSIGN', 'ADD_A', 'SUB_A', 'MUL_A', 'DIV_A', 'MOD_A', 'EXP_A',
     'SHL_A', 'SHR_A', 'USHR_A', 'AND_A', 'OR_A', 'XOR_A',
     'LOGAND_A', 'LOGOR_A', 'NULLISH_A',
 );
 
 const TSOP = enumeration('KEYOF', 'READONLY', 'UNIQUE');
-
-/* ================================================================= operators
- *
- * flags-int -> operator-string decode tables, applied at each construction site.
- */
 
 const BIN_OP_NAME: string[] = [];
 const ASSIGN_OP_NAME: string[] = [];
@@ -146,138 +99,145 @@ function accessibilityOf(flags: number): Accessibility {
 /** A parse slot: a node object, or null when absent. (Replaces flat's `0`.) */
 type Ref = Node | null;
 
+/** The null-data TS keyword/leaf type ids the `keyword` helper materializes. */
+type KeywordType =
+    | typeof N.TSAnyKeyword | typeof N.TSStringKeyword | typeof N.TSNumberKeyword
+    | typeof N.TSBooleanKeyword | typeof N.TSBigIntKeyword | typeof N.TSSymbolKeyword
+    | typeof N.TSObjectKeyword | typeof N.TSVoidKeyword | typeof N.TSUndefinedKeyword
+    | typeof N.TSNullKeyword | typeof N.TSNeverKeyword | typeof N.TSUnknownKeyword
+    | typeof N.TSThisType;
+
 /** Parse errors and offsets. */
 export type ParseError = { pos: number; msg: string };
 
-/* ================================================= node construction (m.X)
- *
- * Typedata's OWN constructors. Each returns the outer node as a direct object
- * literal in the fixed key order { type, start, end, name, data } — one hidden
- * class for the whole tree. `flags` (the ints the grammar already computes) are
- * decoded into the tight payload here; children arrive as real Node refs (null =
- * absent) or Node[] lists. No pool, no dispatcher.
- */
-
 const m = {
-    // ---- leaves (interior code path; leaf TEXT is filled by ident()/leaf() below) ----
-    BooleanLiteral: (s: number, e: number, flags: number): RawNode => ({ id: nextId(), type: N.BooleanLiteral, start: s, end: e, name: flags !== 0 ? 'true' : 'false', data: null }),
-    NullLiteral: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.NullLiteral, start: s, end: e, name: 'null', data: null }),
-    ThisExpression: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.ThisExpression, start: s, end: e, name: '', data: null }),
-    Super: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.Super, start: s, end: e, name: '', data: null }),
-    EmptyStatement: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.EmptyStatement, start: s, end: e, name: '', data: null }),
-    DebuggerStatement: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.DebuggerStatement, start: s, end: e, name: '', data: null }),
-    ImportMeta: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.ImportMeta, start: s, end: e, name: '', data: null }),
-    NewTarget: (s: number, e: number, _f: number): RawNode => ({ id: nextId(), type: N.NewTarget, start: s, end: e, name: '', data: null }),
+    BooleanLiteral: (s: number, e: number, flags: number): Node => node(N.BooleanLiteral, s, e, flags !== 0 ? 'true' : 'false', null),
+    NullLiteral: (s: number, e: number, _f: number): Node => node(N.NullLiteral, s, e, 'null', null),
+    ThisExpression: (s: number, e: number, _f: number): Node => node(N.ThisExpression, s, e, '', null),
+    Super: (s: number, e: number, _f: number): Node => node(N.Super, s, e, '', null),
+    EmptyStatement: (s: number, e: number, _f: number): Node => node(N.EmptyStatement, s, e, '', null),
+    DebuggerStatement: (s: number, e: number, _f: number): Node => node(N.DebuggerStatement, s, e, '', null),
+    ImportMeta: (s: number, e: number, _f: number): Node => node(N.ImportMeta, s, e, '', null),
+    NewTarget: (s: number, e: number, _f: number): Node => node(N.NewTarget, s, e, '', null),
 
-    // ---- scalar-decoding interior nodes ----
-    BinaryExpression: (s: number, e: number, flags: number, l: Ref, r: Ref): RawNode => ({ id: nextId(), type: N.BinaryExpression, start: s, end: e, name: '', data: { operator: BIN_OP_NAME[flags & 63], left: l, right: r } }),
-    LogicalExpression: (s: number, e: number, flags: number, l: Ref, r: Ref): RawNode => ({ id: nextId(), type: N.LogicalExpression, start: s, end: e, name: '', data: { operator: LOGICAL_OP_NAME[flags & 63], left: l, right: r } }),
-    AssignmentExpression: (s: number, e: number, flags: number, l: Ref, r: Ref): RawNode => ({ id: nextId(), type: N.AssignmentExpression, start: s, end: e, name: '', data: { operator: ASSIGN_OP_NAME[flags & 63], left: l, right: r } }),
-    UnaryExpression: (s: number, e: number, flags: number, a: Ref): RawNode => ({ id: nextId(), type: N.UnaryExpression, start: s, end: e, name: '', data: { operator: UNARY_OP_NAME[flags & 63], prefix: true, argument: a } }),
-    UpdateExpression: (s: number, e: number, flags: number, a: Ref): RawNode => ({ id: nextId(), type: N.UpdateExpression, start: s, end: e, name: '', data: { operator: UPDATE_OP_NAME[flags & 63], prefix: (flags & FL.PREFIX) !== 0, argument: a } }),
-    ObjectProperty: (s: number, e: number, flags: number, key: Ref, value: Ref): RawNode => ({ id: nextId(), type: N.ObjectProperty, start: s, end: e, name: '', data: { key, value, kind: ['init', 'get', 'set'][(flags >> FL.KIND_SHIFT) & 3], computed: (flags & FL.COMPUTED) !== 0, shorthand: (flags & FL.SHORTHAND) !== 0 } }),
-    CallExpression: (s: number, e: number, flags: number, callee: Ref, args: Ref[] | null, typeArgs: Ref): RawNode => ({ id: nextId(), type: N.CallExpression, start: s, end: e, name: '', data: { callee, arguments: args ?? [], optional: (flags & FL.OPTIONAL) !== 0, typeArguments: typeArgs ?? null } }),
-    StaticMemberExpression: (s: number, e: number, flags: number, obj: Ref, prop: Ref): RawNode => ({ id: nextId(), type: N.StaticMemberExpression, start: s, end: e, name: '', data: { object: obj, property: prop, optional: (flags & FL.OPTIONAL) !== 0 } }),
-    ComputedMemberExpression: (s: number, e: number, flags: number, obj: Ref, expr: Ref): RawNode => ({ id: nextId(), type: N.ComputedMemberExpression, start: s, end: e, name: '', data: { object: obj, expression: expr, optional: (flags & FL.OPTIONAL) !== 0 } }),
-    PrivateFieldExpression: (s: number, e: number, flags: number, obj: Ref, field: Ref): RawNode => ({ id: nextId(), type: N.PrivateFieldExpression, start: s, end: e, name: '', data: { object: obj, field, optional: (flags & FL.OPTIONAL) !== 0 } }),
-    ChainExpression: (s: number, e: number, _f: number, expression: Ref): RawNode => ({ id: nextId(), type: N.ChainExpression, start: s, end: e, name: '', data: { expression } }),
-    ArrowFunctionExpression: (s: number, e: number, flags: number, tp: Ref, params: Ref[] | null, rt: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.ArrowFunctionExpression, start: s, end: e, name: '', data: { typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body, async: (flags & FL.ASYNC) !== 0, expression: (flags & FL.EXPR_BODY) !== 0 } }),
-    FunctionExpression: (s: number, e: number, flags: number, id: Ref, tp: Ref, params: Ref[] | null, rt: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.FunctionExpression, start: s, end: e, name: '', data: { id: id ?? null, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body: body ?? null, async: (flags & FL.ASYNC) !== 0, generator: (flags & FL.GENERATOR) !== 0 } }),
-    FunctionDeclaration: (s: number, e: number, flags: number, id: Ref, tp: Ref, params: Ref[] | null, rt: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.FunctionDeclaration, start: s, end: e, name: '', data: { id: id ?? null, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body: body ?? null, async: (flags & FL.ASYNC) !== 0, generator: (flags & FL.GENERATOR) !== 0, declare: (flags & FL.DECLARE) !== 0 } }),
-    ClassExpression: (s: number, e: number, _flags: number, id: Ref, tp: Ref, sc: Ref, sta: Ref, impl: Ref[] | null, body: Ref[] | null): RawNode => ({ id: nextId(), type: N.ClassExpression, start: s, end: e, name: '', data: { id: id ?? null, typeParameters: tp ?? null, superClass: sc ?? null, superTypeArguments: sta ?? null, implements: impl ?? [], body: body ?? [] } }),
-    ClassDeclaration: (s: number, e: number, flags: number, id: Ref, tp: Ref, sc: Ref, sta: Ref, impl: Ref[] | null, body: Ref[] | null): RawNode => ({ id: nextId(), type: N.ClassDeclaration, start: s, end: e, name: '', data: { id: id ?? null, typeParameters: tp ?? null, superClass: sc ?? null, superTypeArguments: sta ?? null, implements: impl ?? [], body: body ?? [], abstract: (flags & FL.ABSTRACT) !== 0, declare: (flags & FL.DECLARE) !== 0 } }),
-    YieldExpression: (s: number, e: number, flags: number, a: Ref): RawNode => ({ id: nextId(), type: N.YieldExpression, start: s, end: e, name: '', data: { argument: a ?? null, delegate: (flags & FL.DELEGATE) !== 0 } }),
-    VariableDeclaration: (s: number, e: number, flags: number, decls: Ref[] | null): RawNode => ({ id: nextId(), type: N.VariableDeclaration, start: s, end: e, name: '', data: { declarations: decls ?? [], kind: ['var', 'var', 'let', 'const'][flags & VAR_KIND.KIND_MASK], declare: (flags & FL.DECLARE) !== 0 } }),
-    VariableDeclarator: (s: number, e: number, flags: number, id: Ref, ta: Ref, init: Ref): RawNode => ({ id: nextId(), type: N.VariableDeclarator, start: s, end: e, name: '', data: { id, typeAnnotation: ta ?? null, init: init ?? null, definite: (flags & FL.DEFINITE) !== 0 } }),
-    ForOfStatement: (s: number, e: number, flags: number, left: Ref, right: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.ForOfStatement, start: s, end: e, name: '', data: { left, right, body, await: (flags & FL.AWAIT) !== 0 } }),
-    MethodDefinition: (s: number, e: number, flags: number, key: Ref, value: Ref): RawNode => ({ id: nextId(), type: N.MethodDefinition, start: s, end: e, name: '', data: { key, value, kind: ['method', 'get', 'set', 'constructor'][(flags >> FL.KIND_SHIFT) & 3], static: (flags & FL.STATIC) !== 0, computed: (flags & FL.COMPUTED) !== 0, optional: (flags & FL.OPTIONAL) !== 0, abstract: (flags & FL.ABSTRACT) !== 0, accessibility: accessibilityOf(flags) } }),
-    PropertyDefinition: (s: number, e: number, flags: number, key: Ref, ta: Ref, value: Ref): RawNode => ({ id: nextId(), type: N.PropertyDefinition, start: s, end: e, name: '', data: { key, typeAnnotation: ta ?? null, value: value ?? null, static: (flags & FL.STATIC) !== 0, computed: (flags & FL.COMPUTED) !== 0, readonly: (flags & FL.READONLY) !== 0, optional: (flags & FL.OPTIONAL) !== 0, definite: (flags & FL.DEFINITE) !== 0, declare: (flags & FL.DECLARE) !== 0, abstract: (flags & FL.ABSTRACT) !== 0, accessibility: accessibilityOf(flags) } }),
-    FormalParameter: (s: number, e: number, flags: number, pat: Ref, ta: Ref, init: Ref): RawNode => ({ id: nextId(), type: N.FormalParameter, start: s, end: e, name: '', data: { pattern: pat, typeAnnotation: ta ?? null, init: init ?? null, optional: (flags & FL.OPTIONAL) !== 0, readonly: (flags & FL.READONLY) !== 0, accessibility: accessibilityOf(flags) } }),
-    ImportDeclaration: (s: number, e: number, flags: number, specs: Ref[] | null, source: Ref): RawNode => ({ id: nextId(), type: N.ImportDeclaration, start: s, end: e, name: '', data: { specifiers: specs ?? [], source, importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' } }),
-    ImportSpecifier: (s: number, e: number, flags: number, local: Ref, imported: Ref): RawNode => ({ id: nextId(), type: N.ImportSpecifier, start: s, end: e, name: '', data: { local, imported, importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' } }),
-    ExportNamedDeclaration: (s: number, e: number, flags: number, decl: Ref, specs: Ref[] | null, source: Ref): RawNode => ({ id: nextId(), type: N.ExportNamedDeclaration, start: s, end: e, name: '', data: { declaration: decl ?? null, specifiers: specs ?? [], source: source ?? null, exportKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' } }),
-    ExportSpecifier: (s: number, e: number, flags: number, local: Ref, exported: Ref): RawNode => ({ id: nextId(), type: N.ExportSpecifier, start: s, end: e, name: '', data: { local, exported, exportKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' } }),
-    // keyword leaf: `kw` is already a TSXKeyword/TSThisType node type id (data:null leaf).
-    keyword: (s: number, e: number, kw: number): RawNode => ({ id: nextId(), type: kw, start: s, end: e, name: '', data: null }),
-    TSTypeParameter: (s: number, e: number, flags: number, name: Ref, constraint: Ref, dflt: Ref): RawNode => ({ id: nextId(), type: N.TSTypeParameter, start: s, end: e, name: '', data: { name, constraint: constraint ?? null, default: dflt ?? null, in: (flags & 1) !== 0, out: (flags & 2) !== 0, const: (flags & 4) !== 0 } }),
-    TSNamedTupleMember: (s: number, e: number, flags: number, label: Ref, elemType: Ref): RawNode => ({ id: nextId(), type: N.TSNamedTupleMember, start: s, end: e, name: '', data: { label, elementType: elemType, optional: (flags & FL.OPTIONAL) !== 0 } }),
-    TSPropertySignature: (s: number, e: number, flags: number, key: Ref, ta: Ref): RawNode => ({ id: nextId(), type: N.TSPropertySignature, start: s, end: e, name: '', data: { key, typeAnnotation: ta ?? null, optional: (flags & FL.OPTIONAL) !== 0, readonly: (flags & FL.READONLY) !== 0, computed: (flags & FL.COMPUTED) !== 0 } }),
-    TSMethodSignature: (s: number, e: number, flags: number, key: Ref, tp: Ref, params: Ref[] | null, rt: Ref): RawNode => ({ id: nextId(), type: N.TSMethodSignature, start: s, end: e, name: '', data: { key, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, optional: (flags & FL.OPTIONAL) !== 0, kind: ['method', 'get', 'set'][(flags >> FL.KIND_SHIFT) & 3], computed: (flags & FL.COMPUTED) !== 0 } }),
-    TSIndexSignature: (s: number, e: number, flags: number, param: Ref, ta: Ref): RawNode => ({ id: nextId(), type: N.TSIndexSignature, start: s, end: e, name: '', data: { parameter: param, typeAnnotation: ta ?? null, readonly: (flags & FL.READONLY) !== 0 } }),
-    TSTypeOperator: (s: number, e: number, flags: number, ta: Ref): RawNode => ({ id: nextId(), type: N.TSTypeOperator, start: s, end: e, name: '', data: { operator: flags === 1 ? 'keyof' : flags === 2 ? 'readonly' : flags === 3 ? 'unique' : '', typeAnnotation: ta } }),
-    TSMappedType: (s: number, e: number, flags: number, tp: Ref, nameType: Ref, ta: Ref): RawNode => ({ id: nextId(), type: N.TSMappedType, start: s, end: e, name: '', data: { typeParameter: tp, nameType: nameType ?? null, typeAnnotation: ta ?? null, readonlyMod: (flags >> 4) & 3, optionalMod: (flags >> 6) & 3 } }),
-    TSConstructorType: (s: number, e: number, flags: number, tp: Ref, params: Ref[] | null, rt: Ref): RawNode => ({ id: nextId(), type: N.TSConstructorType, start: s, end: e, name: '', data: { typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, abstract: (flags & FL.ABSTRACT) !== 0 } }),
-    TSInterfaceDeclaration: (s: number, e: number, flags: number, id: Ref, tp: Ref, ext: Ref[] | null, body: Ref[] | null): RawNode => ({ id: nextId(), type: N.TSInterfaceDeclaration, start: s, end: e, name: '', data: { id, typeParameters: tp ?? null, extends: ext ?? [], body: body ?? [], declare: (flags & FL.DECLARE) !== 0 } }),
-    TSTypeAliasDeclaration: (s: number, e: number, flags: number, id: Ref, tp: Ref, ta: Ref): RawNode => ({ id: nextId(), type: N.TSTypeAliasDeclaration, start: s, end: e, name: '', data: { id, typeParameters: tp ?? null, typeAnnotation: ta, declare: (flags & FL.DECLARE) !== 0 } }),
-    TSEnumDeclaration: (s: number, e: number, flags: number, id: Ref, members: Ref[] | null): RawNode => ({ id: nextId(), type: N.TSEnumDeclaration, start: s, end: e, name: '', data: { id, members: members ?? [], const: (flags & FL.CONST_ENUM) !== 0, declare: (flags & FL.DECLARE) !== 0 } }),
-    TSModuleDeclaration: (s: number, e: number, flags: number, id: Ref, body: Ref[] | null): RawNode => ({ id: nextId(), type: N.TSModuleDeclaration, start: s, end: e, name: '', data: { id, body: body ?? [], declare: (flags & FL.DECLARE) !== 0, namespace: (flags & FL.NAMESPACE) !== 0 } }),
+    BinaryExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node => node(N.BinaryExpression, s, e, '', { operator: BIN_OP_NAME[flags & 63], left: l, right: r }),
+    LogicalExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node => node(N.LogicalExpression, s, e, '', { operator: LOGICAL_OP_NAME[flags & 63], left: l, right: r }),
+    AssignmentExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node => node(N.AssignmentExpression, s, e, '', { operator: ASSIGN_OP_NAME[flags & 63], left: l, right: r }),
+    UnaryExpression: (s: number, e: number, flags: number, a: Node): Node => node(N.UnaryExpression, s, e, '', { operator: UNARY_OP_NAME[flags & 63], prefix: true, argument: a }),
+    UpdateExpression: (s: number, e: number, flags: number, a: Node): Node => node(N.UpdateExpression, s, e, '', { operator: UPDATE_OP_NAME[flags & 63], prefix: (flags & FL.PREFIX) !== 0, argument: a }),
+    ObjectProperty: (s: number, e: number, flags: number, key: Node, value: Node): Node => node(N.ObjectProperty, s, e, '', { key, value, kind: (['init', 'get', 'set'] as const)[(flags >> FL.KIND_SHIFT) & 3], computed: (flags & FL.COMPUTED) !== 0, shorthand: (flags & FL.SHORTHAND) !== 0 }),
+    CallExpression: (s: number, e: number, flags: number, callee: Node, args: Node[] | null, typeArgs: Node | null): Node => node(N.CallExpression, s, e, '', { callee, arguments: args ?? [], optional: (flags & FL.OPTIONAL) !== 0, typeArguments: typeArgs ?? null }),
+    StaticMemberExpression: (s: number, e: number, flags: number, obj: Node, prop: Node): Node => node(N.StaticMemberExpression, s, e, '', { object: obj, property: prop, optional: (flags & FL.OPTIONAL) !== 0 }),
+    ComputedMemberExpression: (s: number, e: number, flags: number, obj: Node, expr: Node): Node => node(N.ComputedMemberExpression, s, e, '', { object: obj, expression: expr, optional: (flags & FL.OPTIONAL) !== 0 }),
+    PrivateFieldExpression: (s: number, e: number, flags: number, obj: Node, field: Node): Node => node(N.PrivateFieldExpression, s, e, '', { object: obj, field, optional: (flags & FL.OPTIONAL) !== 0 }),
+    ChainExpression: (s: number, e: number, _f: number, expression: Node): Node => node(N.ChainExpression, s, e, '', { expression }),
+    ArrowFunctionExpression: (s: number, e: number, flags: number, tp: Node | null, params: Node[] | null, rt: Node | null, body: Node): Node => node(N.ArrowFunctionExpression, s, e, '', { typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body, async: (flags & FL.ASYNC) !== 0, expression: (flags & FL.EXPR_BODY) !== 0 }),
+    FunctionExpression: (s: number, e: number, flags: number, id: Node | null, tp: Node | null, params: Node[] | null, rt: Node | null, body: Node | null): Node => node(N.FunctionExpression, s, e, '', { id: id ?? null, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body: body ?? null, async: (flags & FL.ASYNC) !== 0, generator: (flags & FL.GENERATOR) !== 0 }),
+    FunctionDeclaration: (s: number, e: number, flags: number, id: Node | null, tp: Node | null, params: Node[] | null, rt: Node | null, body: Node | null): Node => node(N.FunctionDeclaration, s, e, '', { id: id ?? null, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, body: body ?? null, async: (flags & FL.ASYNC) !== 0, generator: (flags & FL.GENERATOR) !== 0, declare: (flags & FL.DECLARE) !== 0 }),
+    ClassExpression: (s: number, e: number, _flags: number, id: Node | null, tp: Node | null, sc: Node | null, sta: Node | null, impl: Node[] | null, body: Node[] | null): Node => node(N.ClassExpression, s, e, '', { id: id ?? null, typeParameters: tp ?? null, superClass: sc ?? null, superTypeArguments: sta ?? null, implements: impl ?? [], body: body ?? [] }),
+    ClassDeclaration: (s: number, e: number, flags: number, id: Node | null, tp: Node | null, sc: Node | null, sta: Node | null, impl: Node[] | null, body: Node[] | null): Node => node(N.ClassDeclaration, s, e, '', { id: id ?? null, typeParameters: tp ?? null, superClass: sc ?? null, superTypeArguments: sta ?? null, implements: impl ?? [], body: body ?? [], abstract: (flags & FL.ABSTRACT) !== 0, declare: (flags & FL.DECLARE) !== 0 }),
+    YieldExpression: (s: number, e: number, flags: number, a: Node | null): Node => node(N.YieldExpression, s, e, '', { argument: a ?? null, delegate: (flags & FL.DELEGATE) !== 0 }),
+    VariableDeclaration: (s: number, e: number, flags: number, decls: Node[] | null): Node => node(N.VariableDeclaration, s, e, '', { declarations: decls ?? [], kind: (['var', 'var', 'let', 'const'] as const)[flags & VAR_KIND.KIND_MASK], declare: (flags & FL.DECLARE) !== 0 }),
+    VariableDeclarator: (s: number, e: number, flags: number, id: Node, ta: Node | null, init: Node | null): Node => node(N.VariableDeclarator, s, e, '', { id, typeAnnotation: ta ?? null, init: init ?? null, definite: (flags & FL.DEFINITE) !== 0 }),
+    ForOfStatement: (s: number, e: number, flags: number, left: Node, right: Node, body: Node): Node => node(N.ForOfStatement, s, e, '', { left, right, body, await: (flags & FL.AWAIT) !== 0 }),
+    MethodDefinition: (s: number, e: number, flags: number, key: Node, value: Node): Node => node(N.MethodDefinition, s, e, '', { key, value, kind: (['method', 'get', 'set', 'constructor'] as const)[(flags >> FL.KIND_SHIFT) & 3], static: (flags & FL.STATIC) !== 0, computed: (flags & FL.COMPUTED) !== 0, optional: (flags & FL.OPTIONAL) !== 0, abstract: (flags & FL.ABSTRACT) !== 0, accessibility: accessibilityOf(flags) }),
+    PropertyDefinition: (s: number, e: number, flags: number, key: Node, ta: Node | null, value: Node | null): Node => node(N.PropertyDefinition, s, e, '', { key, typeAnnotation: ta ?? null, value: value ?? null, static: (flags & FL.STATIC) !== 0, computed: (flags & FL.COMPUTED) !== 0, readonly: (flags & FL.READONLY) !== 0, optional: (flags & FL.OPTIONAL) !== 0, definite: (flags & FL.DEFINITE) !== 0, declare: (flags & FL.DECLARE) !== 0, abstract: (flags & FL.ABSTRACT) !== 0, accessibility: accessibilityOf(flags) }),
+    FormalParameter: (s: number, e: number, flags: number, pat: Node, ta: Node | null, init: Node | null): Node => node(N.FormalParameter, s, e, '', { pattern: pat, typeAnnotation: ta ?? null, init: init ?? null, optional: (flags & FL.OPTIONAL) !== 0, readonly: (flags & FL.READONLY) !== 0, accessibility: accessibilityOf(flags) }),
+    ImportDeclaration: (s: number, e: number, flags: number, specs: Node[] | null, source: Node): Node => node(N.ImportDeclaration, s, e, '', { specifiers: specs ?? [], source, importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' }),
+    ImportSpecifier: (s: number, e: number, flags: number, local: Node, imported: Node): Node => node(N.ImportSpecifier, s, e, '', { local, imported, importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' }),
+    ExportNamedDeclaration: (s: number, e: number, flags: number, decl: Node | null, specs: Node[] | null, source: Node | null): Node => node(N.ExportNamedDeclaration, s, e, '', { declaration: decl ?? null, specifiers: specs ?? [], source: source ?? null, exportKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' }),
+    ExportSpecifier: (s: number, e: number, flags: number, local: Node, exported: Node): Node => node(N.ExportSpecifier, s, e, '', { local, exported, exportKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' }),
+    keyword: (s: number, e: number, kw: KeywordType): Node => node(kw, s, e, '', null),
+    TSTypeParameter: (s: number, e: number, flags: number, name: Node, constraint: Node | null, dflt: Node | null): Node => node(N.TSTypeParameter, s, e, '', { name, constraint: constraint ?? null, default: dflt ?? null, in: (flags & 1) !== 0, out: (flags & 2) !== 0, const: (flags & 4) !== 0 }),
+    TSNamedTupleMember: (s: number, e: number, flags: number, label: Node, elemType: Node): Node => node(N.TSNamedTupleMember, s, e, '', { label, elementType: elemType, optional: (flags & FL.OPTIONAL) !== 0 }),
+    TSPropertySignature: (s: number, e: number, flags: number, key: Node, ta: Node | null): Node => node(N.TSPropertySignature, s, e, '', { key, typeAnnotation: ta ?? null, optional: (flags & FL.OPTIONAL) !== 0, readonly: (flags & FL.READONLY) !== 0, computed: (flags & FL.COMPUTED) !== 0 }),
+    TSMethodSignature: (s: number, e: number, flags: number, key: Node, tp: Node | null, params: Node[] | null, rt: Node | null): Node => node(N.TSMethodSignature, s, e, '', { key, typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, optional: (flags & FL.OPTIONAL) !== 0, kind: (['method', 'get', 'set'] as const)[(flags >> FL.KIND_SHIFT) & 3], computed: (flags & FL.COMPUTED) !== 0 }),
+    TSIndexSignature: (s: number, e: number, flags: number, param: Node, ta: Node | null): Node => node(N.TSIndexSignature, s, e, '', { parameter: param, typeAnnotation: ta ?? null, readonly: (flags & FL.READONLY) !== 0 }),
+    TSTypeOperator: (s: number, e: number, flags: number, ta: Node): Node => node(N.TSTypeOperator, s, e, '', { operator: flags === 1 ? 'keyof' : flags === 2 ? 'readonly' : flags === 3 ? 'unique' : '', typeAnnotation: ta }),
+    TSMappedType: (s: number, e: number, flags: number, tp: Node, nameType: Node | null, ta: Node | null): Node => node(N.TSMappedType, s, e, '', { typeParameter: tp, nameType: nameType ?? null, typeAnnotation: ta ?? null, readonlyMod: (flags >> 4) & 3, optionalMod: (flags >> 6) & 3 }),
+    TSConstructorType: (s: number, e: number, flags: number, tp: Node | null, params: Node[] | null, rt: Node | null): Node => node(N.TSConstructorType, s, e, '', { typeParameters: tp ?? null, params: params ?? [], returnType: rt ?? null, abstract: (flags & FL.ABSTRACT) !== 0 }),
+    TSInterfaceDeclaration: (s: number, e: number, flags: number, id: Node, tp: Node | null, ext: Node[] | null, body: Node[] | null): Node => node(N.TSInterfaceDeclaration, s, e, '', { id, typeParameters: tp ?? null, extends: ext ?? [], body: body ?? [], declare: (flags & FL.DECLARE) !== 0 }),
+    TSTypeAliasDeclaration: (s: number, e: number, flags: number, id: Node, tp: Node | null, ta: Node): Node => node(N.TSTypeAliasDeclaration, s, e, '', { id, typeParameters: tp ?? null, typeAnnotation: ta, declare: (flags & FL.DECLARE) !== 0 }),
+    TSEnumDeclaration: (s: number, e: number, flags: number, id: Node, members: Node[] | null): Node => node(N.TSEnumDeclaration, s, e, '', { id, members: members ?? [], const: (flags & FL.CONST_ENUM) !== 0, declare: (flags & FL.DECLARE) !== 0 }),
+    TSModuleDeclaration: (s: number, e: number, flags: number, id: Node, body: Node[] | null): Node => node(N.TSModuleDeclaration, s, e, '', { id, body: body ?? [], declare: (flags & FL.DECLARE) !== 0, namespace: (flags & FL.NAMESPACE) !== 0 }),
 
-    // ---- plain interior nodes: payload keys in schema order, direct literal ----
-    Program: (s: number, e: number, _f: number, body: Ref[]): RawNode => ({ id: nextId(), type: N.Program, start: s, end: e, name: '', data: { body } }),
-    TemplateLiteral: (s: number, e: number, _f: number, quasis: Ref[], expressions: Ref[]): RawNode => ({ id: nextId(), type: N.TemplateLiteral, start: s, end: e, name: '', data: { quasis, expressions } }),
-    TaggedTemplateExpression: (s: number, e: number, _f: number, tag: Ref, quasi: Ref): RawNode => ({ id: nextId(), type: N.TaggedTemplateExpression, start: s, end: e, name: '', data: { tag, quasi } }),
-    ArrayExpression: (s: number, e: number, _f: number, elements: Ref[]): RawNode => ({ id: nextId(), type: N.ArrayExpression, start: s, end: e, name: '', data: { elements } }),
-    ObjectExpression: (s: number, e: number, _f: number, properties: Ref[]): RawNode => ({ id: nextId(), type: N.ObjectExpression, start: s, end: e, name: '', data: { properties } }),
-    SpreadElement: (s: number, e: number, _f: number, argument: Ref): RawNode => ({ id: nextId(), type: N.SpreadElement, start: s, end: e, name: '', data: { argument } }),
-    ConditionalExpression: (s: number, e: number, _f: number, test: Ref, consequent: Ref, alternate: Ref): RawNode => ({ id: nextId(), type: N.ConditionalExpression, start: s, end: e, name: '', data: { test, consequent, alternate } }),
-    NewExpression: (s: number, e: number, _f: number, callee: Ref, args: Ref[] | null, typeArgs: Ref): RawNode => ({ id: nextId(), type: N.NewExpression, start: s, end: e, name: '', data: { callee, arguments: args ?? [], typeArguments: typeArgs ?? null } }),
-    SequenceExpression: (s: number, e: number, _f: number, expressions: Ref[]): RawNode => ({ id: nextId(), type: N.SequenceExpression, start: s, end: e, name: '', data: { expressions } }),
-    AwaitExpression: (s: number, e: number, _f: number, argument: Ref): RawNode => ({ id: nextId(), type: N.AwaitExpression, start: s, end: e, name: '', data: { argument } }),
-    ImportExpression: (s: number, e: number, _f: number, source: Ref, options: Ref): RawNode => ({ id: nextId(), type: N.ImportExpression, start: s, end: e, name: '', data: { source, options: options ?? null } }),
-    ExpressionStatement: (s: number, e: number, _f: number, expression: Ref): RawNode => ({ id: nextId(), type: N.ExpressionStatement, start: s, end: e, name: '', data: { expression } }),
-    BlockStatement: (s: number, e: number, _f: number, body: Ref[]): RawNode => ({ id: nextId(), type: N.BlockStatement, start: s, end: e, name: '', data: { body } }),
-    IfStatement: (s: number, e: number, _f: number, test: Ref, consequent: Ref, alternate: Ref): RawNode => ({ id: nextId(), type: N.IfStatement, start: s, end: e, name: '', data: { test, consequent, alternate: alternate ?? null } }),
-    ForStatement: (s: number, e: number, _f: number, init: Ref, test: Ref, update: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.ForStatement, start: s, end: e, name: '', data: { init: init ?? null, test: test ?? null, update: update ?? null, body } }),
-    ForInStatement: (s: number, e: number, _f: number, left: Ref, right: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.ForInStatement, start: s, end: e, name: '', data: { left, right, body } }),
-    WhileStatement: (s: number, e: number, _f: number, test: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.WhileStatement, start: s, end: e, name: '', data: { test, body } }),
-    DoWhileStatement: (s: number, e: number, _f: number, body: Ref, test: Ref): RawNode => ({ id: nextId(), type: N.DoWhileStatement, start: s, end: e, name: '', data: { body, test } }),
-    SwitchStatement: (s: number, e: number, _f: number, discriminant: Ref, cases: Ref[]): RawNode => ({ id: nextId(), type: N.SwitchStatement, start: s, end: e, name: '', data: { discriminant, cases } }),
-    SwitchCase: (s: number, e: number, _f: number, test: Ref, consequent: Ref[]): RawNode => ({ id: nextId(), type: N.SwitchCase, start: s, end: e, name: '', data: { test: test ?? null, consequent } }),
-    TryStatement: (s: number, e: number, _f: number, block: Ref, handler: Ref, finalizer: Ref): RawNode => ({ id: nextId(), type: N.TryStatement, start: s, end: e, name: '', data: { block, handler: handler ?? null, finalizer: finalizer ?? null } }),
-    CatchClause: (s: number, e: number, _f: number, param: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.CatchClause, start: s, end: e, name: '', data: { param: param ?? null, body } }),
-    ReturnStatement: (s: number, e: number, _f: number, argument: Ref): RawNode => ({ id: nextId(), type: N.ReturnStatement, start: s, end: e, name: '', data: { argument: argument ?? null } }),
-    ThrowStatement: (s: number, e: number, _f: number, argument: Ref): RawNode => ({ id: nextId(), type: N.ThrowStatement, start: s, end: e, name: '', data: { argument } }),
-    BreakStatement: (s: number, e: number, _f: number, label: Ref): RawNode => ({ id: nextId(), type: N.BreakStatement, start: s, end: e, name: '', data: { label: label ?? null } }),
-    ContinueStatement: (s: number, e: number, _f: number, label: Ref): RawNode => ({ id: nextId(), type: N.ContinueStatement, start: s, end: e, name: '', data: { label: label ?? null } }),
-    LabeledStatement: (s: number, e: number, _f: number, label: Ref, body: Ref): RawNode => ({ id: nextId(), type: N.LabeledStatement, start: s, end: e, name: '', data: { label, body } }),
-    StaticBlock: (s: number, e: number, _f: number, body: Ref[]): RawNode => ({ id: nextId(), type: N.StaticBlock, start: s, end: e, name: '', data: { body } }),
-    ObjectPattern: (s: number, e: number, _f: number, properties: Ref[]): RawNode => ({ id: nextId(), type: N.ObjectPattern, start: s, end: e, name: '', data: { properties } }),
-    ArrayPattern: (s: number, e: number, _f: number, elements: Ref[]): RawNode => ({ id: nextId(), type: N.ArrayPattern, start: s, end: e, name: '', data: { elements } }),
-    AssignmentPattern: (s: number, e: number, _f: number, left: Ref, right: Ref): RawNode => ({ id: nextId(), type: N.AssignmentPattern, start: s, end: e, name: '', data: { left, right } }),
-    RestElement: (s: number, e: number, _f: number, argument: Ref, typeAnnotation: Ref): RawNode => ({ id: nextId(), type: N.RestElement, start: s, end: e, name: '', data: { argument, typeAnnotation: typeAnnotation ?? null } }),
-    ImportDefaultSpecifier: (s: number, e: number, _f: number, local: Ref): RawNode => ({ id: nextId(), type: N.ImportDefaultSpecifier, start: s, end: e, name: '', data: { local } }),
-    ImportNamespaceSpecifier: (s: number, e: number, _f: number, local: Ref): RawNode => ({ id: nextId(), type: N.ImportNamespaceSpecifier, start: s, end: e, name: '', data: { local } }),
-    ExportDefaultDeclaration: (s: number, e: number, _f: number, declaration: Ref): RawNode => ({ id: nextId(), type: N.ExportDefaultDeclaration, start: s, end: e, name: '', data: { declaration } }),
-    ExportAllDeclaration: (s: number, e: number, _f: number, source: Ref, exported: Ref): RawNode => ({ id: nextId(), type: N.ExportAllDeclaration, start: s, end: e, name: '', data: { source, exported: exported ?? null } }),
-    TSTypeAnnotation: (s: number, e: number, _f: number, typeAnnotation: Ref): RawNode => ({ id: nextId(), type: N.TSTypeAnnotation, start: s, end: e, name: '', data: { typeAnnotation } }),
-    TSTypeReference: (s: number, e: number, _f: number, typeName: Ref, typeArguments: Ref): RawNode => ({ id: nextId(), type: N.TSTypeReference, start: s, end: e, name: '', data: { typeName, typeArguments: typeArguments ?? null } }),
-    TSQualifiedName: (s: number, e: number, _f: number, left: Ref, right: Ref): RawNode => ({ id: nextId(), type: N.TSQualifiedName, start: s, end: e, name: '', data: { left, right } }),
-    TSTypeParameterInstantiation: (s: number, e: number, _f: number, params: Ref[]): RawNode => ({ id: nextId(), type: N.TSTypeParameterInstantiation, start: s, end: e, name: '', data: { params } }),
-    TSTypeParameterDeclaration: (s: number, e: number, _f: number, params: Ref[]): RawNode => ({ id: nextId(), type: N.TSTypeParameterDeclaration, start: s, end: e, name: '', data: { params } }),
-    TSTupleType: (s: number, e: number, _f: number, elementTypes: Ref[]): RawNode => ({ id: nextId(), type: N.TSTupleType, start: s, end: e, name: '', data: { elementTypes } }),
-    TSTypeLiteral: (s: number, e: number, _f: number, members: Ref[]): RawNode => ({ id: nextId(), type: N.TSTypeLiteral, start: s, end: e, name: '', data: { members } }),
-    TSCallSignatureDeclaration: (s: number, e: number, _f: number, typeParameters: Ref, params: Ref[] | null, returnType: Ref): RawNode => ({ id: nextId(), type: N.TSCallSignatureDeclaration, start: s, end: e, name: '', data: { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null } }),
-    TSConstructSignatureDeclaration: (s: number, e: number, _f: number, typeParameters: Ref, params: Ref[] | null, returnType: Ref): RawNode => ({ id: nextId(), type: N.TSConstructSignatureDeclaration, start: s, end: e, name: '', data: { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null } }),
-    TSUnionType: (s: number, e: number, _f: number, types: Ref[]): RawNode => ({ id: nextId(), type: N.TSUnionType, start: s, end: e, name: '', data: { types } }),
-    TSIntersectionType: (s: number, e: number, _f: number, types: Ref[]): RawNode => ({ id: nextId(), type: N.TSIntersectionType, start: s, end: e, name: '', data: { types } }),
-    TSFunctionType: (s: number, e: number, _f: number, typeParameters: Ref, params: Ref[] | null, returnType: Ref): RawNode => ({ id: nextId(), type: N.TSFunctionType, start: s, end: e, name: '', data: { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null } }),
-    TSArrayType: (s: number, e: number, _f: number, elementType: Ref): RawNode => ({ id: nextId(), type: N.TSArrayType, start: s, end: e, name: '', data: { elementType } }),
-    TSIndexedAccessType: (s: number, e: number, _f: number, objectType: Ref, indexType: Ref): RawNode => ({ id: nextId(), type: N.TSIndexedAccessType, start: s, end: e, name: '', data: { objectType, indexType } }),
-    TSTypeQuery: (s: number, e: number, _f: number, exprName: Ref, typeArguments: Ref): RawNode => ({ id: nextId(), type: N.TSTypeQuery, start: s, end: e, name: '', data: { exprName, typeArguments: typeArguments ?? null } }),
-    TSConditionalType: (s: number, e: number, _f: number, checkType: Ref, extendsType: Ref, trueType: Ref, falseType: Ref): RawNode => ({ id: nextId(), type: N.TSConditionalType, start: s, end: e, name: '', data: { checkType, extendsType, trueType, falseType } }),
-    TSInferType: (s: number, e: number, _f: number, typeParameter: Ref): RawNode => ({ id: nextId(), type: N.TSInferType, start: s, end: e, name: '', data: { typeParameter } }),
-    TSLiteralType: (s: number, e: number, _f: number, literal: Ref): RawNode => ({ id: nextId(), type: N.TSLiteralType, start: s, end: e, name: '', data: { literal } }),
-    TSTemplateLiteralType: (s: number, e: number, _f: number, quasis: Ref[], types: Ref[]): RawNode => ({ id: nextId(), type: N.TSTemplateLiteralType, start: s, end: e, name: '', data: { quasis, types } }),
-    TSImportType: (s: number, e: number, _f: number, source: Ref, qualifier: Ref, typeArguments: Ref): RawNode => ({ id: nextId(), type: N.TSImportType, start: s, end: e, name: '', data: { source, qualifier: qualifier ?? null, typeArguments: typeArguments ?? null } }),
-    TSClassImplements: (s: number, e: number, _f: number, expression: Ref, typeArguments: Ref): RawNode => ({ id: nextId(), type: N.TSClassImplements, start: s, end: e, name: '', data: { expression, typeArguments: typeArguments ?? null } }),
-    TSInterfaceHeritage: (s: number, e: number, _f: number, expression: Ref, typeArguments: Ref): RawNode => ({ id: nextId(), type: N.TSInterfaceHeritage, start: s, end: e, name: '', data: { expression, typeArguments: typeArguments ?? null } }),
-    TSEnumMember: (s: number, e: number, _f: number, id: Ref, initializer: Ref): RawNode => ({ id: nextId(), type: N.TSEnumMember, start: s, end: e, name: '', data: { id, initializer: initializer ?? null } }),
-    TSAsExpression: (s: number, e: number, _f: number, expression: Ref, typeAnnotation: Ref): RawNode => ({ id: nextId(), type: N.TSAsExpression, start: s, end: e, name: '', data: { expression, typeAnnotation } }),
-    TSSatisfiesExpression: (s: number, e: number, _f: number, expression: Ref, typeAnnotation: Ref): RawNode => ({ id: nextId(), type: N.TSSatisfiesExpression, start: s, end: e, name: '', data: { expression, typeAnnotation } }),
-    TSNonNullExpression: (s: number, e: number, _f: number, expression: Ref): RawNode => ({ id: nextId(), type: N.TSNonNullExpression, start: s, end: e, name: '', data: { expression } }),
+    Program: (s: number, e: number, _f: number, body: Node[]): Node => node(N.Program, s, e, '', { body }),
+    TemplateLiteral: (s: number, e: number, _f: number, quasis: Node[], expressions: Node[]): Node => node(N.TemplateLiteral, s, e, '', { quasis, expressions }),
+    TaggedTemplateExpression: (s: number, e: number, _f: number, tag: Node, quasi: Node): Node => node(N.TaggedTemplateExpression, s, e, '', { tag, quasi }),
+    ArrayExpression: (s: number, e: number, _f: number, elements: (Node | null)[]): Node => node(N.ArrayExpression, s, e, '', { elements }),
+    ObjectExpression: (s: number, e: number, _f: number, properties: Node[]): Node => node(N.ObjectExpression, s, e, '', { properties }),
+    SpreadElement: (s: number, e: number, _f: number, argument: Node): Node => node(N.SpreadElement, s, e, '', { argument }),
+    ConditionalExpression: (s: number, e: number, _f: number, test: Node, consequent: Node, alternate: Node): Node => node(N.ConditionalExpression, s, e, '', { test, consequent, alternate }),
+    NewExpression: (s: number, e: number, _f: number, callee: Node, args: Node[] | null, typeArgs: Node | null): Node => node(N.NewExpression, s, e, '', { callee, arguments: args ?? [], typeArguments: typeArgs ?? null }),
+    SequenceExpression: (s: number, e: number, _f: number, expressions: Node[]): Node => node(N.SequenceExpression, s, e, '', { expressions }),
+    AwaitExpression: (s: number, e: number, _f: number, argument: Node): Node => node(N.AwaitExpression, s, e, '', { argument }),
+    ImportExpression: (s: number, e: number, _f: number, source: Node, options: Node | null): Node => node(N.ImportExpression, s, e, '', { source, options: options ?? null }),
+    ExpressionStatement: (s: number, e: number, _f: number, expression: Node): Node => node(N.ExpressionStatement, s, e, '', { expression }),
+    BlockStatement: (s: number, e: number, _f: number, body: Node[]): Node => node(N.BlockStatement, s, e, '', { body }),
+    IfStatement: (s: number, e: number, _f: number, test: Node, consequent: Node, alternate: Node | null): Node => node(N.IfStatement, s, e, '', { test, consequent, alternate: alternate ?? null }),
+    ForStatement: (s: number, e: number, _f: number, init: Node | null, test: Node | null, update: Node | null, body: Node): Node => node(N.ForStatement, s, e, '', { init: init ?? null, test: test ?? null, update: update ?? null, body }),
+    ForInStatement: (s: number, e: number, _f: number, left: Node, right: Node, body: Node): Node => node(N.ForInStatement, s, e, '', { left, right, body }),
+    WhileStatement: (s: number, e: number, _f: number, test: Node, body: Node): Node => node(N.WhileStatement, s, e, '', { test, body }),
+    DoWhileStatement: (s: number, e: number, _f: number, body: Node, test: Node): Node => node(N.DoWhileStatement, s, e, '', { body, test }),
+    SwitchStatement: (s: number, e: number, _f: number, discriminant: Node, cases: Node[]): Node => node(N.SwitchStatement, s, e, '', { discriminant, cases }),
+    SwitchCase: (s: number, e: number, _f: number, test: Node | null, consequent: Node[]): Node => node(N.SwitchCase, s, e, '', { test: test ?? null, consequent }),
+    TryStatement: (s: number, e: number, _f: number, block: Node, handler: Node | null, finalizer: Node | null): Node => node(N.TryStatement, s, e, '', { block, handler: handler ?? null, finalizer: finalizer ?? null }),
+    CatchClause: (s: number, e: number, _f: number, param: Node | null, body: Node): Node => node(N.CatchClause, s, e, '', { param: param ?? null, body }),
+    ReturnStatement: (s: number, e: number, _f: number, argument: Node | null): Node => node(N.ReturnStatement, s, e, '', { argument: argument ?? null }),
+    ThrowStatement: (s: number, e: number, _f: number, argument: Node): Node => node(N.ThrowStatement, s, e, '', { argument }),
+    BreakStatement: (s: number, e: number, _f: number, label: Node | null): Node => node(N.BreakStatement, s, e, '', { label: label ?? null }),
+    ContinueStatement: (s: number, e: number, _f: number, label: Node | null): Node => node(N.ContinueStatement, s, e, '', { label: label ?? null }),
+    LabeledStatement: (s: number, e: number, _f: number, label: Node, body: Node): Node => node(N.LabeledStatement, s, e, '', { label, body }),
+    StaticBlock: (s: number, e: number, _f: number, body: Node[]): Node => node(N.StaticBlock, s, e, '', { body }),
+    ObjectPattern: (s: number, e: number, _f: number, properties: Node[]): Node => node(N.ObjectPattern, s, e, '', { properties }),
+    ArrayPattern: (s: number, e: number, _f: number, elements: (Node | null)[]): Node => node(N.ArrayPattern, s, e, '', { elements }),
+    AssignmentPattern: (s: number, e: number, _f: number, left: Node, right: Node): Node => node(N.AssignmentPattern, s, e, '', { left, right }),
+    RestElement: (s: number, e: number, _f: number, argument: Node, typeAnnotation: Node | null): Node => node(N.RestElement, s, e, '', { argument, typeAnnotation: typeAnnotation ?? null }),
+    ImportDefaultSpecifier: (s: number, e: number, _f: number, local: Node): Node => node(N.ImportDefaultSpecifier, s, e, '', { local }),
+    ImportNamespaceSpecifier: (s: number, e: number, _f: number, local: Node): Node => node(N.ImportNamespaceSpecifier, s, e, '', { local }),
+    ExportDefaultDeclaration: (s: number, e: number, _f: number, declaration: Node): Node => node(N.ExportDefaultDeclaration, s, e, '', { declaration }),
+    ExportAllDeclaration: (s: number, e: number, _f: number, source: Node, exported: Node | null): Node => node(N.ExportAllDeclaration, s, e, '', { source, exported: exported ?? null }),
+    TSTypeAnnotation: (s: number, e: number, _f: number, typeAnnotation: Node): Node => node(N.TSTypeAnnotation, s, e, '', { typeAnnotation }),
+    TSTypeReference: (s: number, e: number, _f: number, typeName: Node, typeArguments: Node | null): Node => node(N.TSTypeReference, s, e, '', { typeName, typeArguments: typeArguments ?? null }),
+    TSQualifiedName: (s: number, e: number, _f: number, left: Node, right: Node): Node => node(N.TSQualifiedName, s, e, '', { left, right }),
+    TSTypeParameterInstantiation: (s: number, e: number, _f: number, params: Node[]): Node => node(N.TSTypeParameterInstantiation, s, e, '', { params }),
+    TSTypeParameterDeclaration: (s: number, e: number, _f: number, params: Node[]): Node => node(N.TSTypeParameterDeclaration, s, e, '', { params }),
+    TSTupleType: (s: number, e: number, _f: number, elementTypes: Node[]): Node => node(N.TSTupleType, s, e, '', { elementTypes }),
+    TSTypeLiteral: (s: number, e: number, _f: number, members: Node[]): Node => node(N.TSTypeLiteral, s, e, '', { members }),
+    TSCallSignatureDeclaration: (s: number, e: number, _f: number, typeParameters: Node | null, params: Node[] | null, returnType: Node | null): Node => node(N.TSCallSignatureDeclaration, s, e, '', { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null }),
+    TSConstructSignatureDeclaration: (s: number, e: number, _f: number, typeParameters: Node | null, params: Node[] | null, returnType: Node | null): Node => node(N.TSConstructSignatureDeclaration, s, e, '', { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null }),
+    TSUnionType: (s: number, e: number, _f: number, types: Node[]): Node => node(N.TSUnionType, s, e, '', { types }),
+    TSIntersectionType: (s: number, e: number, _f: number, types: Node[]): Node => node(N.TSIntersectionType, s, e, '', { types }),
+    TSFunctionType: (s: number, e: number, _f: number, typeParameters: Node | null, params: Node[] | null, returnType: Node | null): Node => node(N.TSFunctionType, s, e, '', { typeParameters: typeParameters ?? null, params: params ?? [], returnType: returnType ?? null }),
+    TSArrayType: (s: number, e: number, _f: number, elementType: Node): Node => node(N.TSArrayType, s, e, '', { elementType }),
+    TSIndexedAccessType: (s: number, e: number, _f: number, objectType: Node, indexType: Node): Node => node(N.TSIndexedAccessType, s, e, '', { objectType, indexType }),
+    TSTypeQuery: (s: number, e: number, _f: number, exprName: Node, typeArguments: Node | null): Node => node(N.TSTypeQuery, s, e, '', { exprName, typeArguments: typeArguments ?? null }),
+    TSConditionalType: (s: number, e: number, _f: number, checkType: Node, extendsType: Node, trueType: Node, falseType: Node): Node => node(N.TSConditionalType, s, e, '', { checkType, extendsType, trueType, falseType }),
+    TSInferType: (s: number, e: number, _f: number, typeParameter: Node): Node => node(N.TSInferType, s, e, '', { typeParameter }),
+    TSLiteralType: (s: number, e: number, _f: number, literal: Node): Node => node(N.TSLiteralType, s, e, '', { literal }),
+    TSTemplateLiteralType: (s: number, e: number, _f: number, quasis: Node[], types: Node[]): Node => node(N.TSTemplateLiteralType, s, e, '', { quasis, types }),
+    TSImportType: (s: number, e: number, _f: number, source: Node, qualifier: Node | null, typeArguments: Node | null): Node => node(N.TSImportType, s, e, '', { source, qualifier: qualifier ?? null, typeArguments: typeArguments ?? null }),
+    TSClassImplements: (s: number, e: number, _f: number, expression: Node, typeArguments: Node | null): Node => node(N.TSClassImplements, s, e, '', { expression, typeArguments: typeArguments ?? null }),
+    TSInterfaceHeritage: (s: number, e: number, _f: number, expression: Node, typeArguments: Node | null): Node => node(N.TSInterfaceHeritage, s, e, '', { expression, typeArguments: typeArguments ?? null }),
+    TSEnumMember: (s: number, e: number, _f: number, id: Node, initializer: Node | null): Node => node(N.TSEnumMember, s, e, '', { id, initializer: initializer ?? null }),
+    TSAsExpression: (s: number, e: number, _f: number, expression: Node, typeAnnotation: Node): Node => node(N.TSAsExpression, s, e, '', { expression, typeAnnotation }),
+    TSSatisfiesExpression: (s: number, e: number, _f: number, expression: Node, typeAnnotation: Node): Node => node(N.TSSatisfiesExpression, s, e, '', { expression, typeAnnotation }),
+    TSNonNullExpression: (s: number, e: number, _f: number, expression: Node): Node => node(N.TSNonNullExpression, s, e, '', { expression }),
+
+    JSXElement: (s: number, e: number, _f: number, openingElement: Node, children: Node[], closingElement: Node | null): Node => node(N.JSXElement, s, e, '', { openingElement, children, closingElement: closingElement ?? null }),
+    JSXOpeningElement: (s: number, e: number, _f: number, name: Node, typeArguments: Node | null, attributes: Node[]): Node => node(N.JSXOpeningElement, s, e, '', { name, typeArguments: typeArguments ?? null, attributes }),
+    JSXClosingElement: (s: number, e: number, _f: number, name: Node): Node => node(N.JSXClosingElement, s, e, '', { name }),
+    JSXFragment: (s: number, e: number, _f: number, openingFragment: Node, children: Node[], closingFragment: Node): Node => node(N.JSXFragment, s, e, '', { openingFragment, children, closingFragment }),
+    JSXOpeningFragment: (s: number, e: number, _f: number): Node => node(N.JSXOpeningFragment, s, e, '', null),
+    JSXClosingFragment: (s: number, e: number, _f: number): Node => node(N.JSXClosingFragment, s, e, '', null),
+    JSXNamespacedName: (s: number, e: number, _f: number, namespace: Node, name: Node): Node => node(N.JSXNamespacedName, s, e, '', { namespace, name }),
+    JSXMemberExpression: (s: number, e: number, _f: number, object: Node, property: Node): Node => node(N.JSXMemberExpression, s, e, '', { object, property }),
+    JSXExpressionContainer: (s: number, e: number, _f: number, expression: Node): Node => node(N.JSXExpressionContainer, s, e, '', { expression }),
+    JSXEmptyExpression: (s: number, e: number, _f: number): Node => node(N.JSXEmptyExpression, s, e, '', null),
+    JSXAttribute: (s: number, e: number, _f: number, name: Node, value: Node | null): Node => node(N.JSXAttribute, s, e, '', { name, value: value ?? null }),
+    JSXSpreadAttribute: (s: number, e: number, _f: number, argument: Node): Node => node(N.JSXSpreadAttribute, s, e, '', { argument }),
+    JSXSpreadChild: (s: number, e: number, _f: number, expression: Node): Node => node(N.JSXSpreadChild, s, e, '', { expression }),
 };
-
-/* ----------------------------------------------------------------- tokens */
 
 const T_EOF = 0;
 const T_IDENT = 1;
@@ -326,8 +286,6 @@ const CONTEXTUAL = new Set<number>([
 
 const F_NL = 1;
 
-/* ------------------------------------------------------------ lexer state */
-
 let src = '';
 let srcLen = 0;
 let pos = 0;
@@ -336,43 +294,15 @@ let tokStart = 0;
 let tokEnd = 0;
 let tokFlags = 0;
 let tokVal = 0;
-/** Rolling hash of the current ident-like token's chars (L1): computed DURING
- * the lexer's ident scan (it touches every char anyway), consumed by intern().
- * For T_PRIVATE it covers the name AFTER the '#'. Meaningless for other tokens. */
 let tokHash = 0;
 let tsMode = true;
+let jsxMode = false;
 
-/* ---- fused parser state (was the "pool"; now module-local, invisible to callers) ---- */
 let errors: ParseError[] = [];
 
-/* ---- node id counter ----
- * Sequential per-parse node id, assigned from 1 (0 = null parity with the old
- * NodeId convention). Every node constructor inlines `id: nextId()` as its FIRST
- * key, so the whole tree is one hidden class AND every node keys the id-indexed
- * side tables (semantic nodeSymbol/nodeScope, shake liveness). Draws from the
- * SHARED ast id counter (so programmatic clones never collide); reset per parse. */
 const nextId = nextNodeId;
 
-/* ---- L1: slice-free hash-during-scan identifier interning ----
- * Repeated identifier strings share ONE string object (i3's invariant), but the
- * old slice-then-Map.get interning allocated a throwaway slice on EVERY
- * occurrence (17–27% of parse in the r6 autopsy). Now the LEXER computes a
- * rolling hash while it scans the ident chars (it touches each char anyway →
- * `tokHash`), and interning probes a custom open-addressed table: hash + length
- * + direct charCodeAt comparison against the source — NO slice on the probe.
- * The string is materialized only on FIRST occurrence.
- * SCOPE: identifiers + private-identifier names (the repeated-name population).
- * Literal raws are NOT interned (r6: raws repeat far less, ~1% of retained).
- *
- * SlicedString CAUTION (measured, real): V8 represents `.slice()` results of
- * >= 13 chars as SlicedStrings that RETAIN THE PARENT — a long name sliced
- * straight from the source pins the ENTIRE source in the tree (the pre-L1 code
- * had this bug; llm/spikes/03-parse-levers/bench/sliced-probe.ts retained a
- * 32 MB source through a handful of long names). Every materialization
- * (interned names AND literal raws) therefore force-flattens long slices via
- * the concat trick: `(' ' + s).substring(1)` re-parents the slice onto a fresh
- * (len+1)-char flat string, so nothing in the tree references the source. */
-const FLATTEN_MIN = 13; // V8 SlicedString::kMinLength
+const FLATTEN_MIN = 13;
 
 /** Materialize src[start,end) as a string that NEVER retains the source. */
 function sliceFlat(start: number, end: number): string {
@@ -431,21 +361,13 @@ function intern(start: number, end: number, hash: number): string {
         }
         i = (i + 1) & itMask;
     }
-    const s = sliceFlat(start, end); // first occurrence: materialize (source-free)
+    const s = sliceFlat(start, end);
     itKeys[i] = s;
     itHashes[i] = hash;
-    if (++itCount * 4 > (itMask + 1) * 3) internGrow(); // load factor 3/4
+    if (++itCount * 4 > (itMask + 1) * 3) internGrow();
     return s;
 }
 
-/* ---- L2: line table fused into the lexer ----
- * buildLineTable used to be a SECOND full pass over the source. The lexer is the
- * only consumer of every char, so it records newline offsets as it consumes them
- * (whitespace skip, comments, string/template bodies, escaped newlines). Output
- * is the identical Uint32Array (offset of each line start; only '\n' counts —
- * \r / U+2028 / U+2029 are ASI-relevant but not line starts, matching
- * buildLineTable). Speculation rewinds (saveState/restoreState) truncate via the
- * saved lineCount; re-scans then re-record the same offsets. */
 let lineStarts = new Uint32Array(1 << 12);
 let lineCount = 0;
 /** Record a newline AT offset i (line starts at i+1). */
@@ -609,11 +531,11 @@ function nextToken(): void {
         while (pos < srcLen) {
             const cc = src.charCodeAt(pos);
             if (cc === c) { pos++; break; }
-            if (cc === 92) { // escaped char may be a line-continuation '\n'
+            if (cc === 92) {
                 if (src.charCodeAt(pos + 1) === 10) recordNL(pos + 1);
                 pos += 2;
             } else {
-                if (cc === 10) recordNL(pos); // tolerated unterminated-string newline
+                if (cc === 10) recordNL(pos);
                 pos++;
             }
         }
@@ -628,7 +550,7 @@ function nextToken(): void {
             return;
         }
         pos++;
-        let h = 0; // hash of the name AFTER the '#' (what parsePrivate interns)
+        let h = 0;
         while (pos < srcLen) {
             const cc = src.charCodeAt(pos);
             if (cc < 128 && CHAR[cc] !== C_ID && CHAR[cc] !== C_DIG) break;
@@ -671,11 +593,11 @@ function scanTemplatePart(): void {
         const c = src.charCodeAt(pos);
         if (c === 96) { pos++; tok = T_TEMPLATE_FULL; tokEnd = pos; tokVal = 0; return; }
         if (c === 36 && src.charCodeAt(pos + 1) === 123) { pos += 2; tok = T_TEMPLATE_HEAD; tokEnd = pos; tokVal = 0; return; }
-        if (c === 92) { // escaped char may be a line-continuation '\n'
+        if (c === 92) {
             if (src.charCodeAt(pos + 1) === 10) recordNL(pos + 1);
             pos += 2;
         } else {
-            if (c === 10) recordNL(pos); // raw newline inside a template literal
+            if (c === 10) recordNL(pos);
             pos++;
         }
     }
@@ -693,7 +615,7 @@ function reScanRegex(): void {
     let inClass = false;
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
-        if (c === 92) { // escape may swallow a '\n' in a (broken) regex body
+        if (c === 92) {
             if (src.charCodeAt(pos + 1) === 10) recordNL(pos + 1);
             pos += 2;
             continue;
@@ -791,8 +713,6 @@ function scanPunct(c: number): void {
     tok = T_PUNCT; tokEnd = pos; tokVal = v;
 }
 
-/* ---------------------------------------------------------- parser helpers */
-
 function err(msg: string): void {
     if (errors.length < 100) errors.push({ pos: tokStart, msg });
 }
@@ -807,29 +727,12 @@ function eatK(v: number): boolean { if (isK(v)) { nextToken(); return true; } re
 function isIdentLike(): boolean { return tok === T_IDENT || (tok === T_KW && CONTEXTUAL.has(tokVal)); }
 function isNameLike(): boolean { return tok === T_IDENT || tok === T_KW; }
 
-/* ---- leaf constructors (materialize name/value/raw at parse) ---- */
-
-// Leaf constructors: the ONLY node-shape-specific parser code. The identifier's
-// name (and every literal's raw) lives in the outer `name` slot (data:null) — the
-// type+data leaf. Built as a DIRECT object literal in the fixed key order
-// { type, start, end, name, data } so the leaf shares the one hidden class with
-// every interior node. Identifier names are INTERNED (i3); literal raws are not.
-// Identifier ROLE leaf: the role type id (BindingIdentifier / IdentifierReference
-// / IdentifierName / LabelIdentifier) is fixed by the CALL SITE — the parser
-// knows the grammatical position. All four are data:null name-slot leaves.
 function ident(role: number, start: number, end: number): Identifier {
-    // Current-token spans reuse the hash the lexer computed during the scan
-    // (tokHash); historical spans (shorthand keys, re-materialized names) rehash
-    // — rare and short. Content is sliced from src either way, so this guard is
-    // purely a fast path, never a correctness question.
     const h = start === tokStart && end === tokEnd ? tokHash : hashRange(start, end);
-    return { id: nextId(), type: role, start, end, name: intern(start, end, h), data: null } as RawNode as Identifier;
+    return { id: nextId(), type: role, start, end, name: intern(start, end, h), data: null } as Identifier;
 }
-/** A leaf literal (Num/Str/Regex/BigInt/TemplateElement): raw text sliced (not
- * interned) into the outer name slot; span-only constructors (start,end).
- * sliceFlat: long raws must not retain the source (SlicedString, see L1 note). */
 function leafRaw(flatType: number, start: number, end: number): Node {
-    return { id: nextId(), type: flatType, start, end, name: sliceFlat(start, end), data: null } as RawNode as Node;
+    return { id: nextId(), type: flatType, start, end, name: sliceFlat(start, end), data: null } as Node;
 }
 /** Parse an identifier token in the given role. `role` picks the leaf type. */
 function parseIdent(role: number): Identifier {
@@ -846,7 +749,7 @@ function parseNameAsIdent(role: number): Identifier {
     nextToken();
     return id;
 }
-function makeMissingIdent(role: number): Identifier { return { id: nextId(), type: role, start: 0, end: 0, name: '', data: null } as RawNode as Identifier; }
+function makeMissingIdent(role: number): Identifier { return { id: nextId(), type: role, start: 0, end: 0, name: '', data: null } as Identifier; }
 /** A literal/leaf of the given flat type at the current token span. */
 function leaf(flatType: number, start: number, end: number): Node {
     return leafRaw(flatType, start, end);
@@ -859,14 +762,9 @@ type LexState = [number, number, number, number, number, number, number, number,
 const saveState = (): LexState => [pos, tok, tokStart, tokEnd, tokFlags, tokVal, errors.length, tokHash, lineCount];
 function restoreState(s: LexState): void {
     pos = s[0]; tok = s[1]; tokStart = s[2]; tokEnd = s[3]; tokFlags = s[4]; tokVal = s[5];
-    errors.length = s[6]; tokHash = s[7]; lineCount = s[8]; // rewind truncates the line table (L2)
+    errors.length = s[6]; tokHash = s[7]; lineCount = s[8];
 }
 
-// object list stack — the arena-free analogue of flat's Uint32 scratch stack.
-// L3: the stack is kept PACKED_ELEMENTS (built by push, grown by push — never
-// `new Array(n)` / `length = n`, both of which go HOLEY), so finishList can emit
-// each child list as ONE exact-size PACKED array via Array#slice (V8 memcpy fast
-// path, no per-element copy loop, no capacity slack, packed elements kind).
 const stkInit = (): Ref[] => { const a: Ref[] = []; for (let i = 0; i < 1 << 12; i++) a.push(null); return a; };
 let stk: Ref[] = stkInit();
 let sp = 0;
@@ -874,9 +772,19 @@ function push(v: Ref): void {
     if (sp === stk.length) { const n = stk.length; for (let i = 0; i < n; i++) stk.push(null); }
     stk[sp++] = v;
 }
-/** Materialize [from, sp) into a fresh exact-size packed array (dropping the run). */
+const DEV = process.env.NODE_ENV !== 'production';
+
+/** Position of the current token as `line:col`, for invariant messages. */
+function here(): string {
+    const { line, column } = lineColOf(lineStarts.slice(0, lineCount), tokStart);
+    return `${line}:${column}`;
+}
+
+/** Materialize [from, sp) into a fresh exact-size packed array (dropping the run).
+ * Grammar-guaranteed list: asserts (dev) that no hole slipped through. */
 function finishList(from: number): Node[] {
-    const out = stk.slice(from, sp) as Node[]; // no nulls in a finishList run
+    if (DEV) for (let i = from; i < sp; i++) if (stk[i] === null) throw new Error(`parser invariant: null in list at ${here()}`);
+    const out = stk.slice(from, sp) as Node[];
     sp = from;
     return out;
 }
@@ -887,15 +795,11 @@ function finishListWithHoles(from: number): (Node | null)[] {
     return out;
 }
 
-/* re-derive a scalar from a materialized node (for declare-prefix rewrite):
- * `declare` lives in the node's PAYLOAD (data.declare) in type+data. */
 function applyDeclare(inner: Node, start: number): void {
-    const r: RawNode = inner;
+    const r = inner as { data: { declare?: boolean } | null };
     if (r.data !== null) r.data.declare = true;
     inner.start = start;
 }
-
-/* ------------------------------------------------------------ expressions */
 
 const BIN_PREC = new Uint8Array(64);
 const BIN_OP = new Uint8Array(64);
@@ -942,8 +846,6 @@ function parseAssign(noIn = false): Node {
         const s = saveState();
         if (tok === T_IDENT || CONTEXTUAL.has(tokVal)) {
             const idStart = tokStart;
-            // Speculative: this ident is a single arrow param (binding) if `=>`
-            // follows; otherwise state is restored and it's reparsed as an expr.
             const maybe = parseIdent(R_BIND);
             if (isP(P.ARROW) && (tokFlags & F_NL) === 0) return parseArrowAfterSingleParam(idStart, maybe, 0);
             restoreState(s);
@@ -957,7 +859,7 @@ function parseAssign(noIn = false): Node {
             if (isP(P.LPAREN) && arrowAheadFromParen()) return parseArrow(asyncStart, FL.ASYNC, null);
             if (isIdentLike()) {
                 const idStart = tokStart;
-                const p = parseIdent(R_BIND); // single async arrow param (binding)
+                const p = parseIdent(R_BIND);
                 if (isP(P.ARROW)) return parseArrowAfterSingleParam(asyncStart, p, FL.ASYNC, idStart);
             }
         }
@@ -1085,7 +987,7 @@ function parseNew(): Node {
     nextToken();
     if (isP(P.DOT)) {
         nextToken();
-        parseNameAsIdent(R_NAME); // `target` in new.target — meta-property part, discarded
+        parseNameAsIdent(R_NAME);
         return m.NewTarget(start, tokStart, 0) as Node;
     }
     const callee: Node = isK(K.NEW) ? parseNew() : parseMemberChain(parsePrimary(), false);
@@ -1115,23 +1017,16 @@ function parseArgs(): Node[] {
 }
 
 function parseMemberChain(expr: Node, allowCall: boolean): Node {
-    // An optional-chain "run": if ANY link here uses `?.` (member or call), the
-    // OUTERMOST node of this run is wrapped in a ChainExpression (ESTree
-    // semantics — the whole-chain short-circuit boundary). Parentheses terminate
-    // a chain naturally: a parenthesized subexpression is a nested parse whose
-    // own run already wrapped, and its members re-enter here as a fresh run.
     let sawOptional = false;
-    // Wrap-on-exit helper: every early return must funnel through this so the
-    // ChainExpression lands on the outermost link no matter where the run ends.
     const finish = (e: Node): Node => (sawOptional ? (m.ChainExpression(e.start, e.end, 0, e) as Node) : e);
     for (;;) {
         if (isP(P.DOT)) {
             nextToken();
             if (tok === T_PRIVATE) {
-                const prop = parsePrivate(); // #field — private field access
+                const prop = parsePrivate();
                 expr = m.PrivateFieldExpression(expr.start, prop.end, 0, expr, prop) as Node;
             } else {
-                const prop = parseNameAsIdent(R_NAME); // non-computed member property (IdentifierName)
+                const prop = parseNameAsIdent(R_NAME);
                 expr = m.StaticMemberExpression(expr.start, prop.end, 0, expr, prop) as Node;
             }
         } else if (isP(P.QDOT)) {
@@ -1147,10 +1042,10 @@ function parseMemberChain(expr: Node, allowCall: boolean): Node {
                 expectP(P.RBRACKET, "']'");
                 expr = m.ComputedMemberExpression(expr.start, tokStart, FL.OPTIONAL, expr, prop) as Node;
             } else if (tok === T_PRIVATE) {
-                const prop = parsePrivate(); // optional private field access `a?.#b`
+                const prop = parsePrivate();
                 expr = m.PrivateFieldExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop) as Node;
             } else {
-                const prop = parseNameAsIdent(R_NAME); // non-computed optional member property
+                const prop = parseNameAsIdent(R_NAME);
                 expr = m.StaticMemberExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop) as Node;
             }
         } else if (isP(P.LBRACKET)) {
@@ -1182,9 +1077,6 @@ function parseMemberChain(expr: Node, allowCall: boolean): Node {
 }
 
 function parsePrivate(): Node {
-    // The ESTree name excludes the leading '#'. Built as a direct leaf literal in
-    // the fixed key order (one hidden class); the stripped name is interned like an
-    // identifier (private names repeat too).
     const id: Node = { id: nextId(), type: N.PrivateIdentifier, start: tokStart, end: tokEnd, name: intern(tokStart + 1, tokEnd, tokHash), data: null };
     nextToken();
     return id;
@@ -1217,6 +1109,229 @@ function parseTemplate(): Node {
     return m.TemplateLiteral(start, tokStart, 0, quasis, eFrom) as Node;
 }
 
+/** Is `c` a valid start char of a JSX identifier (letter / `_` / `$`, or any
+ * non-ASCII treated as ident). */
+function isJSXIdentStart(c: number): boolean {
+    return c < 128 ? CHAR[c] === C_ID : (c !== 0x2028 && c !== 0x2029);
+}
+
+function scanJSXName(): [number, number] {
+    const start = pos;
+    pos++;
+    while (pos < srcLen) {
+        const c = src.charCodeAt(pos);
+        if (c < 128) { const cl = CHAR[c]; if (cl === C_ID || cl === C_DIG || c === 45) { pos++; continue; } break; }
+        if (c === 0x2028 || c === 0x2029) break;
+        pos++;
+    }
+    return [start, pos];
+}
+
+/** Skip whitespace/newlines (recording line starts) inside a JSX tag interior. */
+function skipJSXTagWs(): void {
+    while (pos < srcLen) {
+        const c = src.charCodeAt(pos);
+        if (c === 10) { recordNL(pos); pos++; continue; }
+        if (c < 128 ? CHAR[c] === C_WS || CHAR[c] === C_NL : (c === 0x2028 || c === 0x2029 || c === 0xa0 || c === 0xfeff)) { pos++; continue; }
+        break;
+    }
+}
+
+/** A JSXIdentifier leaf (data:null, raw name in the name slot). */
+function jsxIdent(start: number, end: number): Node {
+    return { id: nextId(), type: N.JSXIdentifier, start, end, name: sliceFlat(start, end), data: null } as Node;
+}
+
+function parseJSXName(): Node {
+    skipJSXTagWs();
+    if (!isJSXIdentStart(src.charCodeAt(pos))) { err('expected JSX name'); return makeMissingIdent(R_NAME) as Node; }
+    const [s0, e0] = scanJSXName();
+    const first = src.charCodeAt(s0);
+    if (pos < srcLen && src.charCodeAt(pos) === 58 ) {
+        pos++;
+        const [s1, e1] = isJSXIdentStart(src.charCodeAt(pos)) ? scanJSXName() : [pos, pos];
+        return m.JSXNamespacedName(s0, e1, 0, jsxIdent(s0, e0), jsxIdent(s1, e1)) as Node;
+    }
+    if (pos < srcLen && src.charCodeAt(pos) === 46 ) {
+        const isThis = e0 - s0 === 4 && src.startsWith('this', s0);
+        let obj: Node = isThis ? m.ThisExpression(s0, e0, 0) as Node : ident(R_REF, s0, e0) as Node;
+        while (pos < srcLen && src.charCodeAt(pos) === 46) {
+            pos++;
+            const [ps, pe] = isJSXIdentStart(src.charCodeAt(pos)) ? scanJSXName() : [pos, pos];
+            obj = m.JSXMemberExpression(s0, pe, 0, obj, jsxIdent(ps, pe)) as Node;
+        }
+        return obj;
+    }
+    if (e0 - s0 === 4 && first === 116  && src.startsWith('this', s0)) return m.ThisExpression(s0, e0, 0) as Node;
+    if (first >= 65 && first <= 90 ) return ident(R_REF, s0, e0) as Node;
+    return jsxIdent(s0, e0);
+}
+
+/** Parse a JSX attribute name: JSXIdentifier or JSXNamespacedName (`a:b`). Pos-driven. */
+function parseJSXAttributeName(): Node {
+    const [s0, e0] = scanJSXName();
+    if (pos < srcLen && src.charCodeAt(pos) === 58 ) {
+        pos++;
+        const [s1, e1] = isJSXIdentStart(src.charCodeAt(pos)) ? scanJSXName() : [pos, pos];
+        return m.JSXNamespacedName(s0, e1, 0, jsxIdent(s0, e0), jsxIdent(s1, e1)) as Node;
+    }
+    return jsxIdent(s0, e0);
+}
+
+function parseJSXBrace(inChildren: boolean): Node {
+    const bracePos = pos;
+    pos = bracePos + 1;
+    nextToken();
+    let node: Node;
+    if (isP(P.DOTDOTDOT)) {
+        nextToken();
+        const arg = parseAssign();
+        node = inChildren
+            ? m.JSXSpreadChild(bracePos, tokEnd, 0, arg) as Node
+            : m.JSXExpressionContainer(bracePos, tokEnd, 0, arg) as Node;
+    } else if (isP(P.RBRACE)) {
+        node = m.JSXExpressionContainer(bracePos, tokEnd, 0, m.JSXEmptyExpression(bracePos + 1, tokStart, 0) as Node) as Node;
+    } else {
+        const expr = parseExpression();
+        node = m.JSXExpressionContainer(bracePos, tokEnd, 0, expr) as Node;
+    }
+    if (isP(P.RBRACE)) { pos = tokEnd; } else { err("expected '}' in JSX"); pos = tokStart; }
+    return node;
+}
+
+function parseJSXSpreadAttribute(): Node {
+    const bracePos = pos;
+    pos = bracePos + 1;
+    nextToken();
+    if (!eatP(P.DOTDOTDOT)) err("expected '...' in JSX spread attribute");
+    const arg = parseAssign();
+    const node = m.JSXSpreadAttribute(bracePos, tokEnd, 0, arg) as Node;
+    if (isP(P.RBRACE)) { pos = tokEnd; } else { err("expected '}' in JSX"); pos = tokStart; }
+    return node;
+}
+
+/** Parse opening-tag attributes. Pos-driven; `pos` sits just past the name.
+ * Leaves `pos` on `>` or `/`. */
+function parseJSXAttributes(): Node[] {
+    const from = sp;
+    for (;;) {
+        skipJSXTagWs();
+        const c = pos < srcLen ? src.charCodeAt(pos) : 0;
+        if (c === 62  || c === 47  || c === 0) break;
+        if (c === 123 ) { push(parseJSXSpreadAttribute()); continue; }
+        if (!isJSXIdentStart(c)) { err('unexpected character in JSX attributes'); pos++; continue; }
+        const name = parseJSXAttributeName();
+        const nameEnd = pos;
+        skipJSXTagWs();
+        let value: Ref = null;
+        let end = nameEnd;
+        if (pos < srcLen && src.charCodeAt(pos) === 61 ) {
+            pos++;
+            skipJSXTagWs();
+            const vc = pos < srcLen ? src.charCodeAt(pos) : 0;
+            if (vc === 34 || vc === 39 ) {
+                const vs = pos;
+                pos++;
+                while (pos < srcLen && src.charCodeAt(pos) !== vc) { if (src.charCodeAt(pos) === 10) recordNL(pos); pos++; }
+                pos++;
+                value = leafRaw(N.StringLiteral, vs, pos);
+                end = pos;
+            } else if (vc === 123 ) {
+                value = parseJSXBrace(false);
+                end = pos;
+            } else if (vc === 60 ) {
+                value = parseJSXNested();
+                end = pos;
+            } else {
+                err('expected JSX attribute value');
+            }
+        }
+        push(m.JSXAttribute(name.start, end, 0, name, value) as Node);
+    }
+    return finishList(from);
+}
+
+/** Parse JSX children (pos-driven). On entry `pos` sits just after the opening
+ * `>`; leaves `pos` on the closing-tag `<`. */
+function parseJSXChildren(): Node[] {
+    const from = sp;
+    for (;;) {
+        const textStart = pos;
+        while (pos < srcLen) {
+            const c = src.charCodeAt(pos);
+            if (c === 60  || c === 123 ) break;
+            if (c === 10) recordNL(pos);
+            pos++;
+        }
+        if (pos > textStart) push({ id: nextId(), type: N.JSXText, start: textStart, end: pos, name: sliceFlat(textStart, pos), data: null } as Node);
+        if (pos >= srcLen) { err('unterminated JSX element'); break; }
+        const c = src.charCodeAt(pos);
+        if (c === 123 ) { push(parseJSXBrace(true)); continue; }
+        if (src.charCodeAt(pos + 1) === 47 ) break;
+        push(parseJSXNested());
+    }
+    return from === sp ? [] : finishList(from);
+}
+
+/** Parse a nested JSX element/fragment in child or attribute-value position. `pos`
+ * sits on `<`. Pure raw scan (no lexer sync — the outermost parseJSXRoot resyncs). */
+function parseJSXNested(): Node {
+    const start = pos;
+    pos++;
+    skipJSXTagWs();
+    if (pos < srcLen && src.charCodeAt(pos) === 62 ) {
+        const openFrag = m.JSXOpeningFragment(start, pos + 1, 0) as Node;
+        pos++;
+        const children = parseJSXChildren();
+        const closeStart = pos;
+        pos += 2;
+        skipJSXTagWs();
+        expectRawChar(62 , "'>'");
+        const closeFrag = m.JSXClosingFragment(closeStart, pos, 0) as Node;
+        return m.JSXFragment(start, pos, 0, openFrag, children, closeFrag) as Node;
+    }
+    const name = parseJSXName();
+    let typeArgs: Ref = null;
+    if (tsMode && pos < srcLen && src.charCodeAt(pos) === 60 ) {
+        nextToken();
+        const ta = tryParseTypeArgsInType();
+        if (ta !== null) { typeArgs = ta; pos = tokStart; }
+        else pos = tokStart;
+    }
+    const attrs = parseJSXAttributes();
+    skipJSXTagWs();
+    if (pos < srcLen && src.charCodeAt(pos) === 47 ) {
+        pos++;
+        skipJSXTagWs();
+        expectRawChar(62 , "'>'");
+        const open = m.JSXOpeningElement(start, pos, 0, name, typeArgs, attrs) as Node;
+        return m.JSXElement(start, pos, 0, open, [], null) as Node;
+    }
+    expectRawChar(62 , "'>'");
+    const open = m.JSXOpeningElement(start, pos, 0, name, typeArgs, attrs) as Node;
+    const children = parseJSXChildren();
+    const closeStart = pos;
+    pos += 2;
+    const closeName = parseJSXName();
+    skipJSXTagWs();
+    expectRawChar(62 , "'>'");
+    const close = m.JSXClosingElement(closeStart, pos, 0, closeName) as Node;
+    return m.JSXElement(start, pos, 0, open, children, close) as Node;
+}
+
+function parseJSXRoot(): Node {
+    pos = tokStart;
+    const node = parseJSXNested();
+    nextToken();
+    return node;
+}
+
+/** Consume the exact raw char `ch` at `pos` (advancing past it); error otherwise. */
+function expectRawChar(ch: number, what: string): void {
+    if (pos < srcLen && src.charCodeAt(pos) === ch) { pos++; return; }
+    err(`expected ${what} in JSX`);
+}
+
 function parsePrimary(): Node {
     const start = tokStart;
     switch (tok) {
@@ -1226,10 +1341,13 @@ function parsePrimary(): Node {
         case T_REGEX: { const n = leaf(N.RegExpLiteral, start, tokEnd); nextToken(); return n; }
         case T_TEMPLATE_FULL: case T_TEMPLATE_HEAD: return parseTemplate();
         case T_PRIVATE: return parsePrivate();
-        case T_IDENT: return parseIdent(R_REF); // primary expression identifier
+        case T_IDENT: return parseIdent(R_REF);
     }
     if (tok === T_PUNCT) {
         switch (tokVal as number) {
+            case P.LT:
+                if (jsxMode) return parseJSXRoot();
+                break;
             case P.SLASH: case P.SLASHEQ:
                 reScanRegex();
                 return parsePrimary();
@@ -1268,13 +1386,13 @@ function parsePrimary(): Node {
             case K.ASYNC:
                 nextToken();
                 if (isK(K.FUNCTION)) return parseFunction(true, false, true);
-                return ident(R_REF, start, start + 5); // `async` used as a plain expression identifier
+                return ident(R_REF, start, start + 5);
             case K.CLASS: return parseClass(true, 0);
             case K.IMPORT: {
                 nextToken();
                 if (isP(P.DOT)) {
                     nextToken();
-                    parseNameAsIdent(R_NAME); // `meta` in import.meta — meta-property part, discarded
+                    parseNameAsIdent(R_NAME);
                     return m.ImportMeta(start, tokStart, 0) as Node;
                 }
                 expectP(P.LPAREN, "'('");
@@ -1287,7 +1405,7 @@ function parsePrimary(): Node {
             }
             case K.NEW: return parseNew();
         }
-        if (CONTEXTUAL.has(tokVal)) return parseIdent(R_REF); // contextual keyword as expression identifier
+        if (CONTEXTUAL.has(tokVal)) return parseIdent(R_REF);
     }
     err('unexpected token in expression');
     nextToken();
@@ -1331,7 +1449,7 @@ function parseObjectMember(): Node {
         expectP(P.RBRACKET, "']'");
     } else if ((tok as number) === T_STR) { key = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
     else if (tok === T_NUM) { key = leaf(N.NumericLiteral, tokStart, tokEnd); nextToken(); }
-    else key = parseNameAsIdent(R_NAME); // property key — a pure name (never resolves)
+    else key = parseNameAsIdent(R_NAME);
 
     if (kind !== 0 || async || generator || isP(P.LPAREN)) {
         const fn = parseMethodTail(start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
@@ -1343,8 +1461,6 @@ function parseObjectMember(): Node {
         const value = parseAssign();
         return m.ObjectProperty(start, value.end, flags, key, value) as Node;
     }
-    // shorthand `{ a }` / `{ a = 1 }`: the VALUE resolves, so it is a distinct
-    // IdentifierReference (not the IdentifierName key — no one node in two roles).
     const shorthandRef = ident(R_REF, key.start, key.end);
     if (isP(P.EQ)) {
         nextToken();
@@ -1379,8 +1495,6 @@ function parseMethodTail(start: number, flags: number): Node {
     else consumeSemi();
     return m.FunctionExpression(start, tokStart, flags, null, typeParams, params, returnType, body) as Node;
 }
-
-/* --------------------------------------------------------------- arrows */
 
 function arrowAheadFromParen(): boolean {
     let p = tokStart + 1;
@@ -1460,8 +1574,6 @@ function parseArrowAfterSingleParam(start: number, id: Identifier, flags: number
     return m.ArrowFunctionExpression(start, body.end, flags, null, [param], null, body) as Node;
 }
 
-/* ------------------------------------------------------- binding patterns */
-
 function parseBindingTarget(): Node {
     if (isP(P.LBRACKET)) {
         const start = tokStart;
@@ -1501,17 +1613,15 @@ function parseBindingTarget(): Node {
                     expectP(P.RBRACKET, "']'");
                 } else if ((tok as number) === T_STR) { key = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
                 else if (tok === T_NUM) { key = leaf(N.NumericLiteral, tokStart, tokEnd); nextToken(); }
-                else key = parseNameAsIdent(R_NAME); // pattern property key — a pure name (never resolves)
+                else key = parseNameAsIdent(R_NAME);
                 let value: Node;
                 if (isP(P.COLON)) { nextToken(); value = parseBindingElement(); }
                 else if (isP(P.EQ)) {
-                    // shorthand-with-default `{ a = 1 }`: value is a BINDING target
-                    // (distinct from the IdentifierName key), defaulted.
                     nextToken();
                     const right = parseAssign();
                     value = m.AssignmentPattern(key.start, right.end, 0, ident(R_BIND, key.start, key.end), right) as Node;
                     flags |= FL.SHORTHAND;
-                } else { value = ident(R_BIND, key.start, key.end); flags |= FL.SHORTHAND; } // shorthand `{ a }`: value binds
+                } else { value = ident(R_BIND, key.start, key.end); flags |= FL.SHORTHAND; }
                 push(m.ObjectProperty(s, value.end, flags, key, value) as Node);
             }
             if (!isP(P.RBRACE)) expectP(P.COMMA, "','");
@@ -1519,7 +1629,7 @@ function parseBindingTarget(): Node {
         expectP(P.RBRACE, "'}'");
         return m.ObjectPattern(start, tokStart, 0, finishList(from)) as Node;
     }
-    return parseIdent(R_BIND); // bare binding-target identifier
+    return parseIdent(R_BIND);
 }
 
 function parseBindingElement(): Node {
@@ -1557,8 +1667,6 @@ function parseParams(): Node[] {
             if (tsMode && isP(P.COLON)) typeAnn = parseTypeAnn();
             push(m.RestElement(start, tokStart, 0, arg, typeAnn) as Node);
         } else if (isK(K.THIS) && tsMode) {
-            // TS `this` parameter — sits in FormalParameter.pattern (binding slot);
-            // kept in the declaring role so semantic treats it as today.
             const t = ident(R_BIND, tokStart, tokEnd);
             nextToken();
             let typeAnn: Ref = null;
@@ -1590,15 +1698,13 @@ function nextIsParamNameEnd(): boolean {
     return end;
 }
 
-/* -------------------------------------------------------------- functions */
-
 function parseFunction(async: boolean, isDecl: boolean, isExpr: boolean): Node {
     const start = tokStart;
     nextToken();
     let flags = async ? FL.ASYNC : 0;
     if (isP(P.STAR)) { flags |= FL.GENERATOR; nextToken(); }
     let id: Ref = null;
-    if (isIdentLike()) id = parseIdent(R_BIND); // function name — a binding
+    if (isIdentLike()) id = parseIdent(R_BIND);
     let typeParams: Ref = null;
     if (tsMode && isP(P.LT)) { const t = tryParseTypeParams(); if (t !== null) typeParams = t; }
     const params = parseParams();
@@ -1616,7 +1722,7 @@ function parseClass(isExpr: boolean, extraFlags: number, startOverride = -1): No
     const start = startOverride >= 0 ? startOverride : tokStart;
     nextToken();
     let id: Ref = null;
-    if (isIdentLike() && !isK(K.EXTENDS) && !isK(K.IMPLEMENTS)) id = parseIdent(R_BIND); // class name — a binding
+    if (isIdentLike() && !isK(K.EXTENDS) && !isK(K.IMPLEMENTS)) id = parseIdent(R_BIND);
     let typeParams: Ref = null;
     if (tsMode && isP(P.LT)) { const t = tryParseTypeParams(); if (t !== null) typeParams = t; }
     let superClass: Ref = null;
@@ -1629,8 +1735,6 @@ function parseClass(isExpr: boolean, extraFlags: number, startOverride = -1): No
     if (tsMode && eatK(K.IMPLEMENTS)) {
         do {
             const s = tokStart;
-            // heritage `X.Y` — type-namespace entity name: head resolves (ref),
-            // qualified `.right` is a pure name.
             let expr: Node = parseIdent(R_REF);
             while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); expr = m.TSQualifiedName(s, r.end, 0, expr, r) as Node; }
             let targs: Ref = null;
@@ -1670,7 +1774,6 @@ function parseClassMember(): Node {
             nextToken();
             if (isP(P.LBRACE)) {
                 const b = parseBlock();
-                // b is a Block; its body list lives behind .data in type+data.
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
                 return m.StaticBlock(start, tokStart, 0, body) as Node;
             }
@@ -1697,7 +1800,7 @@ function parseClassMember(): Node {
         nextToken();
         if (tsMode && isIdentLike()) {
             const s = saveState();
-            const name = parseIdent(R_BIND); // index-signature parameter name (binding slot)
+            const name = parseIdent(R_BIND);
             if (isP(P.COLON)) {
                 const keyAnn = parseTypeAnn();
                 const param = m.FormalParameter(name.start, tokStart, 0, name, keyAnn, null) as Node;
@@ -1715,9 +1818,9 @@ function parseClassMember(): Node {
     } else if ((tok as number) === T_STR) { key = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
     else if (tok === T_NUM) { key = leaf(N.NumericLiteral, tokStart, tokEnd); nextToken(); }
     else if (tok === T_PRIVATE) key = parsePrivate();
-    else key = parseNameAsIdent(R_NAME); // class member key — a pure name
+    else key = parseNameAsIdent(R_NAME);
 
-    if (kind === 0 && nodeType(key) === N.IdentifierName && src.startsWith('constructor', key.start) && key.end - key.start === 11)
+    if (kind === 0 && key.type === N.IdentifierName && src.startsWith('constructor', key.start) && key.end - key.start === 11)
         kind = 3;
 
     if (tsMode && isP(P.QUESTION)) { flags |= FL.OPTIONAL; nextToken(); }
@@ -1743,8 +1846,6 @@ function isAccessModifier(): boolean {
         (len === 9 && src.startsWith('protected', tokStart))
     );
 }
-
-/* -------------------------------------------------------------- statements */
 
 function parseBlock(): Node {
     const start = tokStart;
@@ -1877,7 +1978,7 @@ function parseStatement(): Node {
                 const isBreak = tokVal === K.BREAK;
                 nextToken();
                 let label: Ref = null;
-                if (isIdentLike() && (tokFlags & F_NL) === 0) label = parseIdent(R_LABEL); // break/continue target label
+                if (isIdentLike() && (tokFlags & F_NL) === 0) label = parseIdent(R_LABEL);
                 consumeSemi();
                 return isBreak ? m.BreakStatement(start, tokStart, 0, label) as Node : m.ContinueStatement(start, tokStart, 0, label) as Node;
             }
@@ -1932,7 +2033,7 @@ function parseStatement(): Node {
                     const s = saveState();
                     nextToken();
                     if (isIdentLike() || (tok as number) === T_STR) {
-                        const id = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseIdent(R_BIND); // namespace/module name (ident form) — a binding
+                        const id = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseIdent(R_BIND);
                         if ((tok as number) === T_STR) nextToken();
                         if (isP(P.LBRACE)) {
                             nextToken();
@@ -1948,11 +2049,9 @@ function parseStatement(): Node {
         }
     }
     const expr = parseExpression();
-    if (nodeType(expr) === N.IdentifierReference && isP(P.COLON)) {
+    if (expr.type === N.IdentifierReference && isP(P.COLON)) {
         nextToken();
         const body = parseStatement();
-        // the expression-parsed name is actually a statement label: rebuild it in
-        // the label role (labels never resolve to symbols).
         const label = ident(R_LABEL, expr.start, expr.end);
         return m.LabeledStatement(start, body.end, 0, label, body) as Node;
     }
@@ -2050,8 +2149,6 @@ function parseFor(start: number): Node {
     return m.ForStatement(start, body.end, 0, init, test, update, body) as Node;
 }
 
-/* ---------------------------------------------------------------- modules */
-
 function parseImport(): Node {
     const start = tokStart;
     nextToken();
@@ -2070,7 +2167,7 @@ function parseImport(): Node {
         return m.ImportDeclaration(start, tokStart, flags, finishList(from), source) as Node;
     }
     if (isIdentLike()) {
-        const local = parseIdent(R_BIND); // default import local — a binding
+        const local = parseIdent(R_BIND);
         push(m.ImportDefaultSpecifier(local.start, local.end, 0, local) as Node);
         eatP(P.COMMA);
     }
@@ -2078,7 +2175,7 @@ function parseImport(): Node {
         const s = tokStart;
         nextToken();
         if (!eatK(K.AS)) err("expected 'as'");
-        const local = parseIdent(R_BIND); // namespace import local — a binding
+        const local = parseIdent(R_BIND);
         push(m.ImportNamespaceSpecifier(s, local.end, 0, local) as Node);
     } else if (isP(P.LBRACE)) {
         nextToken();
@@ -2091,11 +2188,8 @@ function parseImport(): Node {
                 if (isNameLike() || (tok as number) === T_STR) specFlags |= FL.TYPE_ONLY;
                 else restoreState(st);
             }
-            const imported = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseNameAsIdent(R_NAME); // external name — a pure name
+            const imported = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseNameAsIdent(R_NAME);
             if ((tok as number) === T_STR) nextToken();
-            // `import { a }` — `a` names both the external AND the local binding, but
-            // those are two roles: local is a distinct BindingIdentifier over the
-            // same span (imported stays the IdentifierName; string form can't be local).
             let local = eatK(K.AS) ? parseIdent(R_BIND) : ident(R_BIND, imported.start, imported.end);
             push(m.ImportSpecifier(ss, tokStart, specFlags, local, imported) as Node);
             if (!isP(P.RBRACE)) expectP(P.COMMA, "','");
@@ -2107,7 +2201,7 @@ function parseImport(): Node {
     if ((tok as number) === T_STR) { source = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
     else err('expected module specifier');
     consumeSemi();
-    return m.ImportDeclaration(start, tokStart, flags, finishList(from), source) as Node;
+    return m.ImportDeclaration(start, tokStart, flags, finishList(from), source ?? leaf(N.StringLiteral, tokStart, tokStart)) as Node;
 }
 
 function parseExport(): Node {
@@ -2124,12 +2218,12 @@ function parseExport(): Node {
     if (isP(P.STAR)) {
         nextToken();
         let exported: Ref = null;
-        if (eatK(K.AS)) exported = parseIdent(R_NAME); // `export * as X` — external name (never resolves)
+        if (eatK(K.AS)) exported = parseIdent(R_NAME);
         if (!eatK(K.FROM)) err("expected 'from'");
         let source: Ref = null;
         if ((tok as number) === T_STR) { source = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
         consumeSemi();
-        return m.ExportAllDeclaration(start, tokStart, 0, source, exported) as Node;
+        return m.ExportAllDeclaration(start, tokStart, 0, source ?? leaf(N.StringLiteral, tokStart, tokStart), exported) as Node;
     }
     let flags = 0;
     if (tsMode && isK(K.TYPE)) {
@@ -2150,15 +2244,12 @@ function parseExport(): Node {
                 if (isNameLike()) specFlags |= FL.TYPE_ONLY;
                 else restoreState(st);
             }
-            const local = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseNameAsIdent(R_REF); // exported local — resolves
+            const local = (tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseNameAsIdent(R_REF);
             if ((tok as number) === T_STR) nextToken();
-            // `export { a }` — `a` is both the resolving local AND the external
-            // exported name: two roles, distinct nodes over the same span
-            // (exported is a pure IdentifierName; a string local can't be split).
             let exported: Node = eatK(K.AS)
                 ? ((tok as number) === T_STR ? leaf(N.StringLiteral, tokStart, tokEnd) : parseNameAsIdent(R_NAME))
-                : (nodeType(local) === N.StringLiteral ? local : ident(R_NAME, local.start, local.end));
-            if (nodeType(exported) === N.StringLiteral) nextToken();
+                : (local.type === N.StringLiteral ? local : ident(R_NAME, local.start, local.end));
+            if (exported.type === N.StringLiteral) nextToken();
             push(m.ExportSpecifier(ss, tokStart, specFlags, local, exported) as Node);
             if (!isP(P.RBRACE)) expectP(P.COMMA, "','");
         }
@@ -2174,19 +2265,15 @@ function parseExport(): Node {
     return m.ExportNamedDeclaration(start, tokStart, flags, decl, [], null) as Node;
 }
 
-/* ------------------------------------------------------------- TS declels */
-
 function parseInterface(start: number, extraFlags: number): Node {
     nextToken();
-    const id = parseIdent(R_BIND); // interface name — a (type-namespace) binding
+    const id = parseIdent(R_BIND);
     let typeParams: Ref = null;
     if (isP(P.LT)) { const t = tryParseTypeParams(); if (t !== null) typeParams = t; }
     const extFrom = sp;
     if (eatK(K.EXTENDS)) {
         do {
             const s = tokStart;
-            // heritage `X.Y` — type-namespace entity name: head resolves (ref),
-            // qualified `.right` is a pure name.
             let expr: Node = parseIdent(R_REF);
             while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); expr = m.TSQualifiedName(s, r.end, 0, expr, r) as Node; }
             let targs: Ref = null;
@@ -2201,7 +2288,7 @@ function parseInterface(start: number, extraFlags: number): Node {
 
 function parseTypeAlias(start: number, extraFlags: number): Node {
     nextToken();
-    const id = parseIdent(R_BIND); // type-alias name — a (type-namespace) binding
+    const id = parseIdent(R_BIND);
     let typeParams: Ref = null;
     if (isP(P.LT)) { const t = tryParseTypeParams(); if (t !== null) typeParams = t; }
     expectP(P.EQ, "'='");
@@ -2212,14 +2299,14 @@ function parseTypeAlias(start: number, extraFlags: number): Node {
 
 function parseEnum(start: number, extraFlags: number): Node {
     nextToken();
-    const id = parseIdent(R_BIND); // enum name — a binding (dual-namespace)
+    const id = parseIdent(R_BIND);
     expectP(P.LBRACE, "'{'");
     const from = sp;
     while (!isP(P.RBRACE) && (tok as number) !== T_EOF) {
         const ms = tokStart;
         let key: Node;
         if ((tok as number) === T_STR) { key = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
-        else key = parseNameAsIdent(R_NAME); // enum member name — a pure name (never resolves)
+        else key = parseNameAsIdent(R_NAME);
         let init: Ref = null;
         if (isP(P.EQ)) { nextToken(); init = parseAssign(); }
         push(m.TSEnumMember(ms, tokStart, 0, key, init) as Node);
@@ -2228,8 +2315,6 @@ function parseEnum(start: number, extraFlags: number): Node {
     expectP(P.RBRACE, "'}'");
     return m.TSEnumDeclaration(start, tokStart, extraFlags, id, finishList(from)) as Node;
 }
-
-/* ------------------------------------------------------------- TS types */
 
 function parseTypeAnn(): Node {
     const start = tokStart;
@@ -2347,7 +2432,7 @@ function parseTypeOperator(): Node {
     if (isK(K.UNIQUE)) { nextToken(); const t = parseTypeOperator(); return m.TSTypeOperator(start, t.end, TSOP.UNIQUE, t) as Node; }
     if (isK(K.INFER)) {
         nextToken();
-        const name = parseIdent(R_BIND); // `infer X` — introduces a type-param binding
+        const name = parseIdent(R_BIND);
         const tp = m.TSTypeParameter(name.start, name.end, 0, name, null, null) as Node;
         return m.TSInferType(start, tokStart, 0, tp) as Node;
     }
@@ -2397,7 +2482,7 @@ function parsePrimaryType(): Node {
                 const sv = saveState();
                 let t: Ref = null;
                 if (isIdentLike()) {
-                    const label = parseIdent(R_NAME); // named tuple member label — a pure name
+                    const label = parseIdent(R_NAME);
                     let opt = 0;
                     if (isP(P.QUESTION)) { opt = FL.OPTIONAL; nextToken(); }
                     if (isP(P.COLON)) {
@@ -2411,7 +2496,7 @@ function parsePrimaryType(): Node {
             } else {
                 const s = saveState();
                 if (isIdentLike()) {
-                    const label = parseIdent(R_NAME); // named tuple member label — a pure name
+                    const label = parseIdent(R_NAME);
                     let opt = 0;
                     if (isP(P.QUESTION)) { opt = FL.OPTIONAL; nextToken(); }
                     if (isP(P.COLON)) {
@@ -2438,7 +2523,6 @@ function parsePrimaryType(): Node {
     if (isK(K.TYPEOF)) {
         nextToken();
         const s = tokStart;
-        // `typeof X.Y` — value-namespace entity name: head resolves (ref), `.right` is a pure name.
         let expr: Node = parseIdent(R_REF);
         while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); expr = m.TSQualifiedName(s, r.end, 0, expr, r) as Node; }
         let targs: Ref = null;
@@ -2454,22 +2538,19 @@ function parsePrimaryType(): Node {
         let qualifier: Ref = null;
         if (isP(P.DOT)) {
             nextToken();
-            // `import('m').X.Y` qualifier — names members of the imported module
-            // namespace; never resolves to a local symbol, so pure names throughout.
-            qualifier = parseNameAsIdent(R_NAME);
-            while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); qualifier = m.TSQualifiedName(qualifier!.start, r.end, 0, qualifier, r) as Node; }
+            let q: Node = parseNameAsIdent(R_NAME);
+            while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); q = m.TSQualifiedName(q.start, r.end, 0, q, r) as Node; }
+            qualifier = q;
         }
         let targs: Ref = null;
         if (isP(P.LT)) { const t = tryParseTypeArgsInType(); if (t !== null) targs = t; }
-        return m.TSImportType(start, tokStart, 0, source, qualifier, targs) as Node;
+        return m.TSImportType(start, tokStart, 0, source ?? leaf(N.StringLiteral, tokStart, tokStart), qualifier, targs) as Node;
     }
     if (isK(K.THIS)) { nextToken(); return m.keyword(start, tokStart, N.TSThisType) as Node; }
     if (isIdentLike() || tok === T_KW) {
         const kw = tsKeywordType();
         if (kw !== 0) { nextToken(); return m.keyword(start, tokStart, kw) as Node; }
         const s = tokStart;
-        // type reference `X.Y` — type-namespace entity name: head resolves (ref),
-        // qualified `.right` is a pure name.
         let name: Node = parseNameAsIdent(R_REF);
         while (isP(P.DOT)) { nextToken(); const r = parseNameAsIdent(R_NAME); name = m.TSQualifiedName(s, r.end, 0, name, r) as Node; }
         let targs: Ref = null;
@@ -2481,10 +2562,7 @@ function parsePrimaryType(): Node {
     return m.keyword(start, tokStart, N.TSAnyKeyword) as Node;
 }
 
-/** Recognize a TS keyword type at the current token; returns the TSXKeyword node
- * type id directly (the lexer's keyword recognition maps straight to type ids),
- * or 0 for a non-keyword name. */
-function tsKeywordType(): number {
+function tsKeywordType(): KeywordType | 0 {
     const len = tokEnd - tokStart;
     const st = tokStart;
     switch (len) {
@@ -2557,7 +2635,7 @@ function parseMappedType(): Node {
     else if (isP(P.MINUS)) { nextToken(); if (eatK(K.READONLY)) flags |= 2 << 4; }
     else if (eatK(K.READONLY)) flags |= 3 << 4;
     expectP(P.LBRACKET, "'['");
-    const name = parseIdent(R_BIND); // mapped-type parameter — a type-param binding
+    const name = parseIdent(R_BIND);
     if (!eatK(K.IN)) err("expected 'in'");
     const constraint = parseType();
     let nameType: Ref = null;
@@ -2613,10 +2691,6 @@ function parseTypeMember(): Node {
     if (isP(P.LBRACKET)) {
         nextToken();
         const ps = tokStart;
-        // Ambiguous `[name...`: either an index-signature parameter (`[k: string]`,
-        // a binding) or a computed key `[Foo.Bar]` (Foo is a reference object).
-        // Parse as a reference; if it turns out to be an index-sig param, rebuild
-        // it in the binding role (no single node straddling two roles).
         const name = parseNameAsIdent(R_REF);
         if (isP(P.COLON)) {
             const keyAnn = parseTypeAnn();
@@ -2629,7 +2703,7 @@ function parseTypeMember(): Node {
         let key: Node = name;
         while (isP(P.DOT)) {
             nextToken();
-            const r = parseNameAsIdent(R_NAME); // computed-key member property — a pure name
+            const r = parseNameAsIdent(R_NAME);
             key = m.StaticMemberExpression(ps, r.end, 0, key, r) as Node;
         }
         expectP(P.RBRACKET, "']'");
@@ -2652,7 +2726,7 @@ function parseTypeMember(): Node {
     let key: Node;
     if ((tok as number) === T_STR) { key = leaf(N.StringLiteral, tokStart, tokEnd); nextToken(); }
     else if (tok === T_NUM) { key = leaf(N.NumericLiteral, tokStart, tokEnd); nextToken(); }
-    else key = parseNameAsIdent(R_NAME); // type-member (prop/method signature) key — a pure name
+    else key = parseNameAsIdent(R_NAME);
     if (isP(P.QUESTION)) { flags |= FL.OPTIONAL; nextToken(); }
     if (isP(P.LPAREN) || isP(P.LT) || kind !== 0) {
         let tp: Ref = null;
@@ -2695,7 +2769,7 @@ function tryParseTypeParams(): Node | null {
                 else if (isK(K.CONST)) { flags |= 4; nextToken(); }
                 else break;
             }
-            const name = parseIdent(R_BIND); // `<T>` type parameter — a type-namespace binding
+            const name = parseIdent(R_BIND);
             let constraint: Ref = null;
             if (eatK(K.EXTENDS)) constraint = parseType();
             let dflt: Ref = null;
@@ -2757,14 +2831,12 @@ function tryParseTypeArgsForCall(): Node | null {
     return null;
 }
 
-/* ------------------------------------------------------------------ entry */
-
 /** The parse result: the standalone program, the error list, and the source-free
  * line table for offset->line/col. NO pool — the source is not retained (leaves
  * materialized their name/raw into the outer `name` slot; identifier names are
  * interned). */
 export type ParseResult = { program: Program; errors: ParseError[]; lines: Uint32Array; nodeCount: number };
-export type ParseOptions = { ts: boolean };
+export type ParseOptions = { ts: boolean; jsx: boolean };
 
 /** Parse `source` into a standalone type+data Program. House signature:
  * `parse(source, options): { program, errors, lines }` — no pool, no out-param.
@@ -2772,15 +2844,16 @@ export type ParseOptions = { ts: boolean };
  * reset at entry; nothing references `source` after this returns. */
 export function parse(source: string, options: ParseOptions): ParseResult {
     tsMode = options.ts;
+    jsxMode = options.jsx;
     src = source;
     srcLen = source.length;
     pos = 0;
     sp = 0;
     resetNodeIds();
     errors = [];
-    internReset(1 << 13); // holds ~6k distinct names before one growth
+    internReset(1 << 13);
     lineCount = 0;
-    recordNL(-1); // line 1 starts at offset 0
+    recordNL(-1);
     void speculating;
     nextToken();
     const from = sp;
@@ -2791,13 +2864,10 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         push(parseStatement());
     }
     const body = finishList(from);
-    const program = m.Program(0, srcLen, 0, body) as RawNode as Program;
-    const lines = lineStarts.slice(0, lineCount); // fused table (L2) — no second pass
+    const program = m.Program(0, srcLen, 0, body) as Program;
+    const lines = lineStarts.slice(0, lineCount);
     const outErrors = errors;
-    const nodeCount = peekNodeId() + 1; // ids run 1..peek; +1 for the reserved 0 slot
-    // Drop the parser's references so the source string, intern table and stack
-    // slots are not pinned by module-level state after we return. (Nulling stk
-    // writes null into packed elements — the packed kind is preserved.)
+    const nodeCount = peekNodeId() + 1;
     src = '';
     errors = [];
     internReset(1);
@@ -2814,15 +2884,9 @@ export function parseWithDiagnostics(source: string, options: ParseOptions): Par
     return parse(source, options);
 }
 
-/* --------------------------------------------------- round-6 i4 probe hooks
- *
- * Parse-autopsy support: run the LEXER alone (tokenize the whole source, no node
- * allocation, no grammar) to isolate the lexing share of parse time. Idents are
- * materialized+interned exactly as in a real parse (that cost belongs to lexing),
- * so this bounds the "scan + intern" floor under the grammar/alloc work. The sum
- * escapes so the loop is not dead-code-eliminated. */
 export function lexOnly(source: string, options: ParseOptions): number {
     tsMode = options.ts;
+    jsxMode = options.jsx;
     src = source;
     srcLen = source.length;
     pos = 0;

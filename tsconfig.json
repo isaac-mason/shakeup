@@ -12,5 +12,6 @@
         "skipLibCheck": true,
         "types": ["node"]
     },
-    "include": ["src", "examples", "tst", "vitest.config.ts"]
+    "include": ["src", "examples", "tst", "vitest.config.ts"],
+    "exclude": ["tst/fixtures/jsx", "tst/fixtures/exemplar/widget.tsx"]
 }
