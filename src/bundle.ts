@@ -17,8 +17,8 @@ import {
     resolveJSXOptions,
 } from './module-graph';
 import { compilePipeline, type PluginCtx } from './plugin';
-import { type Shaken, shake } from './shake';
 import { encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
+import { type TreeshakeResult, treeshake } from './treeshake';
 
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
@@ -35,7 +35,7 @@ export type BundleResult = {
     warnings: string[];
     graph: Graph | null;
     linked: Linked | null;
-    shaken: Shaken | null;
+    shaken: TreeshakeResult | null;
     map?: SourceMap;
 };
 
@@ -102,27 +102,27 @@ function renameWalk(ctx: EmitCtx, node: Node): void {
 function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
     const { mod } = ctx;
     const src = mod.source;
-    for (const stmt of mod.program.data.body) {
-        if (ctx.live !== null && !ctx.live.has(stmt.id)) {
-            ctx.edits.push({ start: stmt.start, end: stmt.end });
+    for (const statement of mod.program.data.body) {
+        if (ctx.live !== null && !ctx.live.has(statement.id)) {
+            ctx.edits.push({ start: statement.start, end: statement.end });
             continue;
         }
 
-        if (stmt.type === N.ImportDeclaration) {
-            if (stmt.data.importKind !== 'type') {
-                const source = stmt.data.source;
-                if (source.type === N.StringLiteral && stmt.data.specifiers.length === 0) {
+        if (statement.type === N.ImportDeclaration) {
+            if (statement.data.importKind !== 'type') {
+                const source = statement.data.source;
+                if (source.type === N.StringLiteral && statement.data.specifiers.length === 0) {
                     const spec = src.slice(source.start + 1, source.end - 1);
                     const rec = mod.importRecords.find((r) => r.specifier === spec);
                     if (rec?.external) sideEffectSpecs.add(spec);
                 }
             }
-            ctx.edits.push({ start: stmt.start, end: stmt.end });
+            ctx.edits.push({ start: statement.start, end: statement.end });
             continue;
         }
 
-        if (stmt.type === N.ExportAllDeclaration) {
-            const source = stmt.data.source;
+        if (statement.type === N.ExportAllDeclaration) {
+            const source = statement.data.source;
             const spec = source.type === N.StringLiteral ? src.slice(source.start + 1, source.end - 1) : '';
             const rec = mod.importRecords.find((r) => r.specifier === spec);
             if (rec?.external) {
@@ -132,13 +132,13 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
                         `'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`,
                     );
             }
-            ctx.edits.push({ start: stmt.start, end: stmt.end });
+            ctx.edits.push({ start: statement.start, end: statement.end });
             continue;
         }
 
-        if (stmt.type === N.ExportNamedDeclaration) {
-            if (stmt.data.exportKind === 'type') continue;
-            const decl = stmt.data.declaration;
+        if (statement.type === N.ExportNamedDeclaration) {
+            if (statement.data.exportKind === 'type') continue;
+            const decl = statement.data.declaration;
             if (decl !== null) {
                 if (
                     decl.type === N.TSEnumDeclaration ||
@@ -146,39 +146,39 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
                     decl.type === N.TSTypeAliasDeclaration
                 )
                     continue;
-                ctx.edits.push({ start: stmt.start, end: decl.start });
+                ctx.edits.push({ start: statement.start, end: decl.start });
                 renameWalk(ctx, decl);
             } else {
-                ctx.edits.push({ start: stmt.start, end: stmt.end });
+                ctx.edits.push({ start: statement.start, end: statement.end });
             }
             continue;
         }
 
-        if (stmt.type === N.ExportDefaultDeclaration) {
-            const decl = stmt.data.declaration;
+        if (statement.type === N.ExportDefaultDeclaration) {
+            const decl = statement.data.declaration;
             const named = (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) && decl.data.id !== null;
             if (named) {
-                ctx.edits.push({ start: stmt.start, end: decl.start });
+                ctx.edits.push({ start: statement.start, end: decl.start });
             } else {
                 const ref = ctx.linked.defaultRefs.get(mod.idx);
                 const name = ref !== undefined ? finalNameOf(ctx.linked, ref) : `${mod.idx}_default`;
-                ctx.edits.push({ start: stmt.start, end: decl.start, text: `const ${name} = ` });
+                ctx.edits.push({ start: statement.start, end: decl.start, text: `const ${name} = ` });
             }
             renameWalk(ctx, decl);
             continue;
         }
 
-        renameWalk(ctx, stmt);
+        renameWalk(ctx, statement);
     }
 }
 
 /** True if the module has at least one live statement containing JSX (so its
  * injected runtime import is genuinely needed). `live === null` = no shaking. */
 function moduleHasLiveJSX(mod: Module, live: Set<number> | null): boolean {
-    for (const stmt of mod.program.data.body) {
-        if (live !== null && !live.has(stmt.id)) continue;
+    for (const statement of mod.program.data.body) {
+        if (live !== null && !live.has(statement.id)) continue;
         let found = false;
-        walk(stmt, (n) => {
+        walk(statement, (n) => {
             if (n.type === N.JSXElement || n.type === N.JSXFragment) found = true;
         });
         if (found) return true;
@@ -284,7 +284,7 @@ export function bundle(options: BundleOptions): BundleResult {
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
     const jsxPure = resolveJSXOptions(options.jsx).pure;
-    const shaken = options.treeshake === false ? null : shake(graph, linked, jsxPure);
+    const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
 
     let anyLiveJSX = false;
 
@@ -316,8 +316,8 @@ export function bundle(options: BundleOptions): BundleResult {
         let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName, jsxLower);
         if (live !== null) {
             const deadSpans: [number, number][] = [];
-            for (const stmt of mod.program.data.body) {
-                if (!live.has(stmt.id)) deadSpans.push([stmt.start, stmt.end]);
+            for (const statement of mod.program.data.body) {
+                if (!live.has(statement.id)) deadSpans.push([statement.start, statement.end]);
             }
             stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
         }

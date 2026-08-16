@@ -72,7 +72,7 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
     const roots = new Set<string>(); // explicitly-imported entry modules (never pruned)
 
     // Wrap the shared fetchModule to record this env's graph as it loads modules.
-    const fetchModule = async (id: string): Promise<string> => {
+    const fetchModule = async (id: string): Promise<{ code: string; map?: FetchResult['map'] }> => {
         const r = await options.fetchModule(id);
         if (r.errors.length > 0) throw new Error(r.errors.join('\n'));
         const prev = graph.get(id);
@@ -98,7 +98,7 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
         };
         for (const d of r.deps) edge(d).importers.add(id);
         for (const d of r.dynamicDeps) edge(d).dynamicImporters.add(id);
-        return r.code;
+        return { code: r.code, map: r.map };
     };
 
     // `import.meta.hot.invalidate()` calls land here; applyEdit drains them and

@@ -290,3 +290,18 @@ describe('runner — evaluator + import.meta', () => {
         expect(ran.length).toBe(1); // the injected evaluator ran the module
     });
 });
+
+describe('runner — source maps', () => {
+    it('attaches a real map without breaking evaluation', async () => {
+        const runner = createRunner({
+            resolveId: (s) => s,
+            fetchModule: (id) => {
+                const r = moduleRunnerTransform(id, `export const v = 42;`, { sourcemap: true });
+                return { code: r.code, map: r.map };
+            },
+        });
+        // the default evaluator attaches //# sourceMappingURL (startOffset-shifted) —
+        // the module must still evaluate correctly.
+        expect((await runner.import('m')).v).toBe(42);
+    });
+});

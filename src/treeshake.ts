@@ -4,20 +4,18 @@ import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { type Graph, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
 
-/** Result of tree shaking: which top-level statements survive, and which were dropped.
- * Liveness is keyed by statement node id (the id-indexed side-table convention). */
-export type Shaken = {
+export type TreeshakeResult = {
     live: Set<number>[];
     dropped: [number, Node][];
 };
 
-type StmtInfo = {
-    stmt: Node;
+type StatementInfo = {
+    statement: Node;
     refs: number[];
     pure: boolean;
 };
 
-function collectRefs(mod: Module, linked: Linked, stmt: Node, out: number[]): void {
+function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]): void {
     const moduleScope = scopeOf(mod.semantic, mod.program);
     const pushSym = (sym: number): void => {
         if (sym === 0) return;
@@ -30,8 +28,8 @@ function collectRefs(mod: Module, linked: Linked, stmt: Node, out: number[]): vo
         }
         if (mod.semantic.symbols[sym].scope === moduleScope) out.push(packRef(mod.idx, sym));
     };
-    walkRefIdents(stmt, (ident) => pushSym(symbolOf(mod.semantic, ident)));
-    if (mod.jsxRuntime !== null && stmtContainsJSX(stmt)) {
+    walkRefIdents(statement, (ident) => pushSym(symbolOf(mod.semantic, ident)));
+    if (mod.jsxRuntime !== null && statementContainsJSX(statement)) {
         const rt = mod.jsxRuntime;
         pushSym(rt.jsx);
         pushSym(rt.jsxs);
@@ -41,45 +39,45 @@ function collectRefs(mod: Module, linked: Linked, stmt: Node, out: number[]): vo
 }
 
 /** True if the statement subtree contains any JSX element/fragment. */
-function stmtContainsJSX(stmt: Node): boolean {
+function statementContainsJSX(statement: Node): boolean {
     let found = false;
-    walk(stmt, (n) => {
+    walk(statement, (n) => {
         if (n.type === N.JSXElement || n.type === N.JSXFragment) found = true;
     });
     return found;
 }
 
-function stmtIsPure(mod: Module, stmt: Node, jsxPure: boolean): boolean {
-    if (stmt.type === N.ImportDeclaration) {
-        if (stmt.data.specifiers.length > 0) return true;
-        const source = stmt.data.source;
+function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolean {
+    if (statement.type === N.ImportDeclaration) {
+        if (statement.data.specifiers.length > 0) return true;
+        const source = statement.data.source;
         if (source.type !== N.StringLiteral) return true;
         const spec = mod.source.slice(source.start + 1, source.end - 1);
         const rec = mod.importRecords.find((r) => r.specifier === spec);
         return !(rec?.external ?? false);
     }
-    return isPureStatement(stmt, jsxPure);
+    return isPureStatement(statement, jsxPure);
 }
 
 /** pseudo-symbol id marking "the whole namespace of this module" */
 const NS_MARKER = 0x1fffff;
 
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
-export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
+export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): TreeshakeResult {
     const live: Set<number>[] = graph.modules.map(() => new Set());
-    const infos: StmtInfo[][] = [];
-    /** packed declared-symbol ref -> [moduleIdx, stmt list index] */
-    const declToStmt = new Map<number, [number, number]>();
+    const infos: StatementInfo[][] = [];
+    /** packed declared-symbol ref -> [moduleIdx, statement list index] */
+    const declToStatement = new Map<number, [number, number]>();
 
     for (const mod of graph.modules) {
-        const list: StmtInfo[] = [];
+        const list: StatementInfo[] = [];
         const moduleScope = scopeOf(mod.semantic, mod.program);
         const spans: [number, number, number][] = [];
-        for (const stmt of mod.program.data.body) {
+        for (const statement of mod.program.data.body) {
             const refs: number[] = [];
-            collectRefs(mod, linked, stmt, refs);
-            list.push({ stmt, refs, pure: stmtIsPure(mod, stmt, jsxPure) });
-            spans.push([stmt.start, stmt.end, list.length - 1]);
+            collectRefs(mod, linked, statement, refs);
+            list.push({ statement, refs, pure: statementIsPure(mod, statement, jsxPure) });
+            spans.push([statement.start, statement.end, list.length - 1]);
         }
         const sem = mod.semantic;
         for (let sym = 1; sym < sem.symbols.length; sym++) {
@@ -87,7 +85,7 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
             const at = sem.symbols[sym].decl!.start;
             for (const [s, e, idx] of spans) {
                 if (at >= s && at < e) {
-                    declToStmt.set(packRef(mod.idx, sym), [mod.idx, idx]);
+                    declToStatement.set(packRef(mod.idx, sym), [mod.idx, idx]);
                     break;
                 }
             }
@@ -95,8 +93,8 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
         const defRef = linked.defaultRefs.get(mod.idx);
         if (defRef !== undefined) {
             for (let i = 0; i < list.length; i++) {
-                if (list[i].stmt.type === N.ExportDefaultDeclaration) {
-                    declToStmt.set(defRef, [mod.idx, i]);
+                if (list[i].statement.type === N.ExportDefaultDeclaration) {
+                    declToStatement.set(defRef, [mod.idx, i]);
                     break;
                 }
             }
@@ -111,16 +109,16 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
         liveRefs.add(ref);
         worklist.push(ref);
     };
-    const includeStmt = (modIdx: number, idx: number): void => {
+    const includeStatement = (modIdx: number, idx: number): void => {
         const info = infos[modIdx][idx];
-        if (live[modIdx].has(info.stmt.id)) return;
-        live[modIdx].add(info.stmt.id);
+        if (live[modIdx].has(info.statement.id)) return;
+        live[modIdx].add(info.statement.id);
         for (const r of info.refs) markRef(r);
     };
 
     for (const mod of graph.modules) {
         for (let i = 0; i < infos[mod.idx].length; i++) {
-            if (!infos[mod.idx][i].pure) includeStmt(mod.idx, i);
+            if (!infos[mod.idx][i].pure) includeStatement(mod.idx, i);
         }
     }
     const entryMap = linked.exportMaps.get(graph.entry);
@@ -145,15 +143,15 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
             }
             continue;
         }
-        const decl = declToStmt.get(ref);
-        if (decl !== undefined) includeStmt(decl[0], decl[1]);
+        const decl = declToStatement.get(ref);
+        if (decl !== undefined) includeStatement(decl[0], decl[1]);
     }
 
     const dropped: [number, Node][] = [];
     for (const mod of graph.modules) {
         for (const info of infos[mod.idx]) {
-            if (live[mod.idx].has(info.stmt.id)) continue;
-            const t = info.stmt.type;
+            if (live[mod.idx].has(info.statement.id)) continue;
+            const t = info.statement.type;
             if (
                 t === N.ImportDeclaration ||
                 t === N.ExportAllDeclaration ||
@@ -162,7 +160,7 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
                 t === N.TSTypeAliasDeclaration
             )
                 continue;
-            dropped.push([mod.idx, info.stmt]);
+            dropped.push([mod.idx, info.statement]);
         }
     }
     return { live, dropped };

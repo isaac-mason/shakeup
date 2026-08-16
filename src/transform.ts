@@ -1,7 +1,16 @@
 import { walkRefIdents } from './analysis/refs';
-import { analyze, createSemantic, symbolOf } from './analysis/semantic';
-import { N, type Node, walk } from './ast';
-import { applyEdits, buildLineTable, collectStripEdits, type Edit, type JSXLower, type MapCtx, renderEdits, renderMappedPart } from './emit';
+import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
+import { N, type Node, type Program, walk } from './ast';
+import {
+    applyEdits,
+    buildLineTable,
+    collectStripEdits,
+    type Edit,
+    type JSXLower,
+    type MapCtx,
+    renderEdits,
+    renderMappedPart,
+} from './emit';
 import { collectUnsupported, type JSXOptions, resolveJSXOptions, scanJSX } from './module-graph';
 import { parse } from './parser';
 import { addLine, encodeMappings, joinParts, newMappings, type Part, type SourceMap } from './sourcemap';
@@ -224,14 +233,23 @@ function collectBindingNames(pattern: Node, out: string[]): void {
     });
 }
 
-export function moduleRunnerTransform(filename: string, code: string, options: { sourcemap?: boolean } = {}): ModuleRunnerResult {
-    const { program, errors: parseErrors } = parse(code, { ts: false, jsx: false });
-    const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
-    if (errors.length > 0) return { code: '', deps: [], dynamicDeps: [], errors, hmr: { selfAccepts: false, acceptedDeps: [] } };
+type RunnerEdits = {
+    edits: Edit[];
+    exportEntries: string[];
+    importLines: string[];
+    reExportLines: string[];
+    deps: string[];
+    dynamicDeps: string[];
+    hmr: HmrInfo;
+};
 
-    const semantic = createSemantic();
-    analyze(semantic, program);
-
+/** Analyze a parsed module + collect the edits/prelude that rewrite it to the
+ *  `__shakeup` protocol (imports→link, exports→live, refs→member, import.meta,
+ *  dynamic import, HMR-accept detection). Pure over (program, semantic, code) — no
+ *  parse. Shared by {@link moduleRunnerTransform} (standalone, on stripped JS) and
+ *  {@link devTransform} (fused with the TS/JSX strip over ONE parse). TS `export
+ *  enum` registers its live binding; the strip lowers the enum + drops the keyword. */
+function collectRunnerEdits(program: Program, semantic: Semantic, code: string): RunnerEdits {
     // Deconflict runtime locals against every identifier in the module.
     const used = new Set(semantic.names.keys());
     const claim = (base: string): string => {
@@ -342,17 +360,24 @@ export function moduleRunnerTransform(filename: string, code: string, options: {
             if (stmt.data.exportKind === 'type') continue;
             const decl = stmt.data.declaration;
             if (decl !== null) {
-                edits.push({ start: stmt.start, end: exportKeywordEnd(code, stmt.start, false) }); // strip `export`
+                const stripKeyword = () => edits.push({ start: stmt.start, end: exportKeywordEnd(code, stmt.start, false) });
                 if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) {
+                    stripKeyword();
                     if (decl.data.id !== null) addExport(decl.data.id.name, decl.data.id.name);
                 } else if (decl.type === N.VariableDeclaration) {
+                    stripKeyword();
                     for (const d of decl.data.declarations) {
                         if (d.type !== N.VariableDeclarator) continue;
                         const names: string[] = [];
                         collectBindingNames(d.data.id, names);
                         for (const nm of names) addExport(nm, nm);
                     }
+                } else if (decl.type === N.TSEnumDeclaration) {
+                    // fused path only (stripped JS has no enum node): the strip lowers
+                    // the enum + drops its `export`; we just register the live binding.
+                    if (decl.data.id !== null) addExport(decl.data.id.name, decl.data.id.name);
                 }
+                // interface / type alias: type-only — the strip blanks the whole stmt.
                 continue;
             }
             if (stmt.data.source !== null) {
@@ -417,11 +442,24 @@ export function moduleRunnerTransform(filename: string, code: string, options: {
         edits.push({ start: ident.start, end: ident.end, text: shorthandProp !== null ? `${ident.name}: ${val}` : val });
     });
 
+    return { edits, exportEntries, importLines, reExportLines, deps, dynamicDeps, hmr };
+}
+
+/** Assemble the runner prelude (`live`/imports/`exportAll`) + the edited body into
+ *  the final output, with an optional source map back to `code`. */
+function assembleRunner(
+    filename: string,
+    code: string,
+    r: RunnerEdits,
+    errors: string[],
+    sourcemap?: boolean,
+): ModuleRunnerResult {
+    const { edits, exportEntries, importLines, reExportLines, deps, dynamicDeps, hmr } = r;
     const live = exportEntries.length > 0 ? `__shakeup.live({ ${exportEntries.join(', ')} });` : '';
     const imports = importLines.join('\n');
     const reExports = reExportLines.join('\n');
 
-    if (options.sourcemap) {
+    if (sourcemap) {
         const bodyPart = renderMappedPart(code, edits, 0); // body maps back to `code`; synthetics don't
         const parts: Part[] = [];
         if (live !== '') parts.push({ code: live });
@@ -446,4 +484,60 @@ export function moduleRunnerTransform(filename: string, code: string, options: {
     if (reExports !== '') parts.push(reExports);
     if (body !== '') parts.push(body);
     return { code: `${parts.join('\n')}\n`, deps, dynamicDeps, errors, hmr };
+}
+
+const emptyResult = (errors: string[]): ModuleRunnerResult => ({
+    code: '',
+    deps: [],
+    dynamicDeps: [],
+    errors,
+    hmr: { selfAccepts: false, acceptedDeps: [] },
+});
+
+/** Rewrite already-stripped ESM to the native `__shakeup.*` module-runner form.
+ *  Standalone — parses `code` as plain JS. The dev path uses {@link devTransform}. */
+export function moduleRunnerTransform(filename: string, code: string, options: { sourcemap?: boolean } = {}): ModuleRunnerResult {
+    const { program, errors: parseErrors } = parse(code, { ts: false, jsx: false });
+    const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
+    if (errors.length > 0) return emptyResult(errors);
+    const semantic = createSemantic();
+    analyze(semantic, program);
+    return assembleRunner(filename, code, collectRunnerEdits(program, semantic, code), errors, options.sourcemap);
+}
+
+/** Inputs to {@link devTransform}. */
+export type DevTransformOptions = { lang?: TransformLang; jsx?: JSXOptions; sourcemap?: boolean };
+
+/**
+ * The FUSED dev-path transform: TS/JSX strip + module-runner rewrite over a SINGLE
+ * parse (P1) — the dev server's per-module transform. For NON-JSX modules the strip
+ * edits + runner-rewrite edits are collected over one AST and applied together (one
+ * parse instead of two). JSX modules fall back to the sequential 2-parse path
+ * (`transform` → `moduleRunnerTransform`): JSX lowering generates runtime + component
+ * references the runner-rewrite must also resolve, which the fused path doesn't do yet.
+ */
+export function devTransform(filename: string, source: string, options: DevTransformOptions = {}): ModuleRunnerResult {
+    const lang = options.lang ?? inferLang(filename);
+    const ts = lang === 'ts' || lang === 'tsx';
+    const jsx = lang === 'jsx' || lang === 'tsx';
+
+    const { program, errors: parseErrors } = parse(source, { ts, jsx });
+    const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
+    collectUnsupported(program, filename, errors);
+    if (errors.length > 0) return emptyResult(errors);
+
+    // JSX: not yet fused — use the proven sequential path. No source map yet: it
+    // would map runner-code→stripped, and composing strip∘runner needs a chain step.
+    if (jsx && scanJSX(program).hasJSX) {
+        const stripped = transform(filename, source, { lang, jsx: options.jsx });
+        if (stripped.errors.length > 0) return emptyResult(stripped.errors);
+        return moduleRunnerTransform(filename, stripped.code);
+    }
+
+    // Fused: one parse feeds both the TS strip and the runner-rewrite.
+    const semantic = createSemantic();
+    analyze(semantic, program);
+    const r = collectRunnerEdits(program, semantic, source);
+    if (ts) r.edits.push(...collectStripEdits(program, source, true, null, null));
+    return assembleRunner(filename, source, r, errors, options.sourcemap);
 }

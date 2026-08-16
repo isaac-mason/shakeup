@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { moduleRunnerTransform, transform } from '../src/transform.ts';
+import { devTransform, moduleRunnerTransform, transform } from '../src/transform.ts';
 
 /** Transform, asserting no diagnostics, and return the code. */
 function ok(filename: string, src: string): string {
@@ -258,5 +258,92 @@ describe('moduleRunnerTransform — re-exports', () => {
         expect(ns.a).toBe(99); // local precedence
         expect(ns.b).toBe(2); // from star
         expect('default' in ns).toBe(false); // default never re-exported by *
+    });
+});
+
+// ─── devTransform: fused parse-once (dev-path transform) ─────────────────────
+
+/** run runner-protocol code against a stub __shakeup, return the exports. */
+async function runCode(code: string, link: (spec: string) => unknown): Promise<Record<string, unknown>> {
+    const ns: Record<string, unknown> = {};
+    const noop = () => {};
+    const __shakeup = {
+        link: async (spec: string) => link(spec),
+        live: (g: Record<string, () => unknown>) => {
+            for (const k of Object.keys(g)) Object.defineProperty(ns, k, { get: g[k], enumerable: true, configurable: true });
+        },
+        exportAll: (o: Record<string, unknown>) => {
+            for (const k of Object.keys(o))
+                if (k !== 'default' && !(k in ns))
+                    Object.defineProperty(ns, k, { get: () => o[k], enumerable: true, configurable: true });
+        },
+        meta: {
+            url: 't',
+            filename: 't',
+            env: {},
+            hot: {
+                data: {},
+                accept: noop,
+                dispose: noop,
+                invalidate: noop,
+                prune: noop,
+                on: noop,
+                off: noop,
+                send: noop,
+                acceptExports: noop,
+            },
+        },
+    };
+    // biome-ignore lint/security/noGlobalEval: test-only evaluation of trusted output.
+    await new Function('__shakeup', `return (async () => {\n${code}\n})()`)(__shakeup);
+    return ns;
+}
+
+/** a deterministic module namespace for any imported specifier. */
+const stubLink = () => ({ x: 'X', a: 1, b: 2, fn: () => 'called', default: 'D' });
+
+describe('devTransform — fused output executes identically to sequential', () => {
+    // canonicalize across the two eval runs: functions differ by identity, so tag
+    // them; recurse objects; primitives compare directly.
+    const canon = (v: unknown, d = 0): unknown => {
+        if (v === null || (typeof v !== 'object' && typeof v !== 'function')) return v;
+        if (typeof v === 'function') return '[fn]';
+        if (d > 4) return '[obj]';
+        const o: Record<string, unknown> = {};
+        for (const k of Object.keys(v as object)) o[k] = canon((v as Record<string, unknown>)[k], d + 1);
+        return o;
+    };
+    const equivalent = async (src: string) => {
+        const fused = devTransform('t.ts', src);
+        const seq = moduleRunnerTransform('t.ts', transform('t.ts', src).code);
+        expect(fused.errors).toEqual([]);
+        expect(seq.errors).toEqual([]);
+        expect(canon(await runCode(fused.code, stubLink))).toEqual(canon(await runCode(seq.code, stubLink)));
+        return fused;
+    };
+
+    it('TS annotations + value imports', () => equivalent(`import { x } from './m';\nexport const y: string = x + '!';`));
+    it('enum export', () => equivalent(`export enum E { A, B = 3, C }\nexport const v = [E.A, E.C];`));
+    it('parameter properties', () =>
+        equivalent(`class P { constructor(public a: number, readonly b = 2) {} }\nexport const r = [new P(9).a, new P(9).b];`));
+    it('re-exports + this-preservation', () =>
+        equivalent(`export * from './b';\nimport { fn } from './c';\nexport const r = fn();`));
+    it('default + namespace + dynamic import', () =>
+        equivalent(
+            `import d from './m';\nimport * as ns from './n';\nexport const load = () => import('./lazy');\nexport const out = [d, ns.x];`,
+        ));
+
+    it('reports fused output has the __shakeup protocol (not raw ESM)', async () => {
+        const { code } = devTransform('t.ts', `import { x } from './m';\nexport const y = x;`);
+        expect(code).toContain('__shakeup.link');
+        expect(code).toContain('__shakeup.live');
+        expect(code).not.toMatch(/^import /m);
+    });
+
+    it('JSX falls back to the sequential path and still lowers correctly', async () => {
+        const { code, errors } = devTransform('t.tsx', `const A = () => <div className="x">hi</div>;\nexport const app = A;`);
+        expect(errors).toEqual([]);
+        expect(code).toContain('jsx-runtime'); // JSX runtime linked
+        expect(code).not.toMatch(/<div/);
     });
 });

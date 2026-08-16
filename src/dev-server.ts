@@ -10,12 +10,10 @@
 // path), so an OPFS/network `load` works.
 //
 // Pipeline per module: runLoad (→ default fs) → runTransform (plugin source
-// patches, e.g. capture) → shakeup strip (TS/JSX) → moduleRunnerTransform → cache +
-// graph. moduleParsed runs read-only after a parse when any plugin needs it.
-//
-// NOTE (perf, not surface): strip + moduleRunnerTransform each parse internally, so
-// a module parses 2–3×. Fusing to a single parse (P1) is an internal optimization
-// behind this stable surface — it does not change the API.
+// patches, e.g. capture) → devTransform (FUSED strip + module-runner rewrite over a
+// SINGLE parse for non-JSX; JSX falls back to two) → cache + graph. moduleParsed
+// runs read-only after a parse when any plugin needs it. A source map (runner code →
+// original) is emitted per module and carried on FetchResult for the evaluator.
 
 import { analyze, createSemantic } from './analysis/semantic.ts';
 import type { HmrUpdate } from './environment.ts';
@@ -31,7 +29,8 @@ import {
     runResolveId,
     runTransform,
 } from './plugin.ts';
-import { type HmrInfo, moduleRunnerTransform, type TransformOptions, transform } from './transform.ts';
+import type { SourceMap } from './sourcemap.ts';
+import { devTransform, type HmrInfo, type TransformOptions } from './transform.ts';
 
 /** Resolution result: a module id to evaluate through the graph, or an external
  *  specifier the runner native-imports. */
@@ -46,6 +45,9 @@ export type DevServerOptions = {
     plugins?: Plugin[];
     /** JSX config forwarded to the strip transform. */
     jsx?: TransformOptions['jsx'];
+    /** emit source maps (mapping runner code → original) so the runner attaches them
+     *  and dev stack traces map to source. Default true. */
+    sourcemap?: boolean;
     warn?: (message: string) => void;
 };
 
@@ -55,6 +57,7 @@ export type ModuleNode = {
     id: string;
     hash: number;
     code: string;
+    map?: SourceMap;
     deps: string[];
     dynamicDeps: string[];
     importers: Set<string>;
@@ -64,6 +67,7 @@ export type ModuleNode = {
 
 export type FetchResult = {
     code: string;
+    map?: SourceMap;
     deps: string[];
     dynamicDeps: string[];
     hmr: HmrInfo;
@@ -215,23 +219,31 @@ export function createDevServer(options: DevServerOptions): DevServer {
         const hash = hashOf(source);
         const cached = graph.get(id);
         if (cached !== undefined && cached.hash === hash && cached.errors.length === 0) {
-            return { code: cached.code, deps: cached.deps, dynamicDeps: cached.dynamicDeps, hmr: cached.hmr, errors: [] };
+            return {
+                code: cached.code,
+                map: cached.map,
+                deps: cached.deps,
+                dynamicDeps: cached.dynamicDeps,
+                hmr: cached.hmr,
+                errors: [],
+            };
         }
 
-        // plugin source patches (capture, etc.) → strip TS/JSX → module-runner form.
+        // plugin source patches (capture, etc.) → fused strip + module-runner rewrite.
         const patched = await runTransform(pipeline, ctx, source, id);
-        const stripped = transform(id, patched, { jsx: options.jsx });
-        if (stripped.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: stripped.errors };
 
-        // read-only moduleParsed (P4): only pay a parse when a plugin needs it.
+        // read-only moduleParsed (P4): only pay a parse when a plugin needs it. Parses
+        // the (patched) module source — the real TS/JSX AST plugins inspect.
         if (pipeline.moduleParsed.length > 0) {
-            const { program, nodeCount } = parse(stripped.code, { ts: false, jsx: false });
+            const isx = id.endsWith('.tsx') || id.endsWith('.jsx');
+            const { program, nodeCount } = parse(patched, { ts: true, jsx: isx });
             const semantic = createSemantic();
             analyze(semantic, program);
-            await runModuleParsed(pipeline, ctx, { id, source: stripped.code, program, nodeCount, semantic });
+            await runModuleParsed(pipeline, ctx, { id, source: patched, program, nodeCount, semantic });
         }
 
-        const result = moduleRunnerTransform(id, stripped.code);
+        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: options.sourcemap ?? true });
+        if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
         const deps = await resolveDeps(id, result.deps);
         const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
         // resolve accepted-dep specifiers to ids so the graph walk matches `deps`.
@@ -248,6 +260,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
             id,
             hash,
             code: result.code,
+            map: result.map,
             deps,
             dynamicDeps,
             importers: prev?.importers ?? new Set(),
@@ -272,7 +285,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
             }
             depNode.importers.add(id);
         }
-        return { code: node.code, deps, dynamicDeps, hmr, errors: node.errors };
+        return { code: node.code, map: node.map, deps, dynamicDeps, hmr, errors: node.errors };
     }
 
     function invalidate(id: string): void {

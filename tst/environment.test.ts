@@ -330,3 +330,36 @@ describe('environment — HMR edge cases', () => {
         expect((await e.import('/entry.ts')).got).toBe(1);
     });
 });
+
+describe('environment — source maps', () => {
+    it('threads the dev-server map through to the evaluator (shifted for startOffset)', async () => {
+        const { createDevServer } = await import('../src/dev-server.ts');
+        const { createEnvironment } = await import('../src/environment.ts');
+        const { defaultEvaluator } = await import('../src/runner.ts');
+        const files: Record<string, string> = { '/m.ts': `export const v: number = 1;` };
+        const server = createDevServer({ fs: { read: (id) => files[id] ?? null, exists: (id) => id in files }, sourcemap: true });
+
+        // the dev server emits a map back to source
+        const fetched = await server.fetchModule('/m.ts');
+        expect(fetched.map).toBeDefined();
+        expect(fetched.map?.sources).toEqual(['/m.ts']);
+
+        // and it reaches the evaluator
+        let receivedMap: unknown;
+        const env = createEnvironment({
+            name: 'e',
+            fetchModule: server.fetchModule,
+            resolveId: server.resolveId,
+            evaluator: {
+                startOffset: 2,
+                runModule: (ctx, code, map) => {
+                    receivedMap = map;
+                    return defaultEvaluator.runModule(ctx, code);
+                },
+                runExternalModule: defaultEvaluator.runExternalModule,
+            },
+        });
+        await env.import('/m.ts');
+        expect(receivedMap).toBeDefined();
+    });
+});

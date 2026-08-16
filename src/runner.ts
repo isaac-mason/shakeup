@@ -14,6 +14,8 @@
 // `await`s any dep. A cycle re-entering a still-evaluating module gets its exports
 // object with getters already in place — lazy, so values resolve once defined.
 
+import type { SourceMap } from './sourcemap.ts';
+
 /** Resolve a specifier (as written) from an importer to a module id, or mark it
  *  external (native-imported, not evaluated through the graph). */
 export type ResolveId = (
@@ -21,10 +23,14 @@ export type ResolveId = (
     importer: string | null,
 ) => string | { external: string } | Promise<string | { external: string }>;
 
+/** transformed source for a module — code, plus an optional source map (SMv3)
+ *  back to the original, which the evaluator attaches so stack traces map to source. */
+export type FetchedModule = string | { code: string; map?: SourceMap };
+
 export type RunnerOptions = {
     resolveId: ResolveId;
-    /** transformed (`__shakeup.*`) source for a module id. */
-    fetchModule: (id: string) => string | Promise<string>;
+    /** transformed (`__shakeup.*`) source for a module id (code, or {code, map}). */
+    fetchModule: (id: string) => FetchedModule | Promise<FetchedModule>;
     /** build a module's import.meta base (url + filename); the runner adds `.hot` +
      *  `.env`. Matches makecat's RunnerHost.createImportMeta. */
     createImportMeta?: (id: string) => ImportMetaInit | Promise<ImportMetaInit>;
@@ -110,8 +116,10 @@ export type ModuleEvaluator = {
     /** number of wrapper lines prepended before the module body — for sourcemap
      *  line alignment of runtime stack traces. */
     startOffset?: number;
-    /** evaluate a transformed module body with its `__shakeup` context. */
-    runModule(ctx: ModuleContext, code: string): Promise<void>;
+    /** evaluate a transformed module body with its `__shakeup` context. `map` (if
+     *  given) is attached — shifted down by `startOffset` — so stack traces map to
+     *  source. */
+    runModule(ctx: ModuleContext, code: string, map?: SourceMap): Promise<void>;
     /** native-import an external specifier (browser: reject `node:`). */
     runExternalModule(spec: string): Promise<unknown>;
 };
@@ -140,11 +148,32 @@ const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
     body: string,
 ) => (ctx: ModuleContext) => Promise<void>;
 
+/** Append a `//# sourceMappingURL` data-URL to `code`, shifting the map down by
+ *  `startOffset` lines (the `new Function` wrapper prefix) so runtime stack traces
+ *  in the eval'd code map back to source. `;` per line is SMv3's line separator. */
+function attachSourceMap(code: string, map: SourceMap, startOffset: number): string {
+    const shifted = { ...map, mappings: ';'.repeat(startOffset) + map.mappings };
+    // btoa isn't in scope in every runtime; encode via a portable base64.
+    const json = JSON.stringify(shifted);
+    let b64: string;
+    if (typeof Buffer !== 'undefined') {
+        b64 = Buffer.from(json, 'utf8').toString('base64');
+    } else {
+        let bin = '';
+        for (const byte of new TextEncoder().encode(json)) bin += String.fromCharCode(byte);
+        b64 = btoa(bin);
+    }
+    return `${code}\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,${b64}`;
+}
+
 /** Default evaluator: `new AsyncFunction` for module bodies, dynamic `import` for
  *  externals. `new Function` wraps the body ~2 lines down (V8). */
 export const defaultEvaluator: ModuleEvaluator = {
     startOffset: 2,
-    runModule: (ctx, code) => new AsyncFunction('__shakeup', code)(ctx),
+    runModule: (ctx, code, map) => {
+        const src = map !== undefined ? attachSourceMap(code, map, defaultEvaluator.startOffset ?? 0) : code;
+        return new AsyncFunction('__shakeup', src)(ctx);
+    },
     runExternalModule: (spec) => import(/* @vite-ignore */ spec),
 };
 
@@ -259,10 +288,12 @@ export function createRunner(options: RunnerOptions): Runner {
         };
         modules.set(id, rec);
         evaluating.add(id);
-        const code = await options.fetchModule(id);
+        const fetched = await options.fetchModule(id);
+        const code = typeof fetched === 'string' ? fetched : fetched.code;
+        const map = typeof fetched === 'string' ? undefined : fetched.map;
         ensurePrepared();
         try {
-            await evaluator.runModule(await makeContext(rec), code);
+            await evaluator.runModule(await makeContext(rec), code, map);
         } catch (err) {
             // Don't cache a half-evaluated module — a retry (or fixed edit) must
             // re-evaluate from scratch, not return the broken partial exports.
@@ -307,11 +338,13 @@ export function createRunner(options: RunnerOptions): Runner {
             eventHandlers: new Map(),
             hotData: old?.hotData ?? {},
         };
-        const code = await options.fetchModule(id);
+        const fetched = await options.fetchModule(id);
+        const code = typeof fetched === 'string' ? fetched : fetched.code;
+        const map = typeof fetched === 'string' ? undefined : fetched.map;
         ensurePrepared();
         modules.set(id, fresh); // register before eval so self-refs resolve
         try {
-            await evaluator.runModule(await makeContext(fresh), code);
+            await evaluator.runModule(await makeContext(fresh), code, map);
         } catch (err) {
             if (old !== undefined) modules.set(id, old);
             else modules.delete(id);

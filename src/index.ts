@@ -5,7 +5,7 @@ export * from './emit';
 export * from './sourcemap';
 export * from './fs';
 export * from './module-graph';
-export * from './shake';
+export * from './treeshake';
 export * from './plugin';
 export * from './plugins/json';
 export * from './plugins/node-resolve';
