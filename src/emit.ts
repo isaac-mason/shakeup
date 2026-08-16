@@ -545,6 +545,7 @@ function collect(ctx: Ctx, root?: Node): void {
 
             case N.MethodDefinition: {
                 if (blankMethodDef(ctx, n)) return false;
+                synthParamProps(ctx, n);
                 return;
             }
 
@@ -561,6 +562,7 @@ function collect(ctx: Ctx, root?: Node): void {
             }
 
             case N.FormalParameter: {
+                if (blankThisParam(ctx, n)) return false;
                 blankParam(ctx, n);
                 return;
             }
@@ -604,6 +606,39 @@ function blankAbstractKeyword(ctx: Ctx, classNode: Node): void {
     if (src.slice(i, kwEnd) === 'abstract') blank(ctx, i, kwEnd);
 }
 
+/** True if `n` is a `super(...)` call statement (parameter-property assignments must follow it). */
+function isSuperCallStmt(n: Node): boolean {
+    if (n.type !== N.ExpressionStatement) return false;
+    const e = n.data.expression;
+    return e.type === N.CallExpression && e.data.callee.type === N.Super;
+}
+
+/** Synthesize `this.x = x;` for each TS parameter property (`constructor(private x: number)`).
+ *  Inserted at the top of the constructor body, or right after `super(...)` in a derived class
+ *  (touching `this` before super is illegal). Emit-time transform, modeled on lowerEnum. */
+function synthParamProps(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition }): void {
+    if (n.data.kind !== 'constructor') return;
+    const value = n.data.value;
+    if (value.type !== N.FunctionExpression) return;
+    const body = value.data.body;
+    if (body === null || body.type !== N.BlockStatement) return;
+    let inject = '';
+    for (const p of value.data.params) {
+        if (p.type !== N.FormalParameter) continue;
+        if (p.data.accessibility === null && !p.data.readonly) continue;
+        const pat = p.data.pattern;
+        if (pat.type !== N.BindingIdentifier) continue; // TS forbids destructuring param props
+        inject += ` this.${pat.name} = ${pat.name};`;
+    }
+    if (inject === '') return;
+    const first = body.data.body[0] ?? null;
+    if (first !== null && isSuperCallStmt(first)) {
+        replace(ctx, first.end, first.end, `;${inject}`); // leading `;` guards ASI after `super()`
+    } else {
+        replace(ctx, body.start + 1, body.start + 1, inject);
+    }
+}
+
 function blankMethodDef(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition }): boolean {
     const value = n.data.value;
     const abstractOrOverload =
@@ -631,6 +666,18 @@ function blankPropDef(ctx: Ctx, n: Node & { type: typeof N.PropertyDefinition })
 }
 
 /** Param: optional `?`, accessibility/readonly param-property modifiers. */
+/** A TS `this` parameter (`function f(this: T, ...)`) is not a runtime parameter — `this` is a
+ *  reserved word, so keeping it emits broken JS. Remove the whole param plus its trailing comma
+ *  so the parameter list stays valid. Returns true when it removed a `this` param. */
+function blankThisParam(ctx: Ctx, n: Node & { type: typeof N.FormalParameter }): boolean {
+    const p = n.data.pattern;
+    if (p.type !== N.BindingIdentifier || p.name !== 'this') return false;
+    blank(ctx, n.start, n.end);
+    const i = skipWs(ctx.src, n.end, ctx.src.length);
+    if (i < ctx.src.length && ctx.src.charCodeAt(i) === 44 /* , */) blank(ctx, i, i + 1);
+    return true;
+}
+
 function blankParam(ctx: Ctx, n: Node & { type: typeof N.FormalParameter }): void {
     const pattern = n.data.pattern;
     if (n.data.accessibility !== null || n.data.readonly) {

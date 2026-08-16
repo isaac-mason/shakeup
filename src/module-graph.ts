@@ -79,6 +79,19 @@ export function resolveJSXOptions(jsx: JSXOptions | undefined): { importSource: 
     return { importSource: jsx?.importSource ?? 'react', pure: jsx?.pure ?? true };
 }
 
+/** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
+ * (non-`declare`) namespace has no runtime lowering, so the walk would leave `namespace X {`
+ * in the output = broken JS; fail loudly instead. (`declare` namespaces erase fine.) */
+function collectUnsupported(program: Node, id: string, errors: string[]): void {
+    walk(program, (n) => {
+        if (n.type === N.TSModuleDeclaration && !n.data.declare) {
+            errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
+            return false;
+        }
+        return true;
+    });
+}
+
 /** Inputs to {@link buildGraph}. */
 export type GraphOptions = {
     entry: string;
@@ -343,6 +356,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
         const { program, errors, nodeCount } = parse(source, { ts: true, jsx });
         for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
+        collectUnsupported(program, id, graph.errors);
         const semantic = createSemantic();
         analyze(semantic, program);
         const mod: Module = {

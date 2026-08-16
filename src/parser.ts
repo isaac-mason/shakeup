@@ -221,6 +221,7 @@ const m = {
     TSAsExpression: (s: number, e: number, _f: number, expression: Node, typeAnnotation: Node): Node => node(N.TSAsExpression, s, e, '', { expression, typeAnnotation }),
     TSSatisfiesExpression: (s: number, e: number, _f: number, expression: Node, typeAnnotation: Node): Node => node(N.TSSatisfiesExpression, s, e, '', { expression, typeAnnotation }),
     TSNonNullExpression: (s: number, e: number, _f: number, expression: Node): Node => node(N.TSNonNullExpression, s, e, '', { expression }),
+    TSInstantiationExpression: (s: number, e: number, _f: number, expression: Node, typeArguments: Node): Node => node(N.TSInstantiationExpression, s, e, '', { expression, typeArguments }),
 
     JSXElement: (s: number, e: number, _f: number, openingElement: Node, children: Node[], closingElement: Node | null): Node => node(N.JSXElement, s, e, '', { openingElement, children, closingElement: closingElement ?? null }),
     JSXOpeningElement: (s: number, e: number, _f: number, name: Node, typeArguments: Node | null, attributes: Node[]): Node => node(N.JSXOpeningElement, s, e, '', { name, typeArguments: typeArguments ?? null, attributes }),
@@ -311,6 +312,9 @@ interface ParserState {
     stk: Ref[];
     sp: number;
     speculating: number;
+    /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
+     * parseNew reads it to reject an optional chain as a `new` callee (a spec error). */
+    chainSawOptional: boolean;
 }
 
 /** Fresh parser state for one `parse` call. Every field is initialized here so
@@ -340,6 +344,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         stk: new Array(1 << 12).fill(null),
         sp: 0,
         speculating: 0,
+        chainSawOptional: false,
     };
 }
 
@@ -1042,7 +1047,15 @@ function parseNew(state: ParserState): Node {
         parseNameAsIdent(state, R_NAME);
         return m.NewTarget(start, state.tokStart, 0) as Node;
     }
-    const callee: Node = isK(state, K.NEW) ? parseNew(state) : parseMemberChain(state, parsePrimary(state), false);
+    let callee: Node;
+    if (isK(state, K.NEW)) {
+        callee = parseNew(state);
+    } else {
+        callee = parseMemberChain(state, parsePrimary(state), false);
+        // `new a?.b()` is a SyntaxError; the parenthesized `new (a?.b)()` is legal (the `?.`
+        // is consumed inside parsePrimary, so this frame's flag stays false there).
+        if (state.chainSawOptional) err(state, 'optional chain is not allowed in a new expression');
+    }
     let typeArgs: Ref = null;
     if (state.tsMode && isP(state, P.LT)) { const t = tryParseTypeArgsForCall(state); if (t !== null) typeArgs = t; }
     let args: Node[] | null = null;
@@ -1070,7 +1083,10 @@ function parseArgs(state: ParserState): Node[] {
 
 function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): Node {
     let sawOptional = false;
-    const finish = (e: Node): Node => (sawOptional ? (m.ChainExpression(e.start, e.end, 0, e) as Node) : e);
+    const finish = (e: Node): Node => {
+        state.chainSawOptional = sawOptional;
+        return sawOptional ? (m.ChainExpression(e.start, e.end, 0, e) as Node) : e;
+    };
     for (;;) {
         if (isP(state, P.DOT)) {
             nextToken(state);
@@ -1109,6 +1125,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             const args = parseArgs(state);
             expr = m.CallExpression(expr.start, state.tokStart, 0, expr, args, null) as Node;
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
+            if (sawOptional) err(state, 'tagged template cannot be used with an optional chain');
             const quasi = parseTemplate(state);
             expr = m.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
         } else if (state.tsMode && isP(state, P.BANG) && (state.tokFlags & F_NL) === 0) {
@@ -1121,9 +1138,15 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 const args = parseArgs(state);
                 expr = m.CallExpression(expr.start, state.tokStart, 0, expr, args, t) as Node;
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
+                if (sawOptional) err(state, 'tagged template cannot be used with an optional chain');
                 const quasi = parseTemplate(state);
                 expr = m.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
-            } else return finish(expr);
+            } else {
+                // bare instantiation expression `f<number>` (TS 4.7): keep the type args as a
+                // node so emit strips them (oxc ts.rs:1819). tryParseTypeArgsForCall's follow-set
+                // already gated that `<...>` is type args here (not a `<` comparison).
+                expr = m.TSInstantiationExpression(expr.start, t.end, 0, expr, t) as Node;
+            }
         } else return finish(expr);
     }
 }
@@ -2081,6 +2104,21 @@ function parseStatement(state: ParserState): Node {
                         applyDeclare(inner, start);
                         return inner;
                     }
+                    // `declare global { ... }` — ambient global augmentation; `global` is a
+                    // contextual identifier here. Model it as a declare TSModuleDeclaration so
+                    // emit erases the whole block (isErasableStatement).
+                    if ((state.tok as number) === T_IDENT && state.src.slice(state.tokStart, state.tokEnd) === 'global') {
+                        const gid = parseIdent(state, R_BIND);
+                        if (isP(state, P.LBRACE)) {
+                            nextToken(state);
+                            const from = state.sp;
+                            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) push(state, parseStatement(state));
+                            expectP(state, P.RBRACE, "'}'");
+                            const mod = m.TSModuleDeclaration(start, state.tokStart, 0, gid, finishList(state, from)) as Node;
+                            applyDeclare(mod, start);
+                            return mod;
+                        }
+                    }
                     restoreState(state, s);
                 }
                 break;
@@ -2575,6 +2613,10 @@ function parsePrimaryType(state: ParserState): Node {
                     restoreState(state, s);
                 }
                 push(state, parseType(state));
+                // unlabeled optional element `[string?]` — consume the marker. Optionality
+                // isn't modeled without a TSOptionalType node, and the whole tuple type is
+                // erased at emit, so dropping it is invisible to output (cf. `...` as TSTypeOperator).
+                if (isP(state, P.QUESTION)) nextToken(state);
             }
             if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
         }

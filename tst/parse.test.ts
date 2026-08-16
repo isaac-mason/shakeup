@@ -106,6 +106,15 @@ describe('fixed parser regressions', () => {
         const labeled = parseFresh('type P = [x: number, ...rest: string[]];', true);
         expect(labeled.errors).toEqual([]);
     });
+
+    it('regression: unlabeled optional tuple members parse (`[string?]`) — grammar audit §4', () => {
+        expect(parseFresh('type T = [string?];', true).errors).toEqual([]);
+        expect(parseFresh('type T = [number, string?];', true).errors).toEqual([]);
+        expect(parseFresh('type T = [string?, number?];', true).errors).toEqual([]);
+        // labeled-optional and rest forms remain unaffected
+        expect(parseFresh('type T = [a?: number];', true).errors).toEqual([]);
+        expect(parseFresh('type T = [...string[]];', true).errors).toEqual([]);
+    });
 });
 
 describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () => {
@@ -154,6 +163,48 @@ describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () =
         expect(countChains('a.b().c?.d;')).toBe(1);
         const s = shape('a.b().c?.d;');
         expect(s).toContain('ExpressionStatement ChainExpression');
+    });
+});
+
+describe('grammar audit — optional-chain spec errors (roadmap §4)', () => {
+    const errsOf = (src: string): string[] => parseFresh(src, true).errors.map((e) => e.msg);
+
+    it('rejects an optional chain as a `new` callee (`new a?.b()`)', () => {
+        expect(errsOf('new a?.b()')).toContain('optional chain is not allowed in a new expression');
+        expect(errsOf('new a?.b.c()')).toContain('optional chain is not allowed in a new expression');
+    });
+
+    it('rejects a tagged template on an optional chain (``a?.b`x` ``)', () => {
+        expect(errsOf('a?.b`x`')).toContain('tagged template cannot be used with an optional chain');
+        expect(errsOf('x?.y`tpl`')).toContain('tagged template cannot be used with an optional chain');
+    });
+
+    it('still accepts the legal parenthesized forms (paren terminates the chain)', () => {
+        expect(parseFresh('new (a?.b)()', true).errors).toEqual([]);
+        expect(parseFresh('(a?.b)`x`', true).errors).toEqual([]);
+    });
+
+    it('does not over-reject ordinary new / tagged-template / optional-call', () => {
+        expect(parseFresh('new a.b()', true).errors).toEqual([]);
+        expect(parseFresh('a.b`x`', true).errors).toEqual([]);
+        expect(parseFresh('a?.b()', true).errors).toEqual([]);
+        expect(parseFresh('new A()', true).errors).toEqual([]);
+    });
+
+    it('models bare instantiation `f<number>` as TSInstantiationExpression (was: type args discarded)', () => {
+        const { program, errors } = parseFresh('const x = f<number>;', true);
+        expect(errors).toEqual([]);
+        const kinds: number[] = [];
+        walk(program, (n) => { kinds.push(n.type); });
+        expect(kinds).toContain(N.TSInstantiationExpression);
+        // the call form keeps CallExpression; a real `<` comparison must NOT become instantiation
+        const call: number[] = [];
+        walk(parseFresh('const x = f<number>(1);', true).program, (n) => { call.push(n.type); });
+        expect(call).toContain(N.CallExpression);
+        expect(call).not.toContain(N.TSInstantiationExpression);
+        const cmp: number[] = [];
+        walk(parseFresh('const c = a < b;', true).program, (n) => { cmp.push(n.type); });
+        expect(cmp).not.toContain(N.TSInstantiationExpression);
     });
 });
 

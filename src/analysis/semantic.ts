@@ -599,6 +599,10 @@ function resolvePass(state: AnalyseState, node: Node | null): void {
             resolvePass(state, node.data.expression);
             resolveType(state, node.data.typeAnnotation);
             return;
+        case N.TSInstantiationExpression:
+            resolvePass(state, node.data.expression);
+            resolveType(state, node.data.typeArguments);
+            return;
         case N.TSTypeAnnotation:
             resolveType(state, node);
             return;

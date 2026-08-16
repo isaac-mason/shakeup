@@ -105,6 +105,40 @@ describe('emit — enum execution', () => {
     });
 });
 
+describe('emit — parameter properties (execution)', () => {
+    const load = async (src: string) => import('data:text/javascript,' + encodeURIComponent(strip(src)));
+
+    it('synthesizes this.x = x for private/public/readonly params', async () => {
+        const mod = await load(
+            'export class C { constructor(private x: number, public y: string, readonly z = 9) {} }',
+        );
+        const c = new mod.C(1, 'a');
+        expect(c.x).toBe(1);
+        expect(c.y).toBe('a');
+        expect(c.z).toBe(9);
+    });
+
+    it('orders assignments after super() in a derived class', async () => {
+        const mod = await load(
+            'class B { constructor(public b: number) {} }\n' +
+                'export class D extends B { constructor(private x: number) { super(10); } }',
+        );
+        const d = new mod.D(3);
+        expect(d.x).toBe(3);
+        expect(d.b).toBe(10); // base param property still assigned; no this-before-super crash
+    });
+
+    it('only param properties are synthesized — plain params are untouched', async () => {
+        const mod = await load(
+            'export class M { got = 0; constructor(a: number, private x: number) { this.got = a; } }',
+        );
+        const m = new mod.M(1, 2);
+        expect(m.x).toBe(2);
+        expect(m.got).toBe(1);
+        expect('a' in m).toBe(false);
+    });
+});
+
 describe('emit — per-rule snippets', () => {
     const cases: [string, string, string][] = [
         ['type annotation', 'const x: number = 1;', 'const x         = 1;'],
@@ -117,12 +151,17 @@ describe('emit — per-rule snippets', () => {
         ['interface (whole)', 'interface I { a: number; }', '                          '],
         ['type alias (whole)', 'type T = number;', '                '],
         ['declare (whole)', 'declare const c: number;', '                        '],
+        ['declare global (whole)', 'declare global { const G: number; }', '                                   '],
         ['import type (whole)', 'import type { A } from "m";', '                           '],
         ['type-only specifier first', 'import { type A, b } from "m";', 'import {         b } from "m";'],
         ['type-only specifier last', 'import { b, type C } from "m";', 'import { b         } from "m";'],
         ['export type specifier', 'export { type A, b };', 'export {         b };'],
         ['call type args', 'foo<X>(y);', 'foo   (y);'],
         ['new type args', 'new Bar<Z>(q);', 'new Bar   (q);'],
+        ['bare instantiation expr', 'const x = f<number>;', 'const x = f        ;'],
+        ['this param + real param', 'function f(this: Foo, x: number) {}', 'function f(           x        ) {}'],
+        ['this param only', 'function g(this: Foo) {}', 'function g(         ) {}'],
+        ['param named thisArg is kept', 'function j(thisArg: number) {}', 'function j(thisArg        ) {}'],
         ['implements clause', 'class C implements A, B {}', 'class C                 {}'],
         ['definite prop', 'class C { p!: number; }', 'class C { p         ; }'],
         ['optional prop', 'class C { p?: number; }', 'class C { p         ; }'],

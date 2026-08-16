@@ -315,6 +315,10 @@ const DEFS = [
     def('JSXSpreadChild', { expression: child }),
     def('JSXIdentifier', null),
     def('JSXText', null),
+    // Appended after the frozen pre-migration vocabulary (ids are append-only so existing
+    // node ids stay byte-identical — see tst/ast.test.ts ID_SNAPSHOT). An expression, so it
+    // sits outside the isTypeOnlyNode / isJSXNode id ranges.
+    def('TSInstantiationExpression', { expression: child, typeArguments: child }),
 ] as const;
 
 type Defs = typeof DEFS;
@@ -864,6 +868,10 @@ export function walk(n: Node, enter: (n: Node) => boolean | void): void {
             break;
         case N.TSNonNullExpression:
             if (d.expression != null) walk(d.expression as Node, enter);
+            break;
+        case N.TSInstantiationExpression:
+            if (d.expression != null) walk(d.expression as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
             break;
         case N.TSModuleDeclaration:
             if (d.id != null) walk(d.id as Node, enter);

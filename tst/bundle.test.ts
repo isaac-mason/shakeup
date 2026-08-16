@@ -115,3 +115,22 @@ describe('bundle: executable output', () => {
         expect(mod.a).toBe(12);
     });
 });
+
+describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)', () => {
+    const bundleErr = (src: string): string[] =>
+        bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) }).errors;
+
+    it('value namespaces are rejected with a clear error', () => {
+        const errs = bundleErr('export namespace NS { export const v = 42; }');
+        expect(errs.join('\n')).toMatch(/value namespaces are not supported/);
+    });
+
+    it('nested value namespaces are rejected', () => {
+        expect(bundleErr('namespace A { export namespace B { export const c = 1; } }').length).toBeGreaterThan(0);
+    });
+
+    it('declare namespace / declare global still erase cleanly (no error)', () => {
+        expect(bundleErr('declare namespace Foo { const x: number; }\nexport const y = 1;')).toEqual([]);
+        expect(bundleErr('declare global { const G: number; }\nexport const z = 2;')).toEqual([]);
+    });
+});

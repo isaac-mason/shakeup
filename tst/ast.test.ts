@@ -45,6 +45,8 @@ const ID_SNAPSHOT: Record<string, number> = {
     JSXElement: 134, JSXOpeningElement: 135, JSXClosingElement: 136, JSXFragment: 137, JSXOpeningFragment: 138, JSXClosingFragment: 139,
     JSXNamespacedName: 140, JSXMemberExpression: 141, JSXExpressionContainer: 142, JSXEmptyExpression: 143, JSXAttribute: 144, JSXSpreadAttribute: 145,
     JSXSpreadChild: 146, JSXIdentifier: 147, JSXText: 148,
+    // appended post-migration (append-only; existing ids above stay byte-identical)
+    TSInstantiationExpression: 149,
 };
 
 describe('DEFS-derived numeric ids match the frozen pre-migration snapshot', () => {
