@@ -4,7 +4,7 @@ import {
     N,
     TYPE_NAME,
     cloneNode,
-    makeIdentifierReference,
+    node,
     walk,
     walkChildren,
 } from '../src/ast.ts';
@@ -57,7 +57,7 @@ walk(src2.program, (n) => {
     return;
 });
 const renamed = cloneNode(decl, (n) => {
-    if (n.type === N.IdentifierReference && n.name === 'v') return makeIdentifierReference('vec');
+    if (n.type === N.IdentifierReference && n.name === 'v') return node(N.IdentifierReference, 0, 0, 'vec', null);
     return null;
 })!;
 console.log('— clone ok:', TYPE_NAME[renamed.type], 'root, rebuilt subtree standalone (source droppable)');

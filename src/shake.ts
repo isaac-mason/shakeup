@@ -1,8 +1,8 @@
 import { type Node, N, walk } from './ast';
 import { isPureStatement } from './analysis/effects';
 import { walkRefIdents } from './analysis/refs';
-import { type Graph, type Module } from './graph';
-import { type Linked, packRef, refMod, refSym } from './link';
+import { scopeOf, symbolOf } from './analysis/semantic';
+import { type Graph, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
 
 /** Result of tree shaking: which top-level statements survive, and which were dropped.
  * Liveness is keyed by statement node id (the id-indexed side-table convention). */
@@ -18,7 +18,7 @@ type StmtInfo = {
 };
 
 function collectRefs(mod: Module, linked: Linked, stmt: Node, out: number[]): void {
-    const moduleScope = mod.semantic.nodeScope[mod.program.id];
+    const moduleScope = scopeOf(mod.semantic, mod.program);
     const pushSym = (sym: number): void => {
         if (sym === 0) return;
         if (mod.namedImports.has(sym)) {
@@ -28,9 +28,9 @@ function collectRefs(mod: Module, linked: Linked, stmt: Node, out: number[]): vo
             else if (bind.kind === 'namespace') out.push(packRef(bind.module, NS_MARKER));
             return;
         }
-        if (mod.semantic.symScope[sym] === moduleScope) out.push(packRef(mod.idx, sym));
+        if (mod.semantic.symbols[sym].scope === moduleScope) out.push(packRef(mod.idx, sym));
     };
-    walkRefIdents(stmt, (ident) => pushSym(mod.semantic.nodeSymbol[ident.id]));
+    walkRefIdents(stmt, (ident) => pushSym(symbolOf(mod.semantic, ident)));
     if (mod.jsxRuntime !== null && stmtContainsJSX(stmt)) {
         const rt = mod.jsxRuntime;
         pushSym(rt.jsx);
@@ -49,7 +49,7 @@ function stmtContainsJSX(stmt: Node): boolean {
     return found;
 }
 
-function stmtIsPure(mod: Module, stmt: Node): boolean {
+function stmtIsPure(mod: Module, stmt: Node, jsxPure: boolean): boolean {
     if (stmt.type === N.ImportDeclaration) {
         if (stmt.data.specifiers.length > 0) return true;
         const source = stmt.data.source;
@@ -58,14 +58,14 @@ function stmtIsPure(mod: Module, stmt: Node): boolean {
         const rec = mod.importRecords.find((r) => r.specifier === spec);
         return !(rec?.external ?? false);
     }
-    return isPureStatement(stmt);
+    return isPureStatement(stmt, jsxPure);
 }
 
 /** pseudo-symbol id marking "the whole namespace of this module" */
 const NS_MARKER = 0x1fffff;
 
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
-export function shake(graph: Graph, linked: Linked): Shaken {
+export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StmtInfo[][] = [];
     /** packed declared-symbol ref -> [moduleIdx, stmt list index] */
@@ -73,18 +73,18 @@ export function shake(graph: Graph, linked: Linked): Shaken {
 
     for (const mod of graph.modules) {
         const list: StmtInfo[] = [];
-        const moduleScope = mod.semantic.nodeScope[mod.program.id];
+        const moduleScope = scopeOf(mod.semantic, mod.program);
         const spans: [number, number, number][] = [];
         for (const stmt of mod.program.data.body) {
             const refs: number[] = [];
             collectRefs(mod, linked, stmt, refs);
-            list.push({ stmt, refs, pure: stmtIsPure(mod, stmt) });
+            list.push({ stmt, refs, pure: stmtIsPure(mod, stmt, jsxPure) });
             spans.push([stmt.start, stmt.end, list.length - 1]);
         }
         const sem = mod.semantic;
-        for (let sym = 1; sym < sem.symCount; sym++) {
-            if (sem.symScope[sym] !== moduleScope) continue;
-            const at = sem.symDecl[sym]!.start;
+        for (let sym = 1; sym < sem.symbols.length; sym++) {
+            if (sem.symbols[sym].scope !== moduleScope) continue;
+            const at = sem.symbols[sym].decl!.start;
             for (const [s, e, idx] of spans) {
                 if (at >= s && at < e) {
                     declToStmt.set(packRef(mod.idx, sym), [mod.idx, idx]);

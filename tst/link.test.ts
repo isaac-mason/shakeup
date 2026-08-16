@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildGraph } from '../src/graph.ts';
+import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { finalNameOf, linkGraph, packRef, refMod } from '../src/link.ts';
 
 const build = (files: Record<string, string>, external: string[] = []) => {
     const graph = buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });

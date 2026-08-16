@@ -1,11 +1,23 @@
 import { type Node, N, walk } from './ast';
+import { symbolOf } from './analysis/semantic';
 import { walkRefIdents } from './analysis/refs';
 import { type Edit, type JSXLower, applyEdits, collectStripEdits } from './emit';
-import { type Graph, type GraphOptions, type JSXRuntime, type Module, buildGraph, resolveJSXOptions } from './graph';
+import {
+    type Graph,
+    type GraphOptions,
+    type ImportBind,
+    type JSXRuntime,
+    type Linked,
+    type Module,
+    buildGraph,
+    externalKey,
+    finalNameOf,
+    linkGraph,
+    packRef,
+    resolveJSXOptions,
+} from './module-graph';
 import { type PluginCtx, compilePipeline } from './plugin';
-import { setJsxPurity } from './analysis/effects';
 import { type Shaken, shake } from './shake';
-import { type ImportBind, type Linked, externalKey, finalNameOf, linkGraph, packRef } from './link';
 
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
@@ -33,7 +45,7 @@ type EmitCtx = {
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
 function renameOf(ctx: EmitCtx, identNode: Node): string | null {
-    const sym = ctx.mod.semantic.nodeSymbol[identNode.id];
+    const sym = symbolOf(ctx.mod.semantic, identNode);
     if (sym === 0) return null;
     const imp = ctx.mod.namedImports.get(sym);
     if (imp !== undefined) {
@@ -266,8 +278,8 @@ export function bundle(options: BundleOptions): BundleResult {
     const parts: string[] = [];
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
-    setJsxPurity(resolveJSXOptions(options.jsx).pure);
-    const shaken = options.treeshake === false ? null : shake(graph, linked);
+    const jsxPure = resolveJSXOptions(options.jsx).pure;
+    const shaken = options.treeshake === false ? null : shake(graph, linked, jsxPure);
 
     let anyLiveJSX = false;
 
@@ -277,7 +289,7 @@ export function bundle(options: BundleOptions): BundleResult {
         const live = shaken === null ? null : shaken.live[idx];
         if (mod.jsxRuntime !== null && moduleHasLiveJSX(mod, live)) anyLiveJSX = true;
         const enumFinalName = (idNode: Node): string | null => {
-            const sym = mod.semantic.nodeSymbol[idNode.id];
+            const sym = symbolOf(mod.semantic, idNode);
             if (sym === 0) return null;
             return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
         };

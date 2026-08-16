@@ -122,7 +122,7 @@ describe('plugin pipeline', () => {
             moduleParsed: (_ctx, info) => {
                 seen.push(info.id);
                 expect(info.nodeCount).toBeGreaterThan(1);
-                expect(info.semantic.symCount).toBeGreaterThan(0);
+                expect(info.semantic.symbols.length).toBeGreaterThan(0);
             },
         };
         build(

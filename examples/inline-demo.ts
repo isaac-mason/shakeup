@@ -1,6 +1,6 @@
-import { type Node, type Program, N, FIELDS, isIdentifier, cloneNode, walkChildren, peekNodeId } from '../src/ast.ts';
+import { type Node, type Program, N, isIdentifier, cloneNode, walkChildren } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
-import { analyze, createSemantic, type Semantic } from '../src/analysis/semantic.ts';
+import { analyze, createSemantic, symbolOf, type Semantic } from '../src/analysis/semantic.ts';
 import { isPureExpr } from '../src/analysis/effects.ts';
 
 const source = [
@@ -26,28 +26,27 @@ function inlineDirectCalls(program: Program, sem: Semantic): number {
         if (params.length !== stmt.data.params.length || params.length === 0) continue;
         const id = stmt.data.id;
         if (id === null) continue;
-        const fnSym = sem.nodeSymbol[id.id];
+        const fnSym = symbolOf(sem, id);
         if (fnSym !== 0) inlinable.set(fnSym, { params, returnExpr: only.data.argument });
     }
 
     let count = 0;
     const visit = (node: Node): void => {
-        walkChildren(node, (child, fieldIndex, listIndex) => {
+        walkChildren(node, (child, field, listIndex) => {
             visit(child);
             if (child.type !== N.CallExpression || child.data.callee.type !== N.IdentifierReference) return;
-            const fn = inlinable.get(sem.nodeSymbol[child.data.callee.id]);
+            const fn = inlinable.get(symbolOf(sem, child.data.callee));
             if (fn === undefined) return;
             const args = child.data.arguments;
-            for (const a of args) if (!isPureExpr(a)) return;
+            for (const a of args) if (!isPureExpr(a, true)) return;
             if (args.length !== fn.params.length) return;
-            const paramSyms = fn.params.map((p) => sem.nodeSymbol[p.id]);
+            const paramSyms = fn.params.map((p) => symbolOf(sem, p));
             const inlined = cloneNode(fn.returnExpr, (n) => {
                 if (n.type !== N.IdentifierReference) return null;
-                const at = paramSyms.indexOf(sem.nodeSymbol[n.id]);
+                const at = paramSyms.indexOf(symbolOf(sem, n));
                 return at >= 0 ? cloneNode(args[at]) : null;
             })!;
             const data = (node as unknown as { data: Record<string, unknown> }).data;
-            const field = fieldName(node, fieldIndex);
             if (listIndex >= 0) (data[field] as Node[])[listIndex] = inlined;
             else data[field] = inlined;
             count++;
@@ -58,9 +57,6 @@ function inlineDirectCalls(program: Program, sem: Semantic): number {
 }
 
 /** field name at schema index (child navigation for the repoint above). */
-function fieldName(node: Node, fieldIndex: number): string {
-    return FIELDS[node.type][fieldIndex].name;
-}
 
 function print(n: Node): string {
     if (isIdentifier(n.type)) return n.name;
@@ -96,16 +92,16 @@ function printModule(program: Program): string {
     return program.data.body.map(print).join('\n');
 }
 
-const { program, nodeCount } = parse(source, { ts: true, jsx: false });
+const { program } = parse(source, { ts: true, jsx: false });
 const sem = createSemantic();
-analyze(sem, program, nodeCount);
+analyze(sem, program);
 
 console.log('— before:');
 console.log(printModule(program));
 
 const n = inlineDirectCalls(program, sem);
 const sem2 = createSemantic();
-analyze(sem2, program, peekNodeId() + 1);
+analyze(sem2, program);
 
 console.log(`\n— after (${n} calls inlined):`);
 const after = printModule(program);

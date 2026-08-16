@@ -23,7 +23,7 @@ function analyzeSource(src: string, ts: boolean): Analyzed {
     const { program, errors, nodeCount } = parse(src, { ts, jsx: false });
     expect(errors).toEqual([]);
     const sem = createSemantic();
-    analyze(sem, program, nodeCount);
+    analyze(sem, program);
     return { program, sem, nodeCount };
 }
 
@@ -53,7 +53,7 @@ function symAt(a: Analyzed, name: string, start: number): number {
 
 /** start offset of the declaring Ident for a resolved symbol. */
 function declStart(a: Analyzed, sym: number): number {
-    return a.sem.symDecl[sym]!.start;
+    return a.sem.symbols[sym].decl!.start;
 }
 
 type RefDiverge = { start: number; name: string; kind: string; ours: string; theirs: string; excerpt: string };
@@ -173,7 +173,7 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
         for (const scope of sm.scopes) {
             for (const v of scope.variables) if (v.defs.length >= 1) theirVarsWithDef++;
         }
-        const ourSymbols = a.sem.symCount - 1;
+        const ourSymbols = a.sem.symbols.length - 1;
         let namedClassDecls = 0;
         walk(a.program, (n) => {
             if (n.type === N.ClassDeclaration && n.data.id !== null) namedClassDecls++;
@@ -197,7 +197,7 @@ describe('semantic TS snippet expectations', () => {
         const decl = identsNamed(a, 'Foo')[0];
         const use = identsNamed(a, 'Foo').find((n) => n.start === 24)!;
         expect(symbolOf(a.sem, use)).not.toBe(0);
-        expect(a.sem.symDecl[symbolOf(a.sem, use)]).toBe(decl);
+        expect(a.sem.symbols[symbolOf(a.sem, use)].decl).toBe(decl);
     });
 
     it('type-alias name resolves in the type namespace', () => {
@@ -303,7 +303,7 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
 
         const A1 = parse('const alpha = 1; alpha;', { ts: false, jsx: false });
         expect(A1.errors).toEqual([]);
-        analyze(sem, A1.program, A1.nodeCount);
+        analyze(sem, A1.program);
         const aIdents: Node[] = [];
         walk(A1.program, (n) => {
             if (isIdentifier(n.type) && n.name === 'alpha') aIdents.push(n);
@@ -313,7 +313,7 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
 
         const B = parse('const beta = 2; alpha; beta;', { ts: false, jsx: false });
         expect(B.errors).toEqual([]);
-        analyze(sem, B.program, B.nodeCount);
+        analyze(sem, B.program);
 
         const bAlpha: Node[] = [];
         const bBeta: Node[] = [];
@@ -337,13 +337,13 @@ describe('semantic reuse (warm re-analyze does not leak bindings)', () => {
         const sem = createSemantic();
 
         const big = parse('const a=1,b=2,c=3,d=4,e=5;', { ts: false, jsx: false });
-        analyze(sem, big.program, big.nodeCount);
-        const afterBig = sem.symCount;
+        analyze(sem, big.program);
+        const afterBig = sem.symbols.length;
         expect(afterBig - 1).toBe(5);
 
         const small = parse('const only = 1;', { ts: false, jsx: false });
-        analyze(sem, small.program, small.nodeCount);
-        expect(sem.symCount - 1).toBe(1);
+        analyze(sem, small.program);
+        expect(sem.symbols.length - 1).toBe(1);
     });
 });
 
@@ -351,7 +351,7 @@ function analyzeJSX(src: string): Analyzed {
     const { program, errors, nodeCount } = parse(src, { ts: false, jsx: true });
     expect(errors).toEqual([]);
     const sem = createSemantic();
-    analyze(sem, program, nodeCount);
+    analyze(sem, program);
     return { program, sem, nodeCount };
 }
 
@@ -408,7 +408,7 @@ describe('JSX head-role split targeted unit tests (eslint-scope blind spot)', ()
         expect(head, 'capitalized head IdentifierReference').toBeDefined();
         const sym = symbolOf(a.sem, head);
         expect(sym).not.toBe(0);
-        expect(a.sem.symDecl[sym]!.start).toBe(9);
+        expect(a.sem.symbols[sym].decl!.start).toBe(9);
     });
 
     it('a lowercase intrinsic tag is a JSXIdentifier that never resolves', () => {
@@ -426,7 +426,7 @@ describe('JSX head-role split targeted unit tests (eslint-scope blind spot)', ()
         const head = identsNamed(a, 'Menu').find((n) => n.type === N.IdentifierReference)!;
         expect(head).toBeDefined();
         expect(symbolOf(a.sem, head)).not.toBe(0);
-        expect(a.sem.symDecl[symbolOf(a.sem, head)]!.start).toBe(9);
+        expect(a.sem.symbols[symbolOf(a.sem, head)].decl!.start).toBe(9);
     });
 
     it('a JSX component reference keeps the binding used (renames + shake see it)', () => {

@@ -16,7 +16,7 @@ const DEFAULT_MAIN_FIELDS = ['browser', 'module', 'main'];
 export const EMPTY_MODULE_ID = '\0empty';
 
 /** The subset of package.json this resolver reads (parse-cached per dir). */
-type PkgJson = {
+type PackageJson = {
     dir: string;
     name: string | undefined;
     exports: unknown;
@@ -274,9 +274,9 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
     const extensions = options.extensions ?? DEFAULT_EXTENSIONS;
     const mainFields = options.mainFields ?? DEFAULT_MAIN_FIELDS;
 
-    const pkgCache = new Map<string, PkgJson | null>();
+    const pkgCache = new Map<string, PackageJson | null>();
 
-    const readPkg = (dir: string): PkgJson | null => {
+    const readPkg = (dir: string): PackageJson | null => {
         const cached = pkgCache.get(dir);
         if (cached !== undefined) return cached;
         const text = fs.read(`${dir}/package.json`);
@@ -303,7 +303,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             }
             browser = map;
         }
-        const pkg: PkgJson = {
+        const pkg: PackageJson = {
             dir,
             name: typeof raw.name === 'string' ? raw.name : undefined,
             exports: raw.exports === null ? undefined : raw.exports,
@@ -331,7 +331,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    const applyBrowserRemap = (pkg: PkgJson, absPath: string): string => {
+    const applyBrowserRemap = (pkg: PackageJson, absPath: string): string => {
         const map = pkg.browser;
         if (map === undefined || typeof map === 'string') return absPath;
         const rel = relativeTo(pkg.dir, absPath);
@@ -345,7 +345,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return absPath;
     };
 
-    const loadAsFileOrDirectory = (pkg: PkgJson, absPath: string): string | null => {
+    const loadAsFileOrDirectory = (pkg: PackageJson, absPath: string): string | null => {
         const remapped = applyBrowserRemap(pkg, absPath);
         if (remapped === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
         const asFile = loadAsFile(remapped);
@@ -357,7 +357,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    const finishBrowserRemap = (pkg: PkgJson, absPath: string): string => {
+    const finishBrowserRemap = (pkg: PackageJson, absPath: string): string => {
         const r = applyBrowserRemap(pkg, absPath);
         if (r === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
         if (r === absPath) return absPath;
@@ -365,7 +365,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return f ?? r;
     };
 
-    const loadPackageRoot = (pkg: PkgJson): string | null => {
+    const loadPackageRoot = (pkg: PackageJson): string | null => {
         const fields: Record<string, string | undefined> = {
             browser: typeof pkg.browser === 'string' ? pkg.browser : undefined,
             module: pkg.module,
@@ -385,7 +385,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
 
     const finishExports = (
         ctx: PluginCtx,
-        pkg: PkgJson,
+        pkg: PackageJson,
         spec: string,
         subpath: string,
         r: PjResult,
@@ -564,15 +564,15 @@ function browserKeyCandidates(rel: string, extensions: string[]): string[] {
     return out;
 }
 
-function relativeForMsg(pkg: PkgJson, absPath: string): string {
+function relativeForMsg(pkg: PackageJson, absPath: string): string {
     return relativeTo(pkg.dir, absPath);
 }
 
 function findEnclosingPackage(
-    readPkg: (dir: string) => PkgJson | null,
+    readPkg: (dir: string) => PackageJson | null,
     startDir: string,
     name: string,
-): PkgJson | null {
+): PackageJson | null {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         if (baseName(dir) === 'node_modules') return null;
         const pkg = readPkg(dir);
@@ -584,9 +584,9 @@ function findEnclosingPackage(
 }
 
 function findBrowserMapOwner(
-    readPkg: (dir: string) => PkgJson | null,
+    readPkg: (dir: string) => PackageJson | null,
     startDir: string,
-): PkgJson | null {
+): PackageJson | null {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         const pkg = readPkg(dir);
         if (pkg !== null && pkg.browser !== undefined && typeof pkg.browser !== 'string') return pkg;

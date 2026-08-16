@@ -373,7 +373,7 @@ export type IdentifierReference = NodeOf<'IdentifierReference'>;
 export type IdentifierName = NodeOf<'IdentifierName'>;
 export type LabelIdentifier = NodeOf<'LabelIdentifier'>;
 
-export type FieldSpec = { name: string; list: boolean };
+type FieldSpec = { name: string; list: boolean };
 
 type HoldsChild<M> = M extends ChildSchema
     ? true
@@ -403,7 +403,7 @@ export const CHILD_FIELDS = Object.fromEntries(
     ]),
 ) as { [T in TypeName]: { name: ChildFieldNames<DefOf<T>['fields']>; list: boolean }[] };
 
-export const FIELDS: FieldSpec[][] = new Array(TYPE_COUNT);
+const FIELDS: FieldSpec[][] = new Array(TYPE_COUNT);
 for (const t of NODE_TYPE_NAMES) FIELDS[N[t]] = CHILD_FIELDS[t] as FieldSpec[];
 
 export function lineColOf(lines: Uint32Array, offset: number): { line: number; column: number } {
@@ -420,30 +420,19 @@ export function lineColOf(lines: Uint32Array, offset: number): { line: number; c
 /** the one untyped window: generic machinery reads `data` fields by name */
 const payload = (n: Node): Record<string, unknown> | null => n.data as Record<string, unknown> | null;
 
-let idCounter = 0;
-export const nextNodeId = (): number => ++idCounter;
-export const resetNodeIds = (): void => {
-    idCounter = 0;
-};
-export const peekNodeId = (): number => idCounter;
-
 /** Payload demanded by a given node-type id — the def's DataOf, selected by IdOf match. */
 type DataForId<Id extends NodeType> = { [T in TypeName]: IdOf<T> extends Id ? DataOf<T> : never }[TypeName];
 
+let idCounter = 0;
+/** globally unique, never reset — ids are unique across parses and clones */
+export const allocId = (): number => ++idCounter;
+
 export function node<Id extends NodeType>(type: Id, start: number, end: number, name: string, data: DataForId<Id>): Node {
-    return { id: nextNodeId(), type, start, end, name, data } as Node;
-}
-
-export function makeIdentifierReference(name: string): Node {
-    return node(N.IdentifierReference, 0, 0, name, null);
-}
-
-export function makeBindingIdentifier(name: string): Node {
-    return node(N.BindingIdentifier, 0, 0, name, null);
+    return { id: allocId(), type, start, end, name, data } as Node;
 }
 
 /** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
-export function walkChildren(n: Node, cb: (child: Node, fieldIndex: number, listIndex: number) => boolean | void): void {
+export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => boolean | void): void {
     const fields = FIELDS[n.type];
     const data = payload(n);
     if (data === null) return;
@@ -454,372 +443,472 @@ export function walkChildren(n: Node, cb: (child: Node, fieldIndex: number, list
             const arr = v as (Node | null)[];
             for (let j = 0; j < arr.length; j++) {
                 const c = arr[j];
-                if (c != null && cb(c, i, j) === false) return;
+                if (c != null && cb(c, fields[i].name, j) === false) return;
             }
-        } else if (cb(v as Node, i, -1) === false) return;
+        } else if (cb(v as Node, fields[i].name, -1) === false) return;
     }
 }
 
 /** Depth-first pre-order walk. `enter` may return false to skip the subtree
  * (exit is then not called). Hand switch over the schema, grouped by field
  * shape — the drift test in tst/ast.test.ts pins it to CHILD_FIELDS. */
-export function walk(n: Node, enter: (n: Node) => boolean | void, exit?: (n: Node) => void): void {
+export function walk(n: Node, enter: (n: Node) => boolean | void): void {
     if (enter(n) === false) return;
     const d = payload(n);
-    if (d !== null)
-        switch (n.type) {
+    if (d === null) return;
+    switch (n.type) {
         case N.Program:
-        case N.BlockStatement:
-        case N.StaticBlock:
-            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TemplateLiteral:
-            { const l = d.quasis as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            { const l = d.expressions as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.quasis as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            { const l = d.expressions as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TaggedTemplateExpression:
-            if (d.tag != null) walk(d.tag as Node, enter, exit);
-            if (d.quasi != null) walk(d.quasi as Node, enter, exit);
+            if (d.tag != null) walk(d.tag as Node, enter);
+            if (d.quasi != null) walk(d.quasi as Node, enter);
             break;
         case N.ArrayExpression:
-        case N.ArrayPattern:
-            { const l = d.elements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.elements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.ObjectExpression:
-        case N.ObjectPattern:
-            { const l = d.properties as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.properties as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.ObjectProperty:
-        case N.MethodDefinition:
-            if (d.key != null) walk(d.key as Node, enter, exit);
-            if (d.value != null) walk(d.value as Node, enter, exit);
+            if (d.key != null) walk(d.key as Node, enter);
+            if (d.value != null) walk(d.value as Node, enter);
             break;
         case N.SpreadElement:
-        case N.UnaryExpression:
-        case N.UpdateExpression:
-        case N.YieldExpression:
-        case N.AwaitExpression:
-        case N.ReturnStatement:
-        case N.ThrowStatement:
-        case N.JSXSpreadAttribute:
-            if (d.argument != null) walk(d.argument as Node, enter, exit);
+            if (d.argument != null) walk(d.argument as Node, enter);
             break;
         case N.BinaryExpression:
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
+            break;
         case N.LogicalExpression:
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
+            break;
         case N.AssignmentExpression:
-        case N.AssignmentPattern:
-        case N.TSQualifiedName:
-            if (d.left != null) walk(d.left as Node, enter, exit);
-            if (d.right != null) walk(d.right as Node, enter, exit);
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
+            break;
+        case N.UnaryExpression:
+            if (d.argument != null) walk(d.argument as Node, enter);
+            break;
+        case N.UpdateExpression:
+            if (d.argument != null) walk(d.argument as Node, enter);
             break;
         case N.ConditionalExpression:
-        case N.IfStatement:
-            if (d.test != null) walk(d.test as Node, enter, exit);
-            if (d.consequent != null) walk(d.consequent as Node, enter, exit);
-            if (d.alternate != null) walk(d.alternate as Node, enter, exit);
+            if (d.test != null) walk(d.test as Node, enter);
+            if (d.consequent != null) walk(d.consequent as Node, enter);
+            if (d.alternate != null) walk(d.alternate as Node, enter);
             break;
         case N.CallExpression:
+            if (d.callee != null) walk(d.callee as Node, enter);
+            { const l = d.arguments as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
+            break;
         case N.NewExpression:
-            if (d.callee != null) walk(d.callee as Node, enter, exit);
-            { const l = d.arguments as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            if (d.callee != null) walk(d.callee as Node, enter);
+            { const l = d.arguments as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
             break;
         case N.StaticMemberExpression:
-        case N.JSXMemberExpression:
-            if (d.object != null) walk(d.object as Node, enter, exit);
-            if (d.property != null) walk(d.property as Node, enter, exit);
+            if (d.object != null) walk(d.object as Node, enter);
+            if (d.property != null) walk(d.property as Node, enter);
             break;
         case N.ComputedMemberExpression:
-            if (d.object != null) walk(d.object as Node, enter, exit);
-            if (d.expression != null) walk(d.expression as Node, enter, exit);
+            if (d.object != null) walk(d.object as Node, enter);
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.PrivateFieldExpression:
-            if (d.object != null) walk(d.object as Node, enter, exit);
-            if (d.field != null) walk(d.field as Node, enter, exit);
+            if (d.object != null) walk(d.object as Node, enter);
+            if (d.field != null) walk(d.field as Node, enter);
             break;
         case N.ChainExpression:
-        case N.ExpressionStatement:
-        case N.TSNonNullExpression:
-        case N.JSXExpressionContainer:
-        case N.JSXSpreadChild:
-            if (d.expression != null) walk(d.expression as Node, enter, exit);
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.SequenceExpression:
-            { const l = d.expressions as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.expressions as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.ArrowFunctionExpression:
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.returnType != null) walk(d.returnType as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
             break;
         case N.FunctionExpression:
-        case N.FunctionDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.returnType != null) walk(d.returnType as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
             break;
         case N.ClassExpression:
-        case N.ClassDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            if (d.superClass != null) walk(d.superClass as Node, enter, exit);
-            if (d.superTypeArguments != null) walk(d.superTypeArguments as Node, enter, exit);
-            { const l = d.implements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            if (d.superClass != null) walk(d.superClass as Node, enter);
+            if (d.superTypeArguments != null) walk(d.superTypeArguments as Node, enter);
+            { const l = d.implements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.YieldExpression:
+            if (d.argument != null) walk(d.argument as Node, enter);
+            break;
+        case N.AwaitExpression:
+            if (d.argument != null) walk(d.argument as Node, enter);
             break;
         case N.ImportExpression:
-            if (d.source != null) walk(d.source as Node, enter, exit);
-            if (d.options != null) walk(d.options as Node, enter, exit);
+            if (d.source != null) walk(d.source as Node, enter);
+            if (d.options != null) walk(d.options as Node, enter);
+            break;
+        case N.ExpressionStatement:
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.VariableDeclaration:
-            { const l = d.declarations as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.declarations as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.VariableDeclarator:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
-            if (d.init != null) walk(d.init as Node, enter, exit);
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
+            if (d.init != null) walk(d.init as Node, enter);
+            break;
+        case N.BlockStatement:
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.IfStatement:
+            if (d.test != null) walk(d.test as Node, enter);
+            if (d.consequent != null) walk(d.consequent as Node, enter);
+            if (d.alternate != null) walk(d.alternate as Node, enter);
             break;
         case N.ForStatement:
-            if (d.init != null) walk(d.init as Node, enter, exit);
-            if (d.test != null) walk(d.test as Node, enter, exit);
-            if (d.update != null) walk(d.update as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.init != null) walk(d.init as Node, enter);
+            if (d.test != null) walk(d.test as Node, enter);
+            if (d.update != null) walk(d.update as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
             break;
         case N.ForInStatement:
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
+            break;
         case N.ForOfStatement:
-            if (d.left != null) walk(d.left as Node, enter, exit);
-            if (d.right != null) walk(d.right as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
             break;
         case N.WhileStatement:
-            if (d.test != null) walk(d.test as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.test != null) walk(d.test as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
             break;
         case N.DoWhileStatement:
-            if (d.body != null) walk(d.body as Node, enter, exit);
-            if (d.test != null) walk(d.test as Node, enter, exit);
+            if (d.body != null) walk(d.body as Node, enter);
+            if (d.test != null) walk(d.test as Node, enter);
             break;
         case N.SwitchStatement:
-            if (d.discriminant != null) walk(d.discriminant as Node, enter, exit);
-            { const l = d.cases as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.discriminant != null) walk(d.discriminant as Node, enter);
+            { const l = d.cases as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.SwitchCase:
-            if (d.test != null) walk(d.test as Node, enter, exit);
-            { const l = d.consequent as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.test != null) walk(d.test as Node, enter);
+            { const l = d.consequent as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TryStatement:
-            if (d.block != null) walk(d.block as Node, enter, exit);
-            if (d.handler != null) walk(d.handler as Node, enter, exit);
-            if (d.finalizer != null) walk(d.finalizer as Node, enter, exit);
+            if (d.block != null) walk(d.block as Node, enter);
+            if (d.handler != null) walk(d.handler as Node, enter);
+            if (d.finalizer != null) walk(d.finalizer as Node, enter);
             break;
         case N.CatchClause:
-            if (d.param != null) walk(d.param as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.param != null) walk(d.param as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
+            break;
+        case N.ReturnStatement:
+            if (d.argument != null) walk(d.argument as Node, enter);
+            break;
+        case N.ThrowStatement:
+            if (d.argument != null) walk(d.argument as Node, enter);
             break;
         case N.BreakStatement:
+            if (d.label != null) walk(d.label as Node, enter);
+            break;
         case N.ContinueStatement:
-            if (d.label != null) walk(d.label as Node, enter, exit);
+            if (d.label != null) walk(d.label as Node, enter);
             break;
         case N.LabeledStatement:
-            if (d.label != null) walk(d.label as Node, enter, exit);
-            if (d.body != null) walk(d.body as Node, enter, exit);
+            if (d.label != null) walk(d.label as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
+            break;
+        case N.FunctionDeclaration:
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
+            if (d.body != null) walk(d.body as Node, enter);
+            break;
+        case N.ClassDeclaration:
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            if (d.superClass != null) walk(d.superClass as Node, enter);
+            if (d.superTypeArguments != null) walk(d.superTypeArguments as Node, enter);
+            { const l = d.implements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.MethodDefinition:
+            if (d.key != null) walk(d.key as Node, enter);
+            if (d.value != null) walk(d.value as Node, enter);
             break;
         case N.PropertyDefinition:
-            if (d.key != null) walk(d.key as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
-            if (d.value != null) walk(d.value as Node, enter, exit);
+            if (d.key != null) walk(d.key as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
+            if (d.value != null) walk(d.value as Node, enter);
+            break;
+        case N.StaticBlock:
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.ObjectPattern:
+            { const l = d.properties as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.ArrayPattern:
+            { const l = d.elements as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.AssignmentPattern:
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
             break;
         case N.RestElement:
-            if (d.argument != null) walk(d.argument as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.argument != null) walk(d.argument as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.FormalParameter:
-            if (d.pattern != null) walk(d.pattern as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
-            if (d.init != null) walk(d.init as Node, enter, exit);
+            if (d.pattern != null) walk(d.pattern as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
+            if (d.init != null) walk(d.init as Node, enter);
             break;
         case N.ImportDeclaration:
-            { const l = d.specifiers as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.source != null) walk(d.source as Node, enter, exit);
+            { const l = d.specifiers as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.source != null) walk(d.source as Node, enter);
             break;
         case N.ImportSpecifier:
-            if (d.local != null) walk(d.local as Node, enter, exit);
-            if (d.imported != null) walk(d.imported as Node, enter, exit);
+            if (d.local != null) walk(d.local as Node, enter);
+            if (d.imported != null) walk(d.imported as Node, enter);
             break;
         case N.ImportDefaultSpecifier:
+            if (d.local != null) walk(d.local as Node, enter);
+            break;
         case N.ImportNamespaceSpecifier:
-            if (d.local != null) walk(d.local as Node, enter, exit);
+            if (d.local != null) walk(d.local as Node, enter);
             break;
         case N.ExportNamedDeclaration:
-            if (d.declaration != null) walk(d.declaration as Node, enter, exit);
-            { const l = d.specifiers as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.source != null) walk(d.source as Node, enter, exit);
+            if (d.declaration != null) walk(d.declaration as Node, enter);
+            { const l = d.specifiers as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.source != null) walk(d.source as Node, enter);
             break;
         case N.ExportSpecifier:
-            if (d.local != null) walk(d.local as Node, enter, exit);
-            if (d.exported != null) walk(d.exported as Node, enter, exit);
+            if (d.local != null) walk(d.local as Node, enter);
+            if (d.exported != null) walk(d.exported as Node, enter);
             break;
         case N.ExportDefaultDeclaration:
-            if (d.declaration != null) walk(d.declaration as Node, enter, exit);
+            if (d.declaration != null) walk(d.declaration as Node, enter);
             break;
         case N.ExportAllDeclaration:
-            if (d.source != null) walk(d.source as Node, enter, exit);
-            if (d.exported != null) walk(d.exported as Node, enter, exit);
+            if (d.source != null) walk(d.source as Node, enter);
+            if (d.exported != null) walk(d.exported as Node, enter);
             break;
         case N.TSTypeAnnotation:
-        case N.TSTypeOperator:
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSTypeReference:
-            if (d.typeName != null) walk(d.typeName as Node, enter, exit);
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            if (d.typeName != null) walk(d.typeName as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
+            break;
+        case N.TSQualifiedName:
+            if (d.left != null) walk(d.left as Node, enter);
+            if (d.right != null) walk(d.right as Node, enter);
             break;
         case N.TSTypeParameterInstantiation:
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
         case N.TSTypeParameterDeclaration:
-            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSTypeParameter:
-            if (d.name != null) walk(d.name as Node, enter, exit);
-            if (d.constraint != null) walk(d.constraint as Node, enter, exit);
-            if (d.default != null) walk(d.default as Node, enter, exit);
+            if (d.name != null) walk(d.name as Node, enter);
+            if (d.constraint != null) walk(d.constraint as Node, enter);
+            if (d.default != null) walk(d.default as Node, enter);
             break;
         case N.TSTupleType:
-            { const l = d.elementTypes as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.elementTypes as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSNamedTupleMember:
-            if (d.label != null) walk(d.label as Node, enter, exit);
-            if (d.elementType != null) walk(d.elementType as Node, enter, exit);
+            if (d.label != null) walk(d.label as Node, enter);
+            if (d.elementType != null) walk(d.elementType as Node, enter);
             break;
         case N.TSTypeLiteral:
-            { const l = d.members as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.members as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSPropertySignature:
-            if (d.key != null) walk(d.key as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.key != null) walk(d.key as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSMethodSignature:
-            if (d.key != null) walk(d.key as Node, enter, exit);
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.returnType != null) walk(d.returnType as Node, enter, exit);
+            if (d.key != null) walk(d.key as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
             break;
         case N.TSIndexSignature:
-            if (d.parameter != null) walk(d.parameter as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.parameter != null) walk(d.parameter as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSCallSignatureDeclaration:
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
+            break;
         case N.TSConstructSignatureDeclaration:
-        case N.TSFunctionType:
-        case N.TSConstructorType:
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.returnType != null) walk(d.returnType as Node, enter, exit);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
             break;
         case N.TSUnionType:
+            { const l = d.types as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
         case N.TSIntersectionType:
-            { const l = d.types as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.types as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            break;
+        case N.TSFunctionType:
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
+            break;
+        case N.TSConstructorType:
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.params as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.returnType != null) walk(d.returnType as Node, enter);
             break;
         case N.TSArrayType:
-            if (d.elementType != null) walk(d.elementType as Node, enter, exit);
+            if (d.elementType != null) walk(d.elementType as Node, enter);
             break;
         case N.TSIndexedAccessType:
-            if (d.objectType != null) walk(d.objectType as Node, enter, exit);
-            if (d.indexType != null) walk(d.indexType as Node, enter, exit);
+            if (d.objectType != null) walk(d.objectType as Node, enter);
+            if (d.indexType != null) walk(d.indexType as Node, enter);
+            break;
+        case N.TSTypeOperator:
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSTypeQuery:
-            if (d.exprName != null) walk(d.exprName as Node, enter, exit);
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            if (d.exprName != null) walk(d.exprName as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
             break;
         case N.TSConditionalType:
-            if (d.checkType != null) walk(d.checkType as Node, enter, exit);
-            if (d.extendsType != null) walk(d.extendsType as Node, enter, exit);
-            if (d.trueType != null) walk(d.trueType as Node, enter, exit);
-            if (d.falseType != null) walk(d.falseType as Node, enter, exit);
+            if (d.checkType != null) walk(d.checkType as Node, enter);
+            if (d.extendsType != null) walk(d.extendsType as Node, enter);
+            if (d.trueType != null) walk(d.trueType as Node, enter);
+            if (d.falseType != null) walk(d.falseType as Node, enter);
             break;
         case N.TSInferType:
-            if (d.typeParameter != null) walk(d.typeParameter as Node, enter, exit);
+            if (d.typeParameter != null) walk(d.typeParameter as Node, enter);
             break;
         case N.TSMappedType:
-            if (d.typeParameter != null) walk(d.typeParameter as Node, enter, exit);
-            if (d.nameType != null) walk(d.nameType as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.typeParameter != null) walk(d.typeParameter as Node, enter);
+            if (d.nameType != null) walk(d.nameType as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSLiteralType:
-            if (d.literal != null) walk(d.literal as Node, enter, exit);
+            if (d.literal != null) walk(d.literal as Node, enter);
             break;
         case N.TSTemplateLiteralType:
-            { const l = d.quasis as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            { const l = d.types as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            { const l = d.quasis as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            { const l = d.types as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSImportType:
-            if (d.source != null) walk(d.source as Node, enter, exit);
-            if (d.qualifier != null) walk(d.qualifier as Node, enter, exit);
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            if (d.source != null) walk(d.source as Node, enter);
+            if (d.qualifier != null) walk(d.qualifier as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
             break;
         case N.TSInterfaceDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            { const l = d.extends as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            { const l = d.extends as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSClassImplements:
+            if (d.expression != null) walk(d.expression as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
+            break;
         case N.TSInterfaceHeritage:
-            if (d.expression != null) walk(d.expression as Node, enter, exit);
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
+            if (d.expression != null) walk(d.expression as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
             break;
         case N.TSTypeAliasDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.typeParameters != null) walk(d.typeParameters as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.typeParameters != null) walk(d.typeParameters as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
             break;
         case N.TSEnumDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            { const l = d.members as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.id != null) walk(d.id as Node, enter);
+            { const l = d.members as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.TSEnumMember:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            if (d.initializer != null) walk(d.initializer as Node, enter, exit);
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.initializer != null) walk(d.initializer as Node, enter);
             break;
         case N.TSAsExpression:
+            if (d.expression != null) walk(d.expression as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
+            break;
         case N.TSSatisfiesExpression:
-            if (d.expression != null) walk(d.expression as Node, enter, exit);
-            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter, exit);
+            if (d.expression != null) walk(d.expression as Node, enter);
+            if (d.typeAnnotation != null) walk(d.typeAnnotation as Node, enter);
+            break;
+        case N.TSNonNullExpression:
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.TSModuleDeclaration:
-            if (d.id != null) walk(d.id as Node, enter, exit);
-            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.id != null) walk(d.id as Node, enter);
+            { const l = d.body as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.JSXElement:
-            if (d.openingElement != null) walk(d.openingElement as Node, enter, exit);
-            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.closingElement != null) walk(d.closingElement as Node, enter, exit);
+            if (d.openingElement != null) walk(d.openingElement as Node, enter);
+            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.closingElement != null) walk(d.closingElement as Node, enter);
             break;
         case N.JSXOpeningElement:
-            if (d.name != null) walk(d.name as Node, enter, exit);
-            if (d.typeArguments != null) walk(d.typeArguments as Node, enter, exit);
-            { const l = d.attributes as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
+            if (d.name != null) walk(d.name as Node, enter);
+            if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
+            { const l = d.attributes as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
             break;
         case N.JSXClosingElement:
-            if (d.name != null) walk(d.name as Node, enter, exit);
+            if (d.name != null) walk(d.name as Node, enter);
             break;
         case N.JSXFragment:
-            if (d.openingFragment != null) walk(d.openingFragment as Node, enter, exit);
-            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter, exit); } }
-            if (d.closingFragment != null) walk(d.closingFragment as Node, enter, exit);
+            if (d.openingFragment != null) walk(d.openingFragment as Node, enter);
+            { const l = d.children as (Node | null)[]; for (let i = 0; i < l.length; i++) { const c = l[i]; if (c != null) walk(c, enter); } }
+            if (d.closingFragment != null) walk(d.closingFragment as Node, enter);
             break;
         case N.JSXNamespacedName:
-            if (d.namespace != null) walk(d.namespace as Node, enter, exit);
-            if (d.name != null) walk(d.name as Node, enter, exit);
+            if (d.namespace != null) walk(d.namespace as Node, enter);
+            if (d.name != null) walk(d.name as Node, enter);
+            break;
+        case N.JSXMemberExpression:
+            if (d.object != null) walk(d.object as Node, enter);
+            if (d.property != null) walk(d.property as Node, enter);
+            break;
+        case N.JSXExpressionContainer:
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.JSXAttribute:
-            if (d.name != null) walk(d.name as Node, enter, exit);
-            if (d.value != null) walk(d.value as Node, enter, exit);
+            if (d.name != null) walk(d.name as Node, enter);
+            if (d.value != null) walk(d.value as Node, enter);
             break;
-        }
-    exit?.(n);
+        case N.JSXSpreadAttribute:
+            if (d.argument != null) walk(d.argument as Node, enter);
+            break;
+        case N.JSXSpreadChild:
+            if (d.expression != null) walk(d.expression as Node, enter);
+            break;
+    }
 }
 
 export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null): Node | null {
@@ -851,6 +940,6 @@ export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null)
 /** Generic reconstruction path for cloneNode: rebuilds an already-valid payload
  * whose shape can't be pinned to one def (id is the whole union). */
 function rebuild(type: number, start: number, end: number, name: string, data: unknown): Node {
-    return { id: nextNodeId(), type, start, end, name, data } as Node;
+    return { id: allocId(), type, start, end, name, data } as Node;
 }
 

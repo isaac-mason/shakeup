@@ -5,7 +5,7 @@ import {
     NODE_TYPE_NAMES,
     TYPE_COUNT,
     isTypeOnlyNode,
-    makeIdentifierReference,
+    node,
     walk,
     walkChildren,
     type Node,
@@ -94,12 +94,12 @@ function synthetic(t: TypeName): { n: Node; expected: string[] } {
     const expected: string[] = [];
     for (const spec of CHILD_FIELDS[t]) {
         if (spec.list) {
-            const a = makeIdentifierReference(`${t}.${spec.name}.0`);
-            const b = makeIdentifierReference(`${t}.${spec.name}.1`);
+            const a = node(N.IdentifierReference, 0, 0, `${t}.${spec.name}.0`, null);
+            const b = node(N.IdentifierReference, 0, 0, `${t}.${spec.name}.1`, null);
             data[spec.name] = [a, null, b];
             expected.push(a.name, b.name);
         } else {
-            const c = makeIdentifierReference(`${t}.${spec.name}`);
+            const c = node(N.IdentifierReference, 0, 0, `${t}.${spec.name}`, null);
             data[spec.name] = c;
             expected.push(c.name);
         }
@@ -142,13 +142,11 @@ describe('walk drift vs CHILD_FIELDS', () => {
         }
     });
 
-    it('enter=false skips children and exit', () => {
+    it('enter=false skips children', () => {
         const { n } = synthetic('IfStatement');
         const seen: string[] = [];
-        let exited = 0;
-        walk(n, (c) => { seen.push(c.name); return c.type === N.IfStatement ? false : undefined; }, () => { exited++; });
+        walk(n, (c) => { seen.push(c.name); return c.type === N.IfStatement ? false : undefined; });
         expect(seen).toEqual(['']);
-        expect(exited).toBe(0);
     });
 });
 

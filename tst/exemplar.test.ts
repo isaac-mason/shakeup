@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
 import { parse } from '../src/parser.ts';
-import { analyze, createSemantic } from '../src/analysis/semantic.ts';
+import { analyze, createSemantic, scopeOf } from '../src/analysis/semantic.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(__dirname, 'fixtures', 'exemplar');
@@ -92,16 +92,16 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('self-oracle: no duplicate top-level declarations; unresolved globals are exactly the expected set', () => {
-        const { program, errors, nodeCount } = parse(built.code, { ts: false, jsx: false });
+        const { program, errors } = parse(built.code, { ts: false, jsx: false });
         expect(errors).toEqual([]);
         const sem = createSemantic();
-        analyze(sem, program, nodeCount);
+        analyze(sem, program);
 
-        const moduleScope = sem.nodeScope[program.id];
+        const moduleScope = scopeOf(sem, program);
         const names: string[] = [];
-        for (let sym = 1; sym < sem.symCount; sym++) {
-            if (sem.symScope[sym] !== moduleScope) continue;
-            names.push(sem.symDecl[sym]!.name);
+        for (let sym = 1; sym < sem.symbols.length; sym++) {
+            if (sem.symbols[sym].scope !== moduleScope) continue;
+            names.push(sem.symbols[sym].decl!.name);
         }
         expect(new Set(names).size).toBe(names.length);
 
