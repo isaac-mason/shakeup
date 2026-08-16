@@ -1,6 +1,6 @@
 import type { FetchResult } from './dev-server.ts';
-import type { ImportMetaInit, ModuleEvaluator, ResolveId, Runner } from './runner.ts';
-import { createRunner } from './runner.ts';
+import type { ImportMetaInit, ModuleEvaluator, ResolveId, ModuleRunner } from './module-runner.ts';
+import { createModuleRunner } from './module-runner.ts';
 import type { HmrInfo } from './transform.ts';
 
 const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
@@ -45,7 +45,7 @@ type HmrBoundary = { boundary: string; acceptedPath: string };
 export type Environment = {
     name: string;
     /** this env's runner — its own module instances. */
-    runner: Runner;
+    runner: ModuleRunner;
     /** evaluate a module (and its graph) in this env. */
     import(id: string): Promise<Record<string, unknown>>;
     /** an upstream edit re-transformed `id`: propagate HMR within THIS env. Assumes
@@ -91,7 +91,7 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
     // `import.meta.hot.invalidate()` calls land here; applyEdit drains them and
     // re-propagates (bubbling to the invalidating module's importers).
     const pendingInvalidations = new Set<string>();
-    const runner = createRunner({
+    const runner = createModuleRunner({
         resolveId: options.resolveId,
         fetchModule,
         createImportMeta: options.createImportMeta,

@@ -11,7 +11,7 @@ export * from './plugins/json';
 export * from './plugins/node-resolve';
 export * from './bundle';
 export * from './transform';
-export * from './runner';
+export * from './module-runner';
 export * from './dev-server';
 export * from './environment';
 export * from './transport';

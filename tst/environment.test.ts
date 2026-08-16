@@ -332,7 +332,7 @@ describe('environment — source maps', () => {
     it('threads the dev-server map through to the evaluator (shifted for startOffset)', async () => {
         const { createDevServer } = await import('../src/dev-server.ts');
         const { createEnvironment } = await import('../src/environment.ts');
-        const { defaultEvaluator } = await import('../src/runner.ts');
+        const { defaultEvaluator } = await import('../src/module-runner.ts');
         const files: Record<string, string> = { '/m.ts': `export const v: number = 1;` };
         const server = createDevServer({ fs: { read: (id) => files[id] ?? null, exists: (id) => id in files }, sourcemap: true });
 

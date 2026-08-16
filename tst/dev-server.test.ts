@@ -3,12 +3,12 @@ import { bundle } from '../src/bundle.ts';
 import { createDevServer, type DevServerOptions } from '../src/dev-server.ts';
 import { createMemoryFs, type Fs } from '../src/fs.ts';
 import type { Plugin } from '../src/plugin.ts';
-import { createRunner } from '../src/runner.ts';
+import { createModuleRunner } from '../src/module-runner.ts';
 
 function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'> = {}) {
     const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
     const server = createDevServer({ fs, ...opts });
-    const runner = createRunner({
+    const runner = createModuleRunner({
         resolveId: (spec, importer) => server.resolveId(spec, importer),
         fetchModule: async (id) => {
             const r = await server.fetchModule(id);

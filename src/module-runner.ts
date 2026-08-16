@@ -11,7 +11,7 @@ export type ResolveId = (
  *  back to the original, which the evaluator attaches so stack traces map to source. */
 export type FetchedModule = string | { code: string; map?: SourceMap };
 
-export type RunnerOptions = {
+export type ModuleRunnerOptions = {
     resolveId: ResolveId;
     /** transformed (`__shakeup.*`) source for a module id (code, or {code, map}). */
     fetchModule: (id: string) => FetchedModule | Promise<FetchedModule>;
@@ -106,7 +106,7 @@ export type ModuleEvaluator = {
     runExternalModule(spec: string): Promise<unknown>;
 };
 
-export type Runner = {
+export type ModuleRunner = {
     /** evaluate a module by id and return its live namespace. */
     import(id: string): Promise<Namespace>;
     /** self-accept convenience: re-evaluate a module and run its own accept
@@ -159,7 +159,7 @@ export const defaultEvaluator: ModuleEvaluator = {
     runExternalModule: (spec) => import(/* @vite-ignore */ spec),
 };
 
-export function createRunner(options: RunnerOptions): Runner {
+export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     const modules = new Map<string, ModuleRecord>();
     const evaluating = new Set<string>(); // ids currently on the evaluation stack
     const evaluator = options.evaluator ?? defaultEvaluator;
