@@ -236,6 +236,8 @@ export type SourceMap = {
     sourcesContent?: (string | null)[];
     names: string[];
     mappings: string;
+    /** Indices into `sources` flagged as third-party/ignored (DevTools `x_google_ignoreList`). */
+    x_google_ignoreList?: number[];
 };
 
 /** Serialize a {@link SourceMap} to a JSON string. */

@@ -259,8 +259,11 @@ describe('sourcemap — bundle() multi-module map', () => {
         expect(trace(r.map!.mappings, exportLineIdx, 0)).toBeNull();
     });
 
-    it('no bundle map unless requested; enabling it does not change the code', () => {
+    it('no bundle map unless requested; enabling it only appends the sourceMappingURL comment', () => {
         expect(build(false).map).toBeUndefined();
-        expect(build(true).code).toBe(build(false).code);
+        // R4: sourcemap:true emits a `.map` sidecar AND appends `//# sourceMappingURL=…` (rollup
+        // parity). The mapped body is otherwise byte-identical.
+        const withMap = build(true).code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
+        expect(withMap).toBe(build(false).code);
     });
 });

@@ -34,8 +34,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(entryChunk.moduleIds).toContain('/main.ts');
         expect(lazyChunk.moduleIds).toContain('/lazy.ts');
         expect(lazyChunk.code).toContain('lazy-payload');
-        // The import() specifier is rewritten to the target chunk's logical path.
-        expect(entryChunk.code).toMatch(/import\('\.\/lazy\.js'\)/);
+        // The import() specifier is rewritten to the target chunk's final (hashed) path (R4).
+        expect(entryChunk.code).toContain(`import('./${lazyChunk.fileName}')`);
         expect(entryChunk.code).not.toContain("import('./lazy')");
         // The lazy chunk exports its surface for the dynamic import.
         expect(lazyChunk.exports).toContain('secret');
@@ -153,8 +153,8 @@ describe('bundle: multi-entry input', () => {
         expect(admin.imports).toContain(shared.name);
         // The shared chunk exports `util`.
         expect(shared.exports).toContain('util');
-        // Cross-chunk import lines reference the shared chunk's logical path.
-        expect(main.code).toContain(`from './${shared.name}.js'`);
+        // Cross-chunk import lines reference the shared chunk's final (hashed) path (R4).
+        expect(main.code).toContain(`from './${shared.fileName}'`);
     });
 
     it('input: string[] derives distinct names and dedups repeats', () => {

@@ -135,6 +135,82 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
  *  named entries. */
 export type InputOption = string | string[] | Record<string, string>;
 
+/** A low-level resolver override (R1 form): specifier+importer → resolved id / null. */
+export type ResolveFn = (specifier: string, importer: string | null) => string | null;
+
+/** Deployment target picking `mainFields`/`conditionNames` defaults (rolldown `platform`). */
+export type Platform = 'node' | 'browser' | 'neutral';
+
+/** `resolve:{}` config (R4, §5) — surfaces the core relative-probe resolver's knobs. Fields
+ *  gated on the npm-field resolver (`mainFields`/`conditionNames`/`exportsFields`/`aliasFields`)
+ *  are ACCEPTED + STORED but only take effect once that resolver consumes them (a NOT-IMPLEMENTED
+ *  seam guarded by a sentinel test — see resolve.workspace.test.ts). */
+export type ResolveOptions = {
+    /** Probe extensions, replacing the hard-coded set. Default ['.tsx','.ts','.jsx','.js','.json']. */
+    extensions?: string[];
+    /** `import './x.js'` → try these instead, in order (e.g. {'.js':['.ts','.js']}). */
+    extensionAlias?: Record<string, string[]>;
+    /** Directory index basenames. Default ['index']. */
+    mainFiles?: string[];
+    /** Pre-resolve string→string alias: `key` / `key/…` rewrites to the target then resolves. */
+    alias?: Record<string, string>;
+    /** false disables the `fs.realpath` deref (symlink preservation). Default true. */
+    symlinks?: boolean;
+    /** STUB — needs the npm-field resolver. Accepted + stored. */
+    mainFields?: string[];
+    /** STUB — needs the npm-field resolver. Accepted + stored. */
+    conditionNames?: string[];
+    /** STUB — package "exports" field lookup path. Accepted + stored. */
+    exportsFields?: string[][];
+    /** STUB — package "browser" alias field. Accepted + stored. */
+    aliasFields?: string[][];
+};
+
+/** Fully-resolved {@link ResolveOptions} with platform defaults applied. */
+export type NormalizedResolve = {
+    extensions: string[];
+    extensionAlias: Record<string, string[]>;
+    mainFiles: string[];
+    alias: Record<string, string>;
+    symlinks: boolean;
+    mainFields: string[];
+    conditionNames: string[];
+    exportsFields: string[][];
+    aliasFields: string[][];
+};
+
+const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json'];
+
+/** Resolve platform → (mainFields, conditionNames) defaults (rolldown input-options.ts). We
+ *  emit ESM, so conditions are import-kind. */
+function platformDefaults(platform: Platform): { mainFields: string[]; conditionNames: string[] } {
+    switch (platform) {
+        case 'browser':
+            return { mainFields: ['browser', 'module', 'main'], conditionNames: ['import', 'browser', 'default'] };
+        case 'neutral':
+            return { mainFields: [], conditionNames: ['import', 'default'] };
+        default:
+            return { mainFields: ['main', 'module'], conditionNames: ['import', 'node', 'default'] };
+    }
+}
+
+/** Normalize a {@link ResolveOptions} + platform into a {@link NormalizedResolve}. */
+export function normalizeResolve(resolve: ResolveOptions | undefined, platform: Platform | undefined): NormalizedResolve {
+    const r = resolve ?? {};
+    const defaults = platformDefaults(platform ?? 'browser');
+    return {
+        extensions: r.extensions ?? DEFAULT_EXTENSIONS,
+        extensionAlias: r.extensionAlias ?? {},
+        mainFiles: r.mainFiles ?? ['index'],
+        alias: r.alias ?? {},
+        symlinks: r.symlinks ?? true,
+        mainFields: r.mainFields ?? defaults.mainFields,
+        conditionNames: r.conditionNames ?? defaults.conditionNames,
+        exportsFields: r.exportsFields ?? [['exports']],
+        aliasFields: r.aliasFields ?? [],
+    };
+}
+
 /** Inputs to {@link buildGraph}. */
 export type GraphOptions = {
     /** One or more entry modules. Exactly one of `input` / `entry` must be set. */
@@ -143,7 +219,10 @@ export type GraphOptions = {
     entry?: string;
     fs: Fs;
     external?: string[] | ((specifier: string) => boolean);
-    resolve?: (specifier: string, importer: string | null) => string | null;
+    /** A low-level resolver function (R1 override) OR a {@link ResolveOptions} config (R4, §5). */
+    resolve?: ResolveFn | ResolveOptions;
+    /** Deployment target → mainFields/conditionNames defaults (R4). Default 'browser'. */
+    platform?: Platform;
     plugins?: Plugin[];
     jsx?: JSXOptions;
     /** R2 stub: accepted and IGNORED. Rolldown default is `'exports-only'`; facade-chunk
@@ -201,14 +280,45 @@ function normalizeInput(options: GraphOptions, errors: string[]): NormalizedEntr
     return out;
 }
 
-const EXTENSION_PROBES = ['', '.ts', '.js', '/index.ts', '/index.js'];
+/** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target (rolldown
+ *  aliases run before defaultResolve, skipping other plugins' resolveId — documented). */
+function applyAlias(specifier: string, alias: Record<string, string>): string {
+    for (const key of Object.keys(alias)) {
+        if (specifier === key) return alias[key];
+        if (specifier.startsWith(`${key}/`)) return alias[key] + specifier.slice(key.length);
+    }
+    return specifier;
+}
 
-function defaultResolve(fs: Fs, specifier: string, importer: string | null): string | null {
-    if (!specifier.startsWith('./') && !specifier.startsWith('../') && !specifier.startsWith('/')) return null;
-    const base = specifier.startsWith('/') || importer === null ? specifier : joinPath(dirnameOf(importer), specifier);
-    for (const ext of EXTENSION_PROBES) {
-        const candidate = base + ext;
-        if (fs.exists(candidate)) return candidate;
+/** Relative/absolute probe (R4: config-driven). Builds the probe set from `extensions` +
+ *  `mainFiles`, honours `extensionAlias` (try mapped exts for a matching suffix first). */
+function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, importer: string | null): string | null {
+    const aliased = applyAlias(specifier, resolve.alias);
+    if (!aliased.startsWith('./') && !aliased.startsWith('../') && !aliased.startsWith('/')) return null;
+    const base = aliased.startsWith('/') || importer === null ? aliased : joinPath(dirnameOf(importer), aliased);
+
+    // extensionAlias: if the specifier ends in a mapped ext (e.g. '.js'), try the alternatives
+    // (e.g. '.ts','.js') BEFORE the generic probe (rolldown input-options.ts:387-393).
+    for (const [ext, alts] of Object.entries(resolve.extensionAlias)) {
+        if (base.endsWith(ext)) {
+            const stem = base.slice(0, base.length - ext.length);
+            for (const alt of alts) {
+                const candidate = stem + alt;
+                if (fs.exists(candidate)) return candidate;
+            }
+        }
+    }
+
+    // Direct hit, then each extension, then directory-index (mainFiles × extensions).
+    if (fs.exists(base)) return base;
+    for (const ext of resolve.extensions) {
+        if (fs.exists(base + ext)) return base + ext;
+    }
+    for (const main of resolve.mainFiles) {
+        for (const ext of resolve.extensions) {
+            const candidate = `${base}/${main}${ext}`;
+            if (fs.exists(candidate)) return candidate;
+        }
     }
     return null;
 }
@@ -513,7 +623,16 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    const baseResolve = options.resolve ?? ((s: string, i: string | null) => defaultResolve(options.fs, s, i));
+    // `resolve` may be a low-level function (R1 override) or a ResolveOptions config (R4). The
+    // config drives the built-in relative probe; the function bypasses it entirely.
+    const resolveIsFn = typeof options.resolve === 'function';
+    const normalizedResolve = normalizeResolve(
+        resolveIsFn ? undefined : (options.resolve as ResolveOptions | undefined),
+        options.platform,
+    );
+    const baseResolve: ResolveFn = resolveIsFn
+        ? (options.resolve as ResolveFn)
+        : (s: string, i: string | null) => defaultResolve(options.fs, normalizedResolve, s, i);
     const pluginExternals = new Set<string>();
     /** resolveId/load option overrides keyed by RESOLVED id, finalized in addModule. */
     const pendingOptions = new Map<string, PendingOptions>();
@@ -713,7 +832,8 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            const depId = options.fs.realpath?.(resolved) ?? resolved;
+            // symlinks:false disables the realpath deref (preserve the symlinked path). §5.
+            const depId = normalizedResolve.symlinks ? (options.fs.realpath?.(resolved) ?? resolved) : resolved;
             rec.resolved = addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }

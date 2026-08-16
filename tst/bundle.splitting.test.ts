@@ -65,7 +65,9 @@ describe('bundle: base automatic chunking', () => {
         });
         expect(r.errors).toEqual([]);
         const a = r.chunks.find((c) => c.name === 'a')!;
-        expect(a.code).toMatch(/import \{[^}]*\} from '\.\/shared\.js'/);
+        // R4: the shared chunk is a non-entry chunk → default chunkFileNames '[name]-[hash].js'.
+        const shared = r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!;
+        expect(a.code).toContain(`from './${shared.fileName}'`);
         const ns = await execEntries(r.chunks, ['a', 'b']);
         // a set the shared value to 123 before reading; b reads the same live binding.
         expect(ns.a.got).toBe(123);
@@ -99,7 +101,8 @@ describe('bundle: dynamic import splitting', () => {
         const lazy = r.chunks.find((c) => c.isDynamicEntry)!;
         expect(lazy.moduleIds).toEqual(['/lazy.ts']);
         expect(lazy.exports).toContain('secret');
-        expect(entry.code).toMatch(/import\('\.\/lazy\.js'\)/);
+        // R4: the dynamic chunk is hashed ('[name]-[hash].js'); the import() path matches it.
+        expect(entry.code).toContain(`import('./${lazy.fileName}')`);
         expect(entry.dynamicImports).toContain(lazy.name);
         // The entry statically imports nothing; it defers the lazy chunk via import().
         expect(entry.imports).toEqual([]);

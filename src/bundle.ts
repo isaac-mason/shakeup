@@ -18,8 +18,15 @@ import {
     resolveJSXOptions,
     toModuleInfo,
 } from './module-graph';
+import {
+    type NormalizedOutputNaming,
+    normalizeOutputOptions,
+    type OutputOptionsNaming,
+    type PreRenderedChunk,
+} from './output-options';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
-import { encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
+import { type ChunkRenderer, type PreliminaryFileName, type RenderedChunk, renderChunks } from './render-chunks';
+import type { Part, SourceMap } from './sourcemap';
 import { type TreeshakeResult, treeshake } from './treeshake';
 
 /** A codeSplitting group as a user config (rolldown `CodeSplittingGroup`, §3.1). */
@@ -37,8 +44,8 @@ export type CodeSplittingGroup = {
     tags?: '$initial'[];
 };
 
-/** Output-shaping options (§3). R4 EXTENDS this same object with naming/hash/sourcemap. */
-export type OutputOptions = {
+/** Output-shaping options (§3, R3) + naming/hash/sourcemap (R4, from {@link OutputOptionsNaming}). */
+export type OutputOptions = OutputOptionsNaming & {
     /** false / the deprecated inlineDynamicImports = don't split dynamic imports out. An
      *  object configures groups. Default true. */
     codeSplitting?: boolean | { minSize?: number; groups?: CodeSplittingGroup[] };
@@ -89,6 +96,8 @@ export type BundleResult = {
     code: string;
     /** The chunk graph. Length ≥ 1 (0 on error). */
     chunks: OutputChunk[];
+    /** Emitted non-chunk files — currently `.map` sidecars (sourcemap: true|'hidden'). */
+    assets?: { fileName: string; source: string }[];
     errors: string[];
     warnings: string[];
     graph: Graph | null;
@@ -108,6 +117,9 @@ type EmitCtx = {
     /** The chunk this module is being rendered into (null in link-only helpers). */
     chunk: Chunk | null;
     chunkGraph: ChunkGraph | null;
+    /** Resolve a target chunk idx to the import specifier this chunk uses for it (R4:
+     *  relative path over preliminary/placeholder-bearing filenames). Null in link-only. */
+    pathToChunk: ((targetChunkIdx: number) => string) | null;
 };
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
@@ -201,8 +213,9 @@ function rewriteDynamicImports(ctx: EmitCtx, node: Node): void {
             const inner = nsName ?? '{}';
             ctx.edits.push({ start: n.start, end: n.end, text: `Promise.resolve().then(() => ${inner})` });
         } else {
-            // Point the specifier at the target chunk's logical path (R4 owns the real path).
-            const path = `./${chunkGraph.chunks[targetChunk].name}.js`;
+            // Point the specifier at the target chunk's import path (R4: preliminary
+            // placeholder-bearing path, resolved to the final hashed name in pass C).
+            const path = ctx.pathToChunk !== null ? ctx.pathToChunk(targetChunk) : `./${chunkGraph.chunks[targetChunk].name}.js`;
             ctx.edits.push({ start: source.start, end: source.end, text: `'${path}'` });
         }
     });
@@ -427,13 +440,29 @@ export function bundle(options: BundleOptions): BundleResult {
     }
     if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
 
-    const wantMap = options.sourcemap === true;
-    const outputChunks: OutputChunk[] = [];
-    for (let ci = 0; ci < chunkGraph.chunks.length; ci++) {
-        const chunk = chunkGraph.chunks[ci];
-        const rendered = renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, wantMap);
-        if (rendered === null) continue; // empty non-entry chunk dropped (§7)
-        outputChunks.push(rendered);
+    // Normalize output naming/hashing/sourcemap config (R4). `sourcemap` (top-level) is a
+    // deprecated alias for `output.sourcemap`. Reject `file:` for a multi-chunk build.
+    const multiChunk = chunkGraph.chunks.length > 1;
+    let naming: NormalizedOutputNaming;
+    try {
+        naming = normalizeOutputOptions(options.output, options.sourcemap, multiChunk, warnings);
+    } catch (e) {
+        return { code: '', chunks: [], errors: [(e as Error).message], warnings, graph, linked, shaken };
+    }
+
+    // Two-pass render → content-hash → final-hash → substitute (render-chunks.ts). The per-chunk
+    // renderer closes over graph/linked/shaken and threads the R4 path resolver + addons.
+    const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
+        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim);
+
+    let outputChunks: OutputChunk[];
+    let assets: { fileName: string; source: string }[];
+    try {
+        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id);
+        outputChunks = r.chunks;
+        assets = r.assets;
+    } catch (e) {
+        return { code: '', chunks: [], errors: [(e as Error).message], warnings, graph, linked, shaken };
     }
 
     // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
@@ -459,6 +488,7 @@ export function bundle(options: BundleOptions): BundleResult {
     return {
         code: entryFirst?.code ?? '',
         chunks: outputChunks,
+        assets,
         errors: [],
         warnings,
         graph,
@@ -468,9 +498,11 @@ export function bundle(options: BundleOptions): BundleResult {
     };
 }
 
-/** Render one chunk to an {@link OutputChunk}, or null if it is an empty non-entry chunk
- *  (dropped per §7). Cross-chunk `import`/`export` lines are synthesized from `chunk.imports`
- *  / `chunk.exports`; module bodies reuse the R2 edit engine but scoped to this chunk. */
+/** Render one chunk to a {@link RenderedChunk} (placeholders unresolved), or null if it is an
+ *  empty non-entry chunk (dropped per §7). Cross-chunk `import`/`export` lines are synthesized
+ *  from `chunk.imports`/`chunk.exports`, their paths resolved via `pathToChunk` (preliminary,
+ *  placeholder-bearing filenames — the real hashed path is substituted in pass C). Banner/intro
+ *  are prepended as SYNTHETIC leading map Parts so the per-chunk sourcemap stays in offset. */
 function renderChunk(
     graph: Graph,
     linked: Linked,
@@ -480,7 +512,10 @@ function renderChunk(
     shaken: TreeshakeResult | null,
     warnings: string[],
     wantMap: boolean,
-): OutputChunk | null {
+    naming: NormalizedOutputNaming,
+    pathToChunk: (targetChunkIdx: number) => string,
+    prelim: PreliminaryFileName,
+): RenderedChunk | null {
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
     const moduleTexts: string[] = [];
@@ -496,7 +531,7 @@ function renderChunk(
             if (sym === 0) return null;
             return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
         };
-        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph };
+        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
         const jsxLower: JSXLower | null =
             mod.jsxRuntime === null
                 ? null
@@ -515,7 +550,7 @@ function renderChunk(
             }
             stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
         }
-        const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph };
+        const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph, pathToChunk };
         moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
         let out = applyEdits(mod.source, ctx.edits).trim();
         if (linked.namespaceOf.has(idx)) {
@@ -531,27 +566,29 @@ function renderChunk(
         }
     }
 
-    // Cross-chunk static imports (§2.2): `import { imported as local, … } from './producer.js';`
+    // Cross-chunk static imports (§2.2): `import { imported as local, … } from '<path>';`
     const crossImportLines: string[] = [];
     for (const [producerChunk, specs] of chunk.imports) {
-        const path = `./${chunkGraph.chunks[producerChunk].name}.js`;
+        const path = pathToChunk(producerChunk);
         const parts = specs.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
         crossImportLines.push(`import { ${parts.join(', ')} } from '${path}';`);
     }
     for (const producerChunk of chunk.sideEffectImports) {
-        crossImportLines.push(`import './${chunkGraph.chunks[producerChunk].name}.js';`);
+        crossImportLines.push(`import '${pathToChunk(producerChunk)}';`);
     }
 
     // External imports (unchanged R2 path), scoped to this chunk's used external locals.
     const extImports = renderExternalImports(linked, sideEffectSpecs);
 
-    // Chunk exports (§2.4). For an entry chunk this is the entry's export surface; for a
-    // shared/producer chunk it is `chunk.exports` (the cross-chunk producer names).
+    // Chunk exports (§2.4). `exports: 'none'` suppresses the entry export line entirely
+    // (validation-only shaping for pure ESM — cross-chunk producer exports still emit so
+    // shared chunks keep working). For a shared/producer chunk it is `chunk.exports`.
     const exportSpecs: string[] = [];
     const exportedNames: string[] = [];
     const seenExport = new Set<string>();
+    const suppressEntryExports = naming.exports === 'none';
     // Entry (and dynamic-entry) chunks export their entry module's surface.
-    if (chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
+    if (!suppressEntryExports && chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
         const entryMap = linked.exportMaps.get(chunk.entryModule);
         if (entryMap !== undefined) {
             for (const [name, bind] of entryMap) {
@@ -576,36 +613,54 @@ function renderChunk(
         exportedNames.push(exportedName);
     }
     const exportLine = exportSpecs.length > 0 ? `export { ${exportSpecs.join(', ')} };` : null;
-    const starLines = entryStarSpecs.map((spec) => `export * from '${spec}';`);
+    const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => `export * from '${spec}';`);
 
     // Empty non-entry chunk with nothing to emit: drop it (§7).
     const isEmpty = moduleTexts.length === 0 && exportLine === null && starLines.length === 0;
     if (isEmpty && !chunk.isEntry) return null;
 
+    // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. `intro`/`outro`
+    // sit INSIDE the module region (rollup order: banner, intro, imports, body, exports, outro,
+    // footer). We keep it simple: banner+intro lead, footer+outro trail.
+    const preInfo: PreRenderedChunk = {
+        name: chunk.name,
+        isEntry: chunk.isEntry,
+        isDynamicEntry: chunk.isDynamicEntry,
+        facadeModuleId: chunk.entryModule >= 0 ? graph.modules[chunk.entryModule].id : null,
+        moduleIds: chunk.modules.map((i) => graph.modules[i].id),
+        exports: [...chunk.exports.keys()].sort(),
+        type: 'chunk',
+    };
+    const banner = naming.banner(preInfo);
+    const intro = naming.intro(preInfo);
+    const outro = naming.outro(preInfo);
+    const footer = naming.footer(preInfo);
+
     const parts: string[] = [];
+    if (banner !== '') parts.push(banner);
+    if (intro !== '') parts.push(intro);
     parts.push(...crossImportLines);
     parts.push(...extImports);
     parts.push(...moduleTexts);
     if (exportLine !== null) parts.push(exportLine);
     parts.push(...starLines);
+    if (outro !== '') parts.push(outro);
+    if (footer !== '') parts.push(footer);
     const code = `${parts.join('\n')}\n`;
 
-    let map: SourceMap | undefined;
+    // Per-chunk map Parts (synthetic leading parts for banner/intro so joinParts counts their
+    // lines and every source segment shifts by exactly that many lines — the classic footgun).
+    const mapParts: Part[] = [];
     if (wantMap) {
-        const all: Part[] = [];
-        for (const s of crossImportLines) all.push({ code: s });
-        for (const s of extImports) all.push({ code: s });
-        all.push(...moduleParts);
-        if (exportLine !== null) all.push({ code: exportLine });
-        for (const s of starLines) all.push({ code: s });
-        const joined = joinParts(all);
-        map = {
-            version: 3,
-            sources: mapSources,
-            sourcesContent: mapSourcesContent,
-            names: [],
-            mappings: encodeMappings(joined.map),
-        };
+        if (banner !== '') mapParts.push({ code: banner });
+        if (intro !== '') mapParts.push({ code: intro });
+        for (const s of crossImportLines) mapParts.push({ code: s });
+        for (const s of extImports) mapParts.push({ code: s });
+        mapParts.push(...moduleParts);
+        if (exportLine !== null) mapParts.push({ code: exportLine });
+        for (const s of starLines) mapParts.push({ code: s });
+        if (outro !== '') mapParts.push({ code: outro });
+        if (footer !== '') mapParts.push({ code: footer });
     }
 
     const importNames: string[] = [];
@@ -614,9 +669,14 @@ function renderChunk(
     const dynamicImportNames: string[] = [];
     for (const d of chunk.dynamicImports) dynamicImportNames.push(chunkGraph.chunks[d].name);
 
-    void chunkIdx;
     return {
-        fileName: `${chunk.name}.js`,
+        chunk,
+        chunkIdx,
+        prelim,
+        code,
+        parts: mapParts,
+        mapSources,
+        mapSourcesContent,
         name: chunk.name,
         isEntry: chunk.isEntry,
         isDynamicEntry: chunk.isDynamicEntry,
@@ -624,8 +684,6 @@ function renderChunk(
         imports: importNames,
         dynamicImports: dynamicImportNames,
         exports: exportedNames,
-        code,
-        map,
     };
 }
 

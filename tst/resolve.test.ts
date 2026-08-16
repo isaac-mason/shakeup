@@ -350,3 +350,108 @@ describe('alignment regressions (vs esbuild)', () => {
         expect(p.resolve('ts-first', '/app/src/a.js').id).toBe('/app/node_modules/ts-first/impl.ts');
     });
 });
+
+// R4 (§5): the `resolve:{}` config surfaced on bundle() → defaultResolve. These exercise the
+// CORE relative-probe resolver (not the nodeResolve plugin), which is what `resolve:{}` drives.
+describe('R4 resolve:{} config (core relative probe)', () => {
+    const moduleIds = (r: ReturnType<typeof bundle>) => r.chunks[0].moduleIds;
+
+    it('extensions: a custom order resolves the earlier ext first', () => {
+        const r = bundle({
+            input: '/main.ts',
+            fs: createMemoryFs({
+                '/main.ts': "export { v } from './x';",
+                '/x.mjs': 'export const v = 1;',
+                '/x.ts': 'export const v = 2;',
+            }),
+            external: [],
+            resolve: { extensions: ['.mjs', '.ts'] },
+        });
+        expect(r.errors).toEqual([]);
+        expect(moduleIds(r)).toContain('/x.mjs');
+        expect(moduleIds(r)).not.toContain('/x.ts');
+    });
+
+    it('extensionAlias: {".js":[".ts"]} makes ./x.js resolve x.ts', () => {
+        const r = bundle({
+            input: '/main.ts',
+            fs: createMemoryFs({
+                '/main.ts': "export { v } from './x.js';",
+                '/x.ts': 'export const v = 1;',
+            }),
+            external: [],
+            resolve: { extensionAlias: { '.js': ['.ts'] } },
+        });
+        expect(r.errors).toEqual([]);
+        expect(moduleIds(r)).toContain('/x.ts');
+    });
+
+    it('alias: {"@":"/src"} rewrites @/foo → /src/foo', () => {
+        const r = bundle({
+            input: '/src/main.ts',
+            fs: createMemoryFs({
+                '/src/main.ts': "export { v } from '@/foo';",
+                '/src/foo.ts': 'export const v = 1;',
+            }),
+            external: [],
+            resolve: { alias: { '@': '/src' } },
+        });
+        expect(r.errors).toEqual([]);
+        expect(moduleIds(r)).toContain('/src/foo.ts');
+    });
+
+    it('mainFiles: a directory import resolves the configured index basename', () => {
+        const r = bundle({
+            input: '/main.ts',
+            fs: createMemoryFs({
+                '/main.ts': "export { v } from './lib';",
+                '/lib/main.ts': 'export const v = 1;',
+            }),
+            external: [],
+            resolve: { mainFiles: ['main', 'index'] },
+        });
+        expect(r.errors).toEqual([]);
+        expect(moduleIds(r)).toContain('/lib/main.ts');
+    });
+
+    it('symlinks:false disables the fs.realpath deref', () => {
+        // An fs whose realpath maps /link/x.ts → /real/x.ts. With symlinks:true (default) the
+        // module id is canonicalized; with symlinks:false the symlinked path is preserved.
+        const files = new Map<string, string>([
+            ['/main.ts', "export { v } from './link/x';"],
+            ['/real/x.ts', 'export const v = 1;'],
+        ]);
+        const canon = (id: string): string => (id.startsWith('/link/') ? `/real/${id.slice('/link/'.length)}` : id);
+        const fs = {
+            read: (id: string) => files.get(canon(id)) ?? null,
+            exists: (id: string) => files.has(canon(id)),
+            realpath: (id: string) => canon(id),
+        };
+        const withDeref = bundle({ input: '/main.ts', fs, external: [] });
+        expect(withDeref.errors).toEqual([]);
+        expect(withDeref.chunks[0].moduleIds).toContain('/real/x.ts');
+
+        const noDeref = bundle({ input: '/main.ts', fs, external: [], resolve: { symlinks: false } });
+        expect(noDeref.errors).toEqual([]);
+        expect(noDeref.chunks[0].moduleIds).toContain('/link/x.ts');
+    });
+
+    it('platform/mainFields SENTINEL — accepted + stored but not consumed by the core probe', () => {
+        // The core relative probe does not read package.json fields; mainFields/conditionNames are
+        // a NOT-IMPLEMENTED seam (they only take effect once the npm-field resolver consumes them).
+        // Passing them must not error and must not change core relative resolution. (Mirrors the
+        // resolve.workspace.test.ts sentinel.)
+        const r = bundle({
+            input: '/main.ts',
+            fs: createMemoryFs({
+                '/main.ts': "export { v } from './x';",
+                '/x.ts': 'export const v = 1;',
+            }),
+            external: [],
+            platform: 'node',
+            resolve: { mainFields: ['module', 'main'], conditionNames: ['custom'] },
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].moduleIds).toContain('/x.ts');
+    });
+});

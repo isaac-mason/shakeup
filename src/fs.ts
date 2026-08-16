@@ -44,3 +44,22 @@ export function dirnameOf(path: string): string {
 export function joinPath(dir: string, relative: string): string {
     return normalizePath(dir === '' ? relative : `${dir}/${relative}`);
 }
+
+/** Last path segment (posix basename). */
+export function basenameOf(path: string): string {
+    const i = path.lastIndexOf('/');
+    return i < 0 ? path : path.slice(i + 1);
+}
+
+/** POSIX relative path from directory `fromDir` to file `to`, always a valid ESM specifier
+ *  (prefixed `./` when not ascending). Both are treated relative to a common (dist) root. */
+export function relativePath(fromDir: string, to: string): string {
+    const from = normalizePath(fromDir).replace(/^\//, '').split('/').filter(Boolean);
+    const target = normalizePath(to).replace(/^\//, '').split('/').filter(Boolean);
+    let i = 0;
+    while (i < from.length && i < target.length && from[i] === target[i]) i++;
+    const up = from.slice(i).map(() => '..');
+    const down = target.slice(i);
+    const joined = [...up, ...down].join('/');
+    return up.length === 0 ? `./${joined}` : joined;
+}
