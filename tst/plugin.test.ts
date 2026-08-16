@@ -20,10 +20,7 @@ describe('plugin pipeline', () => {
             resolveId: (_ctx, spec) => (spec === 'virtual:config' ? '\0virtual:config' : null),
             load: (_ctx, id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { code } = build(
-            { '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" },
-            [virtual],
-        );
+        const { code } = build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
         const mod = await run(code);
         expect(mod.v).toBe('9.9.9');
     });
@@ -40,10 +37,10 @@ describe('plugin pipeline', () => {
                 return at < 0 ? null : [{ start: at, end: at + 4, text: 'PATCHED' }];
             },
         };
-        const { code } = build(
-            { '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' },
-            [replacer, patcher],
-        );
+        const { code } = build({ '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' }, [
+            replacer,
+            patcher,
+        ]);
         const mod = await run(code);
         expect(mod.build).toBe('1.2.3');
         expect(mod.mark).toBe('PATCHED');
@@ -88,10 +85,9 @@ describe('plugin pipeline', () => {
             name: 'externalize-lodash',
             resolveId: (_ctx, spec) => (spec === 'lodash-esque' ? false : null),
         };
-        const { code } = build(
-            { '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" },
-            [externalize],
-        );
+        const { code } = build({ '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" }, [
+            externalize,
+        ]);
         expect(code).toContain("from 'lodash-esque'");
     });
 

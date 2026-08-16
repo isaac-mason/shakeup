@@ -9,7 +9,7 @@
 // directly; this loader mirrors the same tree into a memory-Fs record for our
 // plugin, keyed by the same real absolute paths.
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 

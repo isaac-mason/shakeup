@@ -1,4 +1,5 @@
-import { type Node, N, isTypeOnlyNode, walk, walkChildren } from './ast.ts';
+import { walkRefIdents } from './analysis/refs.ts';
+import { isTypeOnlyNode, N, type Node, walk, walkChildren } from './ast.ts';
 
 /** Emit options; `stripTypes: false` yields byte-identical passthrough. */
 export type EmitOptions = { stripTypes: boolean };
@@ -93,13 +94,13 @@ function blankNode(ctx: Ctx, n: Node | null): void {
 function blankTrailingQuestion(ctx: Ctx, afterEnd: number, limit: number): void {
     const src = ctx.src;
     const i = skipWs(src, afterEnd, limit);
-    if (i < limit && src.charCodeAt(i) === 63 ) blank(ctx, i, i + 1);
+    if (i < limit && src.charCodeAt(i) === 63) blank(ctx, i, i + 1);
 }
 
 function blankDefinite(ctx: Ctx, afterEnd: number, limit: number): void {
     const src = ctx.src;
     const i = skipWs(src, afterEnd, limit);
-    if (i < limit && src.charCodeAt(i) === 33 ) blank(ctx, i, i + 1);
+    if (i < limit && src.charCodeAt(i) === 33) blank(ctx, i, i + 1);
 }
 
 const ERASABLE_MEMBER_MODS = new Set(['public', 'private', 'protected', 'readonly', 'abstract', 'override', 'declare']);
@@ -135,13 +136,37 @@ function blankImplements(ctx: Ctx, impl: Node[]): void {
     const src = ctx.src;
     let i = first.start;
     while (i > 0 && isWs(src.charCodeAt(i - 1))) i--;
-    let kwEnd = i;
+    const kwEnd = i;
     while (i > 0 && isIdentPart(src.charCodeAt(i - 1))) i--;
     if (src.slice(i, kwEnd) === 'implements') {
         blank(ctx, i, last.end);
     } else {
         blank(ctx, first.start, last.end);
     }
+}
+
+/** Render an enum member's initializer over the RAW source range `[rawStart,rawEnd)`
+ *  (paren-safe — a parenthesized expr's node span excludes its wrapping parens),
+ *  rewriting bare references to prior members (`A` → `EnumName.A`) by splicing at
+ *  their absolute source offsets. Returns the trimmed raw slice when nothing needs it. */
+function renderEnumInit(ctx: Ctx, init: Node, prior: Set<string>, enumName: string, rawStart: number, rawEnd: number): string {
+    const src = ctx.src;
+    if (prior.size === 0) return src.slice(rawStart, rawEnd).trim();
+    const edits: { start: number; end: number; text: string }[] = [];
+    walkRefIdents(init, (ident) => {
+        if (ident.type === N.IdentifierReference && prior.has(ident.name)) {
+            edits.push({ start: ident.start, end: ident.end, text: `${enumName}.${ident.name}` });
+        }
+    });
+    if (edits.length === 0) return src.slice(rawStart, rawEnd).trim();
+    edits.sort((a, b) => a.start - b.start);
+    let out = '';
+    let cur = rawStart;
+    for (const e of edits) {
+        out += src.slice(cur, e.start) + e.text;
+        cur = e.end;
+    }
+    return (out + src.slice(cur, rawEnd)).trim();
 }
 
 function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration }, exportNode: Node | null): void {
@@ -153,6 +178,11 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
     let body = '';
     let autoNext = 0;
     let autoOk = true;
+    // Names of members declared so far. A bare reference to one of these inside a
+    // later member's initializer resolves to that member (enum members shadow the
+    // outer scope in initializer position), so it must be emitted as `Name.member`
+    // — `A << 1` → `E.A << 1`. Without this the bare `A` is a ReferenceError.
+    const prior = new Set<string>();
 
     for (const memberNode of members) {
         if (memberNode.type !== N.TSEnumMember) continue;
@@ -173,17 +203,18 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
             }
             body += `${name}[${name}[${keyLit}] = ${autoNext}] = ${keyLit}; `;
             autoNext++;
+            prior.add(key);
             continue;
         }
 
-        const eq = scanForwardChar(ctx, memId.end, memberNode.end, 61 );
-        const raw = src.slice(eq + 1, memberNode.end).trim();
+        const eq = scanForwardChar(ctx, memId.end, memberNode.end, 61 /* = */);
+        const rendered = renderEnumInit(ctx, init, prior, name, eq + 1, memberNode.end);
 
         if (init.type === N.StringLiteral) {
-            body += `${name}[${keyLit}] = ${raw}; `;
+            body += `${name}[${keyLit}] = ${rendered}; `;
             autoOk = false;
         } else if (init.type === N.NumericLiteral) {
-            body += `${name}[${name}[${keyLit}] = ${raw}] = ${keyLit}; `;
+            body += `${name}[${name}[${keyLit}] = ${rendered}] = ${keyLit}; `;
             const v = Number(src.slice(init.start, init.end));
             if (Number.isFinite(v)) {
                 autoNext = v + 1;
@@ -192,9 +223,10 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
                 autoOk = false;
             }
         } else {
-            body += `${name}[${name}[${keyLit}] = ${raw}] = ${keyLit}; `;
+            body += `${name}[${name}[${keyLit}] = ${rendered}] = ${keyLit}; `;
             autoOk = false;
         }
+        prior.add(key);
     }
 
     const varKw = exportNode !== null && !ctx.dropExportKeyword ? 'export var' : 'var';
@@ -215,12 +247,12 @@ function stripTypeOnlySpecifiers(ctx: Ctx, specs: Node[]): void {
         const s = specNode.start;
         let e = specNode.end;
         const after = skipWs(src, e, src.length);
-        if (after < src.length && src.charCodeAt(after) === 44 ) {
+        if (after < src.length && src.charCodeAt(after) === 44) {
             e = after + 1;
         } else {
             let b = s;
             while (b > 0 && isWs(src.charCodeAt(b - 1))) b--;
-            if (b > 0 && src.charCodeAt(b - 1) === 44 ) {
+            if (b > 0 && src.charCodeAt(b - 1) === 44) {
                 blank(ctx, b - 1, e);
                 continue;
             }
@@ -248,7 +280,10 @@ function renderNode(ctx: Ctx, node: Node): string {
 }
 
 function collectRenameEdits(node: Node, cb: (idNode: Node, shorthand: boolean) => void): void {
-    if (node.type === N.BindingIdentifier || node.type === N.IdentifierReference) { cb(node, false); return; }
+    if (node.type === N.BindingIdentifier || node.type === N.IdentifierReference) {
+        cb(node, false);
+        return;
+    }
     if (node.type === N.IdentifierName || node.type === N.LabelIdentifier || node.type === N.PrivateIdentifier) return;
     if (node.type === N.ObjectProperty && node.data.shorthand) {
         const value = node.data.value;
@@ -260,7 +295,9 @@ function collectRenameEdits(node: Node, cb: (idNode: Node, shorthand: boolean) =
         }
         return;
     }
-    walkChildren(node, (child) => { collectRenameEdits(child, cb); });
+    walkChildren(node, (child) => {
+        collectRenameEdits(child, cb);
+    });
 }
 
 /** Apply `edits` (spans over `src`) restricted to `[from,to)`, returning the
@@ -270,7 +307,12 @@ function applyEditsRange(src: string, from: number, to: number, edits: Edit[]): 
     let out = '';
     let cursor = from;
     for (const e of inRange) {
-        if (e.start < cursor) { if (e.end <= cursor) continue; out += e.text ?? blankText(src, cursor, e.end); cursor = e.end; continue; }
+        if (e.start < cursor) {
+            if (e.end <= cursor) continue;
+            out += e.text ?? blankText(src, cursor, e.end);
+            cursor = e.end;
+            continue;
+        }
         out += src.slice(cursor, e.start);
         out += e.text ?? blankText(src, e.start, e.end);
         cursor = e.end;
@@ -280,11 +322,37 @@ function applyEditsRange(src: string, from: number, to: number, edits: Edit[]): 
 }
 
 const JSX_NAMED_ENTITIES: Record<string, string> = {
-    amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', copy: '©', reg: '®',
-    trade: '™', hellip: '…', mdash: '—', ndash: '–', bull: '•', middot: '·',
-    deg: '°', laquo: '«', raquo: '»', times: '×', divide: '÷', euro: '€',
-    pound: '£', cent: '¢', yen: '¥', sect: '§', para: '¶', dagger: '†',
-    Dagger: '‡', lsquo: '‘', rsquo: '’', ldquo: '“', rdquo: '”',
+    amp: '&',
+    lt: '<',
+    gt: '>',
+    quot: '"',
+    apos: "'",
+    nbsp: ' ',
+    copy: '©',
+    reg: '®',
+    trade: '™',
+    hellip: '…',
+    mdash: '—',
+    ndash: '–',
+    bull: '•',
+    middot: '·',
+    deg: '°',
+    laquo: '«',
+    raquo: '»',
+    times: '×',
+    divide: '÷',
+    euro: '€',
+    pound: '£',
+    cent: '¢',
+    yen: '¥',
+    sect: '§',
+    para: '¶',
+    dagger: '†',
+    Dagger: '‡',
+    lsquo: '‘',
+    rsquo: '’',
+    ldquo: '“',
+    rdquo: '”',
 };
 function decodeJSXEntities(s: string): string {
     return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
@@ -336,9 +404,8 @@ function lowerJSXTag(ctx: Ctx, name: Node): string {
 
 /** A single attribute-name as an object-key text (identifier or quoted string). */
 function attrKeyText(name: Node): string {
-    const raw = name.type === N.JSXNamespacedName
-        ? `${(name.data.namespace as Node).name}:${(name.data.name as Node).name}`
-        : name.name;
+    const raw =
+        name.type === N.JSXNamespacedName ? `${(name.data.namespace as Node).name}:${(name.data.name as Node).name}` : name.name;
     return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(raw) ? raw : JSON.stringify(raw);
 }
 
@@ -414,7 +481,8 @@ function lowerJSX(ctx: Ctx, node: Node): string {
         const propParts: string[] = [];
         for (const a of attributes) {
             if (a.type === N.JSXSpreadAttribute) propParts.push(`...${renderNode(ctx, a.data.argument)}`);
-            else if (a.type === N.JSXAttribute) propParts.push(`${attrKeyText(a.data.name)}: ${attrValueText(ctx, a.data.value)}`);
+            else if (a.type === N.JSXAttribute)
+                propParts.push(`${attrKeyText(a.data.name)}: ${attrValueText(ctx, a.data.value)}`);
         }
         const props = propParts.length > 0 ? `{ ${propParts.join(', ')} }` : 'null';
         const args = [tag, props, ...childTexts];
@@ -583,7 +651,7 @@ function collect(ctx: Ctx, root?: Node): void {
 
             case N.TSNonNullExpression: {
                 const expr = n.data.expression;
-                const bang = scanForwardChar(ctx, expr.end, n.end, 33 );
+                const bang = scanForwardChar(ctx, expr.end, n.end, 33);
                 if (bang >= 0) blank(ctx, bang, bang + 1);
                 return;
             }
@@ -641,8 +709,7 @@ function synthParamProps(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition }
 
 function blankMethodDef(ctx: Ctx, n: Node & { type: typeof N.MethodDefinition }): boolean {
     const value = n.data.value;
-    const abstractOrOverload =
-        n.data.abstract || (value.type === N.FunctionExpression && value.data.body === null);
+    const abstractOrOverload = n.data.abstract || (value.type === N.FunctionExpression && value.data.body === null);
     if (abstractOrOverload) {
         blankNode(ctx, n);
         return true;

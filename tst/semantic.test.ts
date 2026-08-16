@@ -1,12 +1,12 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
-import * as meriyah from 'meriyah';
+import { fileURLToPath } from 'node:url';
 import * as escope from 'eslint-scope';
+import * as meriyah from 'meriyah';
+import { describe, expect, it } from 'vitest';
+import { analyze, createSemantic, type Semantic, symbolOf } from '../src/analysis/semantic.ts';
+import { isIdentifier, N, type Node, walk } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
-import { walk, N, isIdentifier, type Node } from '../src/ast.ts';
-import { analyze, createSemantic, symbolOf, type Semantic } from '../src/analysis/semantic.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -92,10 +92,7 @@ function collectRefDivergences(src: string, sm: escope.ScopeManager, a: Analyzed
                 continue;
             }
             const ourDecl = declStart(a, sym);
-            const theirDecls = new Set<number>([
-                ...v.defs.map((d) => pos(d.name)),
-                ...v.identifiers.map((i) => pos(i)),
-            ]);
+            const theirDecls = new Set<number>([...v.defs.map((d) => pos(d.name)), ...v.identifiers.map((i) => pos(i))]);
             if (!theirDecls.has(ourDecl)) {
                 diffs.push({
                     start,
@@ -158,9 +155,7 @@ describe('semantic differential vs eslint-scope (three.core.js)', () => {
                 .slice(0, 20)
                 .map((s) => `  THEIRS-only @${s} :: ${JSON.stringify(src.slice(s - 8, s + 12))}`)
                 .join('\n');
-            expect.fail(
-                `\nUNRESOLVED-SET divergence beyond documented adjustment A1 (implicit \`arguments\`):\n${o}\n${t}\n`,
-            );
+            expect.fail(`\nUNRESOLVED-SET divergence beyond documented adjustment A1 (implicit \`arguments\`):\n${o}\n${t}\n`);
         }
 
         expect(oursOnly.every((s) => startToName.get(s) === 'arguments')).toBe(true);
@@ -396,7 +391,8 @@ describe('G-JSX-4: JSX semantic differential vs eslint-scope', () => {
 
     it('the oracle actually exercised JSX-interior references (non-empty resolved set inside containers)', () => {
         let resolved = 0;
-        for (const scope of sm.scopes) for (const r of scope.references) if (r.resolved && r.resolved.defs.length >= 1) resolved++;
+        for (const scope of sm.scopes)
+            for (const r of scope.references) if (r.resolved && r.resolved.defs.length >= 1) resolved++;
         expect(resolved).toBeGreaterThan(5);
     });
 });
@@ -414,7 +410,9 @@ describe('JSX head-role split targeted unit tests (eslint-scope blind spot)', ()
     it('a lowercase intrinsic tag is a JSXIdentifier that never resolves', () => {
         const a = analyzeJSX('const x = <div />;');
         const tags: Node[] = [];
-        walk(a.program, (n) => { if (n.type === N.JSXIdentifier && n.name === 'div') tags.push(n); });
+        walk(a.program, (n) => {
+            if (n.type === N.JSXIdentifier && n.name === 'div') tags.push(n);
+        });
         expect(tags.length).toBe(1);
         expect(tags[0].type).toBe(N.JSXIdentifier);
         expect(symbolOf(a.sem, tags[0])).toBe(0);

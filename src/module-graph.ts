@@ -1,8 +1,17 @@
-import { type Node, type Program, N, isJSXNode, node, walk } from './ast';
-import { type Fs, dirnameOf, joinPath } from './fs';
-import { type Pipeline, type Plugin, type PluginCtx, compilePipeline, runLoad, runResolveId, runTransform } from './plugin';
+import { analyze, createSemantic, declareSyntheticImport, type Semantic, scopeOf, symbolOf } from './analysis/semantic';
+import { isJSXNode, N, type Node, node, type Program, walk } from './ast';
+import { dirnameOf, type Fs, joinPath } from './fs';
 import { parse } from './parser';
-import { type Semantic, analyze, createSemantic, declareSyntheticImport, scopeOf, symbolOf } from './analysis/semantic';
+import {
+    assertSync,
+    compilePipeline,
+    type Pipeline,
+    type Plugin,
+    type PluginCtx,
+    runLoad,
+    runResolveId,
+    runTransform,
+} from './plugin';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';
@@ -82,7 +91,7 @@ export function resolveJSXOptions(jsx: JSXOptions | undefined): { importSource: 
 /** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
  * (non-`declare`) namespace has no runtime lowering, so the walk would leave `namespace X {`
  * in the output = broken JS; fail loudly instead. (`declare` namespaces erase fine.) */
-function collectUnsupported(program: Node, id: string, errors: string[]): void {
+export function collectUnsupported(program: Node, id: string, errors: string[]): void {
     walk(program, (n) => {
         if (n.type === N.TSModuleDeclaration && !n.data.declare) {
             errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
@@ -106,8 +115,7 @@ const EXTENSION_PROBES = ['', '.ts', '.js', '/index.ts', '/index.js'];
 
 function defaultResolve(fs: Fs, specifier: string, importer: string | null): string | null {
     if (!specifier.startsWith('./') && !specifier.startsWith('../') && !specifier.startsWith('/')) return null;
-    const base =
-        specifier.startsWith('/') || importer === null ? specifier : joinPath(dirnameOf(importer), specifier);
+    const base = specifier.startsWith('/') || importer === null ? specifier : joinPath(dirnameOf(importer), specifier);
     for (const ext of EXTENSION_PROBES) {
         const candidate = base + ext;
         if (fs.exists(candidate)) return candidate;
@@ -192,7 +200,11 @@ function extractRecords(mod: Module): void {
             if (stmt.data.exportKind === 'type') continue;
             const decl = stmt.data.declaration;
             if (decl !== null) {
-                if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration || decl.type === N.TSEnumDeclaration) {
+                if (
+                    decl.type === N.FunctionDeclaration ||
+                    decl.type === N.ClassDeclaration ||
+                    decl.type === N.TSEnumDeclaration
+                ) {
                     const id = decl.data.id;
                     if (id !== null) {
                         mod.namedExports.set(id.name, {
@@ -266,7 +278,6 @@ function extractRecords(mod: Module): void {
             } else {
                 mod.starExports.push(rec);
             }
-            continue;
         }
     }
 }
@@ -286,7 +297,7 @@ function attrsHaveKeyAfterSpread(attrs: Node[]): boolean {
     return false;
 }
 
-function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement: boolean } {
+export function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement: boolean } {
     let hasJSX = false;
     let needsCreateElement = false;
     walk(program, (n: Node) => {
@@ -334,7 +345,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const baseResolve = options.resolve ?? ((s: string, i: string | null) => defaultResolve(options.fs, s, i));
     const pluginExternals = new Set<string>();
     const resolveFn = (specifier: string, importer: string | null): string | null => {
-        const hit = runResolveId(pipe, ctx, specifier, importer);
+        const hit = assertSync(runResolveId(pipe, ctx, specifier, importer));
         if (hit === false) {
             pluginExternals.add(specifier);
             return null;
@@ -342,7 +353,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         if (typeof hit === 'string') return hit;
         return baseResolve(specifier, importer);
     };
-    const loadFn = (id: string): string | null => runLoad(pipe, ctx, id) ?? options.fs.read(id);
+    const loadFn = (id: string): string | null => assertSync(runLoad(pipe, ctx, id)) ?? options.fs.read(id);
 
     const addModule = (id: string): number => {
         const existing = graph.byId.get(id);
@@ -352,7 +363,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             graph.errors.push(`cannot load module '${id}'`);
             return -1;
         }
-        source = runTransform(pipe, ctx, source, id);
+        source = assertSync(runTransform(pipe, ctx, source, id));
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
         const { program, errors, nodeCount } = parse(source, { ts: true, jsx });
         for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
@@ -493,9 +504,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             if (candidate.kind === 'none') continue;
             if (found === null) found = candidate;
             else if (!sameBind(found, candidate)) {
-                ctx.linked.errors.push(
-                    `ambiguous export '${name}' from '${module.id}' (multiple star re-exports provide it)`,
-                );
+                ctx.linked.errors.push(`ambiguous export '${name}' from '${module.id}' (multiple star re-exports provide it)`);
                 return { kind: 'none' };
             }
         }
@@ -573,10 +582,49 @@ function sortModules(graph: Graph): number[] {
 }
 
 const RESERVED = new Set([
-    'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do', 'else',
-    'export', 'extends', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof', 'let', 'new',
-    'return', 'super', 'switch', 'this', 'throw', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
-    'await', 'static', 'enum', 'implements', 'interface', 'package', 'private', 'protected', 'public',
+    'break',
+    'case',
+    'catch',
+    'class',
+    'const',
+    'continue',
+    'debugger',
+    'default',
+    'delete',
+    'do',
+    'else',
+    'export',
+    'extends',
+    'finally',
+    'for',
+    'function',
+    'if',
+    'import',
+    'in',
+    'instanceof',
+    'let',
+    'new',
+    'return',
+    'super',
+    'switch',
+    'this',
+    'throw',
+    'try',
+    'typeof',
+    'var',
+    'void',
+    'while',
+    'with',
+    'yield',
+    'await',
+    'static',
+    'enum',
+    'implements',
+    'interface',
+    'package',
+    'private',
+    'protected',
+    'public',
 ]);
 
 function deconflict(ctx: LinkCtx): void {

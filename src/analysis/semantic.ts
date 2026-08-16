@@ -1,10 +1,5 @@
+import { isIdentifier, N, type Node, walkChildren } from '../ast.ts';
 import { enumeration } from '../util/enumeration';
-import {
-    type Node,
-    N,
-    isIdentifier,
-    walkChildren,
-} from '../ast.ts';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */
 export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');
@@ -142,7 +137,10 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
             s = state.scope;
             while (s !== 0) {
                 const hit = state.sem.bindings.get(bindingKey(s, NS_VALUE, nameId));
-                if (hit !== undefined && (state.sem.symbols[hit].flags & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0) {
+                if (
+                    hit !== undefined &&
+                    (state.sem.symbols[hit].flags & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0
+                ) {
                     state.sem.nodeSym.set(identNode, hit);
                     return;
                 }
@@ -627,7 +625,10 @@ function resolvePass(state: AnalyseState, node: Node | null): void {
 export function declareSyntheticImport(semantic: Semantic, identNode: Node): number {
     let ms = 1;
     for (let s = 1; s < semantic.scopes.length; s++) {
-        if (semantic.scopes[s].flags === SCOPE.MODULE) { ms = s; break; }
+        if (semantic.scopes[s].flags === SCOPE.MODULE) {
+            ms = s;
+            break;
+        }
     }
 
     const id = semantic.symbols.length;
@@ -637,8 +638,7 @@ export function declareSyntheticImport(semantic: Semantic, identNode: Node): num
 }
 
 /** Declared name of a symbol (the text of its declaring Ident). */
-export const symbolName = (semantic: Semantic, symbolId: number): string =>
-    semantic.symbols[symbolId].decl?.name ?? '';
+export const symbolName = (semantic: Semantic, symbolId: number): string => semantic.symbols[symbolId].decl?.name ?? '';
 
 /** Resolved symbol id for an Ident node (0 = unresolved/global). */
 export const symbolOf = (semantic: Semantic, node: Node): number => semantic.nodeSym.get(node) ?? 0;

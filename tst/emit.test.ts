@@ -1,10 +1,10 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
-import { parse } from '../src/parser.ts';
+import { describe, expect, it } from 'vitest';
 import { emitModule } from '../src/emit.ts';
+import { parse } from '../src/parser.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -109,9 +109,7 @@ describe('emit — parameter properties (execution)', () => {
     const load = async (src: string) => import('data:text/javascript,' + encodeURIComponent(strip(src)));
 
     it('synthesizes this.x = x for private/public/readonly params', async () => {
-        const mod = await load(
-            'export class C { constructor(private x: number, public y: string, readonly z = 9) {} }',
-        );
+        const mod = await load('export class C { constructor(private x: number, public y: string, readonly z = 9) {} }');
         const c = new mod.C(1, 'a');
         expect(c.x).toBe(1);
         expect(c.y).toBe('a');
@@ -129,9 +127,7 @@ describe('emit — parameter properties (execution)', () => {
     });
 
     it('only param properties are synthesized — plain params are untouched', async () => {
-        const mod = await load(
-            'export class M { got = 0; constructor(a: number, private x: number) { this.got = a; } }',
-        );
+        const mod = await load('export class M { got = 0; constructor(a: number, private x: number) { this.got = a; } }');
         const m = new mod.M(1, 2);
         expect(m.x).toBe(2);
         expect(m.got).toBe(1);

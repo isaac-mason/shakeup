@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
 import esbuild from 'esbuild';
+import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
 
@@ -72,7 +72,7 @@ const FIXTURES: Record<string, string> = {
     'fragment with children': `
         export const v = <><span>a</span><span>b</span></>;
     `,
-    'nesting': `
+    nesting: `
         export const v = <div className="a"><div className="b"><span>{deep()}</span></div></div>;
         function deep() { return 'D'; }
     `,

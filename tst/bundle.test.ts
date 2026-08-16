@@ -25,10 +25,7 @@ describe('bundle: executable output', () => {
                 'export const add = (a: number, b: number): number => a + b;',
                 'export function scale(v: number, s: number): number { return v * s; }',
             ].join('\n'),
-            '/util.ts': [
-                'const add = (x: number): number => x + 1;',
-                'export const one = (): number => add(0);',
-            ].join('\n'),
+            '/util.ts': ['const add = (x: number): number => x + 1;', 'export const one = (): number => add(0);'].join('\n'),
         });
         const mod = await run(code);
         expect(mod.result).toBe(3);
@@ -77,7 +74,11 @@ describe('bundle: executable output', () => {
     it('external imports hoist and dedupe; externals stay imports', async () => {
         const { code } = build(
             {
-                '/main.ts': ["import { platform } from 'node:process';", "export { arch } from './other';", 'export const p = platform;'].join('\n'),
+                '/main.ts': [
+                    "import { platform } from 'node:process';",
+                    "export { arch } from './other';",
+                    'export const p = platform;',
+                ].join('\n'),
                 '/other.ts': "import { arch } from 'node:process';\nexport { arch };",
             },
             ['node:process'],
@@ -117,8 +118,7 @@ describe('bundle: executable output', () => {
 });
 
 describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)', () => {
-    const bundleErr = (src: string): string[] =>
-        bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) }).errors;
+    const bundleErr = (src: string): string[] => bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) }).errors;
 
     it('value namespaces are rejected with a clear error', () => {
         const errs = bundleErr('export namespace NS { export const v = 42; }');

@@ -85,10 +85,7 @@ describe('tree shaking', () => {
     it('impure top-level initializers are conservatively kept', async () => {
         const { code } = build({
             '/main.ts': ["import { pure } from './lib';", 'export const out = pure;'].join('\n'),
-            '/lib.ts': [
-                'export const pure = 1;',
-                'const kept = Math.max(1, 2);',
-            ].join('\n'),
+            '/lib.ts': ['export const pure = 1;', 'const kept = Math.max(1, 2);'].join('\n'),
         });
         expect(code).toContain('Math.max');
         const mod = await run(code);
@@ -101,7 +98,7 @@ describe('tree shaking', () => {
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
         const mod = await run(code);
-        expect((mod.r as number)).toBe(1);
+        expect(mod.r as number).toBe(1);
         expect(code).toContain('b:');
     });
 });

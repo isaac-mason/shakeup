@@ -1,10 +1,10 @@
-import { readFileSync } from 'node:fs';
 import { execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, test } from 'vitest';
+import { N, type Node, TYPE_NAME, walk } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
-import { walk, N, TYPE_NAME, type Node } from '../src/ast.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -25,10 +25,7 @@ describe('three.core.js', () => {
 });
 
 describe('crashcat/src *.ts', () => {
-    const files = execSync(`find "${CRASHCAT_SRC}" -name '*.ts'`, { encoding: 'utf8' })
-        .split('\n')
-        .filter(Boolean)
-        .sort();
+    const files = execSync(`find "${CRASHCAT_SRC}" -name '*.ts'`, { encoding: 'utf8' }).split('\n').filter(Boolean).sort();
 
     it('found ~99 files', () => {
         expect(files.length).toBeGreaterThan(50);
@@ -47,10 +44,12 @@ describe('tricky snippet corpus', () => {
         'nested templates': 'const s = `a${`b${c}d`}e${f}`;',
         'optional chaining + nullish assign': 'a?.b?.c?.(); x ??= y; obj.a ??= 1; a?.[b]?.c;',
         'private fields + #x in obj': 'class C { #x = 1; m(o){ return #x in o ? this.#x : 0; } }',
-        'generators + async arrows': 'function* g(){ yield* h(); } const f = async (x) => await x; const af = async function*(){ yield 1 };',
+        'generators + async arrows':
+            'function* g(){ yield* h(); } const f = async (x) => await x; const af = async function*(){ yield 1 };',
         'labeled loops with break': 'outer: for (let i=0;i<3;i++){ inner: for(;;){ break outer; continue inner; } }',
         'destructuring defaults in params': 'function f({a=1,b:{c=2}={}}=[], [d=3,...e]=[]){ return a+c+d; }',
-        'getters/setters class + object': 'class C { get x(){return 1} set x(v){} } const o = { get y(){return 2}, set y(v){}, [z]:1 };',
+        'getters/setters class + object':
+            'class C { get x(){return 1} set x(v){} } const o = { get y(){return 2}, set y(v){}, [z]:1 };',
         'static blocks': 'class C { static #s = 1; static { this.t = C.#s; } }',
         'for-await-of': 'async function f(xs){ for await (const x of xs){ console.log(x); } }',
         'tagged templates': 'tag`a${b}c`; String.raw`\\n${x}`;',
@@ -67,7 +66,7 @@ describe('tricky snippet corpus', () => {
         'tuple named members': 'type P = [x: number, y?: number, z: string[]];',
         'tuple labeled rest': 'type P = [x: number, ...rest: string[]];',
         'as const': 'const c = [1, 2, 3] as const;',
-        'satisfies': 'const cfg = { a: 1 } satisfies Record<string, number>;',
+        satisfies: 'const cfg = { a: 1 } satisfies Record<string, number>;',
         'enum with initializers': 'enum Color { Red = 1, Green = "g", Blue = Red << 1 }',
         'abstract class': 'abstract class A { abstract m(): void; concrete(){ return 1; } }',
         'param properties': 'class C { constructor(private readonly x: number, public y = 2){} }',
@@ -122,13 +121,17 @@ describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () =
         const { program, errors } = parseFresh(src, false);
         expect(errors, JSON.stringify(errors)).toEqual([]);
         const parts: string[] = [];
-        walk(program, (n: Node) => { parts.push(TYPE_NAME[n.type]); });
+        walk(program, (n: Node) => {
+            parts.push(TYPE_NAME[n.type]);
+        });
         return parts.join(' ');
     };
     const countChains = (src: string): number => {
         const { program } = parseFresh(src, false);
         let n = 0;
-        walk(program, (node) => { if (node.type === N.ChainExpression) n++; });
+        walk(program, (node) => {
+            if (node.type === N.ChainExpression) n++;
+        });
         return n;
     };
 
@@ -195,15 +198,21 @@ describe('grammar audit — optional-chain spec errors (roadmap §4)', () => {
         const { program, errors } = parseFresh('const x = f<number>;', true);
         expect(errors).toEqual([]);
         const kinds: number[] = [];
-        walk(program, (n) => { kinds.push(n.type); });
+        walk(program, (n) => {
+            kinds.push(n.type);
+        });
         expect(kinds).toContain(N.TSInstantiationExpression);
         // the call form keeps CallExpression; a real `<` comparison must NOT become instantiation
         const call: number[] = [];
-        walk(parseFresh('const x = f<number>(1);', true).program, (n) => { call.push(n.type); });
+        walk(parseFresh('const x = f<number>(1);', true).program, (n) => {
+            call.push(n.type);
+        });
         expect(call).toContain(N.CallExpression);
         expect(call).not.toContain(N.TSInstantiationExpression);
         const cmp: number[] = [];
-        walk(parseFresh('const c = a < b;', true).program, (n) => { cmp.push(n.type); });
+        walk(parseFresh('const c = a < b;', true).program, (n) => {
+            cmp.push(n.type);
+        });
         expect(cmp).not.toContain(N.TSInstantiationExpression);
     });
 });

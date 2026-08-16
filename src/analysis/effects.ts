@@ -1,4 +1,4 @@
-import { type Node, N } from '../ast.ts';
+import { N, type Node } from '../ast.ts';
 
 /**
  * Conservatively true if evaluating this expression has no observable side effects.

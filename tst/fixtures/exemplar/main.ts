@@ -2,14 +2,14 @@
 // result (registry.size === 2) proves it ran exactly once.
 import './shapes/register-all';
 
+import config from './config'; // anonymous default (object literal)
+import { Emitter } from './emitter';
+import labelFor from './label'; // named default (function)
+import { clamp } from './math'; // 3-deep named re-export chain (a->b->c)
+import * as vec2 from './math/vec2'; // namespace import, calling style
+import { Collide, MotionType, Phase } from './motion';
 // mixed named / default / namespace imports
 import { areaOf, registry } from './shapes/registry';
-import config from './config'; // anonymous default (object literal)
-import labelFor from './label'; // named default (function)
-import * as vec2 from './math/vec2'; // namespace import, calling style
-import { clamp } from './math'; // 3-deep named re-export chain (a->b->c)
-import { Emitter } from './emitter';
-import { MotionType, Collide, Phase } from './motion';
 import { step } from './sim/integrate';
 import type { Particle } from './types';
 

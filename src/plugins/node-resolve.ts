@@ -1,4 +1,4 @@
-import { type Fs, dirnameOf, joinPath, normalizePath } from '../fs';
+import { dirnameOf, type Fs, joinPath, normalizePath } from '../fs';
 import type { Plugin, PluginCtx } from '../plugin';
 
 export type NodeResolveOptions = {
@@ -190,7 +190,7 @@ function subpathResolve(
     conditions: Set<string>,
 ): PjResult {
     if (!matchKey.endsWith('/') && !matchKey.includes('*')) {
-        if (Object.prototype.hasOwnProperty.call(matchObj, matchKey)) {
+        if (Object.hasOwn(matchObj, matchKey)) {
             return targetResolve(packageUrl, matchObj[matchKey], '', false, conditions);
         }
     }
@@ -204,10 +204,7 @@ function subpathResolve(
             const patternBase = key.slice(0, star);
             if (matchKey.startsWith(patternBase)) {
                 const patternTrailer = key.slice(star + 1);
-                if (
-                    patternTrailer === '' ||
-                    (matchKey.endsWith(patternTrailer) && matchKey.length >= key.length)
-                ) {
+                if (patternTrailer === '' || (matchKey.endsWith(patternTrailer) && matchKey.length >= key.length)) {
                     const captured = matchKey.slice(patternBase.length, matchKey.length - patternTrailer.length);
                     return targetResolve(packageUrl, matchObj[key], captured, true, conditions);
                 }
@@ -225,21 +222,12 @@ function subpathResolve(
     return { status: 'null', blocked: false };
 }
 
-function exportsResolve(
-    exports: unknown,
-    subpath: string,
-    packageUrl: string,
-    conditions: Set<string>,
-): PjResult {
+function exportsResolve(exports: unknown, subpath: string, packageUrl: string, conditions: Set<string>): PjResult {
     if (subpath === '.') {
-        let mainExport: unknown = undefined;
-        if (
-            typeof exports === 'string' ||
-            Array.isArray(exports) ||
-            (isPlainObject(exports) && !keysStartWithDot(exports))
-        ) {
+        let mainExport: unknown;
+        if (typeof exports === 'string' || Array.isArray(exports) || (isPlainObject(exports) && !keysStartWithDot(exports))) {
             mainExport = exports;
-        } else if (isPlainObject(exports) && Object.prototype.hasOwnProperty.call(exports, '.')) {
+        } else if (isPlainObject(exports) && Object.hasOwn(exports, '.')) {
             mainExport = (exports as Record<string, unknown>)['.'];
         }
         if (mainExport !== undefined) {
@@ -336,7 +324,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         if (map === undefined || typeof map === 'string') return absPath;
         const rel = relativeTo(pkg.dir, absPath);
         for (const candidate of browserKeyCandidates(rel, extensions)) {
-            if (Object.prototype.hasOwnProperty.call(map, candidate)) {
+            if (Object.hasOwn(map, candidate)) {
                 const mapped = map[candidate];
                 if (mapped === false) return EMPTY_MODULE_ID;
                 return normalizePath(`${pkg.dir}/${mapped}`);
@@ -383,13 +371,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    const finishExports = (
-        ctx: PluginCtx,
-        pkg: PackageJson,
-        spec: string,
-        subpath: string,
-        r: PjResult,
-    ): string | null => {
+    const finishExports = (ctx: PluginCtx, pkg: PackageJson, spec: string, subpath: string, r: PjResult): string | null => {
         switch (r.status) {
             case 'exact': {
                 if (fs.exists(r.value)) return r.value;
@@ -457,7 +439,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             const owner = findBrowserMapOwner(readPkg, importerDir);
             if (owner !== null) {
                 const map = owner.browser as Record<string, string | false>;
-                if (Object.prototype.hasOwnProperty.call(map, specifier)) {
+                if (Object.hasOwn(map, specifier)) {
                     const mapped = map[specifier];
                     if (mapped === false) return EMPTY_MODULE_ID;
                     if (mapped.startsWith('.')) {
@@ -474,7 +456,11 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         if (selfPkg !== null && selfPkg.exports !== undefined) {
             const mixed = mixedExportsKeys(selfPkg.exports);
             if (mixed !== null) {
-                warn(ctx, specifier, `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`);
+                warn(
+                    ctx,
+                    specifier,
+                    `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`,
+                );
                 return null;
             }
             const r = exportsResolve(selfPkg.exports, subpath, selfPkg.dir, conditions);
@@ -490,7 +476,11 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             if (pkg.exports !== undefined) {
                 const mixed = mixedExportsKeys(pkg.exports);
                 if (mixed !== null) {
-                    warn(ctx, specifier, `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`);
+                    warn(
+                        ctx,
+                        specifier,
+                        `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`,
+                    );
                     return null;
                 }
                 const r = exportsResolve(pkg.exports, subpath, pkgDir, conditions);
@@ -568,11 +558,7 @@ function relativeForMsg(pkg: PackageJson, absPath: string): string {
     return relativeTo(pkg.dir, absPath);
 }
 
-function findEnclosingPackage(
-    readPkg: (dir: string) => PackageJson | null,
-    startDir: string,
-    name: string,
-): PackageJson | null {
+function findEnclosingPackage(readPkg: (dir: string) => PackageJson | null, startDir: string, name: string): PackageJson | null {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         if (baseName(dir) === 'node_modules') return null;
         const pkg = readPkg(dir);
@@ -583,10 +569,7 @@ function findEnclosingPackage(
     return null;
 }
 
-function findBrowserMapOwner(
-    readPkg: (dir: string) => PackageJson | null,
-    startDir: string,
-): PackageJson | null {
+function findBrowserMapOwner(readPkg: (dir: string) => PackageJson | null, startDir: string): PackageJson | null {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         const pkg = readPkg(dir);
         if (pkg !== null && pkg.browser !== undefined && typeof pkg.browser !== 'string') return pkg;

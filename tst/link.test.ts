@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
 import { createMemoryFs } from '../src/fs.ts';
+import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
 
 const build = (files: Record<string, string>, external: string[] = []) => {
     const graph = buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });
@@ -20,7 +20,8 @@ describe('graph + link', () => {
                     "export { scale } from './math';",
                     'export const result = add(util.one(), helper());',
                 ].join('\n'),
-                '/math.ts': 'export const add = (a: number, b: number) => a + b;\nexport function scale(v: number, s: number) { return v * s; }',
+                '/math.ts':
+                    'export const add = (a: number, b: number) => a + b;\nexport function scale(v: number, s: number) { return v * s; }',
                 '/util.ts': "export { one } from './impl';",
                 '/impl.ts': 'const add = (x: number) => x + 1;\nexport const one = () => add(0);',
             },

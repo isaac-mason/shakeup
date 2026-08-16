@@ -1,7 +1,7 @@
-import { type Node, N, walk } from './ast';
 import { isPureStatement } from './analysis/effects';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
+import { N, type Node, walk } from './ast';
 import { type Graph, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
 
 /** Result of tree shaking: which top-level statements survive, and which were dropped.
@@ -154,7 +154,13 @@ export function shake(graph: Graph, linked: Linked, jsxPure: boolean): Shaken {
         for (const info of infos[mod.idx]) {
             if (live[mod.idx].has(info.stmt.id)) continue;
             const t = info.stmt.type;
-            if (t === N.ImportDeclaration || t === N.ExportAllDeclaration || t === N.EmptyStatement || t === N.TSInterfaceDeclaration || t === N.TSTypeAliasDeclaration)
+            if (
+                t === N.ImportDeclaration ||
+                t === N.ExportAllDeclaration ||
+                t === N.EmptyStatement ||
+                t === N.TSInterfaceDeclaration ||
+                t === N.TSTypeAliasDeclaration
+            )
                 continue;
             dropped.push([mod.idx, info.stmt]);
         }

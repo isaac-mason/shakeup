@@ -1,7 +1,7 @@
-import type { Program } from './ast';
-import { type Edit, applyEdits } from './emit';
-import type { Fs } from './fs';
 import type { Semantic } from './analysis/semantic';
+import type { Program } from './ast';
+import { applyEdits, type Edit } from './emit';
+import type { Fs } from './fs';
 
 /** Context passed to every plugin hook. */
 export type PluginCtx = {
@@ -28,16 +28,31 @@ export type ModuleParsedInfo = {
     semantic: Semantic;
 };
 
-/** A plugin: a name plus any of the rollup-shaped build hooks. */
+/** A value or a promise of it. Hooks may be sync or async; the drivers below stay
+ *  fully synchronous when no hook returns a thenable (P4 sync fast path). */
+export type MaybePromise<T> = T | Promise<T>;
+
+const isThenable = (x: unknown): x is Promise<unknown> =>
+    x !== null && typeof x === 'object' && typeof (x as { then?: unknown }).then === 'function';
+
+/** Unwrap a driver result in a synchronous context (bundle mode requires sync
+ *  plugins). Throws if a hook went async — a clear error, not a silent hang. */
+export function assertSync<T>(x: MaybePromise<T>): T {
+    if (isThenable(x)) throw new Error('async plugin hook is not supported in this (synchronous) build context');
+    return x as T;
+}
+
+/** A plugin: a name plus any of the rollup-shaped build hooks. Every hook may
+ *  return a promise; the dev server awaits, bundle mode requires sync. */
 export type Plugin = {
     name: string;
-    buildStart?: (ctx: PluginCtx) => void;
-    resolveId?: WithFilter<(ctx: PluginCtx, specifier: string, importer: string | null) => ResolveIdResult>;
-    load?: WithFilter<(ctx: PluginCtx, id: string) => string | null | undefined>;
-    transform?: WithFilter<(ctx: PluginCtx, code: string, id: string) => TransformResult>;
-    moduleParsed?: (ctx: PluginCtx, info: ModuleParsedInfo) => void;
+    buildStart?: (ctx: PluginCtx) => MaybePromise<void>;
+    resolveId?: WithFilter<(ctx: PluginCtx, specifier: string, importer: string | null) => MaybePromise<ResolveIdResult>>;
+    load?: WithFilter<(ctx: PluginCtx, id: string) => MaybePromise<string | null | undefined>>;
+    transform?: WithFilter<(ctx: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
+    moduleParsed?: (ctx: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     renderChunk?: (ctx: PluginCtx, code: string) => string | null | undefined;
-    buildEnd?: (ctx: PluginCtx) => void;
+    buildEnd?: (ctx: PluginCtx) => MaybePromise<void>;
 };
 
 type Compiled<F> = { plugin: string; matches: ((id: string) => boolean) | null; handler: F };
@@ -96,43 +111,89 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
     return pipeline;
 }
 
-/** first-wins resolveId over the compiled pipeline (string | false | null) */
+/** first-wins resolveId. Stays synchronous unless a hook returns a promise, then
+ *  resumes the loop after it settles (sync fast path). */
 export function runResolveId(
     pipeline: Pipeline,
     ctx: PluginCtx,
     specifier: string,
     importer: string | null,
-): ResolveIdResult {
-    for (const hook of pipeline.resolveId) {
-        if (hook.matches !== null && !hook.matches(specifier)) continue;
-        const result = (hook.handler as (c: PluginCtx, s: string, i: string | null) => ResolveIdResult)(
-            ctx,
-            specifier,
-            importer,
-        );
-        if (result !== null && result !== undefined) return result;
-    }
-    return null;
+): MaybePromise<ResolveIdResult> {
+    const hooks = pipeline.resolveId;
+    let i = 0;
+    const step = (): MaybePromise<ResolveIdResult> => {
+        while (i < hooks.length) {
+            const hook = hooks[i++];
+            if (hook.matches !== null && !hook.matches(specifier)) continue;
+            const r = (hook.handler as (c: PluginCtx, s: string, im: string | null) => MaybePromise<ResolveIdResult>)(
+                ctx,
+                specifier,
+                importer,
+            );
+            if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as ResolveIdResult) : step()));
+            if (r !== null && r !== undefined) return r;
+        }
+        return null;
+    };
+    return step();
 }
 
-/** first-wins load */
-export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): string | null {
-    for (const hook of pipeline.load) {
-        if (hook.matches !== null && !hook.matches(id)) continue;
-        const result = (hook.handler as (c: PluginCtx, i: string) => string | null | undefined)(ctx, id);
-        if (result !== null && result !== undefined) return result;
-    }
-    return null;
+/** first-wins load (sync fast path). */
+export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePromise<string | null> {
+    const hooks = pipeline.load;
+    let i = 0;
+    const step = (): MaybePromise<string | null> => {
+        while (i < hooks.length) {
+            const hook = hooks[i++];
+            if (hook.matches !== null && !hook.matches(id)) continue;
+            const r = (hook.handler as (c: PluginCtx, i: string) => MaybePromise<string | null | undefined>)(ctx, id);
+            if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as string) : step()));
+            if (r !== null && r !== undefined) return r;
+        }
+        return null;
+    };
+    return step();
 }
 
-/** sequential transform chain; Edit[] results are applied to the running code */
-export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, id: string): string {
+/** sequential transform chain; Edit[] results patch the running code (sync fast path). */
+export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, id: string): MaybePromise<string> {
+    const hooks = pipeline.transform;
     let current = code;
-    for (const hook of pipeline.transform) {
-        if (hook.matches !== null && !hook.matches(id)) continue;
-        const result = (hook.handler as (c: PluginCtx, code: string, i: string) => TransformResult)(ctx, current, id);
-        if (result === null || result === undefined) continue;
-        current = typeof result === 'string' ? result : applyEdits(current, result);
-    }
-    return current;
+    let i = 0;
+    const apply = (r: TransformResult): void => {
+        if (r !== null && r !== undefined) current = typeof r === 'string' ? r : applyEdits(current, r);
+    };
+    const step = (): MaybePromise<string> => {
+        while (i < hooks.length) {
+            const hook = hooks[i++];
+            if (hook.matches !== null && !hook.matches(id)) continue;
+            const r = (hook.handler as (c: PluginCtx, code: string, i: string) => MaybePromise<TransformResult>)(
+                ctx,
+                current,
+                id,
+            );
+            if (isThenable(r)) {
+                return r.then((res) => {
+                    apply(res as TransformResult);
+                    return step();
+                });
+            }
+            apply(r);
+        }
+        return current;
+    };
+    return step();
+}
+
+/** sequential moduleParsed hooks (post-parse AST access; sync fast path). */
+export function runModuleParsed(pipeline: Pipeline, ctx: PluginCtx, info: ModuleParsedInfo): MaybePromise<void> {
+    const hooks = pipeline.moduleParsed;
+    let i = 0;
+    const step = (): MaybePromise<void> => {
+        while (i < hooks.length) {
+            const r = hooks[i++].handler(ctx, info);
+            if (isThenable(r)) return r.then(() => step());
+        }
+    };
+    return step();
 }

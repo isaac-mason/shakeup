@@ -37,4 +37,4 @@ export function Panel({ title, children }: { title: string; children: ReactNode 
     );
 }
 
-export { identity, first, numbers };
+export { first, identity, numbers };

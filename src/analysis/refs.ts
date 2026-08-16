@@ -1,4 +1,4 @@
-import { type Node, N, isIdentifier, walkChildren } from '../ast.ts';
+import { isIdentifier, N, type Node, walkChildren } from '../ast.ts';
 
 /**
  * Visit every identifier in `node`'s subtree that carries a symbol — i.e. the
@@ -12,10 +12,7 @@ import { type Node, N, isIdentifier, walkChildren } from '../ast.ts';
  * otherwise — renamers must then expand to `a: a$1` rather than replace the span
  * (the key text stays, only the value name changes).
  */
-export function walkRefIdents(
-    node: Node,
-    cb: (ident: Node, shorthandProp: Node | null) => void,
-): void {
+export function walkRefIdents(node: Node, cb: (ident: Node, shorthandProp: Node | null) => void): void {
     if (node.type === N.BindingIdentifier || node.type === N.IdentifierReference) {
         cb(node, null);
         return;

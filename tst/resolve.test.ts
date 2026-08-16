@@ -66,16 +66,12 @@ describe('nodeResolve: exports condition matching (author order)', () => {
 describe('nodeResolve: wildcard specificity + null-block', () => {
     it('exact subpath key overrides the wildcard', () => {
         const p = probe();
-        expect(p.resolve('wildcard-pkg/utils/special', APP).id).toBe(
-            '/app/node_modules/wildcard-pkg/dist/special-override.js',
-        );
+        expect(p.resolve('wildcard-pkg/utils/special', APP).id).toBe('/app/node_modules/wildcard-pkg/dist/special-override.js');
     });
 
     it('wildcard captures and substitutes', () => {
         const p = probe();
-        expect(p.resolve('wildcard-pkg/utils/foo', APP).id).toBe(
-            '/app/node_modules/wildcard-pkg/dist/utils/foo.js',
-        );
+        expect(p.resolve('wildcard-pkg/utils/foo', APP).id).toBe('/app/node_modules/wildcard-pkg/dist/utils/foo.js');
     });
 
     it('"." sugar-less object resolves via the dot key', () => {
@@ -157,9 +153,7 @@ describe('nodeResolve: browser object remapping', () => {
     it('remaps a relative own-file import inside the package to the browser build', () => {
         const p = probe();
         const importer = '/app/node_modules/browser-object-pkg/entry.js';
-        expect(p.resolve('./node-impl.js', importer).id).toBe(
-            '/app/node_modules/browser-object-pkg/browser-impl.js',
-        );
+        expect(p.resolve('./node-impl.js', importer).id).toBe('/app/node_modules/browser-object-pkg/browser-impl.js');
     });
 
     it('a false-mapped relative import becomes the empty-module sentinel', () => {
@@ -184,9 +178,7 @@ describe('nodeResolve: self-reference', () => {
     it('a package importing itself by name resolves via its own exports', () => {
         const p = probe();
         const importer = '/app/node_modules/self-ref-pkg/index.js';
-        expect(p.resolve('self-ref-pkg/helper', importer).id).toBe(
-            '/app/node_modules/self-ref-pkg/helper.js',
-        );
+        expect(p.resolve('self-ref-pkg/helper', importer).id).toBe('/app/node_modules/self-ref-pkg/helper.js');
         expect(p.resolve('self-ref-pkg', importer).id).toBe('/app/node_modules/self-ref-pkg/index.js');
     });
 });
@@ -234,8 +226,7 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
 
     it('browser object remap + false stub work through the real import graph', async () => {
         const mod = await buildAndRun(
-            "import { impl, stubKeys } from 'browser-object-pkg';\n" +
-                'export const impl2 = impl, keys2 = stubKeys;',
+            "import { impl, stubKeys } from 'browser-object-pkg';\n" + 'export const impl2 = impl, keys2 = stubKeys;',
         );
         expect(mod.impl2).toBe('browser-impl');
         expect(mod.keys2).toBe(0);
@@ -275,7 +266,8 @@ describe('alignment regressions (vs esbuild)', () => {
 
     it('D3: importer browser map remaps a bare specifier to a relative file (tapable pattern)', () => {
         const p = probeFs({
-            '/app/node_modules/tapable-ish/package.json': '{ "name": "tapable-ish", "main": "main.js", "browser": { "util": "./lib/util-browser.js" } }',
+            '/app/node_modules/tapable-ish/package.json':
+                '{ "name": "tapable-ish", "main": "main.js", "browser": { "util": "./lib/util-browser.js" } }',
             '/app/node_modules/tapable-ish/main.js': '',
             '/app/node_modules/tapable-ish/lib/util-browser.js': '',
         });
@@ -318,7 +310,8 @@ describe('alignment regressions (vs esbuild)', () => {
 
     it('D4: extensionless browser key matches the extension-resolved file', () => {
         const p = probeFs({
-            '/app/node_modules/extless/package.json': '{ "name": "extless", "main": "./lib/impl", "browser": { "./lib/impl": "./lib/impl-browser.js" } }',
+            '/app/node_modules/extless/package.json':
+                '{ "name": "extless", "main": "./lib/impl", "browser": { "./lib/impl": "./lib/impl-browser.js" } }',
             '/app/node_modules/extless/lib/impl.js': '',
             '/app/node_modules/extless/lib/impl-browser.js': '',
             '/app/src/a.js': '',
@@ -340,7 +333,8 @@ describe('alignment regressions (vs esbuild)', () => {
     it('D5: defaults align to lineage — no module condition, TS-first extensions', () => {
         const p = probeFs({
             '/app/src/a.js': '',
-            '/app/node_modules/mod-cond/package.json': '{ "name": "mod-cond", "exports": { "module": "./m.js", "default": "./d.js" } }',
+            '/app/node_modules/mod-cond/package.json':
+                '{ "name": "mod-cond", "exports": { "module": "./m.js", "default": "./d.js" } }',
             '/app/node_modules/mod-cond/m.js': '',
             '/app/node_modules/mod-cond/d.js': '',
             '/app/node_modules/ts-first/package.json': '{ "main": "./impl" }',

@@ -1,8 +1,9 @@
 // Types everywhere — none may survive into the bundle.
-import type { MotionType } from './motion';
-import type { Vec2 } from './math/vec2';
+
 // type-only external import (must vanish entirely from the bundle)
 import type { ParsedPath } from 'node:path';
+import type { Vec2 } from './math/vec2';
+import type { MotionType } from './motion';
 
 export interface Particle {
     pos: Vec2;

@@ -1,22 +1,22 @@
-import { type Node, N, walk } from './ast';
-import { symbolOf } from './analysis/semantic';
 import { walkRefIdents } from './analysis/refs';
-import { type Edit, type JSXLower, applyEdits, collectStripEdits } from './emit';
+import { symbolOf } from './analysis/semantic';
+import { N, type Node, walk } from './ast';
+import { applyEdits, collectStripEdits, type Edit, type JSXLower } from './emit';
 import {
+    buildGraph,
+    externalKey,
+    finalNameOf,
     type Graph,
     type GraphOptions,
     type ImportBind,
     type JSXRuntime,
     type Linked,
-    type Module,
-    buildGraph,
-    externalKey,
-    finalNameOf,
     linkGraph,
+    type Module,
     packRef,
     resolveJSXOptions,
 } from './module-graph';
-import { type PluginCtx, compilePipeline } from './plugin';
+import { compilePipeline, type PluginCtx } from './plugin';
 import { type Shaken, shake } from './shake';
 
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */

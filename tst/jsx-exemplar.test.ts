@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -24,7 +24,8 @@ function loadFixtures(): Record<string, string> {
         for (const entry of readdirSync(dir)) {
             const full = join(dir, entry);
             if (statSync(full).isDirectory()) walkDir(full);
-            else if (entry.endsWith('.ts') || entry.endsWith('.tsx')) map[`/${relative(FIXTURE_ROOT, full)}`] = readFileSync(full, 'utf8');
+            else if (entry.endsWith('.ts') || entry.endsWith('.tsx'))
+                map[`/${relative(FIXTURE_ROOT, full)}`] = readFileSync(full, 'utf8');
         }
     };
     walkDir(FIXTURE_ROOT);
@@ -49,7 +50,12 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 
 describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
     const files = loadFixtures();
-    const built = bundle({ entry: '/widget.tsx', fs: createMemoryFs(files), external: ['node:path'], plugins: [reactShimPlugin] });
+    const built = bundle({
+        entry: '/widget.tsx',
+        fs: createMemoryFs(files),
+        external: ['node:path'],
+        plugins: [reactShimPlugin],
+    });
 
     it('bundles with no errors', () => {
         expect(built.errors).toEqual([]);
@@ -58,10 +64,7 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
     it('executes the JSX component against the shim', async () => {
         const mod = await run(built.code);
         type Tree = { k: string; type: unknown; key?: unknown; props: Record<string, unknown> };
-        const Panel = mod.Panel as (p: {
-            rows: { id: number; label: string }[];
-            particle: { motion: number };
-        }) => Tree;
+        const Panel = mod.Panel as (p: { rows: { id: number; label: string }[]; particle: { motion: number } }) => Tree;
         const tree = Panel({
             rows: [
                 { id: 1, label: 'a' },
@@ -96,7 +99,13 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
     it('EXISTING exemplar output is unaffected by JSX machinery (no-tsx build stable)', () => {
         const tsOnly: Record<string, string> = {};
         for (const [k, v] of Object.entries(files)) if (k.endsWith('.ts')) tsOnly[k] = v;
-        const withJsxOpts = bundle({ entry: '/main.ts', fs: createMemoryFs(tsOnly), external: ['node:path'], plugins: [reactShimPlugin], jsx: { importSource: 'react', pure: true } });
+        const withJsxOpts = bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(tsOnly),
+            external: ['node:path'],
+            plugins: [reactShimPlugin],
+            jsx: { importSource: 'react', pure: true },
+        });
         const plain = bundle({ entry: '/main.ts', fs: createMemoryFs(tsOnly), external: ['node:path'] });
         expect(withJsxOpts.errors).toEqual([]);
         expect(withJsxOpts.code).toBe(plain.code);

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { bundle } from '../src/bundle.ts';
 import type { Fs } from '../src/fs.ts';
 import { normalizePath } from '../src/fs.ts';
-import { bundle } from '../src/bundle.ts';
 import { nodeResolve } from '../src/plugins/node-resolve.ts';
 
 type SymlinkFs = Fs & { realpath(id: string): string };
@@ -48,8 +48,7 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
         version: '1.0.0',
         exports: { '.': './index.js' },
     });
-    realFiles[STORE + '/liba@1.0.0/node_modules/liba/index.js'] =
-        "import { b } from 'libb';\nexport const a = 'liba->' + b;";
+    realFiles[STORE + '/liba@1.0.0/node_modules/liba/index.js'] = "import { b } from 'libb';\nexport const a = 'liba->' + b;";
     realFiles[STORE + '/libb@1.0.0/node_modules/libb/package.json'] = JSON.stringify({
         name: 'libb',
         version: '1.0.0',
@@ -80,9 +79,7 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
         const fs = createSymlinkFs(realFiles, links);
         const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
         expect(result.errors).toEqual([]);
-        const mod = (await import(
-            `data:text/javascript,${encodeURIComponent(result.code)}`
-        )) as Record<string, unknown>;
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('liba->libb');
     });
 });
@@ -90,21 +87,18 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
 describe('workspace: pnpm dedup (one store file, two link paths -> one module)', () => {
     const STORE = '/repo/node_modules/.pnpm';
     const realFiles: Record<string, string> = {
-        '/repo/src/main.ts':
-            "import { a } from 'liba';\nimport { d } from 'libd';\nexport const value = a + '|' + d;",
+        '/repo/src/main.ts': "import { a } from 'liba';\nimport { d } from 'libd';\nexport const value = a + '|' + d;",
     };
     realFiles[STORE + '/liba@1.0.0/node_modules/liba/package.json'] = JSON.stringify({
         name: 'liba',
         exports: { '.': './index.js' },
     });
-    realFiles[STORE + '/liba@1.0.0/node_modules/liba/index.js'] =
-        "import { c } from 'libc';\nexport const a = 'a:' + c;";
+    realFiles[STORE + '/liba@1.0.0/node_modules/liba/index.js'] = "import { c } from 'libc';\nexport const a = 'a:' + c;";
     realFiles[STORE + '/libd@1.0.0/node_modules/libd/package.json'] = JSON.stringify({
         name: 'libd',
         exports: { '.': './index.js' },
     });
-    realFiles[STORE + '/libd@1.0.0/node_modules/libd/index.js'] =
-        "import { c } from 'libc';\nexport const d = 'd:' + c;";
+    realFiles[STORE + '/libd@1.0.0/node_modules/libd/index.js'] = "import { c } from 'libc';\nexport const d = 'd:' + c;";
     realFiles[STORE + '/libc@1.0.0/node_modules/libc/package.json'] = JSON.stringify({
         name: 'libc',
         exports: { '.': './index.js' },
@@ -132,9 +126,7 @@ describe('workspace: pnpm dedup (one store file, two link paths -> one module)',
         const fs = createSymlinkFs(realFiles, links);
         const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
         expect(result.errors).toEqual([]);
-        const mod = (await import(
-            `data:text/javascript,${encodeURIComponent(result.code)}`
-        )) as Record<string, unknown>;
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('a:libc|d:libc');
     });
 });
@@ -185,8 +177,7 @@ describe('workspace: install-free member resolution (NOT IMPLEMENTED — pinned)
 
     it('WILL FLIP when install-free workspace resolution lands (§Workspaces item 2)', () => {
         const result = build();
-        const resolvedMemberInGraph = result
-            .graph!.modules.some((m) => m.id === '/repo/packages/b/index.js');
+        const resolvedMemberInGraph = result.graph!.modules.some((m) => m.id === '/repo/packages/b/index.js');
         expect(resolvedMemberInGraph).toBe(false);
     });
 });

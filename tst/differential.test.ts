@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
-import { parse } from '../src/parser.ts';
-import { walk, N, type Node } from '../src/ast.ts';
+import { describe, expect, it } from 'vitest';
+import { N, type Node, walk } from '../src/ast.ts';
 import { ESTREE_TYPE } from '../src/estree.ts';
+import { parse } from '../src/parser.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -59,14 +59,12 @@ const GROUPS: Group[] = [
     {
         name: 'Array(Expression|Pattern)',
         members: ['ArrayExpression', 'ArrayPattern'],
-        reason:
-            "We don't reinterpret assignment-side destructuring: `[a]=x` stays an ArrayExpression for us but is an ArrayPattern for meriyah. Sum both sides to compare.",
+        reason: "We don't reinterpret assignment-side destructuring: `[a]=x` stays an ArrayExpression for us but is an ArrayPattern for meriyah. Sum both sides to compare.",
     },
     {
         name: 'Object(Expression|Pattern)',
         members: ['ObjectExpression', 'ObjectPattern'],
-        reason:
-            "Same as arrays: assignment-side object destructuring stays ObjectExpression for us but ObjectPattern for meriyah. Sum both sides.",
+        reason: 'Same as arrays: assignment-side object destructuring stays ObjectExpression for us but ObjectPattern for meriyah. Sum both sides.',
     },
 ];
 
@@ -80,8 +78,7 @@ const EXCLUDED: Record<string, string> = {
 
 type SuspectedBug = { type: string; delta: number; repro: string; analysis: string };
 
-const SUSPECTED_BUGS: SuspectedBug[] = [
-];
+const SUSPECTED_BUGS: SuspectedBug[] = [];
 
 /** collapse counts according to GROUPS (members summed under group name). */
 function applyGroups(counts: Counts): Counts {

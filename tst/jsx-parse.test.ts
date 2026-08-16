@@ -1,9 +1,9 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { N, type Node, walk } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
-import { walk, N, type Node } from '../src/ast.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JSX_DIR = resolve(__dirname, 'fixtures/jsx');
@@ -16,13 +16,17 @@ function parseJSX(src: string, ts = false) {
 function collect(src: string, ts: boolean, pred: (n: Node) => boolean): { type: number; name: string }[] {
     const { program } = parseJSX(src, ts);
     const out: { type: number; name: string }[] = [];
-    walk(program, (n: Node) => { if (pred(n)) out.push({ type: n.type, name: n.name }); });
+    walk(program, (n: Node) => {
+        if (pred(n)) out.push({ type: n.type, name: n.name });
+    });
     return out;
 }
 function hasType(src: string, ts: boolean, type: number): boolean {
     const { program } = parseJSX(src, ts);
     let found = false;
-    walk(program, (n: Node) => { if (n.type === type) found = true; });
+    walk(program, (n: Node) => {
+        if (n.type === type) found = true;
+    });
     return found;
 }
 
@@ -54,7 +58,9 @@ describe('JSX AST shape', () => {
     it('self-closing element has no children and no closing element', () => {
         const { program } = parseJSX('<img src="x" />;');
         let el: Node | null = null;
-        walk(program, (n) => { if (n.type === N.JSXElement) el = n; });
+        walk(program, (n) => {
+            if (n.type === N.JSXElement) el = n;
+        });
         const data = (el as unknown as { data: { children: Node[]; closingElement: Node | null } }).data;
         expect(data.children).toEqual([]);
         expect(data.closingElement).toBeNull();
@@ -163,7 +169,9 @@ describe('tsx generic-arrow vs JSX ambiguity (plan §3c)', () => {
         const { program, errors } = parseJSX('const el = <Comp<T> foo="x" />;', true);
         expect(errors, JSON.stringify(errors)).toEqual([]);
         let opening: Node | null = null;
-        walk(program, (n) => { if (n.type === N.JSXOpeningElement) opening = n; });
+        walk(program, (n) => {
+            if (n.type === N.JSXOpeningElement) opening = n;
+        });
         const ta = (opening as unknown as { data: { typeArguments: Node | null } }).data.typeArguments;
         expect(ta).not.toBeNull();
         expect(ta!.type).toBe(N.TSTypeParameterInstantiation);
@@ -176,7 +184,9 @@ describe('generic arrows in plain .ts still parse (regression)', () => {
             const { errors, program } = parse(src, { ts: true, jsx: false });
             expect(errors, JSON.stringify(errors)).toEqual([]);
             let hasArrow = false;
-            walk(program, (n) => { if (n.type === N.ArrowFunctionExpression) hasArrow = true; });
+            walk(program, (n) => {
+                if (n.type === N.ArrowFunctionExpression) hasArrow = true;
+            });
             expect(hasArrow).toBe(true);
         });
     }
@@ -188,7 +198,9 @@ describe('jsx:false must NOT parse JSX (negative)', () => {
             const { program, errors } = parse(src, { ts: false, jsx: false });
             expect(errors.length).toBeGreaterThan(0);
             let hasJSX = false;
-            walk(program, (n) => { if (n.type >= N.JSXElement && n.type <= N.JSXText) hasJSX = true; });
+            walk(program, (n) => {
+                if (n.type >= N.JSXElement && n.type <= N.JSXText) hasJSX = true;
+            });
             expect(hasJSX).toBe(false);
         });
     }

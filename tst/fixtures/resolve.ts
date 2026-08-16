@@ -99,7 +99,7 @@ export const resolveFixtures: Record<string, string> = {
     '/app/node_modules/browser-object-pkg/entry.js':
         "import { platform } from './node-impl.js';\n" +
         "import * as stub from './disabled.js';\n" +
-        "export const impl = platform;\n" +
+        'export const impl = platform;\n' +
         'export const stubKeys = Object.keys(stub).length;',
     '/app/node_modules/browser-object-pkg/node-impl.js': "export const platform = 'node-impl';",
     '/app/node_modules/browser-object-pkg/browser-impl.js': "export const platform = 'browser-impl';",
@@ -124,8 +124,7 @@ export const resolveFixtures: Record<string, string> = {
             './helper': './helper.js',
         },
     }),
-    '/app/node_modules/self-ref-pkg/index.js':
-        "import { help } from 'self-ref-pkg/helper';\nexport const impl = help;",
+    '/app/node_modules/self-ref-pkg/index.js': "import { help } from 'self-ref-pkg/helper';\nexport const impl = help;",
     '/app/node_modules/self-ref-pkg/helper.js': "export const help = 'self-ref-helper';",
 
     /* --------------- no-conditions-pkg: condition sets never match */

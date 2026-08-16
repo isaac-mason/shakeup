@@ -5,16 +5,7 @@ import React from 'react';
 import { Card, Icon } from './ui';
 
 function Avatar({ user, size = 40, ...rest }) {
-    return (
-        <img
-            className="avatar"
-            src={user.avatarUrl}
-            width={size}
-            height={size}
-            alt={`avatar for ${user.name}`}
-            {...rest}
-        />
-    );
+    return <img className="avatar" src={user.avatarUrl} width={size} height={size} alt={`avatar for ${user.name}`} {...rest} />;
 }
 
 export function UserList({ users, onSelect }) {

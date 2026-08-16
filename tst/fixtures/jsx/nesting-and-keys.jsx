@@ -24,9 +24,7 @@ export function Table({ rows, columns }) {
             </tbody>
             <tfoot>
                 <tr>
-                    <td colSpan={columns.length}>
-                        Total: {rows.length} rows
-                    </td>
+                    <td colSpan={columns.length}>Total: {rows.length} rows</td>
                 </tr>
             </tfoot>
         </table>

@@ -1,11 +1,12 @@
 // Namespace-import calling style (crashcat): `import * as vec2` used as
 // `vec2.add(...)`. Also imports vec3 the same way — the two namespaces keep the
 // colliding `add`/`dot` apart. Consumes the barrel's named chain export (clamp).
+
+import { clamp } from '../math';
 import * as vec2 from '../math/vec2';
 import * as vec3 from '../math/vec3';
-import { clamp } from '../math';
-import type { Particle } from '../types';
 import { MotionType } from '../motion';
+import type { Particle } from '../types';
 
 // one Euler step: STATIC never moves, DYNAMIC integrates vel, KINEMATIC moves
 // at a fixed clamped rate. Enum switch over MotionType.
