@@ -110,6 +110,9 @@ export type Graph = {
      *  export-surface changes propagated up the importer graph. Empty on a first/full build
      *  (no prior cache to diff against); the incremental stages read it to skip clean work. */
     affected: Set<string>;
+    /** Module ids (re)parsed this build (cache miss) — a superset of `affected`'s seed that
+     *  also includes body-only edits and new modules. `changed ∪ affected` = render-dirty. */
+    changed: Set<string>;
 };
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
@@ -734,6 +737,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         warnings: [],
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
+        changed: new Set(),
     };
     const cache = options.cache;
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
@@ -898,6 +902,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             semantic = createSemantic();
             analyze(semantic, program);
             graph.parseStats.parsed++;
+            graph.changed.add(id);
         }
         const mod: Module = {
             idx: graph.modules.length,
