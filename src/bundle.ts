@@ -15,6 +15,8 @@ import {
     type Linked,
     linkGraph,
     type Module,
+    type ParseCache,
+    type ParseStats,
     packRef,
     resolveJSXOptions,
     toModuleInfo,
@@ -108,6 +110,8 @@ export type BundleResult = {
     graph: Graph | null;
     linked: Linked | null;
     shaken: TreeshakeResult | null;
+    /** Modules freshly parsed vs reused from `options.cache` this build (incremental). */
+    parseStats: ParseStats;
     /** @deprecated alias for the entry chunk's `map`. */
     map?: SourceMap;
 };
@@ -418,14 +422,32 @@ export function bundle(options: BundleOptions): BundleResult {
     // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
     graph = buildGraph(options, pipeline);
     if (graph.errors.length > 0 || graph.entries.length === 0) {
-        return { code: '', chunks: [], errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
+        return {
+            code: '',
+            chunks: [],
+            errors: graph.errors,
+            warnings: [],
+            graph,
+            linked: null,
+            shaken: null,
+            parseStats: graph.parseStats,
+        };
     }
     // Link WITHOUT whole-bundle deconflict — the per-chunk deconflict inside buildChunkGraph
     // assigns names in fresh per-chunk scopes. For a single chunk this reproduces the
     // whole-bundle names byte-for-byte (same order, same taken seeding).
     const linked = linkGraph(graph, { deconflict: false });
     if (linked.errors.length > 0) {
-        return { code: '', chunks: [], errors: linked.errors, warnings: [], graph, linked, shaken: null };
+        return {
+            code: '',
+            chunks: [],
+            errors: linked.errors,
+            warnings: [],
+            graph,
+            linked,
+            shaken: null,
+            parseStats: graph.parseStats,
+        };
     }
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
@@ -451,7 +473,16 @@ export function bundle(options: BundleOptions): BundleResult {
     try {
         naming = normalizeOutputOptions(options.output, options.sourcemap, multiChunk, warnings);
     } catch (e) {
-        return { code: '', chunks: [], errors: [(e as Error).message], warnings, graph, linked, shaken };
+        return {
+            code: '',
+            chunks: [],
+            errors: [(e as Error).message],
+            warnings,
+            graph,
+            linked,
+            shaken,
+            parseStats: graph.parseStats,
+        };
     }
 
     // Two-pass render → content-hash → final-hash → substitute (see renderChunks below). The per-chunk
@@ -466,7 +497,16 @@ export function bundle(options: BundleOptions): BundleResult {
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
-        return { code: '', chunks: [], errors: [(e as Error).message], warnings, graph, linked, shaken };
+        return {
+            code: '',
+            chunks: [],
+            errors: [(e as Error).message],
+            warnings,
+            graph,
+            linked,
+            shaken,
+            parseStats: graph.parseStats,
+        };
     }
 
     // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
@@ -498,6 +538,7 @@ export function bundle(options: BundleOptions): BundleResult {
         graph,
         linked,
         shaken,
+        parseStats: graph.parseStats,
         map: entryFirst?.map,
     };
 }
@@ -986,4 +1027,25 @@ export function renderChunks(
         });
     }
     return { chunks: outChunks, assets };
+}
+
+/** A persistent, incremental build handle (esbuild `Context.Rebuild` lineage). Holds a
+ *  module parse cache across rebuilds, so unchanged modules skip parse/analyze/extract. */
+export type BuildContext = {
+    /** Rebuild from the current sources, reusing unchanged modules. Read `.parseStats` on
+     *  the result for the parse/reuse counts. */
+    rebuild(): BundleResult;
+    /** Drop a module's cached parse so the next rebuild re-parses it (e.g. a known edit). */
+    invalidate(id: string): void;
+    /** Release the cache. */
+    close(): void;
+};
+
+export function createBuildContext(options: BundleOptions): BuildContext {
+    const cache: ParseCache = new Map();
+    return {
+        rebuild: () => bundle({ ...options, cache }),
+        invalidate: (id) => void cache.delete(id),
+        close: () => cache.clear(),
+    };
 }

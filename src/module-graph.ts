@@ -104,6 +104,8 @@ export type Graph = {
     entries: { module: number; name: string }[];
     errors: string[];
     warnings: string[];
+    /** Modules freshly parsed vs reused from `options.cache` this build. */
+    parseStats: ParseStats;
 };
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
@@ -227,6 +229,9 @@ export type GraphOptions = CommonOptions & {
     /** @deprecated single-entry alias for `input`. Normalized into `input`. */
     entry?: string;
     fs: Fs;
+    /** Incremental parse cache (id → parsed artifacts). Pass a persistent Map across builds
+     *  to reuse unchanged modules; the build fills/reads it. See {@link createBuildContext}. */
+    cache?: ParseCache;
     /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
 };
@@ -641,8 +646,44 @@ export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
 }
 
 /** Resolve, load, parse, and analyze the module graph reachable from the entry. */
+/** djb2 content hash keying the incremental parse cache. */
+function hashSource(s: string): number {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
+    return h >>> 0;
+}
+
+/** A module's parse/analyze/extract result — everything derived purely from its
+ *  (post-transform) source, reusable across rebuilds while that source is unchanged.
+ *  Per-build state (indices, resolved deps, importers, exec order) is NOT cached. */
+export type CachedParse = {
+    srcHash: number;
+    program: Program;
+    nodeCount: number;
+    semantic: Semantic;
+    importRecords: { specifier: string; dynamic: boolean }[];
+    namedImports: Map<number, NamedImport>;
+    namedExports: Map<string, NamedExport>;
+    starExports: number[];
+    jsxRuntime: JSXRuntime | null;
+};
+
+/** Persistent per-module cache for incremental rebuilds (id → parsed artifacts). */
+export type ParseCache = Map<string, CachedParse>;
+
+/** Per-rebuild counters: modules freshly parsed vs reused from the cache. */
+export type ParseStats = { parsed: number; reused: number };
+
 export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
-    const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
+    const graph: Graph = {
+        modules: [],
+        byId: new Map(),
+        entries: [],
+        errors: [],
+        warnings: [],
+        parseStats: { parsed: 0, reused: 0 },
+    };
+    const cache = options.cache;
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
@@ -782,11 +823,28 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         mergeOptions(pending, transformed);
         const sideEffects = resolveModuleSideEffects(pending);
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
-        const { program, errors, nodeCount } = parse(source, { ts: true, jsx });
-        for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
-        collectUnsupported(program, id, graph.errors);
-        const semantic = createSemantic();
-        analyze(semantic, program);
+
+        // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
+        // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
+        const srcHash = hashSource(source);
+        const hit = cache?.get(id);
+        const reuse = hit !== undefined && hit.srcHash === srcHash;
+        let program: Program;
+        let nodeCount: number;
+        let semantic: Semantic;
+        if (reuse) {
+            ({ program, nodeCount, semantic } = hit);
+            graph.parseStats.reused++;
+        } else {
+            const parsed = parse(source, { ts: true, jsx });
+            for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
+            collectUnsupported(parsed.program, id, graph.errors);
+            program = parsed.program;
+            nodeCount = parsed.nodeCount;
+            semantic = createSemantic();
+            analyze(semantic, program);
+            graph.parseStats.parsed++;
+        }
         const mod: Module = {
             idx: graph.modules.length,
             id,
@@ -810,8 +868,35 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         };
         graph.modules.push(mod);
         graph.byId.set(id, mod.idx);
-        extractRecords(mod);
-        if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
+        if (reuse) {
+            const c = hit as CachedParse;
+            // Clone import records (resolved/external are per-build); namedImports/Exports index
+            // them by position, which the clone preserves.
+            mod.importRecords = c.importRecords.map((r) => ({
+                specifier: r.specifier,
+                resolved: -1,
+                external: false,
+                dynamic: r.dynamic,
+            }));
+            mod.namedImports = c.namedImports;
+            mod.namedExports = c.namedExports;
+            mod.starExports = c.starExports;
+            mod.jsxRuntime = c.jsxRuntime;
+        } else {
+            extractRecords(mod);
+            if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
+            cache?.set(id, {
+                srcHash,
+                program,
+                nodeCount,
+                semantic,
+                importRecords: mod.importRecords.map((r) => ({ specifier: r.specifier, dynamic: r.dynamic })),
+                namedImports: mod.namedImports,
+                namedExports: mod.namedExports,
+                starExports: mod.starExports,
+                jsxRuntime: mod.jsxRuntime,
+            });
+        }
         for (const hook of pipe.moduleParsed) {
             hook.handler(ctx, {
                 id,
