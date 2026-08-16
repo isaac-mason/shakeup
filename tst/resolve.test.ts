@@ -4,6 +4,7 @@ import { createMemoryFs, type Fs } from '../src/fs.ts';
 import type { Plugin, PluginCtx, ResolveIdResult } from '../src/plugin.ts';
 import { EMPTY_MODULE_ID, nodeResolve } from '../src/plugins/node-resolve.ts';
 import { loadResolveFixtures } from './fixtures/resolve.ts';
+import { stubPluginCtx } from './plugin-ctx.ts';
 
 type Probe = {
     fs: Fs;
@@ -22,7 +23,7 @@ function probe(overrides?: ProbeOverrides): Probe {
         plugin,
         resolve(specifier, importer) {
             const warnings: string[] = [];
-            const ctx: PluginCtx = { warn: (m) => warnings.push(m), fs };
+            const ctx = stubPluginCtx(fs, (m) => warnings.push(m));
             const id = hook(ctx, specifier, importer);
             return { id, warnings };
         },
@@ -165,7 +166,7 @@ describe('nodeResolve: browser object remapping', () => {
     it('the load hook returns empty source for the sentinel', () => {
         const p = probe();
         const loadHook = p.plugin.load as (ctx: PluginCtx, id: string) => string | null | undefined;
-        expect(loadHook({ warn: () => {}, fs: p.fs }, EMPTY_MODULE_ID)).toBe('');
+        expect(loadHook(stubPluginCtx(p.fs), EMPTY_MODULE_ID)).toBe('');
     });
 
     it('a relative import outside any browser-map package passes to core', () => {
@@ -247,7 +248,11 @@ function probeFs(files: Record<string, string>, overrides: Partial<Parameters<ty
     return {
         resolve(specifier: string, importer: string | null) {
             const warnings: string[] = [];
-            const id = hook({ warn: (m) => warnings.push(m), fs }, specifier, importer);
+            const id = hook(
+                stubPluginCtx(fs, (m) => warnings.push(m)),
+                specifier,
+                importer,
+            );
             return { id, warnings };
         },
     };

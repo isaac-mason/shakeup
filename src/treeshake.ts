@@ -117,8 +117,13 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
     };
 
     for (const mod of graph.modules) {
+        // Module-level side-effect gate (rollup Module.ts:530,762): a module marked
+        // `false` does NOT auto-root its impure statements — they drop if unreferenced;
+        // `'no-treeshake'` roots EVERY statement (forces full inclusion).
+        if (mod.sideEffects === false) continue;
+        const forceAll = mod.sideEffects === 'no-treeshake';
         for (let i = 0; i < infos[mod.idx].length; i++) {
-            if (!infos[mod.idx][i].pure) includeStatement(mod.idx, i);
+            if (forceAll || !infos[mod.idx][i].pure) includeStatement(mod.idx, i);
         }
     }
     const entryMap = linked.exportMaps.get(graph.entry);

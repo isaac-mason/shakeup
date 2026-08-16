@@ -15,8 +15,9 @@ import {
     type Module,
     packRef,
     resolveJSXOptions,
+    toModuleInfo,
 } from './module-graph';
-import { compilePipeline, type PluginCtx } from './plugin';
+import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
 import { type TreeshakeResult, treeshake } from './treeshake';
 
@@ -268,9 +269,29 @@ function renderNamespaceObject(linked: Linked, modIdx: number): string {
 export function bundle(options: BundleOptions): BundleResult {
     const pipeline = compilePipeline(options.plugins ?? []);
     const warningsOut: string[] = [];
-    const pluginCtx: PluginCtx = { warn: (m) => warningsOut.push(m), fs: options.fs };
-    for (const hook of pipeline.buildStart) hook.handler(pluginCtx);
-    const graph = buildGraph(options, pipeline);
+    // Full PluginCtx for the bundle-level hooks (buildStart/renderChunk/buildEnd).
+    // getModuleInfo/getModuleIds read `graph` once it's built (null/empty before);
+    // in-build resolution (resolveId hooks, ctx.resolve) runs through buildGraph's
+    // own graph-backed ctx.
+    let graph: Graph;
+    const pluginCtx: PluginCtx = {
+        warn: (m) => warningsOut.push(m),
+        error: (m) => {
+            throw new Error(m);
+        },
+        info: (m) => warningsOut.push(m),
+        debug: () => {},
+        fs: options.fs,
+        resolve: () => null,
+        getModuleInfo: (id): ModuleInfo | null => {
+            if (graph === undefined) return null;
+            const idx = graph.byId.get(id);
+            return idx === undefined ? null : toModuleInfo(graph, graph.modules[idx]);
+        },
+        getModuleIds: () => (graph === undefined ? [][Symbol.iterator]() : graph.byId.keys()),
+    };
+    // buildStart is now driven inside buildGraph (full graph-backed ctx for ctx.resolve).
+    graph = buildGraph(options, pipeline);
     if (graph.errors.length > 0 || graph.entry < 0) {
         return { code: '', errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
     }

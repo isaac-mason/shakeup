@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import { bundle } from '../src/bundle.ts';
 import { createDevServer, type DevServerOptions } from '../src/dev-server.ts';
-import type { Fs } from '../src/fs.ts';
+import { createMemoryFs, type Fs } from '../src/fs.ts';
+import type { Plugin } from '../src/plugin.ts';
 import { createRunner } from '../src/runner.ts';
 
 /** A dev server + runner over an in-memory, editable file map, plus any plugins. */
@@ -115,6 +117,47 @@ describe('dev server — graph tracking', () => {
         await runner.import('/entry.ts');
         expect(server.node('/shared.ts')?.importers).toEqual(new Set(['/a.ts', '/b.ts']));
         expect(server.node('/a.ts')?.deps).toEqual(['/shared.ts']);
+    });
+});
+
+describe('dev server — object plugin returns (R1)', () => {
+    it('resolveId { id, external } and load { code } both work in the async dev path', async () => {
+        const files: Record<string, string> = { '/entry.ts': "import { d } from 'virtual:d';\nexport const v = d + 1;" };
+        const desc: Plugin = {
+            name: 'desc',
+            resolveId: (_ctx, spec) => (spec === 'virtual:d' ? { id: '\0d', external: false } : null),
+            // SourceDescription with an accepted-but-ignored side-effect flag (dev doesn't shake).
+            load: (_ctx, id) => (id === '\0d' ? { code: 'export const d = 41;', moduleSideEffects: false } : null),
+        };
+        const { runner } = setup(files, { plugins: [desc] });
+        expect((await runner.import('/entry.ts')).v).toBe(42);
+    });
+
+    it('resolveId { external: true } routes to a native import (external)', async () => {
+        const externalize: Plugin = {
+            name: 'ext',
+            resolveId: (_ctx, spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
+        };
+        const { server } = setup({ '/a.ts': '' }, { plugins: [externalize] });
+        expect(await server.resolveId('lib-esque', '/a.ts')).toEqual({ external: 'lib-esque' });
+    });
+});
+
+describe('bundle mode — sync fast path guard', () => {
+    it('assertSync throws when a bundle-mode plugin hook goes async', () => {
+        const asyncResolve: Plugin = {
+            name: 'async-resolve',
+            resolveId: async (_ctx, spec) => (spec === 'virtual:x' ? '\0x' : null),
+        };
+        // The sync build refuses an async hook loudly (assertSync throws, no hang).
+        expect(() =>
+            bundle({
+                entry: '/main.ts',
+                fs: createMemoryFs({ '/main.ts': "import 'virtual:x';\nexport const y = 1;" }),
+                external: [],
+                plugins: [asyncResolve],
+            }),
+        ).toThrow('async plugin hook');
     });
 });
 

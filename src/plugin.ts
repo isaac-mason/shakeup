@@ -2,30 +2,145 @@ import type { Semantic } from './analysis/semantic';
 import type { Program } from './ast';
 import { applyEdits, type Edit } from './emit';
 import type { Fs } from './fs';
+import type { SourceMap } from './sourcemap';
 
-/** Context passed to every plugin hook. */
-export type PluginCtx = {
-    warn(message: string): void;
-    fs: Fs;
+// ── module metadata primitives (rolldown plugin/index.ts:36,41,81,86) ─────────
+/** false = no side effects (droppable if unused); true = default liveness;
+ *  'no-treeshake' = keep every statement + always include the module. */
+export type ModuleSideEffects = boolean | 'no-treeshake';
+
+/** rolldown ModuleType (plugin/index.ts:41). We only ACT on js/jsx/ts/tsx +
+ *  json (via the json plugin's own load); others accepted + ignored in R1. */
+export type ModuleType =
+    | 'js'
+    | 'jsx'
+    | 'ts'
+    | 'tsx'
+    | 'json'
+    | 'text'
+    | 'base64'
+    | 'dataurl'
+    | 'binary'
+    | 'empty'
+    | (string & {});
+
+/** Opaque per-module plugin scratch space, keyed by plugin name by convention
+ *  (rolldown CustomPluginOptions, plugin/index.ts:81). */
+export type CustomPluginOptions = { [plugin: string]: unknown };
+
+/** The mutable option bag a module carries; set/overridden across the
+ *  resolveId→load→transform chain (rolldown ModuleOptions, plugin/index.ts:86). */
+export type ModuleOptions = {
+    moduleSideEffects: ModuleSideEffects | null;
+    meta: CustomPluginOptions;
+    moduleType?: ModuleType;
 };
 
-/** resolveId: string = resolved id, false = external, null/undefined = pass */
-export type ResolveIdResult = string | false | null | undefined;
-/** transform: string = replace source, Edit[] = patch it, null/undefined = pass */
-export type TransformResult = string | Edit[] | null | undefined;
+// ── resolveId return (rolldown PartialResolvedId, plugin/index.ts:148) ────────
+export type PartialResolvedId = {
+    id: string;
+    /** true|'absolute' → external, kept verbatim/absolute in output;
+     *  'relative' → external but re-normalized as a relative id;
+     *  false/undefined → internal. (rolldown plugin/index.ts:163) */
+    external?: boolean | 'absolute' | 'relative';
+    moduleSideEffects?: ModuleSideEffects | null;
+    meta?: CustomPluginOptions;
+    moduleType?: ModuleType;
+};
+
+// ── load return (rolldown SourceDescription, plugin/index.ts:168) ─────────────
+export type SourceDescription = {
+    code: string;
+    map?: SourceMap | string | null; // R1: map accepted, not yet consumed (see §7)
+    moduleSideEffects?: ModuleSideEffects | null;
+    meta?: CustomPluginOptions;
+    moduleType?: ModuleType;
+};
+
+// ── transform return (rolldown TransformResult, plugin/index.ts:257) ──────────
+/** code omitted = keep running code, still apply option overrides.
+ *  Edit[] retained as OUR extension (shakeup patch form). */
+export type TransformDescription = {
+    code?: string | Edit[];
+    map?: SourceMap | string | null; // R1: map accepted, not yet consumed (see §7)
+    moduleSideEffects?: ModuleSideEffects | null;
+    meta?: CustomPluginOptions;
+    moduleType?: ModuleType;
+};
+
+// ── the three hook return unions (backward-compatible supersets) ──────────────
+/** resolveId: string = resolved id, false = external, null/undefined = pass,
+ *  object = a {@link PartialResolvedId}. */
+export type ResolveIdResult = string | false | null | undefined | PartialResolvedId;
+/** load: string = source, null/undefined = pass, object = a {@link SourceDescription}. */
+export type LoadResult = string | null | undefined | SourceDescription;
+/** transform: string = replace source, Edit[] = patch it, null/undefined = pass,
+ *  object = a {@link TransformDescription}. */
+export type TransformResult = string | Edit[] | null | undefined | TransformDescription;
+
+// ── resolve-context extra (rolldown ResolveIdExtraOptions, plugin/index.ts:223)
+export type ImportKind = 'import-statement' | 'dynamic-import' | 'require-call' | 'hot-accept' | 'entry';
+export type ResolveIdExtra = {
+    isEntry: boolean;
+    kind: ImportKind;
+    custom?: CustomPluginOptions;
+};
+
+// ── ModuleInfo (rolldown types/module-info.ts; rollup Module.ts:317 info) ─────
+export type ModuleInfo = {
+    id: string;
+    code: string | null; // null for external / not-yet-loaded
+    isEntry: boolean;
+    isExternal: boolean;
+    moduleSideEffects: ModuleSideEffects;
+    meta: CustomPluginOptions;
+    moduleType: ModuleType;
+    importedIds: string[]; // static deps, resolved (R1: from importRecords)
+    dynamicallyImportedIds: string[]; // R1: [] until R2 records dynamic edges
+    importers: string[]; // R1: computed by reverse-scan of the graph
+    dynamicImporters: string[]; // R1: []
+    exports: string[]; // own named-export keys (R1: namedExports.keys)
+};
+
+/** Context passed to every plugin hook (rollup PluginContext.ts:56,
+ *  rolldown plugin-context.ts:181). Every new method returns {@link MaybePromise}
+ *  so the sync fast path holds (`assertSync` unwraps in bundle mode). */
+export type PluginCtx = {
+    warn(message: string): void;
+    error(message: string): never; // rollup PluginContext.ts:63
+    info(message: string): void; // rollup :71
+    debug(message: string): void; // rollup :61
+    fs: Fs;
+    /** Re-run the resolveId pipeline + default resolver (rollup :80, rolldown
+     *  plugin-context.ts:270). skipSelf defaults true → no infinite recursion. */
+    resolve(
+        source: string,
+        importer?: string | null,
+        options?: { isEntry?: boolean; kind?: ImportKind; skipSelf?: boolean; custom?: CustomPluginOptions },
+    ): MaybePromise<PartialResolvedId | null>;
+    /** Backed by the live graph (rollup :69, rolldown plugin-context.ts:223). */
+    getModuleInfo(id: string): ModuleInfo | null;
+    /** All module ids currently in the graph (rollup :68). */
+    getModuleIds(): IterableIterator<string>;
+};
 
 /** Id filter for a hook; non-matching ids skip the handler entirely. */
 export type HookFilter = { id?: RegExp | RegExp[] };
 /** A hook given as a bare function or as `{ filter, handler }`. */
 export type WithFilter<F> = F | { filter?: HookFilter; handler: F };
 
-/** Info handed to the `moduleParsed` hook after a module is parsed and analyzed. */
+/** Info handed to the `moduleParsed` hook after a module is parsed and analyzed.
+ *  We widen our lighter shape (keeping AST access) with the resolved option
+ *  fields rolldown passes on `ModuleInfo`. */
 export type ModuleParsedInfo = {
     id: string;
     source: string;
     program: Program;
     nodeCount: number;
     semantic: Semantic;
+    moduleSideEffects: ModuleSideEffects;
+    meta: CustomPluginOptions;
+    moduleType: ModuleType;
 };
 
 /** A value or a promise of it. Hooks may be sync or async; the drivers below stay
@@ -47,8 +162,10 @@ export function assertSync<T>(x: MaybePromise<T>): T {
 export type Plugin = {
     name: string;
     buildStart?: (ctx: PluginCtx) => MaybePromise<void>;
-    resolveId?: WithFilter<(ctx: PluginCtx, specifier: string, importer: string | null) => MaybePromise<ResolveIdResult>>;
-    load?: WithFilter<(ctx: PluginCtx, id: string) => MaybePromise<string | null | undefined>>;
+    resolveId?: WithFilter<
+        (ctx: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+    >;
+    load?: WithFilter<(ctx: PluginCtx, id: string) => MaybePromise<LoadResult>>;
     transform?: WithFilter<(ctx: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
     moduleParsed?: (ctx: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     renderChunk?: (ctx: PluginCtx, code: string) => string | null | undefined;
@@ -111,13 +228,19 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
     return pipeline;
 }
 
-/** first-wins resolveId. Stays synchronous unless a hook returns a promise, then
- *  resumes the loop after it settles (sync fast path). */
+/** Default `extra` for resolveId callers that don't supply one (dev server, tests). */
+const DEFAULT_RESOLVE_EXTRA: ResolveIdExtra = { isEntry: false, kind: 'import-statement' };
+
+/** first-wins resolveId (rollup `hookFirst`, PluginDriver.ts:141). Returns the RAW
+ *  hook value (object / string / false) — normalization happens at the call site so
+ *  the driver stays shape-agnostic. Stays synchronous unless a hook returns a
+ *  promise, then resumes the loop after it settles (sync fast path). */
 export function runResolveId(
     pipeline: Pipeline,
     ctx: PluginCtx,
     specifier: string,
     importer: string | null,
+    extra: ResolveIdExtra = DEFAULT_RESOLVE_EXTRA,
 ): MaybePromise<ResolveIdResult> {
     const hooks = pipeline.resolveId;
     let i = 0;
@@ -125,11 +248,9 @@ export function runResolveId(
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(specifier)) continue;
-            const r = (hook.handler as (c: PluginCtx, s: string, im: string | null) => MaybePromise<ResolveIdResult>)(
-                ctx,
-                specifier,
-                importer,
-            );
+            const r = (
+                hook.handler as (c: PluginCtx, s: string, im: string | null, e: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+            )(ctx, specifier, importer, extra);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as ResolveIdResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
@@ -138,16 +259,17 @@ export function runResolveId(
     return step();
 }
 
-/** first-wins load (sync fast path). */
-export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePromise<string | null> {
+/** first-wins load (rollup `hookFirst`). Returns the RAW hook value (string /
+ *  SourceDescription); the call site takes `.code`. (sync fast path). */
+export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePromise<LoadResult> {
     const hooks = pipeline.load;
     let i = 0;
-    const step = (): MaybePromise<string | null> => {
+    const step = (): MaybePromise<LoadResult> => {
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(id)) continue;
-            const r = (hook.handler as (c: PluginCtx, i: string) => MaybePromise<string | null | undefined>)(ctx, id);
-            if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as string) : step()));
+            const r = (hook.handler as (c: PluginCtx, i: string) => MaybePromise<LoadResult>)(ctx, id);
+            if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as LoadResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
         return null;
@@ -155,21 +277,48 @@ export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePr
     return step();
 }
 
-/** sequential transform chain; Edit[] results patch the running code (sync fast path). */
-export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, id: string): MaybePromise<string> {
+/** The accumulator a {@link runTransform} chain threads and returns: the running
+ *  code plus the merged option overrides (rollup `hookReduceArg0`,
+ *  PluginDriver.ts:200). `moduleSideEffects`/`moduleType` are null/undefined until a
+ *  hook sets them; `meta` is shallow-merged across the chain. */
+export type TransformAccumulator = {
+    code: string;
+    moduleSideEffects: ModuleSideEffects | null;
+    meta: CustomPluginOptions;
+    moduleType: ModuleType | undefined;
+};
+
+/** sequential transform chain (rollup `hookReduceArg0`). Threads the running code
+ *  AND merges each hook's option overrides. `Edit[]` / string `code` patch the
+ *  running code exactly as before; the accumulator only ADDS option merging.
+ *  Returns the accumulator (read `.code`). (sync fast path). */
+export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, id: string): MaybePromise<TransformAccumulator> {
     const hooks = pipeline.transform;
-    let current = code;
+    const acc: TransformAccumulator = { code, moduleSideEffects: null, meta: {}, moduleType: undefined };
     let i = 0;
     const apply = (r: TransformResult): void => {
-        if (r !== null && r !== undefined) current = typeof r === 'string' ? r : applyEdits(current, r);
+        if (r === null || r === undefined) return;
+        if (typeof r === 'string') {
+            acc.code = r;
+            return;
+        }
+        if (Array.isArray(r)) {
+            acc.code = applyEdits(acc.code, r);
+            return;
+        }
+        // TransformDescription: code omitted keeps the running code; option overrides merge.
+        if (r.code !== undefined) acc.code = typeof r.code === 'string' ? r.code : applyEdits(acc.code, r.code);
+        if (r.moduleSideEffects !== undefined && r.moduleSideEffects !== null) acc.moduleSideEffects = r.moduleSideEffects;
+        if (r.meta !== undefined) Object.assign(acc.meta, r.meta);
+        if (r.moduleType !== undefined) acc.moduleType = r.moduleType;
     };
-    const step = (): MaybePromise<string> => {
+    const step = (): MaybePromise<TransformAccumulator> => {
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(id)) continue;
             const r = (hook.handler as (c: PluginCtx, code: string, i: string) => MaybePromise<TransformResult>)(
                 ctx,
-                current,
+                acc.code,
                 id,
             );
             if (isThenable(r)) {
@@ -180,7 +329,7 @@ export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, i
             }
             apply(r);
         }
-        return current;
+        return acc;
     };
     return step();
 }

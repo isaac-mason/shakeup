@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
+import { buildGraph, linkGraph, resolveJSXOptions } from '../src/module-graph.ts';
+import type { ModuleSideEffects } from '../src/plugin.ts';
+import { treeshake } from '../src/treeshake.ts';
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;
@@ -100,5 +103,47 @@ describe('tree shaking', () => {
         const mod = await run(code);
         expect(mod.r as number).toBe(1);
         expect(code).toContain('b:');
+    });
+});
+
+// The module-level side-effect gate, pinned at the treeshake() unit level (independent
+// of the plugin path): feed a graph whose non-entry module carries the flag directly.
+describe('tree shaking — module-level side-effect gate (unit seam)', () => {
+    const seamFiles = {
+        '/main.ts': "import './effect.ts';\nexport const out = 1;",
+        '/effect.ts': 'globalThis.__SEAM__ = 42;\nconst dead = 7;',
+    };
+    const shakeWith = (effectSideEffects: ModuleSideEffects) => {
+        const graph = buildGraph({ entry: '/main.ts', fs: createMemoryFs(seamFiles), external: [] });
+        expect(graph.errors).toEqual([]);
+        const effect = graph.modules[graph.byId.get('/effect.ts')!];
+        effect.sideEffects = effectSideEffects;
+        const linked = linkGraph(graph);
+        const jsxPure = resolveJSXOptions(undefined).pure;
+        const shaken = treeshake(graph, linked, jsxPure);
+        return { graph, shaken, effectIdx: effect.idx };
+    };
+
+    it('sideEffects false: an unused impure statement is NOT auto-rooted (dropped)', () => {
+        const { shaken, effectIdx } = shakeWith(false);
+        const effectLive = shaken.live[effectIdx];
+        // Nothing in /effect.ts is referenced by main, and it may not auto-root effects.
+        const droppedFromEffect = shaken.dropped.filter(([m]) => m === effectIdx);
+        expect(droppedFromEffect.length).toBeGreaterThan(0);
+        expect(effectLive.size).toBe(0);
+    });
+
+    it("sideEffects 'no-treeshake': every statement is rooted", () => {
+        const { graph, shaken, effectIdx } = shakeWith('no-treeshake');
+        const effectLive = shaken.live[effectIdx];
+        const total = graph.modules[effectIdx].program.data.body.length;
+        expect(effectLive.size).toBe(total);
+    });
+
+    it('sideEffects true (default): an impure statement is auto-rooted (kept)', () => {
+        const { shaken, effectIdx } = shakeWith(true);
+        const effectLive = shaken.live[effectIdx];
+        // The `globalThis.__SEAM__ = 42;` assignment is impure → rooted.
+        expect(effectLive.size).toBeGreaterThan(0);
     });
 });

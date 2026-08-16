@@ -4,10 +4,17 @@ import { dirnameOf, type Fs, joinPath } from './fs';
 import { parse } from './parser';
 import {
     assertSync,
+    type CustomPluginOptions,
     compilePipeline,
+    type ModuleInfo,
+    type ModuleOptions,
+    type ModuleSideEffects,
+    type ModuleType,
+    type PartialResolvedId,
     type Pipeline,
     type Plugin,
     type PluginCtx,
+    type ResolveIdExtra,
     runLoad,
     runResolveId,
     runTransform,
@@ -65,6 +72,18 @@ export type Module = {
     starExports: number[];
     execOrder: number;
     jsxRuntime: JSXRuntime | null;
+    /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
+    sideEffects: ModuleSideEffects;
+    /** Merged per-module plugin scratch space (shallow-merged across the chain). */
+    meta: CustomPluginOptions;
+    /** Declared module type (js/ts/jsx/tsx/json/…); default derived from the id extension. */
+    moduleType: ModuleType;
+    /** True for the graph entry module. */
+    isEntry: boolean;
+    /** Module-level external flag (distinct from per-record ImportRecord.external). */
+    external: boolean;
+    /** Reverse edges: ids of modules that statically import this one (filled during build). */
+    importers: Set<string>;
 };
 
 /** The built module graph rooted at `entry` (an index into `modules`). */
@@ -128,6 +147,43 @@ function isExternal(options: GraphOptions, specifier: string): boolean {
     if (ext === undefined) return false;
     if (typeof ext === 'function') return ext(specifier);
     return ext.includes(specifier);
+}
+
+/** A mutable option bag threaded through resolveId → load → transform for a module
+ *  id (rollup ResolvedId → Module, ModuleLoader.ts:405–433). */
+type PendingOptions = ModuleOptions;
+
+function newPendingOptions(): PendingOptions {
+    return { moduleSideEffects: null, meta: {}, moduleType: undefined };
+}
+
+/** Merge `src` overrides onto `dst` with rollup `updateOptions` precedence
+ *  (Module.ts:1045–1058): only overwrite when the source actually set a value.
+ *  `meta` is shallow-merged (Object.assign) so multiple hooks/plugins contribute. */
+function mergeOptions(
+    dst: PendingOptions,
+    src: { moduleSideEffects?: ModuleSideEffects | null; meta?: CustomPluginOptions; moduleType?: ModuleType },
+): void {
+    if (src.moduleSideEffects !== undefined && src.moduleSideEffects !== null) dst.moduleSideEffects = src.moduleSideEffects;
+    if (src.meta !== undefined) Object.assign(dst.meta, src.meta);
+    if (src.moduleType !== undefined) dst.moduleType = src.moduleType;
+}
+
+/** Resolve the final module-level side-effect flag (rolldown precedence tail,
+ *  plugin/index.ts:144 item 6): first-set of the merged chain, else `true`. The
+ *  `treeshake.moduleSideEffects` global default (item 4) and pkg `sideEffects` (item
+ *  5) are LATER config; R1 uses `true`. */
+function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
+    return pending.moduleSideEffects ?? true;
+}
+
+/** Default module type from the id's extension (R1 only ACTs on js/ts/jsx/tsx/json). */
+function moduleTypeOf(id: string): ModuleType {
+    if (id.endsWith('.tsx')) return 'tsx';
+    if (id.endsWith('.jsx')) return 'jsx';
+    if (id.endsWith('.ts')) return 'ts';
+    if (id.endsWith('.json')) return 'json';
+    return 'js';
 }
 
 /** Collect every BindingIdentifier in a binding pattern into `out`. */
@@ -336,34 +392,169 @@ function injectJSXRuntime(mod: Module, importSource: string): void {
     mod.jsxRuntime = { jsx, jsxs, Fragment, createElement };
 }
 
+/** Project a live {@link Module} into the plugin-facing {@link ModuleInfo}
+ *  (rollup Module.ts:317). Reads the graph as it's being built, so `importers` may
+ *  be partial when called from `moduleParsed` (matches rollup's caveat). */
+export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
+    const importedIds: string[] = [];
+    for (const rec of mod.importRecords) {
+        if (rec.external || rec.resolved < 0) continue;
+        importedIds.push(graph.modules[rec.resolved].id);
+    }
+    return {
+        id: mod.id,
+        code: mod.source,
+        isEntry: mod.isEntry,
+        isExternal: mod.external,
+        moduleSideEffects: mod.sideEffects,
+        meta: mod.meta,
+        moduleType: mod.moduleType,
+        importedIds,
+        dynamicallyImportedIds: [], // R1: no dynamic edges recorded yet (R2)
+        importers: [...mod.importers],
+        dynamicImporters: [], // R1: no dynamic edges recorded yet (R2)
+        exports: [...mod.namedExports.keys()],
+    };
+}
+
 /** Resolve, load, parse, and analyze the module graph reachable from the entry. */
 export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entry: -1, errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    const ctx: PluginCtx = { warn: (m) => graph.warnings.push(m), fs: options.fs };
     const baseResolve = options.resolve ?? ((s: string, i: string | null) => defaultResolve(options.fs, s, i));
     const pluginExternals = new Set<string>();
-    const resolveFn = (specifier: string, importer: string | null): string | null => {
-        const hit = assertSync(runResolveId(pipe, ctx, specifier, importer));
+    /** resolveId/load option overrides keyed by RESOLVED id, finalized in addModule. */
+    const pendingOptions = new Map<string, PendingOptions>();
+    /** (specifier, importer) pairs currently being resolved — the R1 stand-in for
+     *  rollup's per-plugin `skipSelf` recursion guard (§4). */
+    const resolving = new Set<string>();
+
+    const pendingFor = (id: string): PendingOptions => {
+        let p = pendingOptions.get(id);
+        if (p === undefined) {
+            p = newPendingOptions();
+            pendingOptions.set(id, p);
+        }
+        return p;
+    };
+
+    /** The shared resolve path used by both the graph walk and `ctx.resolve`
+     *  (rollup: `this.resolve` calls the same ModuleLoader.resolveId). Runs the
+     *  resolveId pipeline, normalizes {@link PartialResolvedId}, records its option
+     *  overrides against the resolved id, then falls through to `baseResolve`.
+     *  `skipPipeline` bypasses the plugins (used by the recursion guard). Returns
+     *  the resolved id string, `false` (external), or `null` (unresolved). */
+    const resolveThrough = (
+        specifier: string,
+        importer: string | null,
+        extra: ResolveIdExtra,
+        skipPipeline = false,
+    ): string | false | null => {
+        const hit = skipPipeline ? null : assertSync(runResolveId(pipe, ctx, specifier, importer, extra));
         if (hit === false) {
             pluginExternals.add(specifier);
-            return null;
+            return false;
         }
         if (typeof hit === 'string') return hit;
-        return baseResolve(specifier, importer);
+        if (hit !== null && hit !== undefined && typeof hit === 'object') {
+            const partial = hit as PartialResolvedId;
+            if (partial.external !== undefined && partial.external !== false) {
+                // true | 'absolute' | 'relative' → external. R1 treats them alike
+                // (keep verbatim); the re-normalization distinction is R4 (§7).
+                pluginExternals.add(specifier);
+                return false;
+            }
+            mergeOptions(pendingFor(partial.id), partial);
+            return partial.id;
+        }
+        const base = baseResolve(specifier, importer);
+        return base;
     };
-    const loadFn = (id: string): string | null => assertSync(runLoad(pipe, ctx, id)) ?? options.fs.read(id);
 
-    const addModule = (id: string): number => {
+    const ctx: PluginCtx = {
+        warn: (m) => graph.warnings.push(m),
+        error: (m) => {
+            throw new Error(m);
+        },
+        info: (m) => graph.warnings.push(m),
+        debug: () => {},
+        fs: options.fs,
+        resolve: (source, importer = null, opts) => {
+            const extra: ResolveIdExtra = {
+                isEntry: opts?.isEntry ?? false,
+                kind: opts?.kind ?? 'import-statement',
+                custom: opts?.custom,
+            };
+            // Recursion guard (§4): skipSelf (default true) short-circuits a resolveId
+            // hook that re-resolves the same (specifier, importer) already in flight —
+            // if the key is already being resolved, skip the pipeline and go straight
+            // to baseResolve. Otherwise mark it in-flight for the duration so a NESTED
+            // ctx.resolve of the same pair is caught.
+            const key = `${importer ?? ''}\x00${source}`;
+            const skipSelf = opts?.skipSelf !== false;
+            const guardHit = skipSelf && resolving.has(key);
+            const marked = skipSelf && !guardHit;
+            if (marked) resolving.add(key);
+            try {
+                const r = resolveThrough(source, importer, extra, guardHit);
+                if (r === false) return { id: source, external: true };
+                if (r === null) return null;
+                const pending = pendingOptions.get(r);
+                return {
+                    id: r,
+                    external: false,
+                    moduleSideEffects: pending?.moduleSideEffects,
+                    meta: pending?.meta,
+                    moduleType: pending?.moduleType,
+                };
+            } finally {
+                if (marked) resolving.delete(key);
+            }
+        },
+        getModuleInfo: (id) => {
+            const idx = graph.byId.get(id);
+            if (idx === undefined) return null;
+            return toModuleInfo(graph, graph.modules[idx]);
+        },
+        getModuleIds: () => graph.byId.keys(),
+    };
+
+    /** Graph-walk resolve: enters the resolving-set (so a plugin's `ctx.resolve`
+     *  on the same pair is guarded), delegates to `resolveThrough`, exits. */
+    const resolveFn = (specifier: string, importer: string | null, extra: ResolveIdExtra): string | false | null => {
+        const key = `${importer ?? ''}\x00${specifier}`;
+        resolving.add(key);
+        try {
+            return resolveThrough(specifier, importer, extra);
+        } finally {
+            resolving.delete(key);
+        }
+    };
+
+    const loadFn = (id: string): string | null => {
+        const r = assertSync(runLoad(pipe, ctx, id));
+        if (r === null || r === undefined) return options.fs.read(id);
+        if (typeof r === 'string') return r;
+        // SourceDescription: take .code and merge its option overrides (load > resolveId).
+        mergeOptions(pendingFor(id), r);
+        return r.code;
+    };
+
+    const addModule = (id: string, isEntry: boolean): number => {
         const existing = graph.byId.get(id);
         if (existing !== undefined) return existing;
-        let source = loadFn(id);
-        if (source === null) {
+        const source0 = loadFn(id);
+        if (source0 === null) {
             graph.errors.push(`cannot load module '${id}'`);
             return -1;
         }
-        source = assertSync(runTransform(pipe, ctx, source, id));
+        const transformed = assertSync(runTransform(pipe, ctx, source0, id));
+        const source = transformed.code;
+        // Merge transform overrides (transform > load > resolveId precedence, §3).
+        const pending = pendingFor(id);
+        mergeOptions(pending, transformed);
+        const sideEffects = resolveModuleSideEffects(pending);
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
         const { program, errors, nodeCount } = parse(source, { ts: true, jsx });
         for (const e of errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
@@ -383,20 +574,39 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             starExports: [],
             execOrder: -1,
             jsxRuntime: null,
+            sideEffects,
+            meta: pending.meta,
+            moduleType: pending.moduleType ?? moduleTypeOf(id),
+            isEntry,
+            external: false,
+            importers: new Set(),
         };
         graph.modules.push(mod);
         graph.byId.set(id, mod.idx);
         extractRecords(mod);
         if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
         for (const hook of pipe.moduleParsed) {
-            hook.handler(ctx, { id, source, program, nodeCount, semantic });
+            hook.handler(ctx, {
+                id,
+                source,
+                program,
+                nodeCount,
+                semantic,
+                moduleSideEffects: sideEffects,
+                meta: mod.meta,
+                moduleType: mod.moduleType,
+            });
         }
         for (const rec of mod.importRecords) {
             if (isExternal(options, rec.specifier) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
                 continue;
             }
-            const resolved = resolveFn(rec.specifier, id);
+            const resolved = resolveFn(rec.specifier, id, { isEntry: false, kind: 'import-statement' });
+            if (resolved === false || pluginExternals.has(rec.specifier)) {
+                rec.external = true;
+                continue;
+            }
             if (resolved === null) {
                 if (rec.specifier.startsWith('.') || rec.specifier.startsWith('/')) {
                     graph.errors.push(`cannot resolve '${rec.specifier}' from '${id}'`);
@@ -408,13 +618,20 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            rec.resolved = addModule(options.fs.realpath?.(resolved) ?? resolved);
+            const depId = options.fs.realpath?.(resolved) ?? resolved;
+            rec.resolved = addModule(depId, false);
+            if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }
         return mod.idx;
     };
 
-    const entryId = resolveFn(options.entry, null) ?? options.entry;
-    graph.entry = addModule(entryId);
+    // buildStart runs with the full graph-backed ctx so `ctx.resolve` works from it
+    // (rollup runs it as part of the build, before resolution).
+    for (const hook of pipe.buildStart) assertSync(hook.handler(ctx));
+
+    const entryResolved = resolveFn(options.entry, null, { isEntry: true, kind: 'entry' });
+    const entryId = typeof entryResolved === 'string' ? entryResolved : options.entry;
+    graph.entry = addModule(entryId, true);
     return graph;
 }
 

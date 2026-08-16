@@ -1,0 +1,184 @@
+import { describe, expect, it } from 'vitest';
+import { bundle } from '../src/bundle.ts';
+import { createMemoryFs } from '../src/fs.ts';
+import type { ModuleSideEffects, Plugin } from '../src/plugin.ts';
+
+const run = async (code: string): Promise<Record<string, unknown>> =>
+    (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;
+
+const build = (files: Record<string, string>, plugins: Plugin[] = [], external: string[] = []) => {
+    const result = bundle({ entry: '/main.ts', fs: createMemoryFs(files), external, plugins });
+    expect(result.errors).toEqual([]);
+    return result;
+};
+
+describe('plugin resolve/load contract (R1)', () => {
+    // 1. object-return resolveId — virtual module via { id, moduleSideEffects: false }.
+    it('resolveId object return resolves a virtual module', async () => {
+        const virtual: Plugin = {
+            name: 'virtual-config',
+            resolveId: (_ctx, spec) => (spec === 'virtual:config' ? { id: '\0virtual:config', moduleSideEffects: false } : null),
+            load: (_ctx, id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
+        };
+        const { code } = build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
+        const mod = await run(code);
+        expect(mod.v).toBe('9.9.9');
+    });
+
+    // 2. external: true / 'absolute' — import stays a bare import, not inlined.
+    it('resolveId { external: true } keeps the import external', () => {
+        const externalize: Plugin = {
+            name: 'externalize',
+            resolveId: (_ctx, spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
+        };
+        const { code } = build({ '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" }, [
+            externalize,
+        ]);
+        expect(code).toContain("from 'lib-esque'");
+    });
+
+    it("resolveId { external: 'absolute' } is also treated external", () => {
+        const externalize: Plugin = {
+            name: 'externalize-abs',
+            resolveId: (_ctx, spec) => (spec === 'abs-lib' ? { id: '/abs/abs-lib', external: 'absolute' } : null),
+        };
+        const { code } = build({ '/main.ts': "import { x } from 'abs-lib';\nexport const c = () => x();" }, [externalize]);
+        expect(code).toContain("from 'abs-lib'");
+    });
+
+    // 3. moduleSideEffects: false shakes an unused side-effect-y module. THE oracle.
+    it('moduleSideEffects: false drops an unused side-effect module', async () => {
+        const files = {
+            '/main.ts': "import './effect.ts';\nexport const out = 1;",
+            '/effect.ts': 'globalThis.__EFFECT_MARKER__ = 42;',
+        };
+        const markPure: Plugin = {
+            name: 'mark-pure',
+            resolveId: (_ctx, spec, importer) =>
+                spec === './effect.ts' && importer !== null ? { id: '/effect.ts', moduleSideEffects: false } : null,
+        };
+        const { code, shaken } = build(files, [markPure]);
+        expect(code).not.toContain('__EFFECT_MARKER__');
+        expect(shaken!.dropped.length).toBeGreaterThan(0);
+        const mod = await run(code);
+        expect(mod.out).toBe(1);
+
+        // Contrast: default (true) keeps the side effect.
+        const kept = build(files, []);
+        expect(kept.code).toContain('__EFFECT_MARKER__');
+    });
+
+    // 4. 'no-treeshake' — every statement survives, even an otherwise-dead one.
+    it("moduleSideEffects: 'no-treeshake' keeps every statement", () => {
+        const files = {
+            '/main.ts': "import { used } from './lib.ts';\nexport const out = used;",
+            '/lib.ts': ['export const used = 1;', 'const DEAD_BUT_KEPT = 99;', 'globalThis.__NT__ = DEAD_BUT_KEPT;'].join('\n'),
+        };
+        const noShake: Plugin = {
+            name: 'no-shake',
+            resolveId: (_ctx, spec) => (spec === './lib.ts' ? { id: '/lib.ts', moduleSideEffects: 'no-treeshake' } : null),
+        };
+        const { code } = build(files, [noShake]);
+        expect(code).toContain('DEAD_BUT_KEPT');
+        expect(code).toContain('__NT__');
+    });
+
+    // 5. precedence — resolveId false, load true, transform false → final false.
+    it('side-effect precedence: transform wins over load over resolveId', () => {
+        let final: unknown;
+        const layered: Plugin = {
+            name: 'layered',
+            resolveId: (_ctx, spec, importer) =>
+                spec === './lib.ts' && importer !== null ? { id: '/lib.ts', moduleSideEffects: false } : null,
+            load: (_ctx, id) => (id === '/lib.ts' ? { code: 'export const used = 1;', moduleSideEffects: true } : null),
+            transform: {
+                filter: { id: /lib\.ts$/ },
+                handler: (_ctx, code) => ({ code, moduleSideEffects: false }),
+            },
+            buildEnd: (ctx) => {
+                final = ctx.getModuleInfo('/lib.ts')?.moduleSideEffects;
+            },
+        };
+        build({ '/main.ts': "import { used } from './lib.ts';\nexport const out = used;", '/lib.ts': 'export const used = 1;' }, [
+            layered,
+        ]);
+        expect(final).toBe(false);
+    });
+
+    // 6. meta round-trip via getModuleInfo + getModuleIds enumeration.
+    it('meta round-trips across plugins via getModuleInfo; getModuleIds enumerates', () => {
+        let readA: unknown;
+        let ids: string[] = [];
+        const setter: Plugin = {
+            name: 'setter',
+            resolveId: (_ctx, spec, importer) =>
+                spec === './a.ts' && importer !== null ? { id: '/a.ts', meta: { a: 1 } } : null,
+        };
+        const reader: Plugin = {
+            name: 'reader',
+            buildEnd: (ctx) => {
+                const info = ctx.getModuleInfo('/a.ts');
+                readA = (info?.meta.a as number | undefined) ?? undefined;
+                ids = [...ctx.getModuleIds()];
+            },
+        };
+        build({ '/main.ts': "import { a } from './a.ts';\nexport const out = a;", '/a.ts': 'export const a = 1;' }, [
+            setter,
+            reader,
+        ]);
+        expect(readA).toBe(1);
+        expect(ids.sort()).toEqual(['/a.ts', '/main.ts']);
+    });
+
+    // 7. this.resolve from a plugin — matches default resolver; no recursion loop.
+    it('ctx.resolve re-runs resolution and does not recurse', () => {
+        let resolved: string | null = null;
+        const asker: Plugin = {
+            name: 'asker',
+            buildStart: (ctx) => {
+                const r = ctx.resolve('./lib.ts', '/main.ts');
+                // sync fast path: bundle mode never returns a promise here.
+                resolved = r === null || r instanceof Promise ? null : (r as { id: string }).id;
+            },
+        };
+        // A resolveId hook that calls ctx.resolve on the SAME specifier must not loop:
+        // the resolving-set guard sends it straight to baseResolve.
+        let guardedId: string | null = null;
+        const recursive: Plugin = {
+            name: 'recursive',
+            resolveId: (ctx, spec, importer) => {
+                if (spec === './lib.ts' && importer !== null) {
+                    const r = ctx.resolve('./lib.ts', importer);
+                    guardedId = r === null || r instanceof Promise ? null : (r as { id: string }).id;
+                }
+                return null;
+            },
+        };
+        build({ '/main.ts': "import { x } from './lib.ts';\nexport const out = x;", '/lib.ts': 'export const x = 1;' }, [
+            asker,
+            recursive,
+        ]);
+        expect(resolved).toBe('/lib.ts');
+        expect(guardedId).toBe('/lib.ts');
+    });
+
+    // 8. load SourceDescription — { code, moduleSideEffects: false } both take effect.
+    it('load returning a SourceDescription applies code and side-effect flag', async () => {
+        let sideEffects: ModuleSideEffects | undefined;
+        const desc: Plugin = {
+            name: 'desc',
+            resolveId: (_ctx, spec) => (spec === 'virtual:d' ? '\0d' : null),
+            load: (_ctx, id) =>
+                id === '\0d' ? { code: 'globalThis.__D__ = 1;\nexport const d = 7;', moduleSideEffects: false } : null,
+            buildEnd: (ctx) => {
+                sideEffects = ctx.getModuleInfo('\0d')?.moduleSideEffects;
+            },
+        };
+        const { code } = build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
+        const mod = await run(code);
+        expect(mod.v).toBe(7);
+        // The side-effect assignment is droppable (module marked false, only `d` is used).
+        expect(code).not.toContain('__D__');
+        expect(sideEffects).toBe(false);
+    });
+});

@@ -21,9 +21,12 @@ import type { Fs } from './fs.ts';
 import { parse } from './parser.ts';
 import {
     compilePipeline,
+    type ModuleInfo,
+    type PartialResolvedId,
     type Pipeline,
     type Plugin,
     type PluginCtx,
+    type ResolveIdExtra,
     runLoad,
     runModuleParsed,
     runResolveId,
@@ -183,8 +186,53 @@ const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
 export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
-    const ctx: PluginCtx = { warn: options.warn ?? (() => {}), fs };
     const graph = new Map<string, ModuleNode>();
+
+    /** Project a dev {@link ModuleNode} into the plugin-facing {@link ModuleInfo}.
+     *  The dev graph lacks named-exports/side-effects (dev doesn't shake), so
+     *  `exports: []`, `moduleSideEffects: true` (§7). */
+    function toModuleInfo(id: string, node: ModuleNode): ModuleInfo {
+        return {
+            id,
+            code: node.code,
+            isEntry: false,
+            isExternal: false,
+            moduleSideEffects: true,
+            meta: {},
+            moduleType: 'js',
+            importedIds: node.deps,
+            dynamicallyImportedIds: node.dynamicDeps,
+            importers: [...node.importers],
+            dynamicImporters: [],
+            exports: [],
+        };
+    }
+
+    const warn = options.warn ?? (() => {});
+    const ctx: PluginCtx = {
+        warn,
+        error: (m) => {
+            throw new Error(m);
+        },
+        info: warn,
+        debug: () => {},
+        fs,
+        resolve: async (source, importer = null, opts) => {
+            const r = await resolveId(source, importer ?? null, {
+                isEntry: opts?.isEntry ?? false,
+                kind: opts?.kind ?? 'import-statement',
+                custom: opts?.custom,
+            });
+            const partial: PartialResolvedId =
+                typeof r === 'string' ? { id: r, external: false } : { id: r.external, external: true };
+            return partial;
+        },
+        getModuleInfo: (id) => {
+            const node = graph.get(id);
+            return node === undefined ? null : toModuleInfo(id, node);
+        },
+        getModuleIds: () => graph.keys(),
+    };
 
     /** default resolver: relative → path-probe against fs; bare → external. */
     function defaultResolve(spec: string, importer: string | null): ResolveResult {
@@ -196,10 +244,15 @@ export function createDevServer(options: DevServerOptions): DevServer {
         return base; // unresolved — surfaces as a fetch error
     }
 
-    async function resolveId(spec: string, importer: string | null): Promise<ResolveResult> {
+    async function resolveId(spec: string, importer: string | null, _extra?: ResolveIdExtra): Promise<ResolveResult> {
         const hit = await runResolveId(pipeline, ctx, spec, importer);
         if (hit === false) return { external: spec };
         if (typeof hit === 'string') return hit;
+        if (hit !== null && hit !== undefined && typeof hit === 'object') {
+            // PartialResolvedId: external:true|'absolute'|'relative' → runner native-import.
+            if (hit.external !== undefined && hit.external !== false) return { external: spec };
+            return hit.id;
+        }
         return defaultResolve(spec, importer);
     }
 
@@ -213,7 +266,11 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
 
     async function fetchModule(id: string): Promise<FetchResult> {
-        const source = (await runLoad(pipeline, ctx, id)) ?? fs.read(id);
+        const loaded = await runLoad(pipeline, ctx, id);
+        // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
+        // moduleSideEffects/meta/moduleType are accepted but ignored (§7).
+        const source =
+            (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? fs.read(id);
         if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
 
         const hash = hashOf(source);
@@ -230,7 +287,8 @@ export function createDevServer(options: DevServerOptions): DevServer {
         }
 
         // plugin source patches (capture, etc.) → fused strip + module-runner rewrite.
-        const patched = await runTransform(pipeline, ctx, source, id);
+        // runTransform now returns an accumulator; dev uses only `.code`.
+        const patched = (await runTransform(pipeline, ctx, source, id)).code;
 
         // read-only moduleParsed (P4): only pay a parse when a plugin needs it. Parses
         // the (patched) module source — the real TS/JSX AST plugins inspect.
@@ -239,7 +297,16 @@ export function createDevServer(options: DevServerOptions): DevServer {
             const { program, nodeCount } = parse(patched, { ts: true, jsx: isx });
             const semantic = createSemantic();
             analyze(semantic, program);
-            await runModuleParsed(pipeline, ctx, { id, source: patched, program, nodeCount, semantic });
+            await runModuleParsed(pipeline, ctx, {
+                id,
+                source: patched,
+                program,
+                nodeCount,
+                semantic,
+                moduleSideEffects: true,
+                meta: {},
+                moduleType: 'js',
+            });
         }
 
         const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: options.sourcemap ?? true });
