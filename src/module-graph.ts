@@ -106,6 +106,10 @@ export type Graph = {
     warnings: string[];
     /** Modules freshly parsed vs reused from `options.cache` this build. */
     parseStats: ParseStats;
+    /** Module ids whose downstream artifacts (link/shake/render) are stale this rebuild —
+     *  export-surface changes propagated up the importer graph. Empty on a first/full build
+     *  (no prior cache to diff against); the incremental stages read it to skip clean work. */
+    affected: Set<string>;
 };
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
@@ -666,10 +670,57 @@ export type CachedParse = {
     namedExports: Map<string, NamedExport>;
     starExports: number[];
     jsxRuntime: JSXRuntime | null;
+    /** Stable digest of the module's export surface (named-export keys + `export *`
+     *  specifiers). A change here means importers' link/shake/render is stale. */
+    exportSig: string;
 };
 
 /** Persistent per-module cache for incremental rebuilds (id → parsed artifacts). */
 export type ParseCache = Map<string, CachedParse>;
+
+/** Digest a module's export surface (rspack `AffectType` input): the set of names it
+ *  exports plus its `export *` targets. Body-only edits leave this unchanged. */
+function exportSignature(mod: Module): string {
+    const names = [...mod.namedExports.keys()].sort();
+    const stars = mod.starExports.map((r) => mod.importRecords[r].specifier).sort();
+    return `${names.join(',')}\x00${stars.join(',')}`;
+}
+
+/** Whether `r` re-exports from module index `targetIdx` (`export { x } from` or `export *`).
+ *  Such an edge is `Transitive` — a target's export change ripples through `r` to ITS
+ *  importers; a plain `import` is `True` (affects `r` only). */
+function reexportsFrom(r: Module, targetIdx: number): boolean {
+    for (const exp of r.namedExports.values()) {
+        if (exp.rec >= 0 && r.importRecords[exp.rec]?.resolved === targetIdx) return true;
+    }
+    for (const recIdx of r.starExports) {
+        if (r.importRecords[recIdx]?.resolved === targetIdx) return true;
+    }
+    return false;
+}
+
+/** Propagate `changedExports` (modules whose export surface changed vs the last build) up the
+ *  importer graph → the set of modules whose downstream artifacts (link/shake/render) are
+ *  stale. Port of rspack `compute_affected_modules_with_module_graph`: re-export edges are
+ *  transitive, plain imports terminal. */
+function computeAffected(graph: Graph, changedExports: Set<string>): Set<string> {
+    const affected = new Set<string>(changedExports);
+    const exportChanged = new Set<string>(changedExports);
+    const queue = [...changedExports];
+    while (queue.length > 0) {
+        const idx = graph.byId.get(queue.shift() as string);
+        if (idx === undefined) continue;
+        for (const importerId of graph.modules[idx].importers) {
+            affected.add(importerId);
+            const rIdx = graph.byId.get(importerId);
+            if (rIdx !== undefined && reexportsFrom(graph.modules[rIdx], idx) && !exportChanged.has(importerId)) {
+                exportChanged.add(importerId);
+                queue.push(importerId);
+            }
+        }
+    }
+    return affected;
+}
 
 /** Per-rebuild counters: modules freshly parsed vs reused from the cache. */
 export type ParseStats = { parsed: number; reused: number };
@@ -682,8 +733,11 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         errors: [],
         warnings: [],
         parseStats: { parsed: 0, reused: 0 },
+        affected: new Set(),
     };
     const cache = options.cache;
+    // Modules whose export surface changed vs the prior build — the affected-set frontier.
+    const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
@@ -885,6 +939,10 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         } else {
             extractRecords(mod);
             if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
+            const exportSig = exportSignature(mod);
+            // A changed module (had a prior cache entry) whose export surface differs marks its
+            // importers stale (rspack AffectType). A brand-new module affects nothing pre-existing.
+            if (hit !== undefined && hit.exportSig !== exportSig) changedExports.add(id);
             cache?.set(id, {
                 srcHash,
                 program,
@@ -895,6 +953,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 namedExports: mod.namedExports,
                 starExports: mod.starExports,
                 jsxRuntime: mod.jsxRuntime,
+                exportSig,
             });
         }
         for (const hook of pipe.moduleParsed) {
@@ -962,6 +1021,8 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             graph.entries.push({ module: idx, name });
         }
     }
+    // Importers are now complete — propagate export-surface changes to the affected-set.
+    if (changedExports.size > 0) graph.affected = computeAffected(graph, changedExports);
     return graph;
 }
 
