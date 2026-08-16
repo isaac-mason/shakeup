@@ -1,6 +1,7 @@
 import { analyze, createSemantic, declareSyntheticImport, type Semantic, scopeOf, symbolOf } from './analysis/semantic';
 import { isJSXNode, N, type Node, node, type Program, walk } from './ast';
 import { dirnameOf, type Fs, joinPath } from './fs';
+import { createNodeResolver, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import {
     assertSync,
@@ -330,10 +331,22 @@ export function makeBaseResolve(
     fs: Fs,
     resolve: ResolveFn | ResolveOptions | undefined,
     platform: Platform | undefined,
+    warn: (message: string) => void,
 ): ResolveFn {
     if (typeof resolve === 'function') return resolve;
     const normalized = normalizeResolve(resolve, platform);
-    return (s, i) => defaultResolve(fs, normalized, s, i);
+    const node = createNodeResolver({
+        fs,
+        conditions: normalized.conditionNames,
+        extensions: normalized.extensions,
+        mainFields: normalized.mainFields,
+        warn,
+    });
+    // Node resolution first — it handles bare specifiers (node_modules / package `exports` /
+    // workspace member) and browser-field remaps, and returns null for a plain relative import
+    // (no browser-map owner). Those fall to the built-in probe (alias / extensionAlias /
+    // extensions / mainFiles).
+    return (s, i) => node.resolve(applyAlias(s, normalized.alias), i) ?? defaultResolve(fs, normalized, s, i);
 }
 
 /** Whether a specifier is externalized by the `external` option. */
@@ -632,7 +645,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform);
+    const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
     // `symlinks:false` disables the realpath deref below (config form only).
     const normalizedResolve = normalizeResolve(
         typeof options.resolve === 'function' ? undefined : options.resolve,
@@ -745,6 +758,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     };
 
     const loadFn = (id: string): string | null => {
+        if (id === EMPTY_MODULE_ID) return ''; // browser:false-disabled module → empty
         const r = assertSync(runLoad(pipe, ctx, id));
         if (r === null || r === undefined) return options.fs.read(id);
         if (typeof r === 'string') return r;

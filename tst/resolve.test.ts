@@ -1,30 +1,27 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs, type Fs } from '../src/fs.ts';
-import type { Plugin, PluginCtx, ResolveIdResult } from '../src/plugin.ts';
-import { EMPTY_MODULE_ID, nodeResolve } from '../src/plugins/node-resolve.ts';
+import { createNodeResolver, EMPTY_MODULE_ID } from '../src/node-resolve.ts';
 import { loadResolveFixtures } from './fixtures/resolve.ts';
-import { stubPluginCtx } from './plugin-ctx.ts';
 
 type Probe = {
     fs: Fs;
-    plugin: Plugin;
-    resolve(specifier: string, importer: string | null): { id: ResolveIdResult; warnings: string[] };
+    resolve(specifier: string, importer: string | null): { id: string | null; warnings: string[] };
+    load(id: string): string | null;
 };
 
 type ProbeOverrides = { conditions?: string[]; extensions?: string[]; mainFields?: string[] };
 
 function probe(overrides?: ProbeOverrides): Probe {
     const fs = createMemoryFs(loadResolveFixtures());
-    const plugin = nodeResolve({ fs, ...overrides });
-    const hook = plugin.resolveId as (ctx: PluginCtx, s: string, i: string | null) => ResolveIdResult;
+    let warnings: string[] = [];
+    const resolver = createNodeResolver({ fs, ...overrides, warn: (m) => warnings.push(m) });
     return {
         fs,
-        plugin,
+        load: resolver.load,
         resolve(specifier, importer) {
-            const warnings: string[] = [];
-            const ctx = stubPluginCtx(fs, (m) => warnings.push(m));
-            const id = hook(ctx, specifier, importer);
+            warnings = [];
+            const id = resolver.resolve(specifier, importer);
             return { id, warnings };
         },
     };
@@ -165,8 +162,7 @@ describe('nodeResolve: browser object remapping', () => {
 
     it('the load hook returns empty source for the sentinel', () => {
         const p = probe();
-        const loadHook = p.plugin.load as (ctx: PluginCtx, id: string) => string | null | undefined;
-        expect(loadHook(stubPluginCtx(p.fs), EMPTY_MODULE_ID)).toBe('');
+        expect(p.load(EMPTY_MODULE_ID)).toBe('');
     });
 
     it('a relative import outside any browser-map package passes to core', () => {
@@ -202,7 +198,7 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
         const files = loadResolveFixtures();
         files[APP] = mainSource;
         const fs = createMemoryFs(files);
-        const result = bundle({ entry: APP, fs, plugins: [nodeResolve({ fs })] });
+        const result = bundle({ entry: APP, fs });
         expect(result.errors).toEqual([]);
         return run(result.code);
     };
@@ -241,18 +237,13 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
 
 import { createMemoryFs as mkFs } from '../src/fs.ts';
 
-function probeFs(files: Record<string, string>, overrides: Partial<Parameters<typeof nodeResolve>[0]> = {}) {
+function probeFs(files: Record<string, string>, overrides: Partial<Parameters<typeof createNodeResolver>[0]> = {}) {
     const fs = mkFs(files);
-    const plugin = nodeResolve({ fs, ...overrides });
-    const hook = plugin.resolveId as (ctx: PluginCtx, s: string, i: string | null) => ResolveIdResult;
     return {
         resolve(specifier: string, importer: string | null) {
             const warnings: string[] = [];
-            const id = hook(
-                stubPluginCtx(fs, (m) => warnings.push(m)),
-                specifier,
-                importer,
-            );
+            const resolver = createNodeResolver({ fs, ...overrides, warn: (m) => warnings.push(m) });
+            const id = resolver.resolve(specifier, importer);
             return { id, warnings };
         },
     };

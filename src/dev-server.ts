@@ -2,6 +2,7 @@ import { analyze, createSemantic } from './analysis/semantic.ts';
 import type { HmrUpdate } from './environment.ts';
 import type { Fs } from './fs.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from './module-graph.ts';
+import { EMPTY_MODULE_ID } from './node-resolve.ts';
 import { parse } from './parser.ts';
 import {
     compilePipeline,
@@ -159,7 +160,7 @@ const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
 
 export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
-    const baseResolve = makeBaseResolve(fs, options.resolve, options.platform);
+    const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => options.warn?.(m));
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
     const graph = new Map<string, ModuleNode>();
 
@@ -237,6 +238,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
 
     async function fetchModule(id: string): Promise<FetchResult> {
+        if (id === EMPTY_MODULE_ID) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [] };
         const loaded = await runLoad(pipeline, ctx, id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.

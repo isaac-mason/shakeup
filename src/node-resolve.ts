@@ -1,11 +1,22 @@
-import { dirnameOf, type Fs, joinPath, normalizePath } from '../fs';
-import type { Plugin, PluginCtx } from '../plugin';
+import { dirnameOf, type Fs, joinPath, normalizePath } from './fs';
 
-export type NodeResolveOptions = {
+/** The minimal context the resolver needs: a diagnostics sink. */
+type ResolveCtx = { warn(message: string): void };
+
+export type NodeResolverOptions = {
     fs: Fs;
     conditions?: string[];
     extensions?: string[];
     mainFields?: string[];
+    /** Where resolution diagnostics go (unresolved subpaths, condition misses, …). */
+    warn: (message: string) => void;
+};
+
+/** Resolves bare specifiers (node_modules / package `exports` / workspace members) and
+ *  browser-field remaps. `load` returns '' for a `browser: false`-disabled module. */
+export type NodeResolver = {
+    resolve(specifier: string, importer: string | null): string | null;
+    load(id: string): string | null;
 };
 
 const DEFAULT_CONDITIONS = ['import', 'browser', 'default'];
@@ -258,8 +269,9 @@ function mixedExportsKeys(exports: unknown): { key: string; prev: string } | nul
     return null;
 }
 
-export function nodeResolve(options: NodeResolveOptions): Plugin {
+export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
     const fs = options.fs;
+    const warnCtx: ResolveCtx = { warn: options.warn };
     const conditions = new Set(options.conditions ?? DEFAULT_CONDITIONS);
     const extensions = options.extensions ?? DEFAULT_EXTENSIONS;
     const mainFields = options.mainFields ?? DEFAULT_MAIN_FIELDS;
@@ -381,7 +393,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         return null;
     };
 
-    const finishExports = (ctx: PluginCtx, pkg: PackageJson, spec: string, subpath: string, r: PjResult): string | null => {
+    const finishExports = (ctx: ResolveCtx, pkg: PackageJson, spec: string, subpath: string, r: PjResult): string | null => {
         switch (r.status) {
             case 'exact': {
                 if (fs.exists(r.value)) return r.value;
@@ -421,7 +433,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
 
     /** Resolve `specifier`/`subpath` against a located package (node_modules OR workspace
      *  member): its `exports` if present, else the mainFields / subpath file. */
-    const resolveInPackage = (ctx: PluginCtx, pkg: PackageJson, specifier: string, subpath: string): string | null => {
+    const resolveInPackage = (ctx: ResolveCtx, pkg: PackageJson, specifier: string, subpath: string): string | null => {
         if (pkg.exports !== undefined) {
             const mixed = mixedExportsKeys(pkg.exports);
             if (mixed !== null) {
@@ -467,7 +479,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
     };
 
     const resolveId = (
-        ctx: PluginCtx,
+        ctx: ResolveCtx,
         specifier: string,
         importer: string | null,
         skipBrowserMap = false,
@@ -543,13 +555,12 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
     };
 
     return {
-        name: 'node-resolve',
-        resolveId: (ctx, specifier, importer) => resolveId(ctx, specifier, importer),
-        load: (_ctx, id) => (id === EMPTY_MODULE_ID ? '' : null),
+        resolve: (specifier, importer) => resolveId(warnCtx, specifier, importer) ?? null,
+        load: (id) => (id === EMPTY_MODULE_ID ? '' : null),
     };
 }
 
-function warn(ctx: PluginCtx, spec: string, note: string): void {
+function warn(ctx: ResolveCtx, spec: string, note: string): void {
     ctx.warn(`Could not resolve "${spec}": ${note}`);
 }
 

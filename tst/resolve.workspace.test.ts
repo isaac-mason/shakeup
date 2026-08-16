@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import type { Fs } from '../src/fs.ts';
 import { normalizePath } from '../src/fs.ts';
-import { nodeResolve } from '../src/plugins/node-resolve.ts';
 
 type SymlinkFs = Fs & { realpath(id: string): string };
 
@@ -63,7 +62,7 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
 
     it('resolves a store-only nested dep via realpath and executes end-to-end', () => {
         const fs = createSymlinkFs(realFiles, links);
-        const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
+        const result = bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
         expect(result.graph).not.toBeNull();
 
@@ -77,7 +76,7 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
 
     it('produces the correct executed value through the link graph', async () => {
         const fs = createSymlinkFs(realFiles, links);
-        const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
+        const result = bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
         const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('liba->libb');
@@ -114,7 +113,7 @@ describe('workspace: pnpm dedup (one store file, two link paths -> one module)',
 
     it('the doubly-linked store file collapses to a single canonical module', () => {
         const fs = createSymlinkFs(realFiles, links);
-        const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
+        const result = bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
         const ids = result.graph!.modules.map((m) => m.id);
         const libcId = '/repo/node_modules/.pnpm/libc@1.0.0/node_modules/libc/index.js';
@@ -124,7 +123,7 @@ describe('workspace: pnpm dedup (one store file, two link paths -> one module)',
 
     it('executes with the shared libc', async () => {
         const fs = createSymlinkFs(realFiles, links);
-        const result = bundle({ entry: '/repo/src/main.ts', fs, plugins: [nodeResolve({ fs })] });
+        const result = bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
         const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('a:libc|d:libc');
@@ -156,7 +155,7 @@ describe('workspace: install-free member resolution', () => {
             read: (id) => map.get(id) ?? null,
             exists: (id) => map.has(id),
         };
-        return bundle({ entry: '/repo/packages/a/index.js', fs, plugins: [nodeResolve({ fs })] });
+        return bundle({ entry: '/repo/packages/a/index.js', fs });
     };
 
     it('resolves "@ws/b" via the root `workspaces` field (no node_modules install)', () => {
