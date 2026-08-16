@@ -28,15 +28,36 @@ export type BundleOptions = GraphOptions & {
     sourcemap?: boolean;
 };
 
-/** Output of {@link bundle}: the chunk code plus diagnostics and intermediate state. `map` is
- *  present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
-export type BundleResult = {
+/** A single emitted chunk (rollup `OutputChunk`, R2 subset — R3/R4 extend). R2 always
+ *  emits exactly one chunk holding every entry and every module. */
+export type OutputChunk = {
+    /** Chunk file name — R2 stub: derived from the (first) entry name, e.g. `${name}.js`.
+     *  R4 replaces with entryFileNames/chunkFileNames patterns. */
+    fileName: string;
+    /** Entry name for this chunk (the first entry's name in R2's single chunk). */
+    name: string;
+    /** True — every R2 chunk is an entry chunk. */
+    isEntry: boolean;
+    /** Module ids this chunk contains, in emit order. */
+    moduleIds: string[];
     code: string;
+    map?: SourceMap;
+};
+
+/** Output of {@link bundle}: the chunk graph plus diagnostics and intermediate state. `map`
+ *  is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
+export type BundleResult = {
+    /** @deprecated single-chunk convenience alias for `chunks[0].code`. Kept so every
+     *  existing caller/test compiles unchanged in R2. Remove when R3 lands real splitting. */
+    code: string;
+    /** The chunk graph. R2 always length 1 (or 0 on error). R3 makes this the real output. */
+    chunks: OutputChunk[];
     errors: string[];
     warnings: string[];
     graph: Graph | null;
     linked: Linked | null;
     shaken: TreeshakeResult | null;
+    /** @deprecated alias for `chunks[0].map`. */
     map?: SourceMap;
 };
 
@@ -72,6 +93,16 @@ function finalNameOfSymbol(ctx: EmitCtx, sym: number): string | null {
         return nameOfBind(ctx.linked, bind);
     }
     return ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym)) ?? null;
+}
+
+/** Whether two entry-export binds are the same target (so merging them into one chunk's
+ *  `export { … }` is safe). Mirrors module-graph's internal `sameBind` for the emit path. */
+function sameBindForExport(a: ImportBind, b: ImportBind): boolean {
+    if (a.kind !== b.kind) return false;
+    if (a.kind === 'found' && b.kind === 'found') return a.ref === b.ref;
+    if (a.kind === 'namespace' && b.kind === 'namespace') return a.module === b.module;
+    if (a.kind === 'external' && b.kind === 'external') return a.specifier === b.specifier && a.name === b.name;
+    return true;
 }
 
 function nameOfBind(linked: Linked, bind: ImportBind): string | null {
@@ -292,12 +323,12 @@ export function bundle(options: BundleOptions): BundleResult {
     };
     // buildStart is now driven inside buildGraph (full graph-backed ctx for ctx.resolve).
     graph = buildGraph(options, pipeline);
-    if (graph.errors.length > 0 || graph.entry < 0) {
-        return { code: '', errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
+    if (graph.errors.length > 0 || graph.entries.length === 0) {
+        return { code: '', chunks: [], errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
     }
     const linked = linkGraph(graph);
     if (linked.errors.length > 0) {
-        return { code: '', errors: linked.errors, warnings: [], graph, linked, shaken: null };
+        return { code: '', chunks: [], errors: linked.errors, warnings: [], graph, linked, shaken: null };
     }
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
@@ -343,7 +374,7 @@ export function bundle(options: BundleOptions): BundleResult {
             stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
         }
         const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live };
-        moduleEdits(ctx, idx === graph.entry, entryStarSpecs, sideEffectSpecs);
+        moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
         let out = applyEdits(mod.source, ctx.edits).trim();
         if (linked.namespaceOf.has(idx)) {
             out += `\n${renderNamespaceObject(linked, idx)}`;
@@ -363,16 +394,39 @@ export function bundle(options: BundleOptions): BundleResult {
     // Synthetic (generated-only) surrounds, computed once for both the string and the map assembly.
     const extImports = renderExternalImports(linked, sideEffectSpecs);
     let exportLine: string | null = null;
-    const entryMap = linked.exportMaps.get(graph.entry);
-    if (entryMap !== undefined && entryMap.size > 0) {
-        const specifiers: string[] = [];
-        for (const [name, bind] of entryMap) {
-            const local = nameOfBind(linked, bind);
-            if (local === null) continue;
-            const exported = isIdentName(name) ? name : JSON.stringify(name);
-            specifiers.push(local === name ? exported : `${local} as ${exported}`);
+    // Merge the export surfaces of ALL entries into the single chunk's trailing
+    // `export { … }`, deduping by exported name (§4.5). With one entry this is byte-
+    // identical to the pre-R2 single-entry output. Two entries exporting the same name
+    // with DIFFERENT binds is a real conflict in one merged chunk: emit the first, warn.
+    // R3 gives each entry its own chunk and the conflict dissolves.
+    {
+        const merged = new Map<string, ImportBind>();
+        const mergedFrom = new Map<string, string>();
+        for (const { module, name: entryName } of graph.entries) {
+            const entryMap = linked.exportMaps.get(module);
+            if (entryMap === undefined) continue;
+            for (const [name, bind] of entryMap) {
+                const prior = merged.get(name);
+                if (prior === undefined) {
+                    merged.set(name, bind);
+                    mergedFrom.set(name, entryName);
+                } else if (!sameBindForExport(prior, bind)) {
+                    warnings.push(
+                        `entries '${mergedFrom.get(name)}' and '${entryName}' both export '${name}' — merged into one chunk exports the first; R3 chunk splitting will separate them`,
+                    );
+                }
+            }
         }
-        if (specifiers.length > 0) exportLine = `export { ${specifiers.join(', ')} };`;
+        if (merged.size > 0) {
+            const specifiers: string[] = [];
+            for (const [name, bind] of merged) {
+                const local = nameOfBind(linked, bind);
+                if (local === null) continue;
+                const exported = isIdentName(name) ? name : JSON.stringify(name);
+                specifiers.push(local === name ? exported : `${local} as ${exported}`);
+            }
+            if (specifiers.length > 0) exportLine = `export { ${specifiers.join(', ')} };`;
+        }
     }
     const starLines = entryStarSpecs.map((spec) => `export * from '${spec}';`);
 
@@ -410,5 +464,18 @@ export function bundle(options: BundleOptions): BundleResult {
     }
     for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
     warnings.push(...warningsOut.splice(0));
-    return { code, errors: [], warnings, graph, linked, shaken, map };
+
+    // Wrap the single assembled chunk in one OutputChunk (R2 always length 1). name/
+    // fileName come from the first entry; moduleIds are the emit order. code/map are
+    // aliased onto the result for back-compat with every existing caller (§5.2).
+    const chunkName = graph.entries[0]?.name ?? 'main';
+    const chunk: OutputChunk = {
+        fileName: `${chunkName}.js`,
+        name: chunkName,
+        isEntry: true,
+        moduleIds: linked.order.map((i) => graph.modules[i].id),
+        code,
+        map,
+    };
+    return { code, chunks: [chunk], errors: [], warnings, graph, linked, shaken, map };
 }

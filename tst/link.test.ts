@@ -35,7 +35,7 @@ describe('graph + link', () => {
         expect(order.indexOf('/math.ts')).toBeLessThan(order.indexOf('/main.ts'));
         expect(order.indexOf('/impl.ts')).toBeLessThan(order.indexOf('/util.ts'));
 
-        const main = graph.modules[graph.entry];
+        const main = graph.modules[graph.entries[0].module];
         const mathIdx = graph.byId.get('/math.ts')!;
         const addBinds = [...linked.binds.entries()].filter(([ref]) => refMod(ref) === main.idx);
         const found = addBinds.map(([, b]) => b);
@@ -47,7 +47,7 @@ describe('graph + link', () => {
         const renamed = [...linked.finalNames.values()];
         expect(renamed).toContain('add$1');
 
-        const entryExports = linked.exportMaps.get(graph.entry)!;
+        const entryExports = linked.exportMaps.get(graph.entries[0].module)!;
         expect([...entryExports.keys()].sort()).toEqual(['result', 'scale']);
         const scale = entryExports.get('scale')!;
         expect(scale.kind).toBe('found');
@@ -114,7 +114,7 @@ describe('graph + link', () => {
         const types = graph.modules[typesIdx];
         expect([...types.namedExports.keys()]).toEqual(['real']);
         expect(exports.size === 0 || exports.has('real')).toBe(true);
-        const mainBinds = [...linked.binds.entries()].filter(([ref]) => refMod(ref) === graph.entry);
+        const mainBinds = [...linked.binds.entries()].filter(([ref]) => refMod(ref) === graph.entries[0].module);
         expect(mainBinds.length).toBe(1);
     });
 });

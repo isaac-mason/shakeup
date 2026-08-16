@@ -2,7 +2,7 @@ import { isPureStatement } from './analysis/effects';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
-import { type Graph, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
+import { type Graph, type ImportBind, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
 
 export type TreeshakeResult = {
     live: Set<number>[];
@@ -126,11 +126,22 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
             if (forceAll || !infos[mod.idx][i].pure) includeStatement(mod.idx, i);
         }
     }
-    const entryMap = linked.exportMaps.get(graph.entry);
-    if (entryMap !== undefined) {
-        for (const bind of entryMap.values()) {
+    const markExportMap = (map: Map<string, ImportBind> | undefined): void => {
+        if (map === undefined) return;
+        for (const bind of map.values()) {
             if (bind.kind === 'found') markRef(bind.ref);
             else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
+        }
+    };
+    // Root from every entry's export surface (multi-entry, §4.4).
+    for (const { module } of graph.entries) markExportMap(linked.exportMaps.get(module));
+    // Dynamic-import liveness: a dynamically-imported module is an inclusion root — its
+    // whole export surface may be reached at runtime (rollup includeDynamicImport,
+    // Module.ts:1408). Seed each dynamic target's export map. Finer per-export dynamic
+    // shaking is future work.
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.dynamic && !rec.external && rec.resolved >= 0) markExportMap(linked.exportMaps.get(rec.resolved));
         }
     }
     for (const modIdx of linked.namespaceOf.keys()) markRef(packRef(modIdx, NS_MARKER));

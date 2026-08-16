@@ -30,6 +30,12 @@ export type ImportRecord = {
     specifier: string;
     resolved: number;
     external: boolean;
+    /** True iff this edge originates ONLY from dynamic `import()` (no static import
+     *  of the same specifier). A specifier imported both statically and dynamically
+     *  is `dynamic: false` — the static edge dominates (it's already in the sync
+     *  graph; the dynamic-ness adds nothing to chunking once static). Dynamic records
+     *  carry no `namedImports` (a bare `import()` binds no names). */
+    dynamic: boolean;
 };
 
 /** A local binding that aliases an imported name. */
@@ -78,19 +84,23 @@ export type Module = {
     meta: CustomPluginOptions;
     /** Declared module type (js/ts/jsx/tsx/json/…); default derived from the id extension. */
     moduleType: ModuleType;
-    /** True for the graph entry module. */
+    /** True iff this module is rooted as an entry (its index appears in `graph.entries`). */
     isEntry: boolean;
+    /** Entry name when this module is an entry (first name wins on dedup); else null. */
+    entryName: string | null;
     /** Module-level external flag (distinct from per-record ImportRecord.external). */
     external: boolean;
     /** Reverse edges: ids of modules that statically import this one (filled during build). */
     importers: Set<string>;
 };
 
-/** The built module graph rooted at `entry` (an index into `modules`). */
+/** The built module graph rooted at one or more entries. */
 export type Graph = {
     modules: Module[];
     byId: Map<string, number>;
-    entry: number;
+    /** Entry roots, in normalized input order. Each is (module index, entry name).
+     *  Replaces the single `entry`. */
+    entries: { module: number; name: string }[];
     errors: string[];
     warnings: string[];
 };
@@ -120,15 +130,76 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
     });
 }
 
+/** Entry surface — rolldown `InputOption` (input-options.ts:23). `string` = single
+ *  unnamed entry; `string[]` = several unnamed entries; `Record<name, specifier>` =
+ *  named entries. */
+export type InputOption = string | string[] | Record<string, string>;
+
 /** Inputs to {@link buildGraph}. */
 export type GraphOptions = {
-    entry: string;
+    /** One or more entry modules. Exactly one of `input` / `entry` must be set. */
+    input?: InputOption;
+    /** @deprecated single-entry alias for `input`. Normalized into `input`. */
+    entry?: string;
     fs: Fs;
     external?: string[] | ((specifier: string) => boolean);
     resolve?: (specifier: string, importer: string | null) => string | null;
     plugins?: Plugin[];
     jsx?: JSXOptions;
+    /** R2 stub: accepted and IGNORED. Rolldown default is `'exports-only'`; facade-chunk
+     *  generation lands with the chunk graph in R3. Present so callers can pass it today. */
+    preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
 };
+
+/** One normalized entry: a display name plus the raw specifier to resolve. */
+type NormalizedEntry = { name: string; specifier: string };
+
+/** Derive a filename-safe entry name from a specifier's basename (extension stripped).
+ *  Distinct from {@link reprName} (module-path-based, identifier-safe — a different job). */
+function entryNameFromSpecifier(specifier: string): string {
+    const base = specifier.split('/').pop() ?? 'main';
+    const stem = base.replace(/\.[^.]+$/, '');
+    const cleaned = stem.replace(/[^A-Za-z0-9_$-]/g, '_');
+    return cleaned === '' ? 'main' : cleaned;
+}
+
+/** Normalize `input` / `entry` into an ordered {@link NormalizedEntry} list. Pushes a
+ *  graph error (and returns `[]`) when neither / both are set (rollup requires exactly
+ *  one root source). Unnamed entries derive a name from the specifier basename; a
+ *  collision suffixes `name`, `name2`, … deterministically. `Record` keys win verbatim. */
+function normalizeInput(options: GraphOptions, errors: string[]): NormalizedEntry[] {
+    const hasInput = options.input !== undefined;
+    const hasEntry = options.entry !== undefined;
+    if (hasInput === hasEntry) {
+        errors.push("exactly one of 'input' or 'entry' must be set");
+        return [];
+    }
+    const input: InputOption = hasEntry ? (options.entry as string) : (options.input as InputOption);
+    const out: NormalizedEntry[] = [];
+    const used = new Map<string, number>();
+    const derive = (specifier: string): string => {
+        const base = entryNameFromSpecifier(specifier);
+        const seen = used.get(base);
+        if (seen === undefined) {
+            used.set(base, 1);
+            return base;
+        }
+        const n = seen + 1;
+        used.set(base, n);
+        return `${base}${n}`;
+    };
+    if (typeof input === 'string') {
+        out.push({ name: derive(input), specifier: input });
+    } else if (Array.isArray(input)) {
+        for (const specifier of input) out.push({ name: derive(specifier), specifier });
+    } else {
+        for (const name of Object.keys(input)) {
+            used.set(name, 1); // reserve named keys so a later derived name can't collide
+            out.push({ name, specifier: input[name] });
+        }
+    }
+    return out;
+}
 
 const EXTENSION_PROBES = ['', '.ts', '.js', '/index.ts', '/index.js'];
 
@@ -211,11 +282,17 @@ function collectPatternIdents(node: Node | null, out: Node[]): void {
     }
 }
 
-function addRecord(mod: Module, specifier: string): number {
+function addRecord(mod: Module, specifier: string, dynamic = false): number {
     for (let i = 0; i < mod.importRecords.length; i++) {
-        if (mod.importRecords[i].specifier === specifier) return i;
+        if (mod.importRecords[i].specifier === specifier) {
+            // Static dominance: a specifier seen statically stays static regardless of a
+            // later dynamic hit; a dynamic-first record flips to static when the static
+            // import arrives. Order-independent because any static call demotes.
+            if (!dynamic) mod.importRecords[i].dynamic = false;
+            return i;
+        }
     }
-    mod.importRecords.push({ specifier, resolved: -1, external: false });
+    mod.importRecords.push({ specifier, resolved: -1, external: false, dynamic });
     return mod.importRecords.length - 1;
 }
 
@@ -336,6 +413,19 @@ function extractRecords(mod: Module): void {
             }
         }
     }
+
+    // Dynamic import() edges. Unlike static import/export these nest arbitrarily deep in
+    // expressions/function bodies, so the top-level statement scan above misses them —
+    // walk the whole program. Mirrors the dev-path detection in
+    // transform.ts:collectRunnerEdits (~L304); kept inline (detection is ~3 lines and the
+    // two callers emit different outputs — no shared helper warranted). Literal-only:
+    // non-literal import() (import(x), import(`./${x}`), import('a'+b)) has a
+    // non-StringLiteral source → skipped → no edge, left as a runtime import in the emit.
+    walk(mod.program, (n) => {
+        if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) {
+            addRecord(mod, strValue(source, n.data.source), /* dynamic */ true);
+        }
+    });
 }
 
 /** True if `openingName`-carrying attrs put a `key` attribute AFTER a spread
@@ -397,9 +487,10 @@ function injectJSXRuntime(mod: Module, importSource: string): void {
  *  be partial when called from `moduleParsed` (matches rollup's caveat). */
 export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
     const importedIds: string[] = [];
+    const dynamicallyImportedIds: string[] = [];
     for (const rec of mod.importRecords) {
         if (rec.external || rec.resolved < 0) continue;
-        importedIds.push(graph.modules[rec.resolved].id);
+        (rec.dynamic ? dynamicallyImportedIds : importedIds).push(graph.modules[rec.resolved].id);
     }
     return {
         id: mod.id,
@@ -410,16 +501,16 @@ export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
         meta: mod.meta,
         moduleType: mod.moduleType,
         importedIds,
-        dynamicallyImportedIds: [], // R1: no dynamic edges recorded yet (R2)
+        dynamicallyImportedIds,
         importers: [...mod.importers],
-        dynamicImporters: [], // R1: no dynamic edges recorded yet (R2)
+        dynamicImporters: [], // R2: reverse dynamic edges not yet tracked (R3/R4)
         exports: [...mod.namedExports.keys()],
     };
 }
 
 /** Resolve, load, parse, and analyze the module graph reachable from the entry. */
 export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
-    const graph: Graph = { modules: [], byId: new Map(), entry: -1, errors: [], warnings: [] };
+    const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const baseResolve = options.resolve ?? ((s: string, i: string | null) => defaultResolve(options.fs, s, i));
@@ -578,6 +669,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             meta: pending.meta,
             moduleType: pending.moduleType ?? moduleTypeOf(id),
             isEntry,
+            entryName: null,
             external: false,
             importers: new Set(),
         };
@@ -602,7 +694,10 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            const resolved = resolveFn(rec.specifier, id, { isEntry: false, kind: 'import-statement' });
+            const resolved = resolveFn(rec.specifier, id, {
+                isEntry: false,
+                kind: rec.dynamic ? 'dynamic-import' : 'import-statement',
+            });
             if (resolved === false || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
                 continue;
@@ -629,9 +724,25 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     // (rollup runs it as part of the build, before resolution).
     for (const hook of pipe.buildStart) assertSync(hook.handler(ctx));
 
-    const entryResolved = resolveFn(options.entry, null, { isEntry: true, kind: 'entry' });
-    const entryId = typeof entryResolved === 'string' ? entryResolved : options.entry;
-    graph.entry = addModule(entryId, true);
+    // Multi-entry rooting (rollup addEntryModules, ModuleLoader.ts:121-158): resolve each
+    // normalized entry, add its module, mark it an entry, and dedup into graph.entries
+    // (same module named twice ⇒ one root, first name wins). Rooting stays in the caller,
+    // not addModule, per R1's contract.
+    const normalized = normalizeInput(options, graph.errors);
+    const seen = new Set<number>();
+    for (const { name, specifier } of normalized) {
+        const entryResolved = resolveFn(specifier, null, { isEntry: true, kind: 'entry' });
+        const entryId = typeof entryResolved === 'string' ? entryResolved : specifier;
+        const idx = addModule(entryId, true);
+        if (idx < 0) continue; // addModule already pushed a load error
+        const mod = graph.modules[idx];
+        mod.isEntry = true;
+        if (mod.entryName === null) mod.entryName = name;
+        if (!seen.has(idx)) {
+            seen.add(idx);
+            graph.entries.push({ module: idx, name });
+        }
+    }
     return graph;
 }
 
@@ -789,12 +900,24 @@ function sortModules(graph: Graph): number[] {
         state[idx] = 1;
         const mod = graph.modules[idx];
         for (const rec of mod.importRecords) {
-            if (!rec.external && rec.resolved >= 0) visit(rec.resolved);
+            // Skip dynamic edges: a dynamic target is not in the importer's synchronous
+            // execution order (it loads on its own), and a cycle closed through a dynamic
+            // edge must not wrongly serialize. Dynamic targets are seeded separately below.
+            if (!rec.external && !rec.dynamic && rec.resolved >= 0) visit(rec.resolved);
         }
         state[idx] = 2;
         order.push(idx);
     };
-    visit(graph.entry);
+    for (const { module } of graph.entries) visit(module);
+    // R2 single-chunk world: a module reachable ONLY through import() would otherwise be
+    // dropped from `order`. Seed the DFS from every dynamic target AFTER all static-entry
+    // roots so their relative sync-order is preserved. R3 replaces this with real chunk
+    // assignment (the dynamic target becomes its own chunk).
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.dynamic && !rec.external && rec.resolved >= 0) visit(rec.resolved);
+        }
+    }
     return order;
 }
 
@@ -947,7 +1070,14 @@ export function linkGraph(graph: Graph): Linked {
     }
 
     for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
-    if (graph.entry >= 0) exportMapOf(ctx, graph.modules[graph.entry]);
+    for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);
+    // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion
+    // roots (§4.4) and needs the resolved surface present in `linked.exportMaps`.
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.dynamic && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
+        }
+    }
 
     deconflict(ctx);
     return linked;
