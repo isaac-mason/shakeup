@@ -1,7 +1,7 @@
 import { walkRefIdents } from './analysis/refs';
 import { analyze, createSemantic, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
-import { applyEdits, collectStripEdits, type Edit, type JSXLower, type MapCtx, renderEdits, renderMappedPart } from './emit';
+import { applyEdits, buildLineTable, collectStripEdits, type Edit, type JSXLower, type MapCtx, renderEdits, renderMappedPart } from './emit';
 import { collectUnsupported, type JSXOptions, resolveJSXOptions, scanJSX } from './module-graph';
 import { parse } from './parser';
 import { addLine, encodeMappings, joinParts, newMappings, type Part, type SourceMap } from './sourcemap';
@@ -32,15 +32,15 @@ export type TransformOutput = {
 /**
  * Render `edits` over `srcCode`, prefixed by generated-only `prefix` (e.g. the JSX runtime
  * import), producing the code and — since `sourcemap` — an SMv3 map back to `filename`. The
- * prefix's lines are left unmapped (they have no source origin); the body maps at Boundary
- * granularity. The single {@link renderEdits} walk yields code and map together (no drift).
+ * prefix's lines are left unmapped (they have no source origin); the body maps at token
+ * granularity. A single {@link renderEdits} walk produces the code and its map together.
  */
 function finishWithMap(filename: string, prefix: string, srcCode: string, edits: Edit[], errors: string[]): TransformOutput {
     const seg = newMappings();
     let prefixLines = 0;
     for (let i = 0; i < prefix.length; i++) if (prefix.charCodeAt(i) === 10) prefixLines++;
     for (let i = 0; i < prefixLines; i++) addLine(seg);
-    const m: MapCtx = { seg, srcIdx: 0, srcLine: 0, srcCol: 0, genLine: prefixLines, genCol: 0 };
+    const m: MapCtx = { seg, srcIdx: 0, srcLine: 0, srcCol: 0, genLine: prefixLines, genCol: 0, lines: buildLineTable(srcCode) };
     const body = renderEdits(srcCode, edits, m);
     const map: SourceMap = {
         version: 3,

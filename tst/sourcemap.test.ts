@@ -134,26 +134,40 @@ describe('sourcemap — dev transform() round-trip', () => {
     });
 });
 
-describe('sourcemap — lowered constructs map coarsely to their construct (Level-1 limitation)', () => {
-    // Lowered blobs (jsx()/enum IIFE/param-property insert) are ONE edit → their interior maps to
-    // the construct's source start, not the inner expression. Coarse but never garbage/unmapped.
-    const traceToken = (filename: string, src: string, token: string) => {
-        const r = transform(filename, src, { sourcemap: true });
+describe('sourcemap — lowered-construct interiors', () => {
+    // JSX value expressions and enum member initializers map to their own source. Param-property
+    // inserts remain single-block edits → their interior maps to the constructor start (coarse but
+    // never garbage/unmapped).
+    it('JSX: value expressions map to their own source, not the element start', () => {
+        const src = 'export const El = (handler, kid) => <div onClick={handler}>{kid}</div>;';
+        const r = transform('c.tsx', src, { sourcemap: true });
         expect(r.errors).toEqual([]);
-        const gp = posOf(r.code, r.code.indexOf(token));
-        return trace(r.map!.mappings, gp.line, gp.col);
-    };
-
-    it('JSX: interior maps to the element on the right source line', () => {
-        const t = traceToken('c.tsx', 'export const El = () => <div id="x">{greet}</div>;', 'greet');
-        expect(t).not.toBeNull();
-        expect(t!.srcLine).toBe(0);
+        // `handler` in the emitted `onClick: handler` maps back to the {handler} callback expression,
+        // and `kid` to the {kid} child — each to its OWN source position, not the coarse `<div` start.
+        for (const token of ['handler', 'kid']) {
+            const idx = nthIndex(r.code, token, 2); // occ 1 is the parameter; occ 2 is inside the jsx() call
+            const gp = posOf(r.code, idx);
+            const t = trace(r.map!.mappings, gp.line, gp.col);
+            expect(t).not.toBeNull();
+            const off = offOf(src, t!.srcLine, t!.srcCol);
+            expect(src.slice(off, off + token.length)).toBe(token); // exact round-trip to the expression
+            expect(t!.srcCol).toBeGreaterThan(src.indexOf('<div')); // deeper than the element start = fine
+        }
     });
 
-    it('enum: the lowered runtime maps back onto the enum declaration line', () => {
-        const t = traceToken('e.ts', 'const pad = 0;\nexport enum E { A, B }', 'E');
+    it('enum: computed member initializers map to their own source line', () => {
+        // bitflag/computed enums (common in game code) — each initializer must map to ITS line, not
+        // the coarse enum-declaration line.
+        const src = 'export enum Layer {\n  PLAYER = 1 << 2,\n  WALL = 1 << 3,\n  BOTH = PLAYER | WALL,\n}';
+        const r = transform('layer.ts', src, { sourcemap: true });
+        expect(r.errors).toEqual([]);
+        // the `1 << 3` in the emitted IIFE traces to WALL's initializer (source line 2), exactly
+        const gp = posOf(r.code, r.code.indexOf('1 << 3'));
+        const t = trace(r.map!.mappings, gp.line, gp.col);
         expect(t).not.toBeNull();
-        expect(t!.srcLine).toBe(1);
+        expect(t!.srcLine).toBe(2); // WALL's line, NOT the enum decl (line 0)
+        const off = offOf(src, t!.srcLine, t!.srcCol);
+        expect(src.slice(off, off + 6)).toBe('1 << 3');
     });
 
     it('parameter property: class identifiers still round-trip; synthesized this.x maps into the ctor', () => {
@@ -174,7 +188,7 @@ describe('sourcemap — lowered constructs map coarsely to their construct (Leve
     });
 });
 
-describe('sourcemap — runner transform + compose (the dev chain, §9-G)', () => {
+describe('sourcemap — runner transform + compose', () => {
     const original = 'export const greet = (n: string): string => "hi " + n;\nexport const x = greet("a");';
 
     it('strip → runner → compose maps a runner-output identifier back to the ORIGINAL source', () => {

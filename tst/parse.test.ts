@@ -106,7 +106,7 @@ describe('fixed parser regressions', () => {
         expect(labeled.errors).toEqual([]);
     });
 
-    it('regression: unlabeled optional tuple members parse (`[string?]`) — grammar audit §4', () => {
+    it('regression: unlabeled optional tuple members parse (`[string?]`)', () => {
         expect(parseFresh('type T = [string?];', true).errors).toEqual([]);
         expect(parseFresh('type T = [number, string?];', true).errors).toEqual([]);
         expect(parseFresh('type T = [string?, number?];', true).errors).toEqual([]);
@@ -169,7 +169,7 @@ describe('ChainExpression placement (phase 3b — was chain-gap-probe.ts)', () =
     });
 });
 
-describe('grammar audit — optional-chain spec errors (roadmap §4)', () => {
+describe('optional-chain constructs that are SyntaxErrors are rejected', () => {
     const errsOf = (src: string): string[] => parseFresh(src, true).errors.map((e) => e.msg);
 
     it('rejects an optional chain as a `new` callee (`new a?.b()`)', () => {
@@ -194,7 +194,7 @@ describe('grammar audit — optional-chain spec errors (roadmap §4)', () => {
         expect(parseFresh('new A()', true).errors).toEqual([]);
     });
 
-    it('models bare instantiation `f<number>` as TSInstantiationExpression (was: type args discarded)', () => {
+    it('models bare instantiation `f<number>` as TSInstantiationExpression', () => {
         const { program, errors } = parseFresh('const x = f<number>;', true);
         expect(errors).toEqual([]);
         const kinds: number[] = [];

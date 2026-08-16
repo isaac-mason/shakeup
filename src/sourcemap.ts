@@ -1,8 +1,7 @@
 /**
  * Source Map v3 primitives — base64 VLQ, an in-order mappings accumulator, and JSON assembly.
- * Grounded in the SMv3 spec + the oxc_sourcemap / string_wizard segment shape. Positions are
- * 0-based; columns are UTF-16 code units (SMv3 requirement). Browser-clean (no Buffer/Node).
- * See llm/notes/sourcemaps-plan.md.
+ * Positions are 0-based; columns are UTF-16 code units (the SMv3 requirement). Browser-clean
+ * (no Buffer/Node).
  */
 
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -173,10 +172,10 @@ export function trimMappings(code: string, m: Mappings): string {
 export type Part = { code: string; map?: Mappings };
 
 /**
- * Concatenate `parts` with '\n' separators plus a trailing '\n' (the shape both `bundle()` and
- * `moduleRunnerTransform()` emit) and build the combined {@link Mappings}: each part contributes
- * `countLines(part.code)` generated lines — its own segments if mapped, else unmapped lines.
- * Segments already carry their `sourceIdx`, so no renumbering here. Mirrors rolldown's SourceJoiner.
+ * Concatenate `parts` with '\n' separators plus a trailing '\n', and build the combined
+ * {@link Mappings}: each part contributes `countLines(part.code)` generated lines — its own
+ * segments if mapped, else unmapped lines. Segments already carry their `sourceIdx`, so there is
+ * no renumbering here.
  */
 export function joinParts(parts: Part[]): { code: string; map: Mappings } {
     const codes: string[] = [];
@@ -190,7 +189,7 @@ export function joinParts(parts: Part[]): { code: string; map: Mappings } {
     return { code: `${codes.join('\n')}\n`, map: { lines } };
 }
 
-/** Nearest-preceding segment on `line` at/-before `col` (rollup's traceSegment approximation). */
+/** Nearest-preceding mapped segment on `line` at/-before `col`. */
 function traceSegment(m: Mappings, line: number, col: number): Segment | null {
     const segs = m.lines[line];
     if (!segs) return null;
@@ -201,9 +200,8 @@ function traceSegment(m: Mappings, line: number, col: number): Segment | null {
 
 /**
  * Compose two single-source maps into one: `outer` maps final output → an intermediate whose own
- * origin is described by `inner`. Result maps final output → `inner`'s sources. This is the 2-link
- * rollup `collapseSourcemaps` trace, used for the `strip → runner` dev chain (§9-G). Assumes a
- * single inner source (source index 0), which holds for per-module dev transforms.
+ * origin is described by `inner`; the result maps final output → `inner`'s sources. Each `outer`
+ * segment is retraced through `inner`. Assumes a single inner source (index 0).
  */
 export function composeSourceMaps(outer: SourceMap, inner: SourceMap): SourceMap {
     const om = decodeMappings(outer.mappings);
