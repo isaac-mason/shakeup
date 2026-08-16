@@ -27,12 +27,18 @@ describe('bundle: dynamic import() edges', () => {
         const rec = recordOf(result.graph!, '/main.ts', './lazy');
         expect(rec).toBeDefined();
         expect(rec!.dynamic).toBe(true);
-        // The single chunk contains lazy's code (target inlined).
-        expect(result.chunks).toHaveLength(1);
-        expect(result.chunks[0].code).toContain('lazy-payload');
-        // NOTE: R3-gated — the raw import('./lazy') is NOT rewritten in R2, so driving
-        // load() at runtime would 404. We assert on graph + code only until R3.
-        expect(result.code).toContain("import('./lazy')");
+        // R3: the dynamic target becomes its OWN chunk; main is the entry chunk.
+        expect(result.chunks).toHaveLength(2);
+        const entryChunk = result.chunks.find((c) => c.isEntry)!;
+        const lazyChunk = result.chunks.find((c) => c.isDynamicEntry)!;
+        expect(entryChunk.moduleIds).toContain('/main.ts');
+        expect(lazyChunk.moduleIds).toContain('/lazy.ts');
+        expect(lazyChunk.code).toContain('lazy-payload');
+        // The import() specifier is rewritten to the target chunk's logical path.
+        expect(entryChunk.code).toMatch(/import\('\.\/lazy\.js'\)/);
+        expect(entryChunk.code).not.toContain("import('./lazy')");
+        // The lazy chunk exports its surface for the dynamic import.
+        expect(lazyChunk.exports).toContain('secret');
     });
 
     it('tree-shakes a dynamic target as a whole-namespace root (both exports kept)', () => {
@@ -45,10 +51,11 @@ describe('bundle: dynamic import() edges', () => {
             external: [],
         });
         expect(result.errors).toEqual([]);
-        // R2: dynamic import = whole-namespace root, so BOTH survive. Finer per-export
-        // dynamic shaking is future work.
-        expect(result.code).toContain('USED_MARKER');
-        expect(result.code).toContain('UNUSED_MARKER');
+        // Dynamic import = whole-namespace root, so BOTH survive. Finer per-export dynamic
+        // shaking is future work. R3: they live in the lazy chunk (its own chunk).
+        const allCode = result.chunks.map((c) => c.code).join('\n');
+        expect(allCode).toContain('USED_MARKER');
+        expect(allCode).toContain('UNUSED_MARKER');
     });
 
     it('leaves non-literal import() as a runtime import with no edge', () => {
@@ -129,17 +136,25 @@ describe('bundle: multi-entry input', () => {
         expect(result.graph!.entries).toHaveLength(2);
         const names = result.graph!.entries.map((e) => e.name);
         expect(names).toEqual(['main', 'admin']);
-        expect(result.graph!.modules[result.graph!.entries[0].module].id).toBe('/main.ts');
-        expect(result.graph!.modules[result.graph!.entries[1].module].id).toBe('/admin.ts');
-        // Shared module appears exactly once in the emit order.
-        const order = result.linked!.order.map((i) => result.graph!.modules[i].id);
-        expect(order.filter((id) => id === '/shared.ts')).toHaveLength(1);
-        expect(order).toContain('/main.ts');
-        expect(order).toContain('/admin.ts');
-        // Both entries' export surfaces are merged into the single chunk.
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
-        expect(mod.m).toBe(11);
-        expect(mod.admin).toBe(12);
+        // R3: three chunks — main, admin, and a shared chunk holding /shared.ts once.
+        expect(result.chunks).toHaveLength(3);
+        const main = result.chunks.find((c) => c.name === 'main')!;
+        const admin = result.chunks.find((c) => c.name === 'admin')!;
+        const shared = result.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!;
+        expect(main.isEntry).toBe(true);
+        expect(admin.isEntry).toBe(true);
+        expect(shared.isEntry).toBe(false);
+        expect(shared.moduleIds).toEqual(['/shared.ts']);
+        // /shared.ts appears in exactly one chunk.
+        const owners = result.chunks.filter((c) => c.moduleIds.includes('/shared.ts'));
+        expect(owners).toHaveLength(1);
+        // Both entry chunks import the shared chunk (cross-chunk static import).
+        expect(main.imports).toContain(shared.name);
+        expect(admin.imports).toContain(shared.name);
+        // The shared chunk exports `util`.
+        expect(shared.exports).toContain('util');
+        // Cross-chunk import lines reference the shared chunk's logical path.
+        expect(main.code).toContain(`from './${shared.name}.js'`);
     });
 
     it('input: string[] derives distinct names and dedups repeats', () => {

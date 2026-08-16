@@ -967,21 +967,44 @@ const RESERVED = new Set([
     'public',
 ]);
 
-function deconflict(ctx: LinkCtx): void {
-    const { graph, linked } = ctx;
-    const taken = new Set<string>(RESERVED);
-    for (const idx of linked.order) {
-        const mod = graph.modules[idx];
-        for (const node of mod.semantic.unresolved) taken.add(node.name);
-    }
-    const claim = (base: string): string => {
+/** A `claim` closure over a mutable `taken` set: returns a unique name derived from
+ *  `base` (suffixing `$1`, `$2`, … on collision) and reserves it. */
+export function makeClaim(taken: Set<string>): (base: string) => string {
+    return (base: string): string => {
         let name = base;
         let n = 1;
         while (taken.has(name)) name = `${base}$${n++}`;
         taken.add(name);
         return name;
     };
-    for (const idx of linked.order) {
+}
+
+/** Deconflict the module-scope symbols, synthetics, namespaces, and external locals of a
+ *  set of modules (`memberOrder`, exec-ordered) into a FRESH scope. Whole-bundle deconflict
+ *  is this run over `linked.order`; R3 runs it once per chunk (each chunk = one lexical
+ *  scope, so a name may safely repeat across chunks). Writes into `linked.finalNames` /
+ *  `linked.namespaceOf` / `linked.externalLocals` — because a module lives in exactly one
+ *  chunk, its `packRef→name` stays unambiguous. `seed` pre-reserves names the chunk pulls
+ *  in from other chunks (cross-chunk import locals), so producer names win before consumers.
+ *
+ *  When `memberSet` is provided, only external binds whose owning module is in the chunk are
+ *  claimed here (per-chunk external import locals); the whole-bundle path passes it as null
+ *  and claims every external once. */
+export function deconflictChunk(
+    graph: Graph,
+    linked: Linked,
+    memberOrder: number[],
+    memberSet: Set<number> | null,
+    seed: Iterable<string>,
+): (base: string) => string {
+    const taken = new Set<string>(RESERVED);
+    for (const name of seed) taken.add(name);
+    for (const idx of memberOrder) {
+        const mod = graph.modules[idx];
+        for (const node of mod.semantic.unresolved) taken.add(node.name);
+    }
+    const claim = makeClaim(taken);
+    for (const idx of memberOrder) {
         const mod = graph.modules[idx];
         const moduleScope = scopeOf(mod.semantic, mod.program);
         const sem = mod.semantic;
@@ -994,9 +1017,11 @@ function deconflict(ctx: LinkCtx): void {
         }
     }
     for (const [ref, base] of linked.syntheticNames) {
+        if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
         linked.finalNames.set(ref, claim(base));
     }
     for (const [modIdx, base] of linked.namespaceOf) {
+        if (memberSet !== null && !memberSet.has(modIdx)) continue;
         linked.namespaceOf.set(modIdx, claim(base));
     }
     const claimExternal = (specifier: string, name: string, base: string): void => {
@@ -1006,11 +1031,13 @@ function deconflict(ctx: LinkCtx): void {
     };
     for (const [ref, bind] of linked.binds) {
         if (bind.kind !== 'external') continue;
+        if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
         const mod = graph.modules[refMod(ref)];
         const localName = mod.semantic.symbols[refSym(ref)].decl!.name;
         claimExternal(bind.specifier, bind.name, localName);
     }
-    for (const map of linked.exportMaps.values()) {
+    for (const [modIdx, map] of linked.exportMaps) {
+        if (memberSet !== null && !memberSet.has(modIdx)) continue;
         for (const bind of map.values()) {
             if (bind.kind !== 'external') continue;
             const base =
@@ -1022,10 +1049,19 @@ function deconflict(ctx: LinkCtx): void {
             claimExternal(bind.specifier, bind.name, base);
         }
     }
+    return claim;
 }
 
-/** Bind imports/exports across `graph`, order modules, and deconflict names into a {@link Linked}. */
-export function linkGraph(graph: Graph): Linked {
+function deconflict(ctx: LinkCtx): void {
+    deconflictChunk(ctx.graph, ctx.linked, ctx.linked.order, null, []);
+}
+
+/** Bind imports/exports across `graph`, order modules, and deconflict names into a {@link Linked}.
+ *  `opts.deconflict` (default true) runs a whole-bundle deconflict — R3 passes `false` and
+ *  runs a fresh per-chunk deconflict from {@link deconflictChunk} instead (each chunk is its
+ *  own lexical scope). When skipped, `namespaceOf` holds BASE names (`_ns`) so the per-chunk
+ *  pass can claim them. */
+export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked {
     const linked: Linked = {
         graph,
         order: sortModules(graph),
@@ -1072,14 +1108,20 @@ export function linkGraph(graph: Graph): Linked {
     for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
     for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);
     // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion
-    // roots (§4.4) and needs the resolved surface present in `linked.exportMaps`.
+    // roots (§4.4) and needs the resolved surface present in `linked.exportMaps`. A target
+    // may be statically-dominated (its record is `dynamic:false`) yet still have a literal
+    // `import()` in source that R3 rewrites to `Promise.resolve(namespaceObject)` — so we
+    // detect the target from the AST, not the record's `dynamic` flag.
     for (const mod of graph.modules) {
-        for (const rec of mod.importRecords) {
-            if (rec.dynamic && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
-        }
+        walk(mod.program, (n) => {
+            if (n.type !== N.ImportExpression || n.data.source.type !== N.StringLiteral) return;
+            const spec = mod.source.slice(n.data.source.start + 1, n.data.source.end - 1);
+            const rec = mod.importRecords.find((r) => r.specifier === spec);
+            if (rec !== undefined && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
+        });
     }
 
-    deconflict(ctx);
+    if (opts?.deconflict !== false) deconflict(ctx);
     return linked;
 }
 

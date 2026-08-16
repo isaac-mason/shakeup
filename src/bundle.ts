@@ -1,6 +1,7 @@
 import { walkRefIdents } from './analysis/refs';
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
+import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { applyEdits, collectStripEdits, type Edit, type JSXLower, renderMappedPart } from './emit';
 import {
     buildGraph,
@@ -21,25 +22,62 @@ import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
 import { type TreeshakeResult, treeshake } from './treeshake';
 
+/** A codeSplitting group as a user config (rolldown `CodeSplittingGroup`, §3.1). */
+export type CodeSplittingGroup = {
+    name: string | ((id: string) => string | null);
+    test?: string | RegExp | ((id: string) => boolean);
+    priority?: number;
+    minSize?: number;
+    maxSize?: number;
+    minModuleSize?: number;
+    maxModuleSize?: number;
+    minShareCount?: number;
+    entriesAware?: boolean;
+    includeDependenciesRecursively?: boolean;
+    tags?: '$initial'[];
+};
+
+/** Output-shaping options (§3). R4 EXTENDS this same object with naming/hash/sourcemap. */
+export type OutputOptions = {
+    /** false / the deprecated inlineDynamicImports = don't split dynamic imports out. An
+     *  object configures groups. Default true. */
+    codeSplitting?: boolean | { minSize?: number; groups?: CodeSplittingGroup[] };
+    /** rollup-compat manualChunks — normalized to a single group. */
+    manualChunks?: (id: string, meta: { getModuleInfo: (id: string) => ModuleInfo | null }) => string | null | undefined;
+    /** Deprecated alias for `codeSplitting: false` (single-input). */
+    inlineDynamicImports?: boolean;
+    /** One chunk per module, imports preserved as real ESM. */
+    preserveModules?: boolean;
+    preserveModulesRoot?: string;
+};
+
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
     treeshake?: boolean;
     /** Emit a source map (SMv3) mapping the chunk back to the module sources. */
     sourcemap?: boolean;
+    /** Output-shaping config (code splitting, manualChunks, preserveModules). */
+    output?: OutputOptions;
 };
 
-/** A single emitted chunk (rollup `OutputChunk`, R2 subset — R3/R4 extend). R2 always
- *  emits exactly one chunk holding every entry and every module. */
+/** A single emitted chunk (rollup `OutputChunk`). R4 fills `fileName` hashing. */
 export type OutputChunk = {
-    /** Chunk file name — R2 stub: derived from the (first) entry name, e.g. `${name}.js`.
-     *  R4 replaces with entryFileNames/chunkFileNames patterns. */
+    /** Chunk file name — logical stub `${name}.js` until R4 owns entry/chunkFileNames. */
     fileName: string;
-    /** Entry name for this chunk (the first entry's name in R2's single chunk). */
+    /** Logical name (entry name, group name, or derived). */
     name: string;
-    /** True — every R2 chunk is an entry chunk. */
+    /** True iff this is a static user entry chunk. */
     isEntry: boolean;
+    /** True iff this is a dynamic-import target chunk. */
+    isDynamicEntry: boolean;
     /** Module ids this chunk contains, in emit order. */
     moduleIds: string[];
+    /** Logical names of other chunks this chunk statically imports. */
+    imports: string[];
+    /** Logical names of chunks this chunk `import()`s. */
+    dynamicImports: string[];
+    /** Exported names this chunk surfaces. */
+    exports: string[];
     code: string;
     map?: SourceMap;
 };
@@ -47,17 +85,16 @@ export type OutputChunk = {
 /** Output of {@link bundle}: the chunk graph plus diagnostics and intermediate state. `map`
  *  is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
-    /** @deprecated single-chunk convenience alias for `chunks[0].code`. Kept so every
-     *  existing caller/test compiles unchanged in R2. Remove when R3 lands real splitting. */
+    /** @deprecated single-chunk convenience alias for the ENTRY chunk's `code`. */
     code: string;
-    /** The chunk graph. R2 always length 1 (or 0 on error). R3 makes this the real output. */
+    /** The chunk graph. Length ≥ 1 (0 on error). */
     chunks: OutputChunk[];
     errors: string[];
     warnings: string[];
     graph: Graph | null;
     linked: Linked | null;
     shaken: TreeshakeResult | null;
-    /** @deprecated alias for `chunks[0].map`. */
+    /** @deprecated alias for the entry chunk's `map`. */
     map?: SourceMap;
 };
 
@@ -68,6 +105,9 @@ type EmitCtx = {
     edits: Edit[];
     warnings: string[];
     live: Set<number> | null;
+    /** The chunk this module is being rendered into (null in link-only helpers). */
+    chunk: Chunk | null;
+    chunkGraph: ChunkGraph | null;
 };
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
@@ -78,7 +118,7 @@ function renameOf(ctx: EmitCtx, identNode: Node): string | null {
     if (imp !== undefined) {
         const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
         if (bind === undefined) return null;
-        return nameOfBind(ctx.linked, bind);
+        return nameOfBind(ctx.linked, bind, ctx.chunk);
     }
     const renamed = ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym));
     return renamed ?? null;
@@ -90,27 +130,31 @@ function finalNameOfSymbol(ctx: EmitCtx, sym: number): string | null {
     if (imp !== undefined) {
         const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
         if (bind === undefined) return null;
-        return nameOfBind(ctx.linked, bind);
+        return nameOfBind(ctx.linked, bind, ctx.chunk);
     }
     return ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym)) ?? null;
 }
 
-/** Whether two entry-export binds are the same target (so merging them into one chunk's
- *  `export { … }` is safe). Mirrors module-graph's internal `sameBind` for the emit path. */
-function sameBindForExport(a: ImportBind, b: ImportBind): boolean {
-    if (a.kind !== b.kind) return false;
-    if (a.kind === 'found' && b.kind === 'found') return a.ref === b.ref;
-    if (a.kind === 'namespace' && b.kind === 'namespace') return a.module === b.module;
-    if (a.kind === 'external' && b.kind === 'external') return a.specifier === b.specifier && a.name === b.name;
-    return true;
-}
-
-function nameOfBind(linked: Linked, bind: ImportBind): string | null {
+/** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
+ *  consuming chunk). A `found`/`namespace` bind whose producer lives in ANOTHER chunk renders
+ *  as this chunk's cross-chunk import LOCAL (recorded during wiring); a same-chunk bind
+ *  renders as the producer's final name. `chunk === null` = single-scope (whole-bundle). */
+function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): string | null {
     switch (bind.kind) {
-        case 'found':
+        case 'found': {
+            if (chunk !== null) {
+                const local = chunk.importLocalOf.get(bind.ref);
+                if (local !== undefined) return local;
+            }
             return finalNameOf(linked, bind.ref);
-        case 'namespace':
+        }
+        case 'namespace': {
+            if (chunk !== null) {
+                const local = chunk.nsImportLocalOf.get(bind.module);
+                if (local !== undefined) return local;
+            }
             return linked.namespaceOf.get(bind.module) ?? null;
+        }
         case 'external':
             return linked.externalLocals.get(externalKey(bind.specifier, bind.name)) ?? null;
         case 'none':
@@ -118,7 +162,8 @@ function nameOfBind(linked: Linked, bind: ImportBind): string | null {
     }
 }
 
-/** Walk an expression/statement subtree adding rename edits (shorthand-aware). */
+/** Walk an expression/statement subtree adding rename edits (shorthand-aware) AND
+ *  rewriting dynamic `import()` specifiers to their target chunk (§2.5). */
 function renameWalk(ctx: EmitCtx, node: Node): void {
     walkRefIdents(node, (ident, shorthandProp) => {
         const newName = renameOf(ctx, ident);
@@ -128,6 +173,38 @@ function renameWalk(ctx: EmitCtx, node: Node): void {
             end: ident.end,
             text: shorthandProp !== null ? `${ident.name}: ${newName}` : newName,
         });
+    });
+    rewriteDynamicImports(ctx, node);
+}
+
+/** Rewrite each literal dynamic `import('./spec')` in `node` to point at the target chunk's
+ *  logical import path; if the target collapsed into THIS chunk, replace with
+ *  `Promise.resolve(<namespaceObject>)`. External / non-literal import() is left verbatim. */
+function rewriteDynamicImports(ctx: EmitCtx, node: Node): void {
+    const { mod, chunk, chunkGraph } = ctx;
+    if (chunk === null || chunkGraph === null) return;
+    walk(node, (n) => {
+        if (n.type !== N.ImportExpression) return;
+        const source = n.data.source;
+        if (source.type !== N.StringLiteral) return;
+        const spec = mod.source.slice(source.start + 1, source.end - 1);
+        const rec = mod.importRecords.find((r) => r.specifier === spec);
+        if (rec === undefined || rec.external || rec.resolved < 0) return;
+        const targetChunk = chunkGraph.chunkByModule[rec.resolved];
+        if (targetChunk < 0) return;
+        if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
+            // Target folded into this chunk: resolve against its namespace object. Defer the
+            // namespace access into a microtask (`Promise.resolve().then(() => ns)`) so a
+            // top-level `import().then()` doesn't read the ns const before it's declared (TDZ)
+            // — mirrors rolldown's `Promise.resolve().then(() => foo_exports)`.
+            const nsName = ctx.linked.namespaceOf.get(rec.resolved);
+            const inner = nsName ?? '{}';
+            ctx.edits.push({ start: n.start, end: n.end, text: `Promise.resolve().then(() => ${inner})` });
+        } else {
+            // Point the specifier at the target chunk's logical path (R4 owns the real path).
+            const path = `./${chunkGraph.chunks[targetChunk].name}.js`;
+            ctx.edits.push({ start: source.start, end: source.end, text: `'${path}'` });
+        }
     });
 }
 
@@ -282,13 +359,13 @@ function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): st
 
 const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
 
-function renderNamespaceObject(linked: Linked, modIdx: number): string {
+function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | null): string {
     const nsName = linked.namespaceOf.get(modIdx)!;
     const map = linked.exportMaps.get(modIdx);
     const entries: string[] = [];
     if (map !== undefined) {
         for (const [name, bind] of map) {
-            const value = nameOfBind(linked, bind);
+            const value = nameOfBind(linked, bind, chunk);
             if (value === null) continue;
             entries.push(`${isIdentName(name) ? name : JSON.stringify(name)}: ${value}`);
         }
@@ -326,35 +403,100 @@ export function bundle(options: BundleOptions): BundleResult {
     if (graph.errors.length > 0 || graph.entries.length === 0) {
         return { code: '', chunks: [], errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
     }
-    const linked = linkGraph(graph);
+    // Link WITHOUT whole-bundle deconflict — the per-chunk deconflict inside buildChunkGraph
+    // assigns names in fresh per-chunk scopes (§2.3). For a single chunk this reproduces the
+    // whole-bundle names byte-for-byte (same order, same taken seeding).
+    const linked = linkGraph(graph, { deconflict: false });
     if (linked.errors.length > 0) {
         return { code: '', chunks: [], errors: linked.errors, warnings: [], graph, linked, shaken: null };
     }
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
-    const parts: string[] = [];
-    const entryStarSpecs: string[] = [];
-    const sideEffectSpecs = new Set<string>();
     const jsxPure = resolveJSXOptions(options.jsx).pure;
+    // Tree-shake per module BEFORE chunk assembly (unchanged). Uses binds/exportMaps, not names.
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
 
+    // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict (§1-2).
+    const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings);
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions);
+
     let anyLiveJSX = false;
+    for (const mod of graph.modules) {
+        const live = shaken === null ? null : shaken.live[mod.idx];
+        if (mod.jsxRuntime !== null && moduleHasLiveJSX(mod, live)) anyLiveJSX = true;
+    }
+    if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
 
     const wantMap = options.sourcemap === true;
+    const outputChunks: OutputChunk[] = [];
+    for (let ci = 0; ci < chunkGraph.chunks.length; ci++) {
+        const chunk = chunkGraph.chunks[ci];
+        const rendered = renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, wantMap);
+        if (rendered === null) continue; // empty non-entry chunk dropped (§7)
+        outputChunks.push(rendered);
+    }
+
+    // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
+    for (let i = 0; i < outputChunks.length; i++) {
+        const oc = outputChunks[i];
+        for (const hook of pipeline.renderChunk) {
+            const result = hook.handler(pluginCtx, oc.code);
+            if (result !== null && result !== undefined && result !== oc.code) {
+                oc.code = result;
+                if (oc.map !== undefined) {
+                    oc.map = undefined;
+                    warnings.push('sourcemap omitted: a renderChunk plugin rewrote the chunk');
+                }
+            }
+        }
+    }
+    for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
+    warnings.push(...warningsOut.splice(0));
+
+    // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
+    // `code`/`map` aliases point at the FIRST entry chunk (§5.2 back-compat).
+    const entryFirst = outputChunks[0];
+    return {
+        code: entryFirst?.code ?? '',
+        chunks: outputChunks,
+        errors: [],
+        warnings,
+        graph,
+        linked,
+        shaken,
+        map: entryFirst?.map,
+    };
+}
+
+/** Render one chunk to an {@link OutputChunk}, or null if it is an empty non-entry chunk
+ *  (dropped per §7). Cross-chunk `import`/`export` lines are synthesized from `chunk.imports`
+ *  / `chunk.exports`; module bodies reuse the R2 edit engine but scoped to this chunk. */
+function renderChunk(
+    graph: Graph,
+    linked: Linked,
+    chunkGraph: ChunkGraph,
+    chunk: Chunk,
+    chunkIdx: number,
+    shaken: TreeshakeResult | null,
+    warnings: string[],
+    wantMap: boolean,
+): OutputChunk | null {
+    const entryStarSpecs: string[] = [];
+    const sideEffectSpecs = new Set<string>();
     const moduleTexts: string[] = [];
-    const moduleParts: Part[] = []; // parallel to moduleTexts, only built when wantMap
+    const moduleParts: Part[] = [];
     const mapSources: string[] = [];
     const mapSourcesContent: string[] = [];
-    for (const idx of linked.order) {
+
+    for (const idx of chunk.modules) {
         const mod = graph.modules[idx];
         const live = shaken === null ? null : shaken.live[idx];
-        if (mod.jsxRuntime !== null && moduleHasLiveJSX(mod, live)) anyLiveJSX = true;
         const enumFinalName = (idNode: Node): string | null => {
             const sym = symbolOf(mod.semantic, idNode);
             if (sym === 0) return null;
             return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
         };
-        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live };
+        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph };
         const jsxLower: JSXLower | null =
             mod.jsxRuntime === null
                 ? null
@@ -373,11 +515,11 @@ export function bundle(options: BundleOptions): BundleResult {
             }
             stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
         }
-        const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live };
+        const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph };
         moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
         let out = applyEdits(mod.source, ctx.edits).trim();
         if (linked.namespaceOf.has(idx)) {
-            out += `\n${renderNamespaceObject(linked, idx)}`;
+            out += `\n${renderNamespaceObject(linked, idx, chunk)}`;
         }
         if (out !== '') moduleTexts.push(out);
         if (wantMap && out !== '') {
@@ -385,60 +527,74 @@ export function bundle(options: BundleOptions): BundleResult {
             mapSources.push(mod.id);
             mapSourcesContent.push(mod.source);
             moduleParts.push(part);
-            if (linked.namespaceOf.has(idx)) moduleParts.push({ code: renderNamespaceObject(linked, idx) });
+            if (linked.namespaceOf.has(idx)) moduleParts.push({ code: renderNamespaceObject(linked, idx, chunk) });
         }
     }
 
-    if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
+    // Cross-chunk static imports (§2.2): `import { imported as local, … } from './producer.js';`
+    const crossImportLines: string[] = [];
+    for (const [producerChunk, specs] of chunk.imports) {
+        const path = `./${chunkGraph.chunks[producerChunk].name}.js`;
+        const parts = specs.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
+        crossImportLines.push(`import { ${parts.join(', ')} } from '${path}';`);
+    }
+    for (const producerChunk of chunk.sideEffectImports) {
+        crossImportLines.push(`import './${chunkGraph.chunks[producerChunk].name}.js';`);
+    }
 
-    // Synthetic (generated-only) surrounds, computed once for both the string and the map assembly.
+    // External imports (unchanged R2 path), scoped to this chunk's used external locals.
     const extImports = renderExternalImports(linked, sideEffectSpecs);
-    let exportLine: string | null = null;
-    // Merge the export surfaces of ALL entries into the single chunk's trailing
-    // `export { … }`, deduping by exported name (§4.5). With one entry this is byte-
-    // identical to the pre-R2 single-entry output. Two entries exporting the same name
-    // with DIFFERENT binds is a real conflict in one merged chunk: emit the first, warn.
-    // R3 gives each entry its own chunk and the conflict dissolves.
-    {
-        const merged = new Map<string, ImportBind>();
-        const mergedFrom = new Map<string, string>();
-        for (const { module, name: entryName } of graph.entries) {
-            const entryMap = linked.exportMaps.get(module);
-            if (entryMap === undefined) continue;
+
+    // Chunk exports (§2.4). For an entry chunk this is the entry's export surface; for a
+    // shared/producer chunk it is `chunk.exports` (the cross-chunk producer names).
+    const exportSpecs: string[] = [];
+    const exportedNames: string[] = [];
+    const seenExport = new Set<string>();
+    // Entry (and dynamic-entry) chunks export their entry module's surface.
+    if (chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
+        const entryMap = linked.exportMaps.get(chunk.entryModule);
+        if (entryMap !== undefined) {
             for (const [name, bind] of entryMap) {
-                const prior = merged.get(name);
-                if (prior === undefined) {
-                    merged.set(name, bind);
-                    mergedFrom.set(name, entryName);
-                } else if (!sameBindForExport(prior, bind)) {
-                    warnings.push(
-                        `entries '${mergedFrom.get(name)}' and '${entryName}' both export '${name}' — merged into one chunk exports the first; R3 chunk splitting will separate them`,
-                    );
-                }
-            }
-        }
-        if (merged.size > 0) {
-            const specifiers: string[] = [];
-            for (const [name, bind] of merged) {
-                const local = nameOfBind(linked, bind);
+                const local = nameOfBind(linked, bind, chunk);
                 if (local === null) continue;
+                if (seenExport.has(name)) continue;
+                seenExport.add(name);
                 const exported = isIdentName(name) ? name : JSON.stringify(name);
-                specifiers.push(local === name ? exported : `${local} as ${exported}`);
+                exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
+                exportedNames.push(name);
             }
-            if (specifiers.length > 0) exportLine = `export { ${specifiers.join(', ')} };`;
         }
     }
+    // Producer exports for cross-chunk consumers (`export { local as t }`).
+    for (const [exportedName, e] of chunk.exports) {
+        if (seenExport.has(exportedName)) continue;
+        // Skip if this is already covered by the entry export surface under the same local.
+        const local = e.local;
+        seenExport.add(exportedName);
+        const exported = isIdentName(exportedName) ? exportedName : JSON.stringify(exportedName);
+        exportSpecs.push(local === exportedName ? exported : `${local} as ${exported}`);
+        exportedNames.push(exportedName);
+    }
+    const exportLine = exportSpecs.length > 0 ? `export { ${exportSpecs.join(', ')} };` : null;
     const starLines = entryStarSpecs.map((spec) => `export * from '${spec}';`);
 
+    // Empty non-entry chunk with nothing to emit: drop it (§7).
+    const isEmpty = moduleTexts.length === 0 && exportLine === null && starLines.length === 0;
+    if (isEmpty && !chunk.isEntry) return null;
+
+    const parts: string[] = [];
+    parts.push(...crossImportLines);
     parts.push(...extImports);
     parts.push(...moduleTexts);
     if (exportLine !== null) parts.push(exportLine);
     parts.push(...starLines);
-    let code = `${parts.join('\n')}\n`;
+    const code = `${parts.join('\n')}\n`;
 
     let map: SourceMap | undefined;
     if (wantMap) {
-        const all: Part[] = extImports.map((s) => ({ code: s }));
+        const all: Part[] = [];
+        for (const s of crossImportLines) all.push({ code: s });
+        for (const s of extImports) all.push({ code: s });
         all.push(...moduleParts);
         if (exportLine !== null) all.push({ code: exportLine });
         for (const s of starLines) all.push({ code: s });
@@ -452,30 +608,72 @@ export function bundle(options: BundleOptions): BundleResult {
         };
     }
 
-    for (const hook of pipeline.renderChunk) {
-        const result = hook.handler(pluginCtx, code);
-        if (result !== null && result !== undefined && result !== code) {
-            code = result;
-            if (map !== undefined) {
-                map = undefined;
-                warnings.push('sourcemap omitted: a renderChunk plugin rewrote the chunk');
-            }
-        }
-    }
-    for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
-    warnings.push(...warningsOut.splice(0));
+    const importNames: string[] = [];
+    for (const p of chunk.imports.keys()) importNames.push(chunkGraph.chunks[p].name);
+    for (const p of chunk.sideEffectImports) importNames.push(chunkGraph.chunks[p].name);
+    const dynamicImportNames: string[] = [];
+    for (const d of chunk.dynamicImports) dynamicImportNames.push(chunkGraph.chunks[d].name);
 
-    // Wrap the single assembled chunk in one OutputChunk (R2 always length 1). name/
-    // fileName come from the first entry; moduleIds are the emit order. code/map are
-    // aliased onto the result for back-compat with every existing caller (§5.2).
-    const chunkName = graph.entries[0]?.name ?? 'main';
-    const chunk: OutputChunk = {
-        fileName: `${chunkName}.js`,
-        name: chunkName,
-        isEntry: true,
-        moduleIds: linked.order.map((i) => graph.modules[i].id),
+    void chunkIdx;
+    return {
+        fileName: `${chunk.name}.js`,
+        name: chunk.name,
+        isEntry: chunk.isEntry,
+        isDynamicEntry: chunk.isDynamicEntry,
+        moduleIds: chunk.modules.map((i) => graph.modules[i].id),
+        imports: importNames,
+        dynamicImports: dynamicImportNames,
+        exports: exportedNames,
         code,
         map,
     };
-    return { code, chunks: [chunk], errors: [], warnings, graph, linked, shaken, map };
+}
+
+/** Resolve user `output` options into {@link ChunkOptions}, normalizing manualChunks → a
+ *  single group and inlineDynamicImports → codeSplitting:false (§3.3/§3.5). */
+function resolveChunkOptions(output: OutputOptions | undefined, entryCount: number, warnings: string[]): ChunkOptions {
+    const cs = output?.codeSplitting;
+    const inline = output?.inlineDynamicImports === true;
+    let codeSplitting = cs !== false && !inline;
+    if (inline && entryCount > 1) {
+        warnings.push('inlineDynamicImports is only valid with a single input — ignored for multi-entry');
+        codeSplitting = true;
+    }
+    const groups: ResolvedGroup[] = [];
+    let index = 0;
+    const addGroup = (g: CodeSplittingGroup): void => {
+        const nameFn: (id: string) => string | null = typeof g.name === 'function' ? g.name : () => g.name as string;
+        let testFn: ((id: string) => boolean) | null = null;
+        if (typeof g.test === 'string') {
+            const t = g.test;
+            testFn = (id) => id.includes(t);
+        } else if (g.test instanceof RegExp) {
+            const re = g.test;
+            testFn = (id) => re.test(id);
+        } else if (typeof g.test === 'function') {
+            testFn = g.test;
+        }
+        groups.push({
+            name: nameFn,
+            test: testFn,
+            priority: g.priority ?? 0,
+            minSize: g.minSize ?? 0,
+            maxSize: g.maxSize ?? Number.POSITIVE_INFINITY,
+            minModuleSize: g.minModuleSize ?? 0,
+            maxModuleSize: g.maxModuleSize ?? Number.POSITIVE_INFINITY,
+            minShareCount: g.minShareCount ?? 1,
+            initialOnly: (g.tags ?? []).includes('$initial'),
+            includeDependenciesRecursively: g.includeDependenciesRecursively ?? true,
+            index: index++,
+        });
+    };
+    if (typeof cs === 'object' && cs.groups !== undefined) {
+        for (const g of cs.groups) addGroup(g);
+    }
+    // manualChunks → single group whose `name` is the fn (test/priority/sizes default).
+    if (output?.manualChunks !== undefined) {
+        const fn = output.manualChunks;
+        addGroup({ name: (id: string) => fn(id, { getModuleInfo: () => null }) ?? null });
+    }
+    return { codeSplitting, preserveModules: output?.preserveModules === true, groups };
 }
