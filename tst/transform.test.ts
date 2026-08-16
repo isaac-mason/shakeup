@@ -123,8 +123,6 @@ describe('transform — passthrough', () => {
     });
 });
 
-// ─── moduleRunnerTransform (native __shakeup protocol) ───────────────────────
-
 /** the transformed code, asserting no diagnostics. */
 function mrt(src: string): string {
     const r = moduleRunnerTransform('m.js', src);
@@ -260,8 +258,6 @@ describe('moduleRunnerTransform — re-exports', () => {
         expect('default' in ns).toBe(false); // default never re-exported by *
     });
 });
-
-// ─── devTransform: fused parse-once (dev-path transform) ─────────────────────
 
 /** run runner-protocol code against a stub __shakeup, return the exports. */
 async function runCode(code: string, link: (spec: string) => unknown): Promise<Record<string, unknown>> {

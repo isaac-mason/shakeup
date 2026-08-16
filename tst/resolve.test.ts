@@ -351,8 +351,6 @@ describe('alignment regressions (vs esbuild)', () => {
     });
 });
 
-// R4 (§5): the `resolve:{}` config surfaced on bundle() → defaultResolve. These exercise the
-// CORE relative-probe resolver (not the nodeResolve plugin), which is what `resolve:{}` drives.
 describe('R4 resolve:{} config (core relative probe)', () => {
     const moduleIds = (r: ReturnType<typeof bundle>) => r.chunks[0].moduleIds;
 

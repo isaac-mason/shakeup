@@ -30,7 +30,6 @@ function countOurs(src: string): Counts {
     return counts;
 }
 
-/** Count node types in a meriyah ESTree by recursively visiting node objects. */
 function countMeriyah(root: unknown): Counts {
     const counts: Counts = {};
     const skip = new Set(['loc', 'range', 'regex']);
@@ -68,7 +67,6 @@ const GROUPS: Group[] = [
     },
 ];
 
-/** type names excluded entirely from the diff, with reasons. */
 const EXCLUDED: Record<string, string> = {
     Identifier:
         "We split Identifier into four roles (BindingIdentifier / IdentifierReference / IdentifierName / LabelIdentifier), all of which serialize as 'Identifier' in ESTREE_NAME so they land in this one bucket. Counts still diverge from meriyah for two reasons: (1) MetaProperty handling — meriyah emits Identifier children (meta/property) under MetaProperty, we treat ImportMeta/NewTarget as leaves; (2) shorthand `{a}` — we now materialize the key (IdentifierName) and value (IdentifierReference/BindingIdentifier) as two distinct nodes, and we keep assignment-side destructuring expression-flavored, both shifting Identifier counts. Excluded per spec.",
@@ -80,7 +78,6 @@ type SuspectedBug = { type: string; delta: number; repro: string; analysis: stri
 
 const SUSPECTED_BUGS: SuspectedBug[] = [];
 
-/** collapse counts according to GROUPS (members summed under group name). */
 function applyGroups(counts: Counts): Counts {
     const out: Counts = { ...counts };
     for (const g of GROUPS) {

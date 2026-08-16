@@ -51,7 +51,6 @@ type PjResult =
 
 const isUndefinedish = (r: PjResult): boolean => r.status === 'undefined' || r.status === 'no-conditions';
 
-/** path.Join semantics for a posix package-relative target under packageURL. */
 function joinUrl(packageUrl: string, rel: string): string {
     return normalizePath(`${packageUrl}/${rel}`);
 }

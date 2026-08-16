@@ -12,7 +12,6 @@ function parseJSX(src: string, ts = false) {
     return parse(src, { ts, jsx: true });
 }
 
-/** Collect the (type,name) of every node matching a predicate, in walk order. */
 function collect(src: string, ts: boolean, pred: (n: Node) => boolean): { type: number; name: string }[] {
     const { program } = parseJSX(src, ts);
     const out: { type: number; name: string }[] = [];

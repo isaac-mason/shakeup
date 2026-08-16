@@ -29,7 +29,7 @@ import { type ChunkRenderer, type PreliminaryFileName, type RenderedChunk, rende
 import type { Part, SourceMap } from './sourcemap';
 import { type TreeshakeResult, treeshake } from './treeshake';
 
-/** A codeSplitting group as a user config (rolldown `CodeSplittingGroup`, §3.1). */
+/** A codeSplitting group as a user config. */
 export type CodeSplittingGroup = {
     name: string | ((id: string) => string | null);
     test?: string | RegExp | ((id: string) => boolean);
@@ -44,12 +44,12 @@ export type CodeSplittingGroup = {
     tags?: '$initial'[];
 };
 
-/** Output-shaping options (§3, R3) + naming/hash/sourcemap (R4, from {@link OutputOptionsNaming}). */
+/** Output-shaping options plus naming/hash/sourcemap (from {@link OutputOptionsNaming}). */
 export type OutputOptions = OutputOptionsNaming & {
     /** false / the deprecated inlineDynamicImports = don't split dynamic imports out. An
      *  object configures groups. Default true. */
     codeSplitting?: boolean | { minSize?: number; groups?: CodeSplittingGroup[] };
-    /** rollup-compat manualChunks — normalized to a single group. */
+    /** manualChunks — normalized to a single group. */
     manualChunks?: (id: string, meta: { getModuleInfo: (id: string) => ModuleInfo | null }) => string | null | undefined;
     /** Deprecated alias for `codeSplitting: false` (single-input). */
     inlineDynamicImports?: boolean;
@@ -58,7 +58,6 @@ export type OutputOptions = OutputOptionsNaming & {
     preserveModulesRoot?: string;
 };
 
-/** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
     treeshake?: boolean;
     /** Emit a source map (SMv3) mapping the chunk back to the module sources. */
@@ -67,9 +66,7 @@ export type BundleOptions = GraphOptions & {
     output?: OutputOptions;
 };
 
-/** A single emitted chunk (rollup `OutputChunk`). R4 fills `fileName` hashing. */
 export type OutputChunk = {
-    /** Chunk file name — logical stub `${name}.js` until R4 owns entry/chunkFileNames. */
     fileName: string;
     /** Logical name (entry name, group name, or derived). */
     name: string;
@@ -89,8 +86,7 @@ export type OutputChunk = {
     map?: SourceMap;
 };
 
-/** Output of {@link bundle}: the chunk graph plus diagnostics and intermediate state. `map`
- *  is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
+/** `map` is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
     /** @deprecated single-chunk convenience alias for the ENTRY chunk's `code`. */
     code: string;
@@ -117,8 +113,8 @@ type EmitCtx = {
     /** The chunk this module is being rendered into (null in link-only helpers). */
     chunk: Chunk | null;
     chunkGraph: ChunkGraph | null;
-    /** Resolve a target chunk idx to the import specifier this chunk uses for it (R4:
-     *  relative path over preliminary/placeholder-bearing filenames). Null in link-only. */
+    /** Resolve a target chunk idx to the import specifier this chunk uses for it (relative
+     *  path over preliminary/placeholder-bearing filenames). Null in link-only. */
     pathToChunk: ((targetChunkIdx: number) => string) | null;
 };
 
@@ -175,7 +171,7 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
 }
 
 /** Walk an expression/statement subtree adding rename edits (shorthand-aware) AND
- *  rewriting dynamic `import()` specifiers to their target chunk (§2.5). */
+ *  rewriting dynamic `import()` specifiers to their target chunk. */
 function renameWalk(ctx: EmitCtx, node: Node): void {
     walkRefIdents(node, (ident, shorthandProp) => {
         const newName = renameOf(ctx, ident);
@@ -207,13 +203,12 @@ function rewriteDynamicImports(ctx: EmitCtx, node: Node): void {
         if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
             // Target folded into this chunk: resolve against its namespace object. Defer the
             // namespace access into a microtask (`Promise.resolve().then(() => ns)`) so a
-            // top-level `import().then()` doesn't read the ns const before it's declared (TDZ)
-            // — mirrors rolldown's `Promise.resolve().then(() => foo_exports)`.
+            // top-level `import().then()` doesn't read the ns const before it's declared (TDZ).
             const nsName = ctx.linked.namespaceOf.get(rec.resolved);
             const inner = nsName ?? '{}';
             ctx.edits.push({ start: n.start, end: n.end, text: `Promise.resolve().then(() => ${inner})` });
         } else {
-            // Point the specifier at the target chunk's import path (R4: preliminary
+            // Point the specifier at the target chunk's import path (preliminary
             // placeholder-bearing path, resolved to the final hashed name in pass C).
             const path = ctx.pathToChunk !== null ? ctx.pathToChunk(targetChunk) : `./${chunkGraph.chunks[targetChunk].name}.js`;
             ctx.edits.push({ start: source.start, end: source.end, text: `'${path}'` });
@@ -411,13 +406,13 @@ export function bundle(options: BundleOptions): BundleResult {
         },
         getModuleIds: () => (graph === undefined ? [][Symbol.iterator]() : graph.byId.keys()),
     };
-    // buildStart is now driven inside buildGraph (full graph-backed ctx for ctx.resolve).
+    // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
     graph = buildGraph(options, pipeline);
     if (graph.errors.length > 0 || graph.entries.length === 0) {
         return { code: '', chunks: [], errors: graph.errors, warnings: [], graph, linked: null, shaken: null };
     }
     // Link WITHOUT whole-bundle deconflict — the per-chunk deconflict inside buildChunkGraph
-    // assigns names in fresh per-chunk scopes (§2.3). For a single chunk this reproduces the
+    // assigns names in fresh per-chunk scopes. For a single chunk this reproduces the
     // whole-bundle names byte-for-byte (same order, same taken seeding).
     const linked = linkGraph(graph, { deconflict: false });
     if (linked.errors.length > 0) {
@@ -426,10 +421,10 @@ export function bundle(options: BundleOptions): BundleResult {
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
     const jsxPure = resolveJSXOptions(options.jsx).pure;
-    // Tree-shake per module BEFORE chunk assembly (unchanged). Uses binds/exportMaps, not names.
+    // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
 
-    // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict (§1-2).
+    // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings);
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions);
 
@@ -440,7 +435,7 @@ export function bundle(options: BundleOptions): BundleResult {
     }
     if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
 
-    // Normalize output naming/hashing/sourcemap config (R4). `sourcemap` (top-level) is a
+    // Normalize output naming/hashing/sourcemap config. `sourcemap` (top-level) is a
     // deprecated alias for `output.sourcemap`. Reject `file:` for a multi-chunk build.
     const multiChunk = chunkGraph.chunks.length > 1;
     let naming: NormalizedOutputNaming;
@@ -451,7 +446,7 @@ export function bundle(options: BundleOptions): BundleResult {
     }
 
     // Two-pass render → content-hash → final-hash → substitute (render-chunks.ts). The per-chunk
-    // renderer closes over graph/linked/shaken and threads the R4 path resolver + addons.
+    // renderer closes over graph/linked/shaken and threads the path resolver + addons.
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
         renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim);
 
@@ -483,7 +478,7 @@ export function bundle(options: BundleOptions): BundleResult {
     warnings.push(...warningsOut.splice(0));
 
     // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
-    // `code`/`map` aliases point at the FIRST entry chunk (§5.2 back-compat).
+    // `code`/`map` aliases point at the FIRST entry chunk (back-compat).
     const entryFirst = outputChunks[0];
     return {
         code: entryFirst?.code ?? '',
@@ -499,8 +494,8 @@ export function bundle(options: BundleOptions): BundleResult {
 }
 
 /** Render one chunk to a {@link RenderedChunk} (placeholders unresolved), or null if it is an
- *  empty non-entry chunk (dropped per §7). Cross-chunk `import`/`export` lines are synthesized
- *  from `chunk.imports`/`chunk.exports`, their paths resolved via `pathToChunk` (preliminary,
+ *  empty non-entry chunk. Cross-chunk `import`/`export` lines are synthesized from
+ *  `chunk.imports`/`chunk.exports`, their paths resolved via `pathToChunk` (preliminary,
  *  placeholder-bearing filenames — the real hashed path is substituted in pass C). Banner/intro
  *  are prepended as SYNTHETIC leading map Parts so the per-chunk sourcemap stays in offset. */
 function renderChunk(
@@ -566,7 +561,7 @@ function renderChunk(
         }
     }
 
-    // Cross-chunk static imports (§2.2): `import { imported as local, … } from '<path>';`
+    // Cross-chunk static imports: `import { imported as local, … } from '<path>';`
     const crossImportLines: string[] = [];
     for (const [producerChunk, specs] of chunk.imports) {
         const path = pathToChunk(producerChunk);
@@ -577,12 +572,12 @@ function renderChunk(
         crossImportLines.push(`import '${pathToChunk(producerChunk)}';`);
     }
 
-    // External imports (unchanged R2 path), scoped to this chunk's used external locals.
+    // External imports, scoped to this chunk's used external locals.
     const extImports = renderExternalImports(linked, sideEffectSpecs);
 
-    // Chunk exports (§2.4). `exports: 'none'` suppresses the entry export line entirely
-    // (validation-only shaping for pure ESM — cross-chunk producer exports still emit so
-    // shared chunks keep working). For a shared/producer chunk it is `chunk.exports`.
+    // `exports: 'none'` suppresses the entry export line entirely (validation-only shaping for
+    // pure ESM — cross-chunk producer exports still emit so shared chunks keep working). For a
+    // shared/producer chunk it is `chunk.exports`.
     const exportSpecs: string[] = [];
     const exportedNames: string[] = [];
     const seenExport = new Set<string>();
@@ -605,7 +600,6 @@ function renderChunk(
     // Producer exports for cross-chunk consumers (`export { local as t }`).
     for (const [exportedName, e] of chunk.exports) {
         if (seenExport.has(exportedName)) continue;
-        // Skip if this is already covered by the entry export surface under the same local.
         const local = e.local;
         seenExport.add(exportedName);
         const exported = isIdentName(exportedName) ? exportedName : JSON.stringify(exportedName);
@@ -615,13 +609,12 @@ function renderChunk(
     const exportLine = exportSpecs.length > 0 ? `export { ${exportSpecs.join(', ')} };` : null;
     const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => `export * from '${spec}';`);
 
-    // Empty non-entry chunk with nothing to emit: drop it (§7).
+    // Empty non-entry chunk with nothing to emit: drop it.
     const isEmpty = moduleTexts.length === 0 && exportLine === null && starLines.length === 0;
     if (isEmpty && !chunk.isEntry) return null;
 
-    // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. `intro`/`outro`
-    // sit INSIDE the module region (rollup order: banner, intro, imports, body, exports, outro,
-    // footer). We keep it simple: banner+intro lead, footer+outro trail.
+    // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. Order:
+    // banner, intro, imports, body, exports, outro, footer.
     const preInfo: PreRenderedChunk = {
         name: chunk.name,
         isEntry: chunk.isEntry,
@@ -688,7 +681,7 @@ function renderChunk(
 }
 
 /** Resolve user `output` options into {@link ChunkOptions}, normalizing manualChunks → a
- *  single group and inlineDynamicImports → codeSplitting:false (§3.3/§3.5). */
+ *  single group and inlineDynamicImports → codeSplitting:false. */
 function resolveChunkOptions(output: OutputOptions | undefined, entryCount: number, warnings: string[]): ChunkOptions {
     const cs = output?.codeSplitting;
     const inline = output?.inlineDynamicImports === true;

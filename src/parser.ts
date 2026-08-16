@@ -13,8 +13,7 @@ import {
 } from './ast.ts';
 import { enumeration } from './util/enumeration';
 
-/** Any of the four identifier-role leaves — the parser's loose handle for a name
- * node whose role is fixed by the constructing call site. */
+/** Any of the four identifier-role leaves; the role is fixed by the constructing call site. */
 type Identifier = BindingIdentifier | IdentifierReference | IdentifierName | LabelIdentifier;
 
 const R_BIND = N.BindingIdentifier;
@@ -166,7 +165,7 @@ function accessibilityOf(flags: number): Accessibility {
     return a === 1 ? 'public' : a === 2 ? 'private' : a === 3 ? 'protected' : null;
 }
 
-/** A parse slot: a node object, or null when absent. (Replaces flat's `0`.) */
+/** A parse slot: a node object, or null when absent. */
 type Ref = Node | null;
 
 /** The null-data TS keyword/leaf type ids the `keyword` helper materializes. */
@@ -867,9 +866,8 @@ const CONTEXTUAL = new Set<number>([
 const F_NL = 1;
 
 /** All mutable parser state for one `parse` call, threaded as the first argument
- * (`state`) to every lexing/parsing function. Making the state explicit (rather than
- * module-scope `let`s) keeps the parser re-entrant — a prerequisite for warm
- * incremental rebuilds and for parsing more than one module at a time. */
+ * (`state`) to every lexing/parsing function. Explicit state (rather than
+ * module-scope `let`s) keeps the parser re-entrant. */
 interface ParserState {
     src: string;
     srcLen: number;
@@ -894,7 +892,7 @@ interface ParserState {
     sp: number;
     speculating: number;
     /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
-     * parseNew reads it to reject an optional chain as a `new` callee (a spec error). */
+     * parseNew reads it to reject an optional chain as a `new` callee. */
     chainSawOptional: boolean;
 }
 
@@ -2072,8 +2070,8 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 const quasi = parseTemplate(state);
                 expr = m.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
             } else {
-                // bare instantiation expression `f<number>` (TS 4.7): keep the type args as a
-                // node so emit strips them (oxc ts.rs:1819). tryParseTypeArgsForCall's follow-set
+                // bare instantiation expression `f<number>`: keep the type args as a
+                // node so emit strips them. tryParseTypeArgsForCall's follow-set
                 // already gated that `<...>` is type args here (not a `<` comparison).
                 expr = m.TSInstantiationExpression(expr.start, t.end, 0, expr, t) as Node;
             }
@@ -4443,17 +4441,14 @@ function tryParseTypeArgsForCall(state: ParserState): Node | null {
     return null;
 }
 
-/** The parse result: the standalone program, the error list, and the source-free
- * line table for offset->line/col. NO pool — the source is not retained (leaves
- * materialized their name/raw into the outer `name` slot; identifier names are
- * interned). */
+/** The parse result: the program, the error list, and the source-free line table
+ * for offset->line/col. The source is not retained after the parse. */
 export type ParseResult = { program: Program; errors: ParseError[]; lines: Uint32Array; nodeCount: number };
 export type ParseOptions = { ts: boolean; jsx: boolean };
 
-/** Parse `source` into a standalone type+data Program. House signature:
- * `parse(source, options): { program, errors, lines }` — no pool, no out-param.
- * Source, error sink, intern map and line table are the parser's own fused state,
- * reset at entry; nothing references `source` after this returns. */
+/** Parse `source` into a standalone Program. Source, error sink, intern map and
+ * line table are the parser's own state, reset at entry; nothing references
+ * `source` after this returns. */
 export function parse(source: string, options: ParseOptions): ParseResult {
     const state = createParserState(source, options);
     recordNL(state, -1);
@@ -4475,11 +4470,9 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     return { program, errors: state.errors, lines, nodeCount };
 }
 
-/** Convenience: just the standalone Program. */
 export function parseProgram(source: string, options: ParseOptions): Program {
     return parse(source, options).program;
 }
-/** Convenience: program + diagnostics + source-free line table. */
 export function parseWithDiagnostics(source: string, options: ParseOptions): ParseResult {
     return parse(source, options);
 }

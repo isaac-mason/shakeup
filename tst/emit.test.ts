@@ -11,13 +11,11 @@ const REPO = resolve(__dirname, '..');
 const THREE = resolve(REPO, 'llm/spikes/node_modules/three/build/three.core.js');
 const CRASHCAT_SRC = resolve(REPO, '..', 'crashcat', 'src');
 
-/** parse `src` (ts on) and strip to JS. */
 function strip(src: string): string {
     const { program } = parse(src, { ts: true, jsx: false });
     return emitModule(program, src, { stripTypes: true });
 }
 
-/** collect every .ts file under a dir. */
 function walkTs(dir: string): string[] {
     const out: string[] = [];
     for (const entry of readdirSync(dir)) {

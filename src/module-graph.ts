@@ -52,11 +52,11 @@ export type NamedExport = {
     exprNode: Node | null;
 };
 
-/** Deconflict-able local SymbolIds for the injected automatic-runtime bindings
- * (plan §5c option A). Present only on modules that contain JSX; `createElement`
- * is populated only when a key-after-spread fallback (§5a.6) fired. Each is a
- * real IMPORT symbol declared in the module's semantic, so link binds it to the
- * resolved runtime module's export and deconflict renames it like any import. */
+/** Deconflict-able local SymbolIds for the injected automatic-runtime bindings.
+ * Present only on modules that contain JSX; `createElement` is populated only when a
+ * key-after-spread fallback fired. Each is a real IMPORT symbol declared in the module's
+ * semantic, so link binds it to the resolved runtime module's export and deconflict
+ * renames it like any import. */
 export type JSXRuntime = {
     jsx: number;
     jsxs: number;
@@ -105,8 +105,8 @@ export type Graph = {
     warnings: string[];
 };
 
-/** Automatic-runtime JSX options (plan §4b, P2 subset). No `runtime`/`factory`/
- * `fragment`/`development` — automatic runtime only. */
+/** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
+ * automatic runtime only. */
 export type JSXOptions = {
     importSource?: string;
     pure?: boolean;
@@ -130,21 +130,17 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
     });
 }
 
-/** Entry surface — rolldown `InputOption` (input-options.ts:23). `string` = single
- *  unnamed entry; `string[]` = several unnamed entries; `Record<name, specifier>` =
- *  named entries. */
+/** Entry surface. `string` = single unnamed entry; `string[]` = several unnamed entries;
+ *  `Record<name, specifier>` = named entries. */
 export type InputOption = string | string[] | Record<string, string>;
 
-/** A low-level resolver override (R1 form): specifier+importer → resolved id / null. */
+/** A low-level resolver override: specifier+importer → resolved id / null. */
 export type ResolveFn = (specifier: string, importer: string | null) => string | null;
 
-/** Deployment target picking `mainFields`/`conditionNames` defaults (rolldown `platform`). */
+/** Deployment target picking `mainFields`/`conditionNames` defaults. */
 export type Platform = 'node' | 'browser' | 'neutral';
 
-/** `resolve:{}` config (R4, §5) — surfaces the core relative-probe resolver's knobs. Fields
- *  gated on the npm-field resolver (`mainFields`/`conditionNames`/`exportsFields`/`aliasFields`)
- *  are ACCEPTED + STORED but only take effect once that resolver consumes them (a NOT-IMPLEMENTED
- *  seam guarded by a sentinel test — see resolve.workspace.test.ts). */
+/** `resolve:{}` config — surfaces the core relative-probe resolver's knobs. */
 export type ResolveOptions = {
     /** Probe extensions, replacing the hard-coded set. Default ['.tsx','.ts','.jsx','.js','.json']. */
     extensions?: string[];
@@ -156,13 +152,11 @@ export type ResolveOptions = {
     alias?: Record<string, string>;
     /** false disables the `fs.realpath` deref (symlink preservation). Default true. */
     symlinks?: boolean;
-    /** STUB — needs the npm-field resolver. Accepted + stored. */
     mainFields?: string[];
-    /** STUB — needs the npm-field resolver. Accepted + stored. */
     conditionNames?: string[];
-    /** STUB — package "exports" field lookup path. Accepted + stored. */
+    /** package "exports" field lookup path. */
     exportsFields?: string[][];
-    /** STUB — package "browser" alias field. Accepted + stored. */
+    /** package "browser" alias field. */
     aliasFields?: string[][];
 };
 
@@ -181,8 +175,8 @@ export type NormalizedResolve = {
 
 const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json'];
 
-/** Resolve platform → (mainFields, conditionNames) defaults (rolldown input-options.ts). We
- *  emit ESM, so conditions are import-kind. */
+/** Resolve platform → (mainFields, conditionNames) defaults. We emit ESM, so conditions are
+ *  import-kind. */
 function platformDefaults(platform: Platform): { mainFields: string[]; conditionNames: string[] } {
     switch (platform) {
         case 'browser':
@@ -219,14 +213,13 @@ export type GraphOptions = {
     entry?: string;
     fs: Fs;
     external?: string[] | ((specifier: string) => boolean);
-    /** A low-level resolver function (R1 override) OR a {@link ResolveOptions} config (R4, §5). */
+    /** A low-level resolver function OR a {@link ResolveOptions} config. */
     resolve?: ResolveFn | ResolveOptions;
-    /** Deployment target → mainFields/conditionNames defaults (R4). Default 'browser'. */
+    /** Deployment target → mainFields/conditionNames defaults. Default 'browser'. */
     platform?: Platform;
     plugins?: Plugin[];
     jsx?: JSXOptions;
-    /** R2 stub: accepted and IGNORED. Rolldown default is `'exports-only'`; facade-chunk
-     *  generation lands with the chunk graph in R3. Present so callers can pass it today. */
+    /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
 };
 
@@ -243,9 +236,9 @@ function entryNameFromSpecifier(specifier: string): string {
 }
 
 /** Normalize `input` / `entry` into an ordered {@link NormalizedEntry} list. Pushes a
- *  graph error (and returns `[]`) when neither / both are set (rollup requires exactly
- *  one root source). Unnamed entries derive a name from the specifier basename; a
- *  collision suffixes `name`, `name2`, … deterministically. `Record` keys win verbatim. */
+ *  graph error (and returns `[]`) when neither / both are set (exactly one root source is
+ *  required). Unnamed entries derive a name from the specifier basename; a collision suffixes
+ *  `name`, `name2`, … deterministically. `Record` keys win verbatim. */
 function normalizeInput(options: GraphOptions, errors: string[]): NormalizedEntry[] {
     const hasInput = options.input !== undefined;
     const hasEntry = options.entry !== undefined;
@@ -280,8 +273,8 @@ function normalizeInput(options: GraphOptions, errors: string[]): NormalizedEntr
     return out;
 }
 
-/** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target (rolldown
- *  aliases run before defaultResolve, skipping other plugins' resolveId — documented). */
+/** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target. Runs
+ *  before defaultResolve, skipping other plugins' resolveId. */
 function applyAlias(specifier: string, alias: Record<string, string>): string {
     for (const key of Object.keys(alias)) {
         if (specifier === key) return alias[key];
@@ -290,7 +283,7 @@ function applyAlias(specifier: string, alias: Record<string, string>): string {
     return specifier;
 }
 
-/** Relative/absolute probe (R4: config-driven). Builds the probe set from `extensions` +
+/** Relative/absolute config-driven probe. Builds the probe set from `extensions` +
  *  `mainFiles`, honours `extensionAlias` (try mapped exts for a matching suffix first). */
 function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, importer: string | null): string | null {
     const aliased = applyAlias(specifier, resolve.alias);
@@ -298,7 +291,7 @@ function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, i
     const base = aliased.startsWith('/') || importer === null ? aliased : joinPath(dirnameOf(importer), aliased);
 
     // extensionAlias: if the specifier ends in a mapped ext (e.g. '.js'), try the alternatives
-    // (e.g. '.ts','.js') BEFORE the generic probe (rolldown input-options.ts:387-393).
+    // (e.g. '.ts','.js') BEFORE the generic probe.
     for (const [ext, alts] of Object.entries(resolve.extensionAlias)) {
         if (base.endsWith(ext)) {
             const stem = base.slice(0, base.length - ext.length);
@@ -330,16 +323,14 @@ function isExternal(options: GraphOptions, specifier: string): boolean {
     return ext.includes(specifier);
 }
 
-/** A mutable option bag threaded through resolveId → load → transform for a module
- *  id (rollup ResolvedId → Module, ModuleLoader.ts:405–433). */
+/** A mutable option bag threaded through resolveId → load → transform for a module id. */
 type PendingOptions = ModuleOptions;
 
 function newPendingOptions(): PendingOptions {
     return { moduleSideEffects: null, meta: {}, moduleType: undefined };
 }
 
-/** Merge `src` overrides onto `dst` with rollup `updateOptions` precedence
- *  (Module.ts:1045–1058): only overwrite when the source actually set a value.
+/** Merge `src` overrides onto `dst`: only overwrite when the source actually set a value.
  *  `meta` is shallow-merged (Object.assign) so multiple hooks/plugins contribute. */
 function mergeOptions(
     dst: PendingOptions,
@@ -350,15 +341,12 @@ function mergeOptions(
     if (src.moduleType !== undefined) dst.moduleType = src.moduleType;
 }
 
-/** Resolve the final module-level side-effect flag (rolldown precedence tail,
- *  plugin/index.ts:144 item 6): first-set of the merged chain, else `true`. The
- *  `treeshake.moduleSideEffects` global default (item 4) and pkg `sideEffects` (item
- *  5) are LATER config; R1 uses `true`. */
+/** Resolve the final module-level side-effect flag: first-set of the merged chain, else `true`. */
 function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
     return pending.moduleSideEffects ?? true;
 }
 
-/** Default module type from the id's extension (R1 only ACTs on js/ts/jsx/tsx/json). */
+/** Default module type from the id's extension. */
 function moduleTypeOf(id: string): ModuleType {
     if (id.endsWith('.tsx')) return 'tsx';
     if (id.endsWith('.jsx')) return 'jsx';
@@ -526,11 +514,9 @@ function extractRecords(mod: Module): void {
 
     // Dynamic import() edges. Unlike static import/export these nest arbitrarily deep in
     // expressions/function bodies, so the top-level statement scan above misses them —
-    // walk the whole program. Mirrors the dev-path detection in
-    // transform.ts:collectRunnerEdits (~L304); kept inline (detection is ~3 lines and the
-    // two callers emit different outputs — no shared helper warranted). Literal-only:
-    // non-literal import() (import(x), import(`./${x}`), import('a'+b)) has a
-    // non-StringLiteral source → skipped → no edge, left as a runtime import in the emit.
+    // walk the whole program. Literal-only: non-literal import() (import(x), import(`./${x}`),
+    // import('a'+b)) has a non-StringLiteral source → skipped → no edge, left as a runtime
+    // import in the emit.
     walk(mod.program, (n) => {
         if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) {
             addRecord(mod, strValue(source, n.data.source), /* dynamic */ true);
@@ -539,7 +525,7 @@ function extractRecords(mod: Module): void {
 }
 
 /** True if `openingName`-carrying attrs put a `key` attribute AFTER a spread
- * (the key-after-spread createElement fallback, plan §5a.6). */
+ * (the key-after-spread createElement fallback). */
 function attrsHaveKeyAfterSpread(attrs: Node[]): boolean {
     let sawSpread = false;
     for (const a of attrs) {
@@ -592,9 +578,8 @@ function injectJSXRuntime(mod: Module, importSource: string): void {
     mod.jsxRuntime = { jsx, jsxs, Fragment, createElement };
 }
 
-/** Project a live {@link Module} into the plugin-facing {@link ModuleInfo}
- *  (rollup Module.ts:317). Reads the graph as it's being built, so `importers` may
- *  be partial when called from `moduleParsed` (matches rollup's caveat). */
+/** Project a live {@link Module} into the plugin-facing {@link ModuleInfo}. Reads the graph
+ *  as it's being built, so `importers` may be partial when called from `moduleParsed`. */
 export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
     const importedIds: string[] = [];
     const dynamicallyImportedIds: string[] = [];
@@ -613,7 +598,7 @@ export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
         importedIds,
         dynamicallyImportedIds,
         importers: [...mod.importers],
-        dynamicImporters: [], // R2: reverse dynamic edges not yet tracked (R3/R4)
+        dynamicImporters: [],
         exports: [...mod.namedExports.keys()],
     };
 }
@@ -623,8 +608,8 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    // `resolve` may be a low-level function (R1 override) or a ResolveOptions config (R4). The
-    // config drives the built-in relative probe; the function bypasses it entirely.
+    // `resolve` may be a low-level function or a ResolveOptions config. The config drives the
+    // built-in relative probe; the function bypasses it entirely.
     const resolveIsFn = typeof options.resolve === 'function';
     const normalizedResolve = normalizeResolve(
         resolveIsFn ? undefined : (options.resolve as ResolveOptions | undefined),
@@ -636,8 +621,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const pluginExternals = new Set<string>();
     /** resolveId/load option overrides keyed by RESOLVED id, finalized in addModule. */
     const pendingOptions = new Map<string, PendingOptions>();
-    /** (specifier, importer) pairs currently being resolved — the R1 stand-in for
-     *  rollup's per-plugin `skipSelf` recursion guard (§4). */
+    /** (specifier, importer) pairs currently being resolved — the `skipSelf` recursion guard. */
     const resolving = new Set<string>();
 
     const pendingFor = (id: string): PendingOptions => {
@@ -649,12 +633,11 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         return p;
     };
 
-    /** The shared resolve path used by both the graph walk and `ctx.resolve`
-     *  (rollup: `this.resolve` calls the same ModuleLoader.resolveId). Runs the
-     *  resolveId pipeline, normalizes {@link PartialResolvedId}, records its option
-     *  overrides against the resolved id, then falls through to `baseResolve`.
-     *  `skipPipeline` bypasses the plugins (used by the recursion guard). Returns
-     *  the resolved id string, `false` (external), or `null` (unresolved). */
+    /** The shared resolve path used by both the graph walk and `ctx.resolve`. Runs the
+     *  resolveId pipeline, normalizes {@link PartialResolvedId}, records its option overrides
+     *  against the resolved id, then falls through to `baseResolve`. `skipPipeline` bypasses the
+     *  plugins (used by the recursion guard). Returns the resolved id string, `false` (external),
+     *  or `null` (unresolved). */
     const resolveThrough = (
         specifier: string,
         importer: string | null,
@@ -670,8 +653,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
             const partial = hit as PartialResolvedId;
             if (partial.external !== undefined && partial.external !== false) {
-                // true | 'absolute' | 'relative' → external. R1 treats them alike
-                // (keep verbatim); the re-normalization distinction is R4 (§7).
+                // true | 'absolute' | 'relative' → external. Treated alike (keep verbatim).
                 pluginExternals.add(specifier);
                 return false;
             }
@@ -696,11 +678,11 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 kind: opts?.kind ?? 'import-statement',
                 custom: opts?.custom,
             };
-            // Recursion guard (§4): skipSelf (default true) short-circuits a resolveId
-            // hook that re-resolves the same (specifier, importer) already in flight —
-            // if the key is already being resolved, skip the pipeline and go straight
-            // to baseResolve. Otherwise mark it in-flight for the duration so a NESTED
-            // ctx.resolve of the same pair is caught.
+            // Recursion guard: skipSelf (default true) short-circuits a resolveId hook that
+            // re-resolves the same (specifier, importer) already in flight — if the key is
+            // already being resolved, skip the pipeline and go straight to baseResolve.
+            // Otherwise mark it in-flight for the duration so a NESTED ctx.resolve of the same
+            // pair is caught.
             const key = `${importer ?? ''}\x00${source}`;
             const skipSelf = opts?.skipSelf !== false;
             const guardHit = skipSelf && resolving.has(key);
@@ -761,7 +743,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         }
         const transformed = assertSync(runTransform(pipe, ctx, source0, id));
         const source = transformed.code;
-        // Merge transform overrides (transform > load > resolveId precedence, §3).
+        // Merge transform overrides (transform > load > resolveId precedence).
         const pending = pendingFor(id);
         mergeOptions(pending, transformed);
         const sideEffects = resolveModuleSideEffects(pending);
@@ -832,7 +814,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            // symlinks:false disables the realpath deref (preserve the symlinked path). §5.
+            // symlinks:false disables the realpath deref (preserve the symlinked path).
             const depId = normalizedResolve.symlinks ? (options.fs.realpath?.(resolved) ?? resolved) : resolved;
             rec.resolved = addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
@@ -840,14 +822,12 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         return mod.idx;
     };
 
-    // buildStart runs with the full graph-backed ctx so `ctx.resolve` works from it
-    // (rollup runs it as part of the build, before resolution).
+    // buildStart runs with the full graph-backed ctx so `ctx.resolve` works from it.
     for (const hook of pipe.buildStart) assertSync(hook.handler(ctx));
 
-    // Multi-entry rooting (rollup addEntryModules, ModuleLoader.ts:121-158): resolve each
-    // normalized entry, add its module, mark it an entry, and dedup into graph.entries
-    // (same module named twice ⇒ one root, first name wins). Rooting stays in the caller,
-    // not addModule, per R1's contract.
+    // Multi-entry rooting: resolve each normalized entry, add its module, mark it an entry, and
+    // dedup into graph.entries (same module named twice ⇒ one root, first name wins). Rooting
+    // stays in the caller, not addModule.
     const normalized = normalizeInput(options, graph.errors);
     const seen = new Set<number>();
     for (const { name, specifier } of normalized) {
@@ -865,11 +845,6 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     }
     return graph;
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Linking: resolve the graph's import/export edges to concrete symbol binds,
-// order modules, and deconflict names into a Linked overlay over the Graph.
-// ─────────────────────────────────────────────────────────────────────────────
 
 const MOD_SHIFT = 0x200000;
 
@@ -1029,10 +1004,9 @@ function sortModules(graph: Graph): number[] {
         order.push(idx);
     };
     for (const { module } of graph.entries) visit(module);
-    // R2 single-chunk world: a module reachable ONLY through import() would otherwise be
-    // dropped from `order`. Seed the DFS from every dynamic target AFTER all static-entry
-    // roots so their relative sync-order is preserved. R3 replaces this with real chunk
-    // assignment (the dynamic target becomes its own chunk).
+    // A module reachable ONLY through import() would otherwise be dropped from `order`. Seed the
+    // DFS from every dynamic target AFTER all static-entry roots so their relative sync-order is
+    // preserved.
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
             if (rec.dynamic && !rec.external && rec.resolved >= 0) visit(rec.resolved);
@@ -1101,8 +1075,8 @@ export function makeClaim(taken: Set<string>): (base: string) => string {
 
 /** Deconflict the module-scope symbols, synthetics, namespaces, and external locals of a
  *  set of modules (`memberOrder`, exec-ordered) into a FRESH scope. Whole-bundle deconflict
- *  is this run over `linked.order`; R3 runs it once per chunk (each chunk = one lexical
- *  scope, so a name may safely repeat across chunks). Writes into `linked.finalNames` /
+ *  is this run over `linked.order`; it runs once per chunk (each chunk = one lexical scope, so
+ *  a name may safely repeat across chunks). Writes into `linked.finalNames` /
  *  `linked.namespaceOf` / `linked.externalLocals` — because a module lives in exactly one
  *  chunk, its `packRef→name` stays unambiguous. `seed` pre-reserves names the chunk pulls
  *  in from other chunks (cross-chunk import locals), so producer names win before consumers.
@@ -1177,10 +1151,10 @@ function deconflict(ctx: LinkCtx): void {
 }
 
 /** Bind imports/exports across `graph`, order modules, and deconflict names into a {@link Linked}.
- *  `opts.deconflict` (default true) runs a whole-bundle deconflict — R3 passes `false` and
- *  runs a fresh per-chunk deconflict from {@link deconflictChunk} instead (each chunk is its
- *  own lexical scope). When skipped, `namespaceOf` holds BASE names (`_ns`) so the per-chunk
- *  pass can claim them. */
+ *  `opts.deconflict` (default true) runs a whole-bundle deconflict — pass `false` to run a fresh
+ *  per-chunk deconflict from {@link deconflictChunk} instead (each chunk is its own lexical
+ *  scope). When skipped, `namespaceOf` holds BASE names (`_ns`) so the per-chunk pass can claim
+ *  them. */
 export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked {
     const linked: Linked = {
         graph,
@@ -1228,10 +1202,10 @@ export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked
     for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
     for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);
     // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion
-    // roots (§4.4) and needs the resolved surface present in `linked.exportMaps`. A target
-    // may be statically-dominated (its record is `dynamic:false`) yet still have a literal
-    // `import()` in source that R3 rewrites to `Promise.resolve(namespaceObject)` — so we
-    // detect the target from the AST, not the record's `dynamic` flag.
+    // roots and needs the resolved surface present in `linked.exportMaps`. A target may be
+    // statically-dominated (its record is `dynamic:false`) yet still have a literal `import()`
+    // in source rewritten to `Promise.resolve(namespaceObject)` — so we detect the target from
+    // the AST, not the record's `dynamic` flag.
     for (const mod of graph.modules) {
         walk(mod.program, (n) => {
             if (n.type !== N.ImportExpression || n.data.source.type !== N.StringLiteral) return;

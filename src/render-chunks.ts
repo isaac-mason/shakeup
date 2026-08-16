@@ -1,6 +1,5 @@
 /**
- * Two-pass deferred-hash render orchestration — the R4 crux (port of rollup
- * `src/utils/renderChunks.ts` + `Bundle.ts:68-87` + `Chunk.ts:581-617`).
+ * Two-pass deferred-hash render orchestration.
  *
  * A chunk's final `[hash]` hashes its final CONTENT, which includes the import-path strings to
  * the chunks it imports, which contain THOSE chunks' hashes — a fixpoint. We do not iterate:
@@ -78,9 +77,9 @@ const preRenderedInfo = (chunk: Chunk, moduleIdOf: (i: number) => string): PreRe
     type: 'chunk',
 });
 
-/** Compute a chunk's preliminary filename (rollup `Chunk.getPreliminaryFileName`): choose the
- *  entry vs chunk pattern, expand it (`[hash]` → placeholder, else reserve via `makeUnique`),
- *  and record the reservation in `reserved` (lowercased keyset). */
+/** Compute a chunk's preliminary filename: choose the entry vs chunk pattern, expand it
+ *  (`[hash]` → placeholder, else reserve via `makeUnique`), and record the reservation in
+ *  `reserved` (lowercased keyset). */
 function getPreliminaryFileName(
     chunk: Chunk,
     naming: NormalizedOutputNaming,
@@ -137,7 +136,7 @@ export function renderChunks(
     const infos = chunks.map((c) => preRenderedInfo(c, moduleIdOf));
 
     // Pass 0a — reserve ENTRY chunk names first so no-hash `[name].js` names get stable,
-    // un-suffixed reservation before shared/dynamic chunks (rollup reserveEntryChunksInBundle).
+    // un-suffixed reservation before shared/dynamic chunks.
     const prelim: PreliminaryFileName[] = new Array(chunks.length);
     for (let i = 0; i < chunks.length; i++) {
         if (chunks[i].isEntry) prelim[i] = getPreliminaryFileName(chunks[i], naming, genPlaceholder, reserved, infos[i]);
@@ -161,7 +160,7 @@ export function renderChunks(
         if (rc !== null) rendered.push(rc);
     }
 
-    // Collect every chunk placeholder up-front (rollup :215-219).
+    // Collect every chunk placeholder up-front.
     const placeholders = new Set<string>();
     for (const rc of rendered) if (rc.prelim.hashPlaceholder) placeholders.add(rc.prelim.hashPlaceholder);
 
@@ -188,8 +187,8 @@ export function renderChunks(
         const worklist = new Set<string>([placeholder]);
         for (const dep of worklist) {
             const hr = hashDependenciesByPlaceholder.get(dep)!;
-            // ── the load-bearing line: fold the dependency's STABLE CONTENT hash (Pass A), NOT
-            //    its final hash (which would be circular / order-dependent for A↔B cycles). ──
+            // Fold the dependency's STABLE CONTENT hash (Pass A), NOT its final hash (which would
+            // be circular / order-dependent for A↔B cycles).
             contentToHash += hr.contentHash;
             for (const c of hr.containedPlaceholders) worklist.add(c);
         }
@@ -233,8 +232,7 @@ export function renderChunks(
                 mappings: encodeMappings(joined.map),
                 ...(ignore.length > 0 ? { x_google_ignoreList: ignore } : {}),
             };
-            // Emit + comment (rollup emitSourceMapAndGetComment). Appended AFTER hashing so it
-            // never perturbs the content hash.
+            // Emit + comment. Appended AFTER hashing so it never perturbs the content hash.
             const mapFileName = `${fileName}.map`;
             if (naming.sourcemap === 'inline') {
                 code += `${inlineSourceMapComment(map)}\n`;

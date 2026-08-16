@@ -1,5 +1,3 @@
-// --- xxHash64 (64-bit) ------------------------------------------------------
-// A faithful, allocation-light xxHash64 over BigInt (browser-safe; no 64-bit intrinsics).
 const P1 = 0x9e3779b185ebca87n;
 const P2 = 0xc2b2ae3d27d4eb4fn;
 const P3 = 0x165667b19e3779f9n;
@@ -18,7 +16,6 @@ const mergeRound = (acc: bigint, val: bigint): bigint => {
 /** xxHash64 of `bytes` (seed 0) returning a 64-bit unsigned {@link bigint}. */
 function xxh64(bytes: Uint8Array): bigint {
     const len = bytes.length;
-    // Little-endian readers over the byte view.
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     let i = 0;
     let h: bigint;
@@ -64,7 +61,6 @@ function xxh64(bytes: Uint8Array): bigint {
         h = (rotl(h, 11n) * P1) & MASK;
         i += 1;
     }
-    // Avalanche.
     h = (h ^ (h >> 33n)) & MASK;
     h = (h * P2) & MASK;
     h = (h ^ (h >> 29n)) & MASK;
@@ -80,8 +76,6 @@ const toBytes = (input: string | Uint8Array): Uint8Array => {
     return textEncoder.encode(input);
 };
 
-// --- encodings --------------------------------------------------------------
-// url-safe base64 alphabet (matches rolldown's base64url output for [hash] tokens).
 const B64URL = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const B36 = '0123456789abcdefghijklmnopqrstuvwxyz';
 
@@ -113,7 +107,7 @@ export function hashAll(input: string | Uint8Array): Hashes {
     salted.set(bytes, SALT.length);
     const h2 = xxh64(salted);
     const combined = (h1 << 64n) | h2;
-    // hex is fixed-width (32 nibbles) — pad so short values don't shrink; the two 64-bit halves.
+    // hex is fixed-width (32 nibbles) — pad so short values don't shrink.
     const hex = h1.toString(16).padStart(16, '0') + h2.toString(16).padStart(16, '0');
     return {
         base64: encodeRadix(combined, B64URL),
@@ -125,8 +119,8 @@ export function hashAll(input: string | Uint8Array): Hashes {
 export type HashCharacters = 'base64' | 'base36' | 'hex';
 export type GetHash = (input: string | Uint8Array) => string;
 
-/** A hasher for one encoding, mirroring rollup `crypto.ts` `hasherByType`. Output is always
- *  long enough to be sliced to `MAX_HASH_SIZE` (21). */
+/** A hasher for one encoding. Output is always long enough to be sliced to
+ *  `MAX_HASH_SIZE` (21). */
 export const hasherByType: Record<HashCharacters, GetHash> = {
     base64: (input) => hashAll(input).base64.padEnd(21, '0'),
     base36: (input) => hashAll(input).base36.padEnd(21, '0'),

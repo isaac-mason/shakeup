@@ -117,9 +117,9 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
     };
 
     for (const mod of graph.modules) {
-        // Module-level side-effect gate (rollup Module.ts:530,762): a module marked
-        // `false` does NOT auto-root its impure statements — they drop if unreferenced;
-        // `'no-treeshake'` roots EVERY statement (forces full inclusion).
+        // Module-level side-effect gate: a module marked `false` does NOT auto-root its impure
+        // statements — they drop if unreferenced; `'no-treeshake'` roots EVERY statement (forces
+        // full inclusion).
         if (mod.sideEffects === false) continue;
         const forceAll = mod.sideEffects === 'no-treeshake';
         for (let i = 0; i < infos[mod.idx].length; i++) {
@@ -133,12 +133,10 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
             else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
         }
     };
-    // Root from every entry's export surface (multi-entry, §4.4).
+    // Root from every entry's export surface (multi-entry).
     for (const { module } of graph.entries) markExportMap(linked.exportMaps.get(module));
-    // Dynamic-import liveness: a dynamically-imported module is an inclusion root — its
-    // whole export surface may be reached at runtime (rollup includeDynamicImport,
-    // Module.ts:1408). Seed each dynamic target's export map. Finer per-export dynamic
-    // shaking is future work.
+    // Dynamic-import liveness: a dynamically-imported module is an inclusion root — its whole
+    // export surface may be reached at runtime. Seed each dynamic target's export map.
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
             if (rec.dynamic && !rec.external && rec.resolved >= 0) markExportMap(linked.exportMaps.get(rec.resolved));

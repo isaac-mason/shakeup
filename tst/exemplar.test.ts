@@ -10,7 +10,6 @@ import { parse } from '../src/parser.ts';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(__dirname, 'fixtures', 'exemplar');
 
-/** recursively load fixtures/exemplar into a memory-fs map keyed '/main.ts' etc */
 function loadFixtures(): Map<string, string> {
     const map = new Map<string, string>();
     const walkDir = (dir: string): void => {

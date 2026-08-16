@@ -1,6 +1,6 @@
 import type { Plugin } from '../plugin';
 
-/** Plugin turning `.json` imports into a module with the parsed value as default export. */
+/** Turns `.json` imports into a module with the value as default export. */
 export function json(): Plugin {
     return {
         name: 'json',

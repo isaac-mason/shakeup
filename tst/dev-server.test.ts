@@ -5,7 +5,6 @@ import { createMemoryFs, type Fs } from '../src/fs.ts';
 import type { Plugin } from '../src/plugin.ts';
 import { createRunner } from '../src/runner.ts';
 
-/** A dev server + runner over an in-memory, editable file map, plus any plugins. */
 function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'> = {}) {
     const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
     const server = createDevServer({ fs, ...opts });

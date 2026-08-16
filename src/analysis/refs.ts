@@ -1,11 +1,9 @@
 import { isIdentifier, N, type Node, walkChildren } from '../ast.ts';
 
 /**
- * Visit every identifier in `node`'s subtree that carries a symbol — i.e. the
- * two RESOLVING/DECLARING roles `IdentifierReference` and `BindingIdentifier`.
- * The pure-name roles (`IdentifierName` on member/keys/specifier externals and
- * `LabelIdentifier`) are distinct node types now, so they're skipped by simply
- * not matching — the old contextual member/key/label special-casing is gone.
+ * Visit every identifier in `node`'s subtree that carries a symbol — the
+ * `IdentifierReference` and `BindingIdentifier` roles. The pure-name roles
+ * (`IdentifierName`, `LabelIdentifier`) are distinct node types and are skipped.
  *
  * `cb`'s `shorthandProp` is the shorthand-property node when the identifier is
  * the VALUE of a shorthand object property (`{ a }` / `{ a = 1 }`) and null

@@ -1,20 +1,3 @@
-// The dev server (Arc D) — shakeup's own dev runtime, independent of any host's
-// dev server. Owns the module graph, transform cache, and resolution; serves
-// transformed (`__shakeup.*`) modules to the runner via `fetchModule`.
-//
-// SURFACE: plugin-driven, exactly like `bundle()` (P4). resolution, loading, and
-// source transformation are the SAME rollup-shaped plugin hooks (resolveId / load /
-// transform / moduleParsed) — makecat wires its virtual fs, custom resolution, and
-// the `__bongle` capture pass as PLUGINS (the same Plugin objects usable in bundle
-// mode), not bespoke options. Hooks may be async (the drivers keep a sync fast
-// path), so an OPFS/network `load` works.
-//
-// Pipeline per module: runLoad (→ default fs) → runTransform (plugin source
-// patches, e.g. capture) → devTransform (FUSED strip + module-runner rewrite over a
-// SINGLE parse for non-JSX; JSX falls back to two) → cache + graph. moduleParsed
-// runs read-only after a parse when any plugin needs it. A source map (runner code →
-// original) is emitted per module and carried on FetchResult for the evaluator.
-
 import { analyze, createSemantic } from './analysis/semantic.ts';
 import type { HmrUpdate } from './environment.ts';
 import type { Fs } from './fs.ts';
@@ -41,10 +24,10 @@ export type ResolveResult = string | { external: string };
 
 export type DevServerOptions = {
     /** synchronous default fs backend for the built-in resolver + loader (node /
-     *  tests). Omit it and supply async `load`/`resolveId` plugins instead (makecat:
+     *  tests). Omit it and supply async `load`/`resolveId` plugins instead (e.g.
      *  OPFS). */
     fs?: Fs;
-    /** rollup-shaped plugins — the resolution/load/transform surface. */
+    /** plugins — the resolution/load/transform surface. */
     plugins?: Plugin[];
     /** JSX config forwarded to the strip transform. */
     jsx?: TransformOptions['jsx'];
@@ -190,7 +173,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
 
     /** Project a dev {@link ModuleNode} into the plugin-facing {@link ModuleInfo}.
      *  The dev graph lacks named-exports/side-effects (dev doesn't shake), so
-     *  `exports: []`, `moduleSideEffects: true` (§7). */
+     *  `exports: []`, `moduleSideEffects: true`. */
     function toModuleInfo(id: string, node: ModuleNode): ModuleInfo {
         return {
             id,
@@ -234,7 +217,6 @@ export function createDevServer(options: DevServerOptions): DevServer {
         getModuleIds: () => graph.keys(),
     };
 
-    /** default resolver: relative → path-probe against fs; bare → external. */
     function defaultResolve(spec: string, importer: string | null): ResolveResult {
         if (isBare(spec)) return { external: spec };
         const base = spec.startsWith('/') || importer === null ? spec : joinPath(dirOf(importer), spec);
@@ -268,7 +250,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     async function fetchModule(id: string): Promise<FetchResult> {
         const loaded = await runLoad(pipeline, ctx, id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
-        // moduleSideEffects/meta/moduleType are accepted but ignored (§7).
+        // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
             (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? fs.read(id);
         if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
@@ -286,12 +268,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
             };
         }
 
-        // plugin source patches (capture, etc.) → fused strip + module-runner rewrite.
-        // runTransform now returns an accumulator; dev uses only `.code`.
+        // plugin source patches → fused strip + module-runner rewrite.
         const patched = (await runTransform(pipeline, ctx, source, id)).code;
 
-        // read-only moduleParsed (P4): only pay a parse when a plugin needs it. Parses
-        // the (patched) module source — the real TS/JSX AST plugins inspect.
+        // read-only moduleParsed: only pay a parse when a plugin needs it.
         if (pipeline.moduleParsed.length > 0) {
             const isx = id.endsWith('.tsx') || id.endsWith('.jsx');
             const { program, nodeCount } = parse(patched, { ts: true, jsx: isx });

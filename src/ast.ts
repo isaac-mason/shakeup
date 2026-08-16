@@ -315,8 +315,7 @@ const DEFS = [
     def('JSXSpreadChild', { expression: child }),
     def('JSXIdentifier', null),
     def('JSXText', null),
-    // Appended after the frozen pre-migration vocabulary (ids are append-only so existing
-    // node ids stay byte-identical — see tst/ast.test.ts ID_SNAPSHOT). An expression, so it
+    // Ids are append-only, so new node types go at the end. An expression, so it
     // sits outside the isTypeOnlyNode / isJSXNode id ranges.
     def('TSInstantiationExpression', { expression: child, typeArguments: child }),
 ] as const;
@@ -395,7 +394,7 @@ const baseOf = (m: Schema): Schema => (m.kind === 'nullable' || m.kind === 'list
 const holdsChild = (m: Schema): boolean => baseOf(m).kind === 'child';
 const isList = (m: Schema): boolean => m.kind === 'list' || (m.kind === 'nullable' && isList(m.of));
 
-/** child fields per type, in def (walk) order — derived from the defs */
+/** child fields per type, in def (walk) order */
 export const CHILD_FIELDS = Object.fromEntries(
     DEFS.map((d) => [
         d.name,
@@ -421,10 +420,8 @@ export function lineColOf(lines: Uint32Array, offset: number): { line: number; c
     return { line: lo + 1, column: offset - lines[lo] };
 }
 
-/** the one untyped window: generic machinery reads `data` fields by name */
 const payload = (n: Node): Record<string, unknown> | null => n.data as Record<string, unknown> | null;
 
-/** Payload demanded by a given node-type id — the def's DataOf, selected by IdOf match. */
 type DataForId<Id extends NodeType> = { [T in TypeName]: IdOf<T> extends Id ? DataOf<T> : never }[TypeName];
 
 let idCounter = 0;
@@ -453,9 +450,7 @@ export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex
     }
 }
 
-/** Depth-first pre-order walk. `enter` may return false to skip the subtree
- * (exit is then not called). Hand switch over the schema, grouped by field
- * shape — the drift test in tst/ast.test.ts pins it to CHILD_FIELDS. */
+/** Depth-first pre-order walk. `enter` may return false to skip the subtree. */
 export function walk(n: Node, enter: (n: Node) => boolean | void): void {
     if (enter(n) === false) return;
     const d = payload(n);
@@ -1209,8 +1204,6 @@ export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null)
     return rebuild(id, n.start, n.end, n.name, outData);
 }
 
-/** Generic reconstruction path for cloneNode: rebuilds an already-valid payload
- * whose shape can't be pinned to one def (id is the whole union). */
 function rebuild(type: number, start: number, end: number, name: string, data: unknown): Node {
     return { id: allocId(), type, start, end, name, data } as Node;
 }

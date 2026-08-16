@@ -96,7 +96,6 @@ describe('output sourcemap — banner line offset (the footgun)', () => {
     it('the entry statement still traces to its original source line under a banner', () => {
         const r = build({ sourcemap: true, banner: '/* b1 */\n/* b2 */' });
         const decoded = decode(r.map!.mappings);
-        // Find any segment pointing at /main.ts (source index for main.ts).
         const mainIdx = r.map!.sources.indexOf('/main.ts');
         let found = false;
         for (const line of decoded) {

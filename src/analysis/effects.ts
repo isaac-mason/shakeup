@@ -2,9 +2,7 @@ import { N, type Node } from '../ast.ts';
 
 /**
  * Conservatively true if evaluating this expression has no observable side effects.
- * `jsxPure` selects whether a JSX element/fragment is treated as side-effect-free
- * (bundler policy, from `jsx.pure`); it is threaded explicitly rather than held in
- * module state so the check stays pure and reentrant.
+ * `jsxPure` selects whether a JSX element/fragment is treated as side-effect-free.
  */
 export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
     if (node === null) return true;

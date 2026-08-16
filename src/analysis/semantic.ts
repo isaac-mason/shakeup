@@ -616,11 +616,10 @@ function resolvePass(state: AnalyseState, node: Node | null): void {
 
 /**
  * Declare a synthetic IMPORT binding into an already-analyzed module's semantic
- * (plan §5c: the injected automatic-runtime locals jsx/jsxs/Fragment/
- * createElement). `identNode` is a fresh BindingIdentifier; a symbol record is
- * appended and its node→symbol association recorded. The symbol lands in the
- * module scope so deconflict renames it and link binds it like any import.
- * Returns the new SymbolId.
+ * (e.g. injected automatic-runtime locals jsx/jsxs/Fragment/createElement).
+ * `identNode` is a fresh BindingIdentifier; a symbol record is appended and its
+ * node→symbol association recorded. The symbol lands in the module scope so
+ * deconflict renames it and link binds it like any import. Returns the new SymbolId.
  */
 export function declareSyntheticImport(semantic: Semantic, identNode: Node): number {
     let ms = 1;

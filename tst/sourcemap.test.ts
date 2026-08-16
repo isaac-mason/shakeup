@@ -13,11 +13,6 @@ import {
 } from '../src/sourcemap.ts';
 import { moduleRunnerTransform, transform } from '../src/transform.ts';
 
-// Decoding goes through @jridgewell/sourcemap-codec — the canonical VLQ codec used by rollup /
-// vite / magic-string. Using an INDEPENDENT decoder (not our own inverse) is the point: it proves
-// our `mappings` string is spec-correct, not merely self-consistent. `decode` returns absolute
-// [genCol, srcIdx, srcLine, srcCol(, nameIdx)] segments per generated line.
-
 // UTF-16 positions via plain JS string indexing (JS strings are UTF-16, matching SMv3 columns).
 const lineStarts = (s: string): number[] => {
     const a = [0];
@@ -261,8 +256,6 @@ describe('sourcemap — bundle() multi-module map', () => {
 
     it('no bundle map unless requested; enabling it only appends the sourceMappingURL comment', () => {
         expect(build(false).map).toBeUndefined();
-        // R4: sourcemap:true emits a `.map` sidecar AND appends `//# sourceMappingURL=…` (rollup
-        // parity). The mapped body is otherwise byte-identical.
         const withMap = build(true).code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
         expect(withMap).toBe(build(false).code);
     });

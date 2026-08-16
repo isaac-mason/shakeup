@@ -1,19 +1,3 @@
-// The native module runner (Arc A3) — evaluates modules transformed by
-// moduleRunnerTransform (the `__shakeup.*` protocol) and links them at runtime.
-// Transport-agnostic: `resolveId` + `fetchModule` are injected, so the same core
-// runs behind makecat's MessagePort bridge (A5) or a plain in-memory graph (tests).
-//
-// The runner OWNS the `__shakeup` context each module receives:
-//   link(spec)        → resolve + evaluate a dep, return its live namespace
-//   live(getters)     → install this module's exports as lazy getters
-//   exportAll(ns)     → re-export a namespace (skip default + already-defined)
-//   meta              → { url, hot } — hot is the standard import.meta.hot API
-//
-// Circular deps work WITHOUT cycle detection here: moduleRunnerTransform emits
-// `live({…})` as the FIRST statement, so a module's getters are installed before it
-// `await`s any dep. A cycle re-entering a still-evaluating module gets its exports
-// object with getters already in place — lazy, so values resolve once defined.
-
 import type { SourceMap } from './sourcemap.ts';
 
 /** Resolve a specifier (as written) from an importer to a module id, or mark it
@@ -32,18 +16,17 @@ export type RunnerOptions = {
     /** transformed (`__shakeup.*`) source for a module id (code, or {code, map}). */
     fetchModule: (id: string) => FetchedModule | Promise<FetchedModule>;
     /** build a module's import.meta base (url + filename); the runner adds `.hot` +
-     *  `.env`. Matches makecat's RunnerHost.createImportMeta. */
+     *  `.env`. */
     createImportMeta?: (id: string) => ImportMetaInit | Promise<ImportMetaInit>;
-    /** import.meta.env — the realm's runtime env object (makecat sets this per realm
-     *  at boot rather than compile-time replacing). Defaults to `{}` so
+    /** import.meta.env — the realm's runtime env object. Defaults to `{}` so
      *  `import.meta.env.X` never throws. */
     env?: Record<string, unknown>;
     /** how modules are evaluated + externals imported (default: AsyncFunction +
      *  dynamic import). Swap for CSP-safe eval, node `vm`, edge runtimes, or a
-     *  `node:`-rejecting external policy (browser). Mirrors makecat RunnerHost.evaluator. */
+     *  `node:`-rejecting external policy (browser). */
     evaluator?: ModuleEvaluator;
     /** run once before the first module body evaluates (browser: install the
-     *  `process` shim engine deps read). Matches makecat's RunnerHost.prepare. */
+     *  `process` shim engine deps read). */
     prepare?: () => void;
     /** called when a module runs `import.meta.hot.invalidate()` — the owner (an
      *  Environment) re-propagates from that module, bubbling to its importers. When
@@ -54,7 +37,7 @@ export type RunnerOptions = {
     onHotSend?: (event: string, data: unknown) => void;
 };
 
-/** The standard import.meta.hot surface (Vite-compatible shape). */
+/** The standard import.meta.hot surface. */
 export type HotContext = {
     data: Record<string, unknown>;
     accept(): void;
@@ -83,10 +66,9 @@ type ModuleRecord = {
      *  gets the one module) vs `accept([deps], cb)` (cb gets the array). */
     depAccepts: { deps: string[]; single: boolean; cb: (mods: unknown) => void }[];
     /** acceptExports(names, cb): a self-accept that fires only when a named export
-     *  changed value across the update. NOTE: Vite additionally bubbles when a
-     *  NON-accepted export changed; we don't — value-identity comparison is
-     *  unreliable for functions/objects (always "changed" on re-eval), so we treat
-     *  acceptExports as a self-accept boundary that fires cb on a named-value change. */
+     *  changed value across the update. We treat it as a self-accept boundary that
+     *  fires cb on a named-value change (value-identity comparison is unreliable for
+     *  functions/objects, which always "change" on re-eval). */
     acceptExports: { names: string[]; cb: (mod: unknown) => void }[];
     disposeCallbacks: ((data: Record<string, unknown>) => void)[];
     /** prune(cb): fired when the module is removed from the graph (orphaned). */
@@ -106,12 +88,12 @@ export type ModuleContext = {
     meta: { url: string; filename: string; hot: HotContext; env: Record<string, unknown> };
 };
 
-/** A module's import.meta base (url + filename). Matches makecat's
- *  RunnerHost.createImportMeta return; the runner merges `.hot` + `.env` itself. */
+/** A module's import.meta base (url + filename); the runner merges `.hot` + `.env`
+ *  itself. */
 export type ImportMetaInit = { url?: string; filename?: string };
 
 /** How module bodies are evaluated + how externals are imported — swappable for
- *  CSP-safe eval, node `vm`, or edge runtimes. Mirrors Vite's ModuleEvaluator. */
+ *  CSP-safe eval, node `vm`, or edge runtimes. */
 export type ModuleEvaluator = {
     /** number of wrapper lines prepended before the module body — for sourcemap
      *  line alignment of runtime stack traces. */
@@ -142,7 +124,7 @@ export type Runner = {
     emit(event: string, data?: unknown): void;
 };
 
-// AsyncFunction constructor — modules are `async (__shakeup) => { <body> }`.
+// modules are `async (__shakeup) => { <body> }`.
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
     arg: string,
     body: string,
@@ -320,9 +302,9 @@ export function createRunner(options: RunnerOptions): Runner {
     }
 
     /** Re-evaluate a module fresh (new exports object, hot.data preserved). Disposes
-     *  the old instance first (Vite order), then evaluates the new one; on failure it
-     *  RESTORES the old instance so a throwing edit leaves the environment on the
-     *  last-good version rather than a broken partial (#3). */
+     *  the old instance first, then evaluates the new one; on failure it RESTORES the
+     *  old instance so a throwing edit leaves the environment on the last-good version
+     *  rather than a broken partial. */
     async function reeval(id: string): Promise<Namespace> {
         const old = modules.get(id);
         if (old !== undefined) for (const cb of old.disposeCallbacks) cb(old.hotData);

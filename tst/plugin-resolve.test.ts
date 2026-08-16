@@ -13,7 +13,6 @@ const build = (files: Record<string, string>, plugins: Plugin[] = [], external: 
 };
 
 describe('plugin resolve/load contract (R1)', () => {
-    // 1. object-return resolveId — virtual module via { id, moduleSideEffects: false }.
     it('resolveId object return resolves a virtual module', async () => {
         const virtual: Plugin = {
             name: 'virtual-config',
@@ -25,7 +24,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(mod.v).toBe('9.9.9');
     });
 
-    // 2. external: true / 'absolute' — import stays a bare import, not inlined.
     it('resolveId { external: true } keeps the import external', () => {
         const externalize: Plugin = {
             name: 'externalize',
@@ -46,7 +44,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(code).toContain("from 'abs-lib'");
     });
 
-    // 3. moduleSideEffects: false shakes an unused side-effect-y module. THE oracle.
     it('moduleSideEffects: false drops an unused side-effect module', async () => {
         const files = {
             '/main.ts': "import './effect.ts';\nexport const out = 1;",
@@ -63,12 +60,10 @@ describe('plugin resolve/load contract (R1)', () => {
         const mod = await run(code);
         expect(mod.out).toBe(1);
 
-        // Contrast: default (true) keeps the side effect.
         const kept = build(files, []);
         expect(kept.code).toContain('__EFFECT_MARKER__');
     });
 
-    // 4. 'no-treeshake' — every statement survives, even an otherwise-dead one.
     it("moduleSideEffects: 'no-treeshake' keeps every statement", () => {
         const files = {
             '/main.ts': "import { used } from './lib.ts';\nexport const out = used;",
@@ -83,7 +78,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(code).toContain('__NT__');
     });
 
-    // 5. precedence — resolveId false, load true, transform false → final false.
     it('side-effect precedence: transform wins over load over resolveId', () => {
         let final: unknown;
         const layered: Plugin = {
@@ -105,7 +99,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(final).toBe(false);
     });
 
-    // 6. meta round-trip via getModuleInfo + getModuleIds enumeration.
     it('meta round-trips across plugins via getModuleInfo; getModuleIds enumerates', () => {
         let readA: unknown;
         let ids: string[] = [];
@@ -130,7 +123,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(ids.sort()).toEqual(['/a.ts', '/main.ts']);
     });
 
-    // 7. this.resolve from a plugin — matches default resolver; no recursion loop.
     it('ctx.resolve re-runs resolution and does not recurse', () => {
         let resolved: string | null = null;
         const asker: Plugin = {
@@ -162,7 +154,6 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(guardedId).toBe('/lib.ts');
     });
 
-    // 8. load SourceDescription — { code, moduleSideEffects: false } both take effect.
     it('load returning a SourceDescription applies code and side-effect flag', async () => {
         let sideEffects: ModuleSideEffects | undefined;
         const desc: Plugin = {

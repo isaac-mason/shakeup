@@ -1,15 +1,3 @@
-// A first-class dev Environment (Vite `DevEnvironment` lineage) — the composition
-// unit for "one bundler, many apps". A single dev server owns the SHARED transform
-// (a module is transformed once); each Environment owns its OWN module graph, its
-// OWN runner (⇒ its own module instances / singletons), and its OWN HMR boundary
-// propagation. Host-aware environments (browser iframe, node server, edge) are
-// ASSEMBLED from this by injecting the host bits — transport (`fetchModule`),
-// resolution, `import.meta` url, evaluator env — nothing here is host-specific.
-//
-// The per-env graph is built from the shared dev server's FetchResult (deps + HMR
-// metadata) as this env loads modules, so boundary walks use exactly the subgraph
-// THIS env evaluated — matching makecat's "code shared, graph per-env" model.
-
 import type { FetchResult } from './dev-server.ts';
 import type { ImportMetaInit, ModuleEvaluator, ResolveId, Runner } from './runner.ts';
 import { createRunner } from './runner.ts';
@@ -26,9 +14,8 @@ export type EnvironmentOptions = {
      *  all envs); this env evaluates it independently. */
     fetchModule: (id: string) => FetchResult | Promise<FetchResult>;
     resolveId: ResolveId;
-    // ── runner host injections (assembled per host) ─────────────────────────────
     /** build a module's import.meta base (url + filename). Browser: the SW URL;
-     *  node: file://. Matches makecat's RunnerHost.createImportMeta. */
+     *  node: file://. */
     createImportMeta?: (id: string) => ImportMetaInit | Promise<ImportMetaInit>;
     /** import.meta.env — this env's runtime env (client vs server differ here). */
     env?: Record<string, unknown>;

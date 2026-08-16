@@ -26,7 +26,6 @@ function normalize(v: unknown): unknown {
     return v;
 }
 
-/** Bundle a single-fixture module through our pipeline with the shim internal. */
 async function ours(fixture: string): Promise<Record<string, unknown>> {
     const files = { '/main.tsx': fixture, '/react/jsx-runtime.ts': SHIM_JS, '/react.ts': SHIM_JS };
     const resolve = (spec: string): string | null =>
@@ -36,7 +35,6 @@ async function ours(fixture: string): Promise<Record<string, unknown>> {
     return run(r.code);
 }
 
-/** Transform a fixture with esbuild automatic runtime, inline the shim, execute. */
 async function esb(fixture: string): Promise<Record<string, unknown>> {
     const out = await esbuild.transform(fixture, {
         loader: 'tsx',

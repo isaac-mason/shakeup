@@ -17,7 +17,6 @@ export function jsxs(t, p, k) { return el('jsxs', t, p, k); }
 export function createElement(t, p, ...c) { return { k: 'ce', type: norm(t), props: p ?? null, c }; }
 `;
 
-/** load every .ts AND .tsx exemplar fixture into a memory-fs map, plus the shim. */
 function loadFixtures(): Record<string, string> {
     const map: Record<string, string> = {};
     const walkDir = (dir: string): void => {

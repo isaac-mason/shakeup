@@ -1,12 +1,9 @@
 import type { AST_NODE_TYPES } from '@typescript-eslint/types';
 import { N, NODE_TYPE_NAMES, TYPE_COUNT, type TypeName } from './ast.ts';
 
-/** The canonical ESTree/TSESTree vocabulary — inventing a name fails compile. */
 type ESTreeTypeName = `${AST_NODE_TYPES}`;
 
-/** ESTree/TSESTree type name per shakeup type (differential tests, debugging,
- * future plugin interop). `null` marks shakeup-modeled types with no ESTree
- * counterpart. Core `ast.ts` deliberately does not know these. */
+/** ESTree type name per shakeup type; `null` marks types with no ESTree counterpart. */
 export const ESTREE_NAME = {
     Program: 'Program',
     BindingIdentifier: 'Identifier',
@@ -159,6 +156,6 @@ export const ESTREE_NAME = {
     JSXText: 'JSXText',
 } satisfies Record<TypeName, ESTreeTypeName | null>;
 
-/** ESTree type name per numeric type id (derived). */
+/** ESTree type name per numeric type id. */
 export const ESTREE_TYPE: string[] = new Array(TYPE_COUNT).fill('');
 for (const t of NODE_TYPE_NAMES) ESTREE_TYPE[N[t]] = ESTREE_NAME[t] ?? '';

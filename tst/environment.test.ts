@@ -62,7 +62,6 @@ describe('environment — HMR propagation', () => {
         expect(await client.applyEdit('/m.ts')).toEqual({ type: 'update', boundaries: ['/m.ts'] });
         expect(await srv.applyEdit('/m.ts')).toEqual({ type: 'update', boundaries: ['/m.ts'] });
 
-        // each env re-evaluated its own instance and ran its own accept callback.
         expect((globalThis as { __log?: unknown[] }).__log).toEqual(['client:2', 'server:2']);
         expect((await client.import('/m.ts')).v).toBe(2);
     });
@@ -172,7 +171,6 @@ describe('environment — dynamic-import boundaries', () => {
         server.invalidate('/lazy.ts');
         // /lazy is only dynamically imported → dynamic boundary → update, not full reload.
         expect((await e.applyEdit('/lazy.ts')).type).toBe('update');
-        // next dynamic import() gets the fresh module.
         expect(await (ns.load as () => Promise<number>)()).toBe(2);
     });
 });
@@ -191,7 +189,6 @@ describe('environment — acceptExports + prune', () => {
         expect((await e.applyEdit('/m.ts')).type).toBe('update');
         expect((globalThis as { __log?: unknown[] }).__log ?? []).toEqual([]);
 
-        // change a → callback fires.
         files['/m.ts'] = files['/m.ts'].replace('let a = 1', 'let a = 9');
         server.invalidate('/m.ts');
         await e.applyEdit('/m.ts');
@@ -244,7 +241,7 @@ describe('dev server — handleChange fan-out', () => {
         });
         const e = env('e');
         server.register(e);
-        await e.import('/a.ts'); // only /a loaded
+        await e.import('/a.ts');
         files['/b.ts'] = files['/b.ts'].replace('b = 1', 'b = 2');
         const results = await server.handleChange('/b.ts');
         expect(results).toEqual([{ env: 'e', update: { type: 'noop' } }]);

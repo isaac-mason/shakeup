@@ -1,9 +1,3 @@
-/**
- * Source Map v3 primitives — base64 VLQ, an in-order mappings accumulator, and JSON assembly.
- * Positions are 0-based; columns are UTF-16 code units (the SMv3 requirement). Browser-clean
- * (no Buffer/Node).
- */
-
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
 /** Append the base64-VLQ encoding of one signed integer to `out` (sign in the low bit). */

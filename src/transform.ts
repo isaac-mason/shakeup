@@ -19,9 +19,7 @@ import { addLine, encodeMappings, joinParts, newMappings, type Part, type Source
  *  filename extension when omitted. */
 export type TransformLang = 'ts' | 'tsx' | 'js' | 'jsx';
 
-/** Inputs to {@link transform}. `onlyRemoveTypeImports` is not a knob: shakeup
- *  never elides value imports (no strip-time liveness), so that guarantee holds
- *  unconditionally — matching how makecat configures oxc. */
+/** Value imports are never elided (no strip-time liveness). */
 export type TransformOptions = {
     lang?: TransformLang;
     jsx?: JSXOptions;
@@ -29,9 +27,8 @@ export type TransformOptions = {
     sourcemap?: boolean;
 };
 
-/** Output of {@link transform}: the stripped/lowered code plus diagnostics. On
- *  any error, `code` is empty — never emit code from an unreliable parse. `map`
- *  is present iff `options.sourcemap` was set and the parse succeeded. */
+/** On any error, `code` is empty. `map` is present iff `options.sourcemap` was
+ *  set and the parse succeeded. */
 export type TransformOutput = {
     code: string;
     errors: string[];
@@ -39,10 +36,8 @@ export type TransformOutput = {
 };
 
 /**
- * Render `edits` over `srcCode`, prefixed by generated-only `prefix` (e.g. the JSX runtime
- * import), producing the code and — since `sourcemap` — an SMv3 map back to `filename`. The
- * prefix's lines are left unmapped (they have no source origin); the body maps at token
- * granularity. A single {@link renderEdits} walk produces the code and its map together.
+ * Render `edits` over `srcCode`, prefixed by generated-only `prefix`, producing the code and an
+ * SMv3 map back to `filename`. The prefix's lines are left unmapped (they have no source origin).
  */
 function finishWithMap(filename: string, prefix: string, srcCode: string, edits: Edit[], errors: string[]): TransformOutput {
     const seg = newMappings();
@@ -73,16 +68,10 @@ function inferLang(filename: string): TransformLang {
 }
 
 /**
- * Per-module TS-strip + JSX-lower, with no graph or linking — the drop-in for
- * oxc's `transform` on makecat's dev path (Arc A1). One full parse, then the
- * shared emit walk strips types, lowers enums, lowers parameter properties, and
- * lowers JSX to automatic-runtime calls. Import/export statements are preserved
- * verbatim (moduleRunnerTransform rewrites them later); value imports are never
- * elided.
- *
- * Unsupported-but-parseable TS surfaces as an error rather than miscompiling:
- * value namespaces via {@link collectUnsupported}; decorators, `import =`, and
- * `export =` are already parse errors. Both feed `errors`.
+ * Per-module TS-strip + JSX-lower, with no graph or linking. One full parse, then the shared emit
+ * walk strips types, lowers enums, lowers parameter properties, and lowers JSX to automatic-runtime
+ * calls. Import/export statements are preserved verbatim; value imports are never elided.
+ * Unsupported-but-parseable TS surfaces as an error rather than miscompiling.
  */
 export function transform(filename: string, code: string, options: TransformOptions = {}): TransformOutput {
     const lang = options.lang ?? inferLang(filename);
@@ -100,10 +89,8 @@ export function transform(filename: string, code: string, options: TransformOpti
     const semantic = createSemantic();
     analyze(semantic, program);
 
-    // Standalone JSX runtime injection. Bundle mode threads the runtime import
-    // through record/link/deconflict; here there is no graph, so emit it as a
-    // real import and reference fixed locals — exactly what the automatic runtime
-    // does. Locals are deconflicted against every identifier in the module
+    // Standalone JSX runtime injection: emit a real import and reference fixed
+    // locals. Locals are deconflicted against every identifier in the module
     // (`semantic.names`), so they can't shadow user code.
     let runtimeImport = '';
     let jsxLower: JSXLower | null = null;
@@ -138,45 +125,15 @@ export function transform(filename: string, code: string, options: TransformOpti
     return { code: runtimeImport + applyEdits(code, edits), errors };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// moduleRunnerTransform (Arc A2 spike) — rewrite ESM to shakeup's NATIVE module-
-// runner form. NOT vite-coupled: our own protocol, our own runner (Arc A3).
-// Operates on plain JS (makecat strips first).
-//
-// PROTOCOL. The runner wraps each module body in `async (__shakeup) => { … }` and
-// injects one branded context object (double-underscore + product name = the
-// "reserved, hands off" convention — `__webpack_require__` lineage — and the ONE
-// name the runner can't per-module deconflict, so it must be branded):
-//   __shakeup.link(spec)   → Promise<namespace>   — the one import primitive
-//                                                     (static: `await`; dynamic: inline)
-//   __shakeup.live({ n: () => local })             — live exports as lazy getters,
-//                                                     ONE call (esbuild __export shape,
-//                                                     leaner than vite's N defineProperty;
-//                                                     lazy ⇒ circular-dep safe)
-//   __shakeup.exportAll(ns)                        — copy ns's names as live exports
-//                                                     (skip 'default' + already-defined;
-//                                                     esbuild __reExport shape) — `export *`
-//   __shakeup.meta         → import.meta           — `.url`, and `.hot` implements the
-//                                                     STANDARD import.meta.hot HMR API
-//                                                     (accept/dispose/invalidate/data…),
-//                                                     supplied by the runner (A3)
-// Import locals (`_0`, `_1`) are deconflicted against the module's identifiers, so
-// short names are collision-safe without branding.
-//
-// COVERS: imports (named/default/namespace/side-effect) + reference rewrites (member
-// access, this-preserving call wrap, shorthand expansion, scope shadowing free via
-// symbolOf) + named/default exports + re-exports (`export … from`, `export *`,
-// `export * as`) + deps/dynamicDeps + import.meta + dynamic import.
-
 /** HMR-accept metadata, detected statically from `import.meta.hot.accept(...)` so
- *  the dev server learns accept boundaries WITHOUT evaluating (D1). `selfAccepts`:
- *  the module accepts its own updates (`accept()` / `accept(cb)`). `acceptedDeps`:
+ *  the dev server learns accept boundaries WITHOUT evaluating. `selfAccepts`: the
+ *  module accepts its own updates (`accept()` / `accept(cb)`). `acceptedDeps`:
  *  specifiers from `accept('dep', cb)` / `accept([deps], cb)`. */
 export type HmrInfo = { selfAccepts: boolean; acceptedDeps: string[] };
 
-/** Output of {@link moduleRunnerTransform}. `map` (present iff `sourcemap` was set) maps the runner
- *  output back to the INPUT `code` — compose it with the strip map via `composeSourceMaps` for a
- *  map to the original source. */
+/** `map` (present iff `sourcemap` was set) maps the runner output back to the INPUT
+ *  `code` — compose it with the strip map via `composeSourceMaps` for a map to the
+ *  original source. */
 export type ModuleRunnerResult = {
     code: string;
     deps: string[];
@@ -201,7 +158,6 @@ function exportKeywordEnd(code: string, start: number, includeDefault: boolean):
     return i;
 }
 
-/** true for a `import.meta.hot` member expression. */
 function isImportMetaHot(n: Node): boolean {
     return (
         n.type === N.StaticMemberExpression &&
@@ -246,8 +202,7 @@ type RunnerEdits = {
 /** Analyze a parsed module + collect the edits/prelude that rewrite it to the
  *  `__shakeup` protocol (imports→link, exports→live, refs→member, import.meta,
  *  dynamic import, HMR-accept detection). Pure over (program, semantic, code) — no
- *  parse. Shared by {@link moduleRunnerTransform} (standalone, on stripped JS) and
- *  {@link devTransform} (fused with the TS/JSX strip over ONE parse). TS `export
+ *  parse. Shared by {@link moduleRunnerTransform} and {@link devTransform}. TS `export
  *  enum` registers its live binding; the strip lowers the enum + drops the keyword. */
 function collectRunnerEdits(program: Program, semantic: Semantic, code: string): RunnerEdits {
     // Deconflict runtime locals against every identifier in the module.
@@ -272,7 +227,6 @@ function collectRunnerEdits(program: Program, semantic: Semantic, code: string):
     // `base.name` or `base['name']` depending on whether `name` is an identifier.
     const memberAccess = (base: string, name: string): string =>
         isIdentName(name) ? `${base}.${name}` : `${base}[${JSON.stringify(name)}]`;
-    // The expression an import binding rewrites to (`_0`, `_0.foo`, `_0['x']`).
     const memberOf = (b: ImportBinding): string => (b.imported === null ? b.local : memberAccess(b.local, b.imported));
     // A synthetic runtime link for a re-export source; returns its local var. Used
     // only in export getters / exportAll, not referenced in the body.
@@ -282,7 +236,6 @@ function collectRunnerEdits(program: Program, semantic: Semantic, code: string):
         importLines.push(`const ${local} = await __shakeup.link('${spec}');`);
         return local;
     };
-    // The value of an exported local: the import expr if it's an import, else itself.
     const valueOfLocal = (sym: number, name: string): string => {
         const b = bindings.get(sym);
         return b ? memberOf(b) : name;
@@ -293,7 +246,7 @@ function collectRunnerEdits(program: Program, semantic: Semantic, code: string):
     };
 
     // Pre-pass: call-callee idents (this-preservation), dynamic import, import.meta,
-    // and static HMR-accept detection (D1).
+    // and static HMR-accept detection.
     const calleeIdents = new Set<Node>();
     const hmr: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
     walk(program, (n) => {
@@ -377,7 +330,6 @@ function collectRunnerEdits(program: Program, semantic: Semantic, code: string):
                     // the enum + drops its `export`; we just register the live binding.
                     if (decl.data.id !== null) addExport(decl.data.id.name, decl.data.id.name);
                 }
-                // interface / type alias: type-only — the strip blanks the whole stmt.
                 continue;
             }
             if (stmt.data.source !== null) {
@@ -432,7 +384,6 @@ function collectRunnerEdits(program: Program, semantic: Semantic, code: string):
         }
     }
 
-    // Reference rewrites: every IdentifierReference that resolves to an import binding.
     walkRefIdents(program, (ident, shorthandProp) => {
         if (ident.type !== N.IdentifierReference) return;
         const b = bindings.get(symbolOf(semantic, ident));
@@ -505,16 +456,14 @@ export function moduleRunnerTransform(filename: string, code: string, options: {
     return assembleRunner(filename, code, collectRunnerEdits(program, semantic, code), errors, options.sourcemap);
 }
 
-/** Inputs to {@link devTransform}. */
 export type DevTransformOptions = { lang?: TransformLang; jsx?: JSXOptions; sourcemap?: boolean };
 
 /**
- * The FUSED dev-path transform: TS/JSX strip + module-runner rewrite over a SINGLE
- * parse (P1) — the dev server's per-module transform. For NON-JSX modules the strip
- * edits + runner-rewrite edits are collected over one AST and applied together (one
- * parse instead of two). JSX modules fall back to the sequential 2-parse path
- * (`transform` → `moduleRunnerTransform`): JSX lowering generates runtime + component
- * references the runner-rewrite must also resolve, which the fused path doesn't do yet.
+ * The FUSED dev-path transform: TS/JSX strip + module-runner rewrite over a SINGLE parse. For
+ * NON-JSX modules the strip edits + runner-rewrite edits are collected over one AST and applied
+ * together (one parse instead of two). JSX modules fall back to the sequential 2-parse path
+ * (`transform` → `moduleRunnerTransform`): JSX lowering generates runtime + component references
+ * the runner-rewrite must also resolve, which the fused path doesn't do yet.
  */
 export function devTransform(filename: string, source: string, options: DevTransformOptions = {}): ModuleRunnerResult {
     const lang = options.lang ?? inferLang(filename);
@@ -534,7 +483,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
         return moduleRunnerTransform(filename, stripped.code);
     }
 
-    // Fused: one parse feeds both the TS strip and the runner-rewrite.
+    // one parse feeds both the TS strip and the runner-rewrite.
     const semantic = createSemantic();
     analyze(semantic, program);
     const r = collectRunnerEdits(program, semantic, source);

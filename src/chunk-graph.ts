@@ -1,20 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// Chunk graph — the R3 code-splitting core (one cohesive unit).
-//
-//   coloring → atoms → chunks → cross-chunk wiring → per-chunk deconflict
-//
-// A *port* of rollup `src/utils/chunkAssignment.ts` + the cross-chunk import/export
-// wiring of `src/Chunk.ts`, translated to shakeup's index-based graph. Rollup keys on
-// `Module` objects + `Set<number>` of entry indices with a BigInt fast path; shakeup is
-// already index-based, so we use plain typed arrays + one BigInt per module for the
-// dependent-entry set (the set-algebra of the dynamic-import optimization is where BigInt
-// earns its keep — `chunkAssignment.ts:99-160`).
-//
-// This module DOES NOT render text — it produces the `Chunk[]` partition, `chunkByModule`,
-// and the cross-chunk import/export wiring, plus runs per-chunk deconflict. `bundle.ts`
-// consumes that to assemble each chunk's code.
-// ─────────────────────────────────────────────────────────────────────────────
-
 import { N, type Node, walk } from './ast';
 import {
     deconflictChunk,
@@ -35,9 +18,9 @@ export type CrossImport = { imported: string; local: string };
  *  the deconflicted name it is surfaced under in THIS (producer) chunk. */
 export type ChunkExport = { ref: number; exportedName: string; local: string };
 
-/** One emitted chunk (pre-render). rollup `Chunk` (`Chunk.ts:218-267`). */
+/** One emitted chunk (pre-render). */
 export type Chunk = {
-    /** Logical name (entry name, else derived from a member id). R4 resolves the real path. */
+    /** Logical name (entry name, else derived from a member id). */
     name: string;
     /** Member module idxs, exec-ordered (a subsequence of `linked.order`). */
     modules: number[];
@@ -68,9 +51,9 @@ export type Chunk = {
 /** The full chunk partition + lookup structures. */
 export type ChunkGraph = {
     chunks: Chunk[];
-    /** module idx → owning chunk idx (rollup `chunkByModule`, `Chunk.ts:225`). -1 = no chunk. */
+    /** module idx → owning chunk idx. -1 = no chunk. */
     chunkByModule: Int32Array;
-    /** per module → dependent-entry bitset (pre-optimization color, for groups §3). */
+    /** per module → dependent-entry bitset (pre-optimization color, for groups). */
     color: bigint[];
     /** entry module idx → its entry-chunk idx (for dynamic-import target lookup). */
     entryChunkOf: Map<number, number>;
@@ -79,11 +62,11 @@ export type ChunkGraph = {
 /** Options driving chunk formation (a slice of the resolved OutputOptions). */
 export type ChunkOptions = {
     /** When false, dynamic-import targets are NOT promoted to entries (they fold into the
-     *  importer's chunk and the `import()` is rewritten to `Promise.resolve(ns)`). §3.5. */
+     *  importer's chunk and the `import()` is rewritten to `Promise.resolve(ns)`). */
     codeSplitting: boolean;
-    /** When true, one chunk per module — bypasses coloring entirely. §3.6. */
+    /** When true, one chunk per module — bypasses coloring entirely. */
     preserveModules: boolean;
-    /** manualChunks-normalized groups (§3). Empty = pure auto-chunking. */
+    /** manualChunks-normalized groups. Empty = pure auto-chunking. */
     groups: ResolvedGroup[];
 };
 
@@ -114,13 +97,8 @@ function popcount(x: bigint): number {
     return n;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Pass A — static reachability coloring + dynamic-entry discovery.
-// ─────────────────────────────────────────────────────────────────────────────
-
 /** Static dep targets of a module: static (non-dynamic) resolved internal edges, including
- *  star re-exports (they carry live bindings across chunks). Mirrors rollup
- *  `getDependenciesToBeIncluded` restricted to static edges. When `includeDynamic`, dynamic
+ *  star re-exports (they carry live bindings across chunks). When `includeDynamic`, dynamic
  *  edges are followed too — used when codeSplitting is off (targets fold into the importer).*/
 function staticDeps(graph: Graph, idx: number, includeDynamic: boolean): number[] {
     const mod = graph.modules[idx];
@@ -146,10 +124,6 @@ function staticClosure(graph: Graph, root: number, visit: (idx: number) => void,
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Dynamic already-loaded optimization (chunkAssignment.ts:99-160, 521-610).
-// ─────────────────────────────────────────────────────────────────────────────
-
 /** For each dynamic entry, the atoms guaranteed already in memory when it loads =
  *  intersection over its dynamic importers of (importer's static-closure atoms).
  *  Those bits are removed from any atom whose color ⊆ (already-loaded ∪ {this entry}),
@@ -162,9 +136,9 @@ function optimizeColors(
     dynamicImporters: number[][],
 ): void {
     // staticColorOf[e] = OR of colors of every module in entry e's static closure — the set
-    // of atoms (by color bit) present when e's chunk is loaded. We approximate rollup's
-    // per-atom already-loaded set with the union of dependent-entry bits reachable statically
-    // from each importer, which is exactly what lets a shared atom shed the dynamic bit.
+    // of atoms (by color bit) present when e's chunk is loaded. The per-atom already-loaded set
+    // is the union of dependent-entry bits reachable statically from each importer, which is
+    // exactly what lets a shared atom shed the dynamic bit.
     for (let e = 0; e < entryList.length; e++) {
         if (!isDynamicEntry[e]) continue;
         const importers = dynamicImporters[e];
@@ -192,10 +166,6 @@ function optimizeColors(
         }
     }
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Chunk formation.
-// ─────────────────────────────────────────────────────────────────────────────
 
 /** Assign modules to chunks by post-optimization color. Entry/dynamic-entry modules force
  *  their own chunk (so an entry always emits a file). */
@@ -225,10 +195,10 @@ function formChunks(
 
     // Key each module: a grouped module keys on its group; the rest key on color. Modules
     // with equal color always load together → one chunk. An entry module keys on its color
-    // like everything else (rollup `ModulesWithDependentEntries`) — a module reached ONLY by
-    // that entry shares the entry's color and merges into the entry chunk; a shared module
-    // gets its own color and its own chunk. Two entries with identical color (mutual static
-    // import cycle) merge into one chunk (§7 circular case) — both map to it via entryChunkOf.
+    // like everything else — a module reached ONLY by that entry shares the entry's color and
+    // merges into the entry chunk; a shared module gets its own color and its own chunk. Two
+    // entries with identical color (mutual static import cycle) merge into one chunk — both
+    // map to it via entryChunkOf.
     const keyOf = (idx: number): string => {
         if (groupOf !== null && groupOf[idx] >= 0) return `group:${groupOf[idx]}`;
         return `color:${color[idx].toString(16)}`;
@@ -287,10 +257,7 @@ function formChunks(
     return { chunks, chunkByModule, entryChunkOf };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// preserveModules — one chunk per module (§3.6). Bypasses coloring.
-// ─────────────────────────────────────────────────────────────────────────────
-
+// preserveModules — one chunk per module. Bypasses coloring.
 function formPreserveModulesChunks(
     graph: Graph,
     linked: Linked,
@@ -335,9 +302,7 @@ function formPreserveModulesChunks(
     return { chunks, chunkByModule, entryChunkOf };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // Cross-chunk wiring — populate chunk.imports / chunk.exports from linked.binds.
-// ─────────────────────────────────────────────────────────────────────────────
 
 /** The producer chunk + a stable export-name request for an ImportBind that lands in
  *  another chunk. Returns null for same-chunk / external / unresolved binds (no wiring). */
@@ -365,10 +330,6 @@ function producerBaseName(graph: Graph, linked: Linked, ref: number, isNs: boole
     return finalNameOf(linked, ref);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Orchestration.
-// ─────────────────────────────────────────────────────────────────────────────
-
 /** Build the full chunk graph: color → atoms → chunks → wire imports/exports → per-chunk
  *  deconflict. `linked.finalNames` / `namespaceOf` / `externalLocals` are (re)populated by
  *  the per-chunk deconflict; for a single chunk this reproduces the whole-bundle names. */
@@ -382,7 +343,7 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
 
-    // ── Pass A: entry list = static entries, then discovered dynamic targets.
+    // Entry list = static entries, then discovered dynamic targets.
     const entryList: number[] = [];
     const entryName: (string | null)[] = [];
     const isDynamicEntry: boolean[] = [];
@@ -395,7 +356,7 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
     }
 
     // Discover dynamic-import targets as entries (unless codeSplitting is off). We grow
-    // entryList mid-loop exactly as rollup grows allEntriesAndManualChunks.
+    // entryList mid-loop.
     const dynamicImporters: number[][] = [];
     for (let i = 0; i < entryList.length; i++) dynamicImporters.push([]);
     if (options.codeSplitting) {
@@ -419,8 +380,8 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
         }
     }
 
-    // ── Color: for each entry, DFS static closure, set its bit. When codeSplitting is off,
-    // dynamic edges are followed too so targets fold into their importer's chunk (§3.5).
+    // Color: for each entry, DFS static closure, set its bit. When codeSplitting is off,
+    // dynamic edges are followed too so targets fold into their importer's chunk.
     const includeDynamic = !options.codeSplitting;
     const color: bigint[] = new Array(N).fill(ZERO);
     for (let e = 0; e < entryList.length; e++) {
@@ -437,10 +398,9 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
     // Pre-optimization color snapshot (for groups' shareCount).
     const preColor = color.map((c) => c);
 
-    // ── Dynamic already-loaded optimization.
     optimizeColors(graph, color, entryList, isDynamicEntry, dynamicImporters);
 
-    // ── Groups (§3). groupOf[idx] = group index or -1.
+    // groupOf[idx] = group index or -1.
     let groupOf: Int32Array | null = null;
     const groupNames: string[] = [];
     if (options.groups.length > 0) {
@@ -449,7 +409,6 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
         groupNames.push(...res.groupNames);
     }
 
-    // ── Form chunks.
     const { chunks, chunkByModule, entryChunkOf } = formChunks(
         graph,
         linked,
@@ -476,9 +435,9 @@ function wireAndDeconflict(
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
-    // ── 0. Same-chunk dynamic import() targets need a namespace object to resolve against
-    // (`Promise.resolve(<ns>)`, §2.5). A module dynamically imported whose target lands in the
-    // SAME chunk (dynamic-optimization collapse, or a static-dominated dynamic import) gets a
+    // Same-chunk dynamic import() targets need a namespace object to resolve against
+    // (`Promise.resolve(<ns>)`). A module dynamically imported whose target lands in the SAME
+    // chunk (dynamic-optimization collapse, or a static-dominated dynamic import) gets a
     // synthesized namespace if it doesn't already have one. Register the BASE name pre-deconflict
     // so the per-chunk deconflict claims it. (Cross-chunk dynamic targets export named bindings
     // instead — no namespace needed.)
@@ -494,24 +453,23 @@ function wireAndDeconflict(
         });
     }
 
-    // ── 1. Producer-side deconflict FIRST (each chunk's own names + external locals),
-    // seeded empty. This fixes every producer export name before any consumer references it.
-    // Order matters (§2.3 / §7 deconflict-scope-leak): all producers, then consumers layer
-    // their import locals on top. We deconflict every chunk here (producer role), then in a
-    // second pass add the cross-chunk import locals (consumer role) with the producer names
-    // already reserved in that chunk's taken set — reusing the same `taken` via seed.
+    // Producer-side deconflict FIRST (each chunk's own names + external locals), seeded empty.
+    // This fixes every producer export name before any consumer references it. Order matters:
+    // all producers, then consumers layer their import locals on top. We deconflict every chunk
+    // here (producer role), then in a second pass add the cross-chunk import locals (consumer
+    // role) with the producer names already reserved in that chunk's taken set — reusing the
+    // same `taken` via seed.
     const chunkClaim: ((base: string) => string)[] = [];
     const chunkTaken: Set<string>[] = [];
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
         chunkTaken.push(taken);
-        // deconflictChunk seeds RESERVED + unresolved internally; we pass no extra seed.
         const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], []);
         chunkClaim.push(claim);
     }
 
-    // ── 2. Wire imports/exports. For every imported binding whose producer lands in another
-    // chunk, record a cross-chunk import on the consumer + a matching export on the producer.
+    // Wire imports/exports. For every imported binding whose producer lands in another chunk,
+    // record a cross-chunk import on the consumer + a matching export on the producer.
     for (let c = 0; c < chunks.length; c++) {
         const chunk = chunks[c];
         for (const idx of chunk.modules) {
@@ -525,10 +483,9 @@ function wireAndDeconflict(
         }
     }
 
-    // ── 2b. Cross-chunk re-exports: an entry/producer chunk may re-export a binding whose
-    // producer is in another chunk (splitting_re_export_issue273). The entry's export map
-    // is materialized below in bundle.ts; here we ensure such producer exports exist and
-    // the entry chunk imports them. Handled per-entry via its export map.
+    // Cross-chunk re-exports: an entry/producer chunk may re-export a binding whose producer is
+    // in another chunk. The entry's export map is materialized below in bundle.ts; here we
+    // ensure such producer exports exist and the entry chunk imports them.
     for (const [entryModule, chunkIdx] of entryChunkOf) {
         const map = linked.exportMaps.get(entryModule);
         if (map === undefined) continue;
@@ -537,8 +494,8 @@ function wireAndDeconflict(
         }
     }
 
-    // ── 3. Dynamic import targets → dynamicImports edges + side-effect imports for
-    // cross-chunk bare `import './x'` (no named bindings).
+    // Dynamic import targets → dynamicImports edges + side-effect imports for cross-chunk bare
+    // `import './x'` (no named bindings).
     for (let c = 0; c < chunks.length; c++) {
         const chunk = chunks[c];
         for (const idx of chunk.modules) {
@@ -632,10 +589,7 @@ function addImport(consumer: Chunk, producerChunk: number, imported: string, loc
     if (!list.some((s) => s.imported === imported && s.local === local)) list.push({ imported, local });
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Groups (§3.2) — minimal port: test/priority/minShareCount/$initial/min-maxModuleSize.
-// ─────────────────────────────────────────────────────────────────────────────
-
+// Groups — test/priority/minShareCount/$initial/min-maxModuleSize.
 function estimateSize(graph: Graph, idx: number): number {
     return graph.modules[idx].source.length;
 }
@@ -687,7 +641,7 @@ function assignGroups(graph: Graph, preColor: bigint[], groups: ResolvedGroup[])
     }
 
     // includeDependenciesRecursively: pull each captured module's static-dep closure into the
-    // SAME group (reduces cross-chunk churn), unless already captured. rollup default true.
+    // SAME group (reduces cross-chunk churn), unless already captured.
     for (let idx = 0; idx < N; idx++) {
         if (groupOf[idx] < 0) continue;
         const g = groups.find((x) => x.index === capturedBy[idx]);

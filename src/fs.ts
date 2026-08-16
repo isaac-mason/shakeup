@@ -1,7 +1,7 @@
 /**
- * The only seam through which core code touches an environment; core (graph,
- * link, bundle) MUST NOT import node builtins directly — go through an Fs so
- * the browser stays a first-class target. Paths are posix-style strings.
+ * The only seam through which core code touches an environment; core MUST NOT
+ * import node builtins directly — go through an Fs so the browser stays a
+ * first-class target. Paths are posix-style strings.
  */
 export type Fs = {
     read(id: string): string | null;

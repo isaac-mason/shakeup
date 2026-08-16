@@ -12,7 +12,6 @@ export type JSXLower = {
     renameIdent: (idNode: Node) => string | null;
 };
 
-/** An edit over the source. `text` present => replacement; absent => blank. */
 /** A point interior of an edit's replacement `text`: output offset `at` (within `text`) originates
  *  at source offset `src`. Lets a lowered blob (jsx()/enum) map its interior value expressions to
  *  their source rather than to one coarse block. */
@@ -184,7 +183,7 @@ function lowerEnum(ctx: Ctx, enumNode: Node & { type: typeof N.TSEnumDeclaration
     const members = enumNode.data.members;
 
     // Built as source-tracked pieces so each member initializer maps back to its source; the keys
-    // and scaffolding are generated. The pieces assemble to the enum's runtime IIFE verbatim.
+    // and scaffolding are generated. The pieces assemble to the enum's runtime IIFE.
     const varKw = exportNode !== null && !ctx.dropExportKeyword ? 'export var' : 'var';
     const pieces: PieceItem[] = [];
     const put = (text: string, srcOff?: number): void => {
@@ -485,7 +484,7 @@ function lowerJSXChildItems(ctx: Ctx, children: Node[]): PieceItem[] {
 }
 
 /** True when the folded children form a static ARRAY (jsxs): >1 child, or a
- * single spread child (esbuild js_parser.go:14013-14028). */
+ * single spread child. */
 function childrenAreStatic(childTexts: string[]): boolean {
     if (childTexts.length > 1) return true;
     return childTexts.length === 1 && childTexts[0].startsWith('...');
@@ -835,7 +834,6 @@ function blankPropDef(ctx: Ctx, n: Node & { type: typeof N.PropertyDefinition })
     return false;
 }
 
-/** Param: optional `?`, accessibility/readonly param-property modifiers. */
 /** A TS `this` parameter (`function f(this: T, ...)`) is not a runtime parameter — `this` is a
  *  reserved word, so keeping it emits broken JS. Remove the whole param plus its trailing comma
  *  so the parameter list stays valid. Returns true when it removed a `this` param. */
@@ -861,10 +859,6 @@ function blankParam(ctx: Ctx, n: Node & { type: typeof N.FormalParameter }): voi
     }
 }
 
-/**
- * Sort and apply `edits` to `src`. Edits are expected non-overlapping (outer
- * blanks skip descent); any overlap is clamped to the running cursor.
- */
 /** Mapping cursor threaded through {@link renderEdits} when a source map is wanted. Tracks the
  *  current source and generated position (line, UTF-16 column, both 0-based); `seg` collects segments. */
 export type MapCtx = {

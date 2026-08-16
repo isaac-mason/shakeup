@@ -45,7 +45,6 @@ describe('bundle: base automatic chunking', () => {
         const b = r.chunks.find((c) => c.name === 'b')!;
         expect(a.imports).toContain(shared.name);
         expect(b.imports).toContain(shared.name);
-        // /shared.ts appears in exactly one chunk.
         expect(r.chunks.filter((c) => c.moduleIds.includes('/shared.ts'))).toHaveLength(1);
         const ns = await execEntries(r.chunks, ['a', 'b']);
         expect(ns.a.av).toBe(41);
@@ -65,7 +64,6 @@ describe('bundle: base automatic chunking', () => {
         });
         expect(r.errors).toEqual([]);
         const a = r.chunks.find((c) => c.name === 'a')!;
-        // R4: the shared chunk is a non-entry chunk → default chunkFileNames '[name]-[hash].js'.
         const shared = r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!;
         expect(a.code).toContain(`from './${shared.fileName}'`);
         const ns = await execEntries(r.chunks, ['a', 'b']);
@@ -80,7 +78,6 @@ describe('bundle: base automatic chunking', () => {
         expect(r.chunks).toHaveLength(1);
         expect(r.chunks[0].isEntry).toBe(true);
         expect(r.code).toBe(r.chunks[0].code);
-        // No cross-chunk imports for a single chunk.
         expect(r.chunks[0].imports).toEqual([]);
     });
 });
@@ -101,13 +98,9 @@ describe('bundle: dynamic import splitting', () => {
         const lazy = r.chunks.find((c) => c.isDynamicEntry)!;
         expect(lazy.moduleIds).toEqual(['/lazy.ts']);
         expect(lazy.exports).toContain('secret');
-        // R4: the dynamic chunk is hashed ('[name]-[hash].js'); the import() path matches it.
         expect(entry.code).toContain(`import('./${lazy.fileName}')`);
         expect(entry.dynamicImports).toContain(lazy.name);
-        // The entry statically imports nothing; it defers the lazy chunk via import().
         expect(entry.imports).toEqual([]);
-        // Execution of the async `import()` across real files is covered by the oracle spike
-        // (run under `npx tsx`, no vite `/@fs/` loader interception); here we assert structure.
     });
 
     it('a module imported statically AND dynamically folds into the importer (no dup, executes)', async () => {
@@ -123,7 +116,6 @@ describe('bundle: dynamic import splitting', () => {
             external: [],
         });
         expect(r.errors).toEqual([]);
-        // Static dominance: foo folds into the entry chunk — one chunk, no separate lazy chunk.
         expect(r.chunks).toHaveLength(1);
         expect(r.chunks[0].moduleIds).toContain('/foo.ts');
         expect(r.chunks[0].code).toMatch(/Promise\.resolve\(\)\.then\(\(\) =>/);

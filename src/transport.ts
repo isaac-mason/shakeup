@@ -1,12 +1,3 @@
-// Transport split (Arc D5) — lets an Environment live in a different realm
-// (worker / iframe / process) than the dev server. The env↔server link is a
-// serializable frame protocol; the actual transport (in-process, MessagePort,
-// WebSocket) is injected via `post` + feeding incoming frames to `handleFrame`.
-//
-// Mirrors makecat's `lib/build/dev`: `attachEnvironment` ≈ `attachRealm` (server
-// conduit), `EnvironmentBridge` ≈ `RunnerBridge`, `TransportFrame` = our own name; makecat calls it BundlerFrame —
-// so makecat's realm-host + port-bridge drive shakeup's dev server unchanged.
-
 import type { DevServer, FetchResult, ResolveResult } from './dev-server.ts';
 import { createEnvironment, type Environment, type EnvironmentOptions } from './environment.ts';
 
@@ -54,7 +45,7 @@ export function attachEnvironment(
 }
 
 /** ENVIRONMENT (runner) side of the transport: turns frames into invoke promises +
- *  push callbacks. Mirrors makecat's RunnerBridge. */
+ *  push callbacks. */
 export type EnvironmentBridge = {
     handleFrame(frame: TransportFrame): void;
     invoke(call: string, ...args: unknown[]): Promise<unknown>;
