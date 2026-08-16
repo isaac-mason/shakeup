@@ -80,6 +80,8 @@ export type ResolvedGroup = {
     minModuleSize: number;
     maxModuleSize: number;
     minShareCount: number;
+    entriesAware: boolean;
+    entriesAwareMergeThreshold: number;
     initialOnly: boolean;
     includeDependenciesRecursively: boolean;
     /** Original array index — priority tie-break. */
@@ -669,5 +671,103 @@ function assignGroups(graph: Graph, preColor: bigint[], groups: ResolvedGroup[])
         if (g === undefined || g.minSize <= 0) continue;
         if ((groupTotal.get(groupOf[idx]) ?? 0) < g.minSize) groupOf[idx] = -1;
     }
-    return { groupOf, groupNames: groupNameList };
+    return refineGroups(graph, preColor, groups, groupOf, capturedBy, groupNameList);
+}
+
+/** Split a module list into pieces each ≤ `maxSize` (greedy pack in stable-id order; a single
+ *  oversized module forms its own piece). */
+function splitByMaxSize(graph: Graph, mods: number[], maxSize: number): number[][] {
+    const sorted = [...mods].sort((a, b) => (graph.modules[a].id < graph.modules[b].id ? -1 : 1));
+    const out: number[][] = [];
+    let cur: number[] = [];
+    let curSize = 0;
+    for (const m of sorted) {
+        const s = estimateSize(graph, m);
+        if (cur.length > 0 && curSize + s > maxSize) {
+            out.push(cur);
+            cur = [];
+            curSize = 0;
+        }
+        cur.push(m);
+        curSize += s;
+    }
+    if (cur.length > 0) out.push(cur);
+    return out;
+}
+
+/** Merge entriesAware subgroups whose total size is below `threshold` into the largest
+ *  subgroup (a simpler take on rolldown's bitset-nearest merge). */
+function mergeSmallPartitions(graph: Graph, partitions: number[][], threshold: number): number[][] {
+    const sizeOf = (p: number[]): number => p.reduce((s, m) => s + estimateSize(graph, m), 0);
+    let largest = 0;
+    for (let i = 1; i < partitions.length; i++) {
+        if (sizeOf(partitions[i]) > sizeOf(partitions[largest])) largest = i;
+    }
+    const kept: number[][] = [partitions[largest]];
+    for (let i = 0; i < partitions.length; i++) {
+        if (i === largest) continue;
+        if (sizeOf(partitions[i]) < threshold) partitions[largest].push(...partitions[i]);
+        else kept.push(partitions[i]);
+    }
+    return kept;
+}
+
+/** Refine base groups into final sub-chunks: `entriesAware` partitions a group by the set of
+ *  entries reaching each module (its `color` bitset); `maxSize` greedy-splits an oversized
+ *  group/subgroup. Returns a finer module→sub-chunk map + per-sub-chunk base names (duplicate
+ *  names are fine — the naming pass deduplicates them). */
+function refineGroups(
+    graph: Graph,
+    preColor: bigint[],
+    groups: ResolvedGroup[],
+    baseGroupOf: Int32Array,
+    capturedBy: Int32Array,
+    baseNames: string[],
+): { groupOf: Int32Array; groupNames: string[] } {
+    const N = graph.modules.length;
+    const subOf = new Int32Array(N).fill(-1);
+    const subNames: string[] = [];
+    const byBase = new Map<number, number[]>();
+    for (let idx = 0; idx < N; idx++) {
+        const b = baseGroupOf[idx];
+        if (b < 0) continue;
+        let list = byBase.get(b);
+        if (list === undefined) {
+            list = [];
+            byBase.set(b, list);
+        }
+        list.push(idx);
+    }
+    for (const base of [...byBase.keys()].sort((a, b) => a - b)) {
+        const mods = byBase.get(base) as number[];
+        const cfg = groups.find((g) => g.index === capturedBy[mods[0]]) ?? groups[0];
+        let partitions: number[][];
+        if (cfg.entriesAware) {
+            const byColor = new Map<string, number[]>();
+            for (const m of mods) {
+                const k = preColor[m].toString(16);
+                let list = byColor.get(k);
+                if (list === undefined) {
+                    list = [];
+                    byColor.set(k, list);
+                }
+                list.push(m);
+            }
+            partitions = [...byColor.keys()].sort().map((k) => byColor.get(k) as number[]);
+            if (cfg.entriesAwareMergeThreshold > 0 && partitions.length > 1) {
+                partitions = mergeSmallPartitions(graph, partitions, cfg.entriesAwareMergeThreshold);
+            }
+        } else {
+            partitions = [mods];
+        }
+        for (const part of partitions) {
+            const pieces = cfg.maxSize < Number.POSITIVE_INFINITY ? splitByMaxSize(graph, part, cfg.maxSize) : [part];
+            for (const piece of pieces) {
+                const si = subNames.length;
+                subNames.push(baseNames[base]);
+                for (const m of piece) subOf[m] = si;
+            }
+        }
+    }
+    return { groupOf: subOf, groupNames: subNames };
 }

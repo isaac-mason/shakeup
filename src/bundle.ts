@@ -48,6 +48,7 @@ export type CodeSplittingGroup = {
     maxModuleSize?: number;
     minShareCount?: number;
     entriesAware?: boolean;
+    entriesAwareMergeThreshold?: number;
     includeDependenciesRecursively?: boolean;
     tags?: '$initial'[];
 };
@@ -726,6 +727,8 @@ function resolveChunkOptions(
             minModuleSize: g.minModuleSize ?? 0,
             maxModuleSize: g.maxModuleSize ?? Number.POSITIVE_INFINITY,
             minShareCount: g.minShareCount ?? 1,
+            entriesAware: g.entriesAware ?? false,
+            entriesAwareMergeThreshold: g.entriesAwareMergeThreshold ?? 0,
             initialOnly: (g.tags ?? []).includes('$initial'),
             includeDependenciesRecursively: g.includeDependenciesRecursively ?? true,
             index: index++,

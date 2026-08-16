@@ -92,6 +92,49 @@ describe('bundle: base automatic chunking', () => {
         expect(r.chunks.some((c) => c.name === 'libs')).toBe(true);
     });
 
+    it('codeSplitting maxSize splits an oversized group into multiple chunks', async () => {
+        const mod = (n: number) => `export const v${n} = ${JSON.stringify('x'.repeat(120))};`;
+        const r = bundle({
+            input: { a: '/a.ts' },
+            fs: createMemoryFs({
+                '/a.ts':
+                    "import { v1 } from './m1';\nimport { v2 } from './m2';\nimport { v3 } from './m3';\nexport const v = v1.length + v2.length + v3.length;",
+                '/m1.ts': mod(1),
+                '/m2.ts': mod(2),
+                '/m3.ts': mod(3),
+            }),
+            external: [],
+            output: { codeSplitting: { groups: [{ name: 'lib', test: '/m', maxSize: 150 }] } },
+        });
+        expect(r.errors).toEqual([]);
+        // each module is ~145 bytes > maxSize/2, so greedy packing puts one per chunk.
+        const lib = r.chunks.filter((c) => c.moduleIds.some((m) => m.startsWith('/m')));
+        expect(lib).toHaveLength(3);
+    });
+
+    it('codeSplitting entriesAware splits a group by importing-entry set', async () => {
+        const r = bundle({
+            input: { a: '/a.ts', b: '/b.ts' },
+            fs: createMemoryFs({
+                '/a.ts': "import { x } from '/lib/shared';\nimport { y } from '/lib/onlyA';\nexport const av = x + y;",
+                '/b.ts': "import { x } from '/lib/shared';\nexport const bv = x;",
+                '/lib/shared.ts': 'export const x = 1;', // reached by a + b
+                '/lib/onlyA.ts': 'export const y = 2;', // reached by a only
+            }),
+            external: [],
+            output: { codeSplitting: { groups: [{ name: 'lib', test: '/lib/', entriesAware: true }] } },
+        });
+        expect(r.errors).toEqual([]);
+        const lib = r.chunks.filter((c) => c.moduleIds.some((m) => m.startsWith('/lib/')));
+        expect(lib).toHaveLength(2); // {a,b} and {a} entry-sets split into separate chunks
+        const sharedChunk = lib.find((c) => c.moduleIds.includes('/lib/shared.ts'));
+        const onlyAChunk = lib.find((c) => c.moduleIds.includes('/lib/onlyA.ts'));
+        expect(sharedChunk).not.toBe(onlyAChunk);
+        const ns = await execEntries(r.chunks, ['a', 'b']);
+        expect(ns.a.av).toBe(3);
+        expect(ns.b.bv).toBe(1);
+    });
+
     it('cross-chunk import renders `import { … } from` and executes with live bindings', async () => {
         const r = bundle({
             input: { a: '/a.ts', b: '/b.ts' },
