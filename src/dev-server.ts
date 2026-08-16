@@ -1,13 +1,13 @@
 import { analyze, createSemantic } from './analysis/semantic.ts';
 import type { HmrUpdate } from './environment.ts';
 import type { Fs } from './fs.ts';
+import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from './module-graph.ts';
 import { parse } from './parser.ts';
 import {
     compilePipeline,
     type ModuleInfo,
     type PartialResolvedId,
     type Pipeline,
-    type Plugin,
     type PluginCtx,
     type ResolveIdExtra,
     runLoad,
@@ -16,21 +16,13 @@ import {
     runTransform,
 } from './plugin.ts';
 import type { SourceMap } from './sourcemap.ts';
-import { devTransform, type HmrInfo, type TransformOptions } from './transform.ts';
+import { devTransform, type HmrInfo } from './transform.ts';
 
 /** Resolution result: a module id to evaluate through the graph, or an external
  *  specifier the runner native-imports. */
 export type ResolveResult = string | { external: string };
 
-export type DevServerOptions = {
-    /** synchronous default fs backend for the built-in resolver + loader (node /
-     *  tests). Omit it and supply async `load`/`resolveId` plugins instead (e.g.
-     *  OPFS). */
-    fs?: Fs;
-    /** plugins — the resolution/load/transform surface. */
-    plugins?: Plugin[];
-    /** JSX config forwarded to the strip transform. */
-    jsx?: TransformOptions['jsx'];
+export type DevServerOptions = CommonOptions & {
     /** emit source maps (mapping runner code → original) so the runner attaches them
      *  and dev stack traces map to source. Default true. */
     sourcemap?: boolean;
@@ -137,7 +129,6 @@ export function watch(
     };
 }
 
-const EXT_PROBES = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '/index.ts', '/index.js'];
 const isBare = (s: string): boolean => !s.startsWith('./') && !s.startsWith('../') && !s.startsWith('/');
 
 function dirOf(id: string): string {
@@ -168,6 +159,7 @@ const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
 
 export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
+    const baseResolve = makeBaseResolve(fs, options.resolve, options.platform);
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
     const graph = new Map<string, ModuleNode>();
 
@@ -217,15 +209,6 @@ export function createDevServer(options: DevServerOptions): DevServer {
         getModuleIds: () => graph.keys(),
     };
 
-    function defaultResolve(spec: string, importer: string | null): ResolveResult {
-        if (isBare(spec)) return { external: spec };
-        const base = spec.startsWith('/') || importer === null ? spec : joinPath(dirOf(importer), spec);
-        for (const ext of EXT_PROBES) {
-            if (fs.read(base + ext) !== null) return base + ext;
-        }
-        return base; // unresolved — surfaces as a fetch error
-    }
-
     async function resolveId(spec: string, importer: string | null, _extra?: ResolveIdExtra): Promise<ResolveResult> {
         const hit = await runResolveId(pipeline, ctx, spec, importer);
         if (hit === false) return { external: spec };
@@ -235,7 +218,13 @@ export function createDevServer(options: DevServerOptions): DevServer {
             if (hit.external !== undefined && hit.external !== false) return { external: spec };
             return hit.id;
         }
-        return defaultResolve(spec, importer);
+        // No plugin resolved it: honour `external`, then the shared config-driven resolver.
+        if (isExternalSpecifier(options.external, spec)) return { external: spec };
+        const resolved = baseResolve(spec, importer);
+        if (resolved !== null) return resolved;
+        // Unresolved: a bare specifier is native-imported; a relative one surfaces as a fetch error.
+        if (isBare(spec)) return { external: spec };
+        return spec.startsWith('/') || importer === null ? spec : joinPath(dirOf(importer), spec);
     }
 
     async function resolveDeps(id: string, specs: string[]): Promise<string[]> {

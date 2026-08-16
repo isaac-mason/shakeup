@@ -41,6 +41,23 @@ describe('dev server — resolution + serving', () => {
     });
 });
 
+describe('dev server — resolve config (shared with bundle)', () => {
+    it('honours resolve.alias', async () => {
+        const { server } = setup({ '/src/util.ts': '' }, { resolve: { alias: { '@': '/src' } } });
+        expect(await server.resolveId('@/util', '/entry.ts')).toBe('/src/util.ts');
+    });
+
+    it('honours resolve.extensionAlias (import ./x.js → x.ts)', async () => {
+        const { server } = setup({ '/x.ts': '' }, { resolve: { extensionAlias: { '.js': ['.ts', '.js'] } } });
+        expect(await server.resolveId('./x.js', '/entry.ts')).toBe('/x.ts');
+    });
+
+    it('honours the external option for an otherwise-resolvable specifier', async () => {
+        const { server } = setup({ '/lib.ts': '' }, { external: ['./lib'] });
+        expect(await server.resolveId('./lib', '/entry.ts')).toEqual({ external: './lib' });
+    });
+});
+
 describe('dev server — plugins are the surface', () => {
     it('a load plugin supplies virtual modules', async () => {
         const { runner } = setup(

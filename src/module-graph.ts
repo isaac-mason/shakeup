@@ -205,13 +205,11 @@ export function normalizeResolve(resolve: ResolveOptions | undefined, platform: 
     };
 }
 
-/** Inputs to {@link buildGraph}. */
-export type GraphOptions = {
-    /** One or more entry modules. Exactly one of `input` / `entry` must be set. */
-    input?: InputOption;
-    /** @deprecated single-entry alias for `input`. Normalized into `input`. */
-    entry?: string;
-    fs: Fs;
+/** The pipeline surface shared by `bundle()` and `createDevServer()` — how modules are
+ *  loaded and resolved. Both extend it so resolution/transform config cannot drift between
+ *  the dev and prod paths. */
+export type CommonOptions = {
+    fs?: Fs;
     external?: string[] | ((specifier: string) => boolean);
     /** A low-level resolver function OR a {@link ResolveOptions} config. */
     resolve?: ResolveFn | ResolveOptions;
@@ -219,6 +217,15 @@ export type GraphOptions = {
     platform?: Platform;
     plugins?: Plugin[];
     jsx?: JSXOptions;
+};
+
+/** Inputs to {@link buildGraph}. */
+export type GraphOptions = CommonOptions & {
+    /** One or more entry modules. Exactly one of `input` / `entry` must be set. */
+    input?: InputOption;
+    /** @deprecated single-entry alias for `input`. Normalized into `input`. */
+    entry?: string;
+    fs: Fs;
     /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
 };
@@ -316,11 +323,28 @@ function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, i
     return null;
 }
 
+/** Build the base resolver from a resolve option (function or config) + platform — shared by
+ *  {@link buildGraph} and the dev server so dev and prod resolve identically. A function
+ *  bypasses the built-in probe entirely; a config drives it. */
+export function makeBaseResolve(
+    fs: Fs,
+    resolve: ResolveFn | ResolveOptions | undefined,
+    platform: Platform | undefined,
+): ResolveFn {
+    if (typeof resolve === 'function') return resolve;
+    const normalized = normalizeResolve(resolve, platform);
+    return (s, i) => defaultResolve(fs, normalized, s, i);
+}
+
+/** Whether a specifier is externalized by the `external` option. */
+export function isExternalSpecifier(external: CommonOptions['external'], specifier: string): boolean {
+    if (external === undefined) return false;
+    if (typeof external === 'function') return external(specifier);
+    return external.includes(specifier);
+}
+
 function isExternal(options: GraphOptions, specifier: string): boolean {
-    const ext = options.external;
-    if (ext === undefined) return false;
-    if (typeof ext === 'function') return ext(specifier);
-    return ext.includes(specifier);
+    return isExternalSpecifier(options.external, specifier);
 }
 
 /** A mutable option bag threaded through resolveId → load → transform for a module id. */
@@ -608,16 +632,12 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = { modules: [], byId: new Map(), entries: [], errors: [], warnings: [] };
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    // `resolve` may be a low-level function or a ResolveOptions config. The config drives the
-    // built-in relative probe; the function bypasses it entirely.
-    const resolveIsFn = typeof options.resolve === 'function';
+    const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform);
+    // `symlinks:false` disables the realpath deref below (config form only).
     const normalizedResolve = normalizeResolve(
-        resolveIsFn ? undefined : (options.resolve as ResolveOptions | undefined),
+        typeof options.resolve === 'function' ? undefined : options.resolve,
         options.platform,
     );
-    const baseResolve: ResolveFn = resolveIsFn
-        ? (options.resolve as ResolveFn)
-        : (s: string, i: string | null) => defaultResolve(options.fs, normalizedResolve, s, i);
     const pluginExternals = new Set<string>();
     /** resolveId/load option overrides keyed by RESOLVED id, finalized in addModule. */
     const pendingOptions = new Map<string, PendingOptions>();
