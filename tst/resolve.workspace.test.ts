@@ -131,7 +131,7 @@ describe('workspace: pnpm dedup (one store file, two link paths -> one module)',
     });
 });
 
-describe('workspace: install-free member resolution (NOT IMPLEMENTED — pinned)', () => {
+describe('workspace: install-free member resolution', () => {
     const files: Record<string, string> = {
         '/repo/package.json': JSON.stringify({
             name: 'root',
@@ -159,25 +159,11 @@ describe('workspace: install-free member resolution (NOT IMPLEMENTED — pinned)
         return bundle({ entry: '/repo/packages/a/index.js', fs, plugins: [nodeResolve({ fs })] });
     };
 
-    it('KNOWN LIMITATION: member "@ws/b" is treated as unresolved external (warn), not resolved', () => {
+    it('resolves "@ws/b" via the root `workspaces` field (no node_modules install)', () => {
         const result = build();
-        expect(result.warnings).toContainEqual(
-            "'@ws/b' (imported by '/repo/packages/a/index.js') could not be resolved — " +
-                'treated as external. Add it to `external` or use a resolver plugin to silence this.',
-        );
         expect(result.errors).toEqual([]);
-    });
-
-    it('KNOWN LIMITATION: the workspace member does NOT enter the graph', () => {
-        const result = build();
+        expect(result.warnings).toEqual([]);
         const ids = result.graph!.modules.map((m) => m.id);
-        expect(ids).not.toContain('/repo/packages/b/index.js');
-        expect(ids).toEqual(['/repo/packages/a/index.js']);
-    });
-
-    it('WILL FLIP when install-free workspace resolution lands (§Workspaces item 2)', () => {
-        const result = build();
-        const resolvedMemberInGraph = result.graph!.modules.some((m) => m.id === '/repo/packages/b/index.js');
-        expect(resolvedMemberInGraph).toBe(false);
+        expect(ids).toEqual(['/repo/packages/a/index.js', '/repo/packages/b/index.js']);
     });
 });

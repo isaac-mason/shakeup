@@ -23,6 +23,9 @@ type PackageJson = {
     browser: string | Record<string, string | false> | undefined;
     module: string | undefined;
     main: string | undefined;
+    /** `workspaces` globs/paths (array form or `{ packages: [...] }`) — for install-free
+     *  monorepo member resolution. */
+    workspaces: string[] | undefined;
 };
 
 function parsePackageName(spec: string): { name: string; subpath: string } | null {
@@ -290,6 +293,13 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             }
             browser = map;
         }
+        const wsRaw = raw.workspaces;
+        let workspaces: string[] | undefined;
+        if (Array.isArray(wsRaw)) {
+            workspaces = wsRaw.filter((x): x is string => typeof x === 'string');
+        } else if (isPlainObject(wsRaw) && Array.isArray((wsRaw as { packages?: unknown }).packages)) {
+            workspaces = (wsRaw as { packages: unknown[] }).packages.filter((x): x is string => typeof x === 'string');
+        }
         const pkg: PackageJson = {
             dir,
             name: typeof raw.name === 'string' ? raw.name : undefined,
@@ -297,6 +307,7 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             browser,
             module: typeof raw.module === 'string' ? raw.module : undefined,
             main: typeof raw.main === 'string' ? raw.main : undefined,
+            workspaces,
         };
         pkgCache.set(dir, pkg);
         return pkg;
@@ -408,6 +419,53 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
         }
     };
 
+    /** Resolve `specifier`/`subpath` against a located package (node_modules OR workspace
+     *  member): its `exports` if present, else the mainFields / subpath file. */
+    const resolveInPackage = (ctx: PluginCtx, pkg: PackageJson, specifier: string, subpath: string): string | null => {
+        if (pkg.exports !== undefined) {
+            const mixed = mixedExportsKeys(pkg.exports);
+            if (mixed !== null) {
+                warn(
+                    ctx,
+                    specifier,
+                    `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`,
+                );
+                return null;
+            }
+            const r = exportsResolve(pkg.exports, subpath, pkg.dir, conditions);
+            return finishExports(ctx, pkg, specifier, subpath, r);
+        }
+        if (subpath === '.') {
+            const hit = loadPackageRoot(pkg);
+            if (hit !== null) return hit;
+        } else {
+            const abs = normalizePath(`${pkg.dir}/${subpath.slice(2)}`);
+            const hit = loadAsFileOrDirectory(pkg, abs);
+            if (hit !== null) return hit;
+        }
+        warn(ctx, specifier, `The module "${specifier}" was not found on the file system`);
+        return null;
+    };
+
+    /** Install-free workspace member: locate `name`'s package dir via the nearest ancestor
+     *  `workspaces` field. The Fs contract has no directory listing, so a `glob/*` member is
+     *  located by convention — its dir basename matches the specifier's last segment (explicit
+     *  paths are matched exactly). Returns the member dir, or null. */
+    const findWorkspaceMember = (fromDir: string, name: string): string | null => {
+        const last = name.slice(name.lastIndexOf('/') + 1);
+        for (let dir: string | null = fromDir; dir !== null; dir = parentDir(dir)) {
+            const rootPkg = readPkg(dir);
+            if (rootPkg === null || rootPkg.workspaces === undefined) continue;
+            for (const pat of rootPkg.workspaces) {
+                const candidate = pat.endsWith('/*') ? joinPath(dir, `${pat.slice(0, -2)}/${last}`) : joinPath(dir, pat);
+                const memberPkg = readPkg(candidate);
+                if (memberPkg !== null && memberPkg.name === name) return candidate;
+            }
+            return null; // workspace root found but no matching member
+        }
+        return null;
+    };
+
     const resolveId = (
         ctx: PluginCtx,
         specifier: string,
@@ -472,32 +530,15 @@ export function nodeResolve(options: NodeResolveOptions): Plugin {
             const pkg = readPkg(pkgDir);
             if (pkg === null) continue;
 
-            if (pkg.exports !== undefined) {
-                const mixed = mixedExportsKeys(pkg.exports);
-                if (mixed !== null) {
-                    warn(
-                        ctx,
-                        specifier,
-                        `This object cannot contain keys that both start with "." and don't (${mixed.key} vs ${mixed.prev})`,
-                    );
-                    return null;
-                }
-                const r = exportsResolve(pkg.exports, subpath, pkgDir, conditions);
-                return finishExports(ctx, pkg, specifier, subpath, r);
-            }
-
-            if (subpath === '.') {
-                const hit = loadPackageRoot(pkg);
-                if (hit !== null) return hit;
-            } else {
-                const abs = normalizePath(`${pkgDir}/${subpath.slice(2)}`);
-                const hit = loadAsFileOrDirectory(pkg, abs);
-                if (hit !== null) return hit;
-            }
-            warn(ctx, specifier, `The module "${specifier}" was not found on the file system`);
-            return null;
+            return resolveInPackage(ctx, pkg, specifier, subpath);
         }
 
+        // Install-free workspace member fallback (no node_modules/<name> found).
+        const memberDir = findWorkspaceMember(importerDir, name);
+        if (memberDir !== null) {
+            const pkg = readPkg(memberDir);
+            if (pkg !== null) return resolveInPackage(ctx, pkg, specifier, subpath);
+        }
         return null;
     };
 
