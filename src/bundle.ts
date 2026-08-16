@@ -433,7 +433,7 @@ export function bundle(options: BundleOptions): BundleResult {
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
-    const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings);
+    const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions);
 
     let anyLiveJSX = false;
@@ -690,7 +690,12 @@ function renderChunk(
 
 /** Resolve user `output` options into {@link ChunkOptions}, normalizing manualChunks → a
  *  single group and inlineDynamicImports → codeSplitting:false. */
-function resolveChunkOptions(output: OutputOptions | undefined, entryCount: number, warnings: string[]): ChunkOptions {
+function resolveChunkOptions(
+    output: OutputOptions | undefined,
+    entryCount: number,
+    warnings: string[],
+    getModuleInfo: (id: string) => ModuleInfo | null,
+): ChunkOptions {
     const cs = output?.codeSplitting;
     const inline = output?.inlineDynamicImports === true;
     let codeSplitting = cs !== false && !inline;
@@ -732,7 +737,7 @@ function resolveChunkOptions(output: OutputOptions | undefined, entryCount: numb
     // manualChunks → single group whose `name` is the fn (test/priority/sizes default).
     if (output?.manualChunks !== undefined) {
         const fn = output.manualChunks;
-        addGroup({ name: (id: string) => fn(id, { getModuleInfo: () => null }) ?? null });
+        addGroup({ name: (id: string) => fn(id, { getModuleInfo }) ?? null });
     }
     return { codeSplitting, preserveModules: output?.preserveModules === true, groups };
 }

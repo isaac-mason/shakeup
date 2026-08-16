@@ -51,6 +51,47 @@ describe('bundle: base automatic chunking', () => {
         expect(ns.b.bv).toBe(42);
     });
 
+    it('cross-chunk `import * as ns` builds the namespace in the producer chunk and executes', async () => {
+        const r = bundle({
+            input: { a: '/a.ts', b: '/b.ts' },
+            fs: createMemoryFs({
+                '/a.ts': "import * as m from './shared';\nexport const av = m.s + m.t;",
+                '/b.ts': "import * as m from './shared';\nexport const bv = m.s * m.t;",
+                '/shared.ts': 'export const s = 3;\nexport const t = 4;',
+            }),
+            external: [],
+        });
+        expect(r.errors).toEqual([]);
+        const shared = r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!;
+        expect(shared.isEntry).toBe(false);
+        const a = r.chunks.find((c) => c.name === 'a')!;
+        expect(a.imports).toContain(shared.name);
+        const ns = await execEntries(r.chunks, ['a', 'b']);
+        expect(ns.a.av).toBe(7); // 3 + 4
+        expect(ns.b.bv).toBe(12); // 3 * 4
+    });
+
+    it('manualChunks receives a graph-backed getModuleInfo', async () => {
+        let depInfoId: string | undefined;
+        const r = bundle({
+            input: { a: '/a.ts' },
+            fs: createMemoryFs({
+                '/a.ts': "import { x } from './dep';\nexport const v = x;",
+                '/dep.ts': 'export const x = 1;',
+            }),
+            external: [],
+            output: {
+                manualChunks: (id, meta) => {
+                    if (id === '/dep.ts') depInfoId = meta.getModuleInfo(id)?.id;
+                    return id.includes('dep') ? 'libs' : null;
+                },
+            },
+        });
+        expect(r.errors).toEqual([]);
+        expect(depInfoId).toBe('/dep.ts'); // getModuleInfo returned the real node, not the stub
+        expect(r.chunks.some((c) => c.name === 'libs')).toBe(true);
+    });
+
     it('cross-chunk import renders `import { … } from` and executes with live bindings', async () => {
         const r = bundle({
             input: { a: '/a.ts', b: '/b.ts' },
