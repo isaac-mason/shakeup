@@ -25,15 +25,17 @@ export type RunnerOptions = {
     resolveId: ResolveId;
     /** transformed (`__shakeup.*`) source for a module id. */
     fetchModule: (id: string) => string | Promise<string>;
-    /** import.meta.url for a module (browser: SW URL; node: file://). */
-    metaUrl?: (id: string) => string;
+    /** build a module's import.meta base (url + filename); the runner adds `.hot` +
+     *  `.env`. Matches makecat's RunnerHost.createImportMeta. */
+    createImportMeta?: (id: string) => ImportMetaInit | Promise<ImportMetaInit>;
     /** import.meta.env — the realm's runtime env object (makecat sets this per realm
      *  at boot rather than compile-time replacing). Defaults to `{}` so
      *  `import.meta.env.X` never throws. */
     env?: Record<string, unknown>;
-    /** native import for external specifiers (default: dynamic `import`). A browser
-     *  host injects one that rejects `node:` builtins (a composition leak). */
-    nativeImport?: (spec: string) => Promise<unknown>;
+    /** how modules are evaluated + externals imported (default: AsyncFunction +
+     *  dynamic import). Swap for CSP-safe eval, node `vm`, edge runtimes, or a
+     *  `node:`-rejecting external policy (browser). Mirrors makecat RunnerHost.evaluator. */
+    evaluator?: ModuleEvaluator;
     /** run once before the first module body evaluates (browser: install the
      *  `process` shim engine deps read). Matches makecat's RunnerHost.prepare. */
     prepare?: () => void;
@@ -41,6 +43,9 @@ export type RunnerOptions = {
      *  Environment) re-propagates from that module, bubbling to its importers. When
      *  absent, invalidate() falls back to dropping the module's cached instance. */
     onInvalidate?: (id: string) => void;
+    /** outbound custom HMR events: a module's `import.meta.hot.send(event, data)`
+     *  lands here (the host forwards to the server / other realms). */
+    onHotSend?: (event: string, data: unknown) => void;
 };
 
 /** The standard import.meta.hot surface (Vite-compatible shape). */
@@ -72,20 +77,43 @@ type ModuleRecord = {
      *  gets the one module) vs `accept([deps], cb)` (cb gets the array). */
     depAccepts: { deps: string[]; single: boolean; cb: (mods: unknown) => void }[];
     /** acceptExports(names, cb): a self-accept that fires only when a named export
-     *  changed value across the update. */
+     *  changed value across the update. NOTE: Vite additionally bubbles when a
+     *  NON-accepted export changed; we don't — value-identity comparison is
+     *  unreliable for functions/objects (always "changed" on re-eval), so we treat
+     *  acceptExports as a self-accept boundary that fires cb on a named-value change. */
     acceptExports: { names: string[]; cb: (mod: unknown) => void }[];
     disposeCallbacks: ((data: Record<string, unknown>) => void)[];
     /** prune(cb): fired when the module is removed from the graph (orphaned). */
     pruneCallbacks: ((data: Record<string, unknown>) => void)[];
+    /** hot.on(event, cb) listeners; cleared on re-eval (fresh record). */
+    eventHandlers: Map<string, Set<(data: unknown) => void>>;
     /** import.meta.hot.data — persists across hot updates. */
     hotData: Record<string, unknown>;
 };
 
-type ShakeupContext = {
+/** The `__shakeup` context object injected into every module body. A custom
+ *  evaluator receives this and evaluates the module code with it. */
+export type ModuleContext = {
     link: (spec: string) => Promise<Namespace>;
     live: (getters: Record<string, () => unknown>) => void;
     exportAll: (ns: Namespace) => void;
-    meta: { url: string; hot: HotContext; env: Record<string, unknown> };
+    meta: { url: string; filename: string; hot: HotContext; env: Record<string, unknown> };
+};
+
+/** A module's import.meta base (url + filename). Matches makecat's
+ *  RunnerHost.createImportMeta return; the runner merges `.hot` + `.env` itself. */
+export type ImportMetaInit = { url?: string; filename?: string };
+
+/** How module bodies are evaluated + how externals are imported — swappable for
+ *  CSP-safe eval, node `vm`, or edge runtimes. Mirrors Vite's ModuleEvaluator. */
+export type ModuleEvaluator = {
+    /** number of wrapper lines prepended before the module body — for sourcemap
+     *  line alignment of runtime stack traces. */
+    startOffset?: number;
+    /** evaluate a transformed module body with its `__shakeup` context. */
+    runModule(ctx: ModuleContext, code: string): Promise<void>;
+    /** native-import an external specifier (browser: reject `node:`). */
+    runExternalModule(spec: string): Promise<unknown>;
 };
 
 export type Runner = {
@@ -101,34 +129,35 @@ export type Runner = {
     invalidate(id: string): void;
     /** remove an orphaned module: run its prune + dispose callbacks, then drop it. */
     prune(id: string): void;
+    /** deliver an inbound custom HMR event to every module's `hot.on(event)` listeners
+     *  (the host calls this on a server → realm push). */
+    emit(event: string, data?: unknown): void;
 };
 
 // AsyncFunction constructor — modules are `async (__shakeup) => { <body> }`.
 const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as new (
     arg: string,
     body: string,
-) => (ctx: ShakeupContext) => Promise<void>;
+) => (ctx: ModuleContext) => Promise<void>;
+
+/** Default evaluator: `new AsyncFunction` for module bodies, dynamic `import` for
+ *  externals. `new Function` wraps the body ~2 lines down (V8). */
+export const defaultEvaluator: ModuleEvaluator = {
+    startOffset: 2,
+    runModule: (ctx, code) => new AsyncFunction('__shakeup', code)(ctx),
+    runExternalModule: (spec) => import(/* @vite-ignore */ spec),
+};
 
 export function createRunner(options: RunnerOptions): Runner {
     const modules = new Map<string, ModuleRecord>();
-    const compiled = new Map<string, (ctx: ShakeupContext) => Promise<void>>();
     const evaluating = new Set<string>(); // ids currently on the evaluation stack
-    const nativeImport = options.nativeImport ?? ((spec: string) => import(/* @vite-ignore */ spec));
+    const evaluator = options.evaluator ?? defaultEvaluator;
 
     let prepared = false;
     const ensurePrepared = (): void => {
         if (prepared) return;
         prepared = true;
         options.prepare?.();
-    };
-
-    const compile = (id: string, code: string): ((ctx: ShakeupContext) => Promise<void>) => {
-        let fn = compiled.get(id);
-        if (fn === undefined) {
-            fn = new AsyncFunction('__shakeup', code);
-            compiled.set(id, fn);
-        }
-        return fn;
     };
 
     const makeHot = (rec: ModuleRecord): HotContext => ({
@@ -157,35 +186,50 @@ export function createRunner(options: RunnerOptions): Runner {
         prune(cb) {
             rec.pruneCallbacks.push(cb);
         },
-        on() {},
-        off() {},
-        send() {},
+        on(event, cb) {
+            let set = rec.eventHandlers.get(event);
+            if (set === undefined) {
+                set = new Set();
+                rec.eventHandlers.set(event, set);
+            }
+            set.add(cb as (data: unknown) => void);
+        },
+        off(event, cb) {
+            rec.eventHandlers.get(event)?.delete(cb as (data: unknown) => void);
+        },
+        send(event, data) {
+            options.onHotSend?.(event, data);
+        },
     });
 
-    const makeContext = (rec: ModuleRecord): ShakeupContext => ({
-        link: (spec) => linkFrom(rec.id, spec),
-        live: (getters) => {
-            for (const k of Object.keys(getters)) {
-                Object.defineProperty(rec.exports, k, { get: getters[k], enumerable: true, configurable: true });
-            }
-        },
-        exportAll: (ns) => {
-            for (const k of Object.keys(ns)) {
-                if (k !== 'default' && !(k in rec.exports)) {
-                    Object.defineProperty(rec.exports, k, { get: () => ns[k], enumerable: true, configurable: true });
+    const makeContext = async (rec: ModuleRecord): Promise<ModuleContext> => {
+        const im = await options.createImportMeta?.(rec.id);
+        return {
+            link: (spec) => linkFrom(rec.id, spec),
+            live: (getters) => {
+                for (const k of Object.keys(getters)) {
+                    Object.defineProperty(rec.exports, k, { get: getters[k], enumerable: true, configurable: true });
                 }
-            }
-        },
-        meta: {
-            url: options.metaUrl?.(rec.id) ?? `file:///${rec.id.replace(/^\/+/, '')}`,
-            hot: makeHot(rec),
-            env: options.env ?? {},
-        },
-    });
+            },
+            exportAll: (ns) => {
+                for (const k of Object.keys(ns)) {
+                    if (k !== 'default' && !(k in rec.exports)) {
+                        Object.defineProperty(rec.exports, k, { get: () => ns[k], enumerable: true, configurable: true });
+                    }
+                }
+            },
+            meta: {
+                url: im?.url ?? `file:///${rec.id.replace(/^\/+/, '')}`,
+                filename: im?.filename ?? rec.id,
+                hot: makeHot(rec),
+                env: options.env ?? {},
+            },
+        };
+    };
 
     async function linkFrom(importer: string, spec: string): Promise<Namespace> {
         const resolved = await options.resolveId(spec, importer);
-        if (typeof resolved !== 'string') return (await nativeImport(resolved.external)) as Namespace;
+        if (typeof resolved !== 'string') return (await evaluator.runExternalModule(resolved.external)) as Namespace;
         return loadModule(resolved);
     }
 
@@ -210,6 +254,7 @@ export function createRunner(options: RunnerOptions): Runner {
             acceptExports: [],
             disposeCallbacks: [],
             pruneCallbacks: [],
+            eventHandlers: new Map(),
             hotData: {},
         };
         modules.set(id, rec);
@@ -217,12 +262,11 @@ export function createRunner(options: RunnerOptions): Runner {
         const code = await options.fetchModule(id);
         ensurePrepared();
         try {
-            await compile(id, code)(makeContext(rec));
+            await evaluator.runModule(await makeContext(rec), code);
         } catch (err) {
             // Don't cache a half-evaluated module — a retry (or fixed edit) must
             // re-evaluate from scratch, not return the broken partial exports.
             modules.delete(id);
-            compiled.delete(id);
             throw err;
         } finally {
             evaluating.delete(id);
@@ -233,7 +277,6 @@ export function createRunner(options: RunnerOptions): Runner {
 
     function invalidate(id: string): void {
         modules.delete(id);
-        compiled.delete(id);
     }
 
     /** Remove an orphaned module: run its prune + dispose callbacks, drop it. */
@@ -243,7 +286,6 @@ export function createRunner(options: RunnerOptions): Runner {
         for (const cb of rec.pruneCallbacks) cb(rec.hotData);
         for (const cb of rec.disposeCallbacks) cb(rec.hotData);
         modules.delete(id);
-        compiled.delete(id);
     }
 
     /** Re-evaluate a module fresh (new exports object, hot.data preserved). Disposes
@@ -262,18 +304,17 @@ export function createRunner(options: RunnerOptions): Runner {
             acceptExports: [],
             disposeCallbacks: [],
             pruneCallbacks: [],
+            eventHandlers: new Map(),
             hotData: old?.hotData ?? {},
         };
-        compiled.delete(id);
         const code = await options.fetchModule(id);
         ensurePrepared();
         modules.set(id, fresh); // register before eval so self-refs resolve
         try {
-            await compile(id, code)(makeContext(fresh));
+            await evaluator.runModule(await makeContext(fresh), code);
         } catch (err) {
             if (old !== undefined) modules.set(id, old);
             else modules.delete(id);
-            compiled.delete(id);
             throw err;
         }
         return fresh.exports;
@@ -323,5 +364,12 @@ export function createRunner(options: RunnerOptions): Runner {
     /** self-accept convenience: `applyHmr(id, id)`. */
     const applyUpdate = (id: string): Promise<boolean> => applyHmr(id, id);
 
-    return { import: loadModule, applyUpdate, applyHmr, invalidate, prune };
+    function emit(event: string, data?: unknown): void {
+        for (const rec of modules.values()) {
+            const set = rec.eventHandlers.get(event);
+            if (set !== undefined) for (const cb of set) cb(data);
+        }
+    }
+
+    return { import: loadModule, applyUpdate, applyHmr, invalidate, prune, emit };
 }

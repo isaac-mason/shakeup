@@ -2,6 +2,7 @@ export * from './ast';
 export * from './parser';
 export * from './analysis';
 export * from './emit';
+export * from './sourcemap';
 export * from './fs';
 export * from './module-graph';
 export * from './shake';

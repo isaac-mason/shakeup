@@ -1,7 +1,7 @@
 import { walkRefIdents } from './analysis/refs';
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
-import { applyEdits, collectStripEdits, type Edit, type JSXLower } from './emit';
+import { applyEdits, collectStripEdits, type Edit, type JSXLower, renderMappedPart } from './emit';
 import {
     buildGraph,
     externalKey,
@@ -18,13 +18,17 @@ import {
 } from './module-graph';
 import { compilePipeline, type PluginCtx } from './plugin';
 import { type Shaken, shake } from './shake';
+import { encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
 
 /** Inputs to {@link bundle}: graph options plus tree-shaking toggle. */
 export type BundleOptions = GraphOptions & {
     treeshake?: boolean;
+    /** Emit a source map (SMv3) mapping the chunk back to the module sources. */
+    sourcemap?: boolean;
 };
 
-/** Output of {@link bundle}: the chunk code plus diagnostics and intermediate state. */
+/** Output of {@link bundle}: the chunk code plus diagnostics and intermediate state. `map` is
+ *  present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
     code: string;
     errors: string[];
@@ -32,6 +36,7 @@ export type BundleResult = {
     graph: Graph | null;
     linked: Linked | null;
     shaken: Shaken | null;
+    map?: SourceMap;
 };
 
 type EmitCtx = {
@@ -283,7 +288,11 @@ export function bundle(options: BundleOptions): BundleResult {
 
     let anyLiveJSX = false;
 
+    const wantMap = options.sourcemap === true;
     const moduleTexts: string[] = [];
+    const moduleParts: Part[] = []; // parallel to moduleTexts, only built when wantMap
+    const mapSources: string[] = [];
+    const mapSourcesContent: string[] = [];
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
         const live = shaken === null ? null : shaken.live[idx];
@@ -319,13 +328,20 @@ export function bundle(options: BundleOptions): BundleResult {
             out += `\n${renderNamespaceObject(linked, idx)}`;
         }
         if (out !== '') moduleTexts.push(out);
+        if (wantMap && out !== '') {
+            const part = renderMappedPart(mod.source, ctx.edits, mapSources.length);
+            mapSources.push(mod.id);
+            mapSourcesContent.push(mod.source);
+            moduleParts.push(part);
+            if (linked.namespaceOf.has(idx)) moduleParts.push({ code: renderNamespaceObject(linked, idx) });
+        }
     }
 
     if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
 
-    parts.push(...renderExternalImports(linked, sideEffectSpecs));
-    parts.push(...moduleTexts);
-
+    // Synthetic (generated-only) surrounds, computed once for both the string and the map assembly.
+    const extImports = renderExternalImports(linked, sideEffectSpecs);
+    let exportLine: string | null = null;
     const entryMap = linked.exportMaps.get(graph.entry);
     if (entryMap !== undefined && entryMap.size > 0) {
         const specifiers: string[] = [];
@@ -335,16 +351,43 @@ export function bundle(options: BundleOptions): BundleResult {
             const exported = isIdentName(name) ? name : JSON.stringify(name);
             specifiers.push(local === name ? exported : `${local} as ${exported}`);
         }
-        if (specifiers.length > 0) parts.push(`export { ${specifiers.join(', ')} };`);
+        if (specifiers.length > 0) exportLine = `export { ${specifiers.join(', ')} };`;
     }
-    for (const spec of entryStarSpecs) parts.push(`export * from '${spec}';`);
+    const starLines = entryStarSpecs.map((spec) => `export * from '${spec}';`);
 
+    parts.push(...extImports);
+    parts.push(...moduleTexts);
+    if (exportLine !== null) parts.push(exportLine);
+    parts.push(...starLines);
     let code = `${parts.join('\n')}\n`;
+
+    let map: SourceMap | undefined;
+    if (wantMap) {
+        const all: Part[] = extImports.map((s) => ({ code: s }));
+        all.push(...moduleParts);
+        if (exportLine !== null) all.push({ code: exportLine });
+        for (const s of starLines) all.push({ code: s });
+        const joined = joinParts(all);
+        map = {
+            version: 3,
+            sources: mapSources,
+            sourcesContent: mapSourcesContent,
+            names: [],
+            mappings: encodeMappings(joined.map),
+        };
+    }
+
     for (const hook of pipeline.renderChunk) {
         const result = hook.handler(pluginCtx, code);
-        if (result !== null && result !== undefined) code = result;
+        if (result !== null && result !== undefined && result !== code) {
+            code = result;
+            if (map !== undefined) {
+                map = undefined;
+                warnings.push('sourcemap omitted: a renderChunk plugin rewrote the chunk');
+            }
+        }
     }
     for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
     warnings.push(...warningsOut.splice(0));
-    return { code, errors: [], warnings, graph, linked, shaken };
+    return { code, errors: [], warnings, graph, linked, shaken, map };
 }

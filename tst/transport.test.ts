@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createDevServer } from '../src/dev-server.ts';
 import type { Fs } from '../src/fs.ts';
-import { attachEnvironment, type BundlerFrame, connectEnvironment, createEnvironmentBridge } from '../src/transport.ts';
+import { attachEnvironment, connectEnvironment, createEnvironmentBridge, type TransportFrame } from '../src/transport.ts';
 
 /** Wire an environment to the dev server over an in-process frame transport (the
  *  same protocol a MessagePort would carry between realms). */
@@ -10,14 +10,14 @@ function overTransport(files: Record<string, string>) {
     const server = createDevServer({ fs });
 
     // two frame sinks, cross-wired (simulating a transport between two realms).
-    let toRemote!: (f: BundlerFrame) => void;
-    let toServer!: (f: BundlerFrame) => void;
+    let toRemote!: (f: TransportFrame) => void;
+    let toServer!: (f: TransportFrame) => void;
     const conduit = attachEnvironment(server, 'e', (f) => toRemote(f));
     const bridge = createEnvironmentBridge((f) => toServer(f));
     toRemote = bridge.handleFrame;
     toServer = conduit.handleFrame;
 
-    const env = connectEnvironment(bridge, { name: 'e', metaUrl: (id) => id });
+    const env = connectEnvironment(bridge, { name: 'e', createImportMeta: (id) => ({ url: id }) });
     return { server, env, files };
 }
 

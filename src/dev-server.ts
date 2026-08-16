@@ -18,6 +18,7 @@
 // behind this stable surface — it does not change the API.
 
 import { analyze, createSemantic } from './analysis/semantic.ts';
+import type { HmrUpdate } from './environment.ts';
 import type { Fs } from './fs.ts';
 import { parse } from './parser.ts';
 import {
@@ -69,11 +70,9 @@ export type FetchResult = {
     errors: string[];
 };
 
-/** The result of propagating a change in one environment (structural — avoids a
- *  dependency on the Environment module). */
-export type EnvUpdate = { type: 'update' | 'full-reload' | 'noop'; boundaries?: string[] };
-/** Minimal environment handle the dev server fans HMR to. An `Environment` is one. */
-export type EnvHandle = { readonly name: string; applyEdit(id: string): Promise<EnvUpdate> };
+/** Minimal environment handle the dev server fans HMR to. An `Environment` is one
+ *  ({@link HmrUpdate} is re-exported from `environment.ts`). */
+export type EnvHandle = { readonly name: string; applyEdit(id: string): Promise<HmrUpdate> };
 
 export type DevServer = {
     resolveId(spec: string, importer: string | null): Promise<ResolveResult>;
@@ -86,7 +85,7 @@ export type DevServer = {
     /** a file changed: invalidate the SHARED transform cache once, then fan
      *  applyEdit to every registered environment (each HMR-updates its own
      *  instances). Returns each env's per-change result. */
-    handleChange(id: string): Promise<{ env: string; update: EnvUpdate }[]>;
+    handleChange(id: string): Promise<{ env: string; update: HmrUpdate }[]>;
     node(id: string): ModuleNode | undefined;
     moduleIds(): string[];
 };
@@ -286,9 +285,9 @@ export function createDevServer(options: DevServerOptions): DevServer {
         environments.add(env);
         return () => environments.delete(env);
     }
-    async function handleChange(id: string): Promise<{ env: string; update: EnvUpdate }[]> {
+    async function handleChange(id: string): Promise<{ env: string; update: HmrUpdate }[]> {
         invalidate(id); // shared transform cache — the module is re-transformed once
-        const out: { env: string; update: EnvUpdate }[] = [];
+        const out: { env: string; update: HmrUpdate }[] = [];
         for (const env of environments) out.push({ env: env.name, update: await env.applyEdit(id) });
         return out;
     }

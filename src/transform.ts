@@ -1,9 +1,10 @@
 import { walkRefIdents } from './analysis/refs';
 import { analyze, createSemantic, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
-import { applyEdits, collectStripEdits, type Edit, type JSXLower } from './emit';
+import { applyEdits, collectStripEdits, type Edit, type JSXLower, type MapCtx, renderEdits, renderMappedPart } from './emit';
 import { collectUnsupported, type JSXOptions, resolveJSXOptions, scanJSX } from './module-graph';
 import { parse } from './parser';
+import { addLine, encodeMappings, joinParts, newMappings, type Part, type SourceMap } from './sourcemap';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
  *  filename extension when omitted. */
@@ -15,14 +16,41 @@ export type TransformLang = 'ts' | 'tsx' | 'js' | 'jsx';
 export type TransformOptions = {
     lang?: TransformLang;
     jsx?: JSXOptions;
+    /** Emit a source map (SMv3) mapping the output back to `filename`. */
+    sourcemap?: boolean;
 };
 
 /** Output of {@link transform}: the stripped/lowered code plus diagnostics. On
- *  any error, `code` is empty — never emit code from an unreliable parse. */
+ *  any error, `code` is empty — never emit code from an unreliable parse. `map`
+ *  is present iff `options.sourcemap` was set and the parse succeeded. */
 export type TransformOutput = {
     code: string;
     errors: string[];
+    map?: SourceMap;
 };
+
+/**
+ * Render `edits` over `srcCode`, prefixed by generated-only `prefix` (e.g. the JSX runtime
+ * import), producing the code and — since `sourcemap` — an SMv3 map back to `filename`. The
+ * prefix's lines are left unmapped (they have no source origin); the body maps at Boundary
+ * granularity. The single {@link renderEdits} walk yields code and map together (no drift).
+ */
+function finishWithMap(filename: string, prefix: string, srcCode: string, edits: Edit[], errors: string[]): TransformOutput {
+    const seg = newMappings();
+    let prefixLines = 0;
+    for (let i = 0; i < prefix.length; i++) if (prefix.charCodeAt(i) === 10) prefixLines++;
+    for (let i = 0; i < prefixLines; i++) addLine(seg);
+    const m: MapCtx = { seg, srcIdx: 0, srcLine: 0, srcCol: 0, genLine: prefixLines, genCol: 0 };
+    const body = renderEdits(srcCode, edits, m);
+    const map: SourceMap = {
+        version: 3,
+        sources: [filename],
+        sourcesContent: [srcCode],
+        names: [],
+        mappings: encodeMappings(seg),
+    };
+    return { code: prefix + body, errors, map };
+}
 
 const TS_EXT = /\.(ts|mts|cts)$/;
 const TSX_EXT = /\.tsx$/;
@@ -57,8 +85,8 @@ export function transform(filename: string, code: string, options: TransformOpti
     collectUnsupported(program, filename, errors);
     if (errors.length > 0) return { code: '', errors };
 
-    // Plain JS with no JSX: nothing to strip or lower.
-    if (!ts && !jsx) return { code, errors };
+    // Plain JS with no JSX: nothing to strip or lower (map is identity).
+    if (!ts && !jsx) return options.sourcemap ? finishWithMap(filename, '', code, [], errors) : { code, errors };
 
     const semantic = createSemantic();
     analyze(semantic, program);
@@ -97,6 +125,7 @@ export function transform(filename: string, code: string, options: TransformOpti
     }
 
     const edits = collectStripEdits(program, code, false, null, jsxLower);
+    if (options.sourcemap) return finishWithMap(filename, runtimeImport, code, edits, errors);
     return { code: runtimeImport + applyEdits(code, edits), errors };
 }
 
@@ -136,13 +165,16 @@ export function transform(filename: string, code: string, options: TransformOpti
  *  specifiers from `accept('dep', cb)` / `accept([deps], cb)`. */
 export type HmrInfo = { selfAccepts: boolean; acceptedDeps: string[] };
 
-/** Output of {@link moduleRunnerTransform}. */
+/** Output of {@link moduleRunnerTransform}. `map` (present iff `sourcemap` was set) maps the runner
+ *  output back to the INPUT `code` — compose it with the strip map via `composeSourceMaps` for a
+ *  map to the original source. */
 export type ModuleRunnerResult = {
     code: string;
     deps: string[];
     dynamicDeps: string[];
     errors: string[];
     hmr: HmrInfo;
+    map?: SourceMap;
 };
 
 const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
@@ -192,7 +224,7 @@ function collectBindingNames(pattern: Node, out: string[]): void {
     });
 }
 
-export function moduleRunnerTransform(filename: string, code: string): ModuleRunnerResult {
+export function moduleRunnerTransform(filename: string, code: string, options: { sourcemap?: boolean } = {}): ModuleRunnerResult {
     const { program, errors: parseErrors } = parse(code, { ts: false, jsx: false });
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
     if (errors.length > 0) return { code: '', deps: [], dynamicDeps: [], errors, hmr: { selfAccepts: false, acceptedDeps: [] } };
@@ -385,11 +417,33 @@ export function moduleRunnerTransform(filename: string, code: string): ModuleRun
         edits.push({ start: ident.start, end: ident.end, text: shorthandProp !== null ? `${ident.name}: ${val}` : val });
     });
 
+    const live = exportEntries.length > 0 ? `__shakeup.live({ ${exportEntries.join(', ')} });` : '';
+    const imports = importLines.join('\n');
+    const reExports = reExportLines.join('\n');
+
+    if (options.sourcemap) {
+        const bodyPart = renderMappedPart(code, edits, 0); // body maps back to `code`; synthetics don't
+        const parts: Part[] = [];
+        if (live !== '') parts.push({ code: live });
+        if (imports !== '') parts.push({ code: imports });
+        if (reExports !== '') parts.push({ code: reExports });
+        if (bodyPart.code !== '') parts.push(bodyPart);
+        const joined = joinParts(parts);
+        const map: SourceMap = {
+            version: 3,
+            sources: [filename],
+            sourcesContent: [code],
+            names: [],
+            mappings: encodeMappings(joined.map),
+        };
+        return { code: joined.code, deps, dynamicDeps, errors, hmr, map };
+    }
+
     const body = applyEdits(code, edits).trim();
     const parts: string[] = [];
-    if (exportEntries.length > 0) parts.push(`__shakeup.live({ ${exportEntries.join(', ')} });`);
-    if (importLines.length > 0) parts.push(importLines.join('\n'));
-    if (reExportLines.length > 0) parts.push(reExportLines.join('\n'));
+    if (live !== '') parts.push(live);
+    if (imports !== '') parts.push(imports);
+    if (reExports !== '') parts.push(reExports);
     if (body !== '') parts.push(body);
     return { code: `${parts.join('\n')}\n`, deps, dynamicDeps, errors, hmr };
 }

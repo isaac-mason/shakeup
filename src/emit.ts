@@ -1,5 +1,6 @@
 import { walkRefIdents } from './analysis/refs.ts';
 import { isTypeOnlyNode, N, type Node, walk, walkChildren } from './ast.ts';
+import { addLine, addSegment, type Mappings, newMappings, type Part, trimMappings } from './sourcemap.ts';
 
 /** Emit options; `stripTypes: false` yields byte-identical passthrough. */
 export type EmitOptions = { stripTypes: boolean };
@@ -762,24 +763,106 @@ function blankParam(ctx: Ctx, n: Node & { type: typeof N.FormalParameter }): voi
  * Sort and apply `edits` to `src`. Edits are expected non-overlapping (outer
  * blanks skip descent); any overlap is clamped to the running cursor.
  */
-export function applyEdits(src: string, edits: Edit[]): string {
-    if (edits.length === 0) return src;
+/** Mapping cursor threaded through {@link renderEdits} when a source map is wanted. Tracks the
+ *  current source and generated position (line, UTF-16 column, both 0-based); `seg` collects segments. */
+export type MapCtx = { seg: Mappings; srcIdx: number; srcLine: number; srcCol: number; genLine: number; genCol: number };
+
+const isWordChar = (c: number): boolean =>
+    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 95 || c === 36;
+
+/** Boundary-granularity segments for a verbatim-copied span src[from,to): a segment at each word
+ *  start and each non-space punctuation char. Source and generated cursors advance in lockstep. */
+function mapKept(m: MapCtx, src: string, from: number, to: number): void {
+    let inWord = false;
+    for (let i = from; i < to; i++) {
+        const c = src.charCodeAt(i);
+        if (c === 10) {
+            m.genLine++;
+            m.genCol = 0;
+            m.srcLine++;
+            m.srcCol = 0;
+            addLine(m.seg);
+            inWord = false;
+            continue;
+        }
+        if (isWordChar(c)) {
+            if (!inWord) {
+                addSegment(m.seg, m.genCol, m.srcIdx, m.srcLine, m.srcCol);
+                inWord = true;
+            }
+        } else {
+            inWord = false;
+            if (c !== 32 && c !== 9 && c !== 13) addSegment(m.seg, m.genCol, m.srcIdx, m.srcLine, m.srcCol);
+        }
+        m.genCol++;
+        m.srcCol++;
+    }
+}
+
+/** Map an edit whose generated output is `piece`, consuming source [srcFrom,srcTo): one segment
+ *  anchoring the piece to the source start, then advance the gen (over piece) and src cursors apart. */
+function mapEdit(m: MapCtx, src: string, piece: string, srcFrom: number, srcTo: number): void {
+    if (piece.length > 0) addSegment(m.seg, m.genCol, m.srcIdx, m.srcLine, m.srcCol);
+    for (let i = 0; i < piece.length; i++) {
+        if (piece.charCodeAt(i) === 10) {
+            m.genLine++;
+            m.genCol = 0;
+            addLine(m.seg);
+        } else m.genCol++;
+    }
+    for (let i = srcFrom; i < srcTo; i++) {
+        if (src.charCodeAt(i) === 10) {
+            m.srcLine++;
+            m.srcCol = 0;
+        } else m.srcCol++;
+    }
+}
+
+/**
+ * Apply `edits` to `src`, returning the transformed string. When `map` is provided the SAME walk
+ * also emits Boundary-granularity mapping segments (so code and map cannot drift). {@link applyEdits}
+ * is exactly this walk with no map — the string is built by identical statements either way.
+ */
+export function renderEdits(src: string, edits: Edit[], map: MapCtx | null): string {
+    if (edits.length === 0) {
+        if (map) mapKept(map, src, 0, src.length);
+        return src;
+    }
     edits.sort((x, y) => x.start - y.start || x.end - y.end);
     let out = '';
     let cursor = 0;
     for (const e of edits) {
         if (e.start < cursor) {
             if (e.end <= cursor) continue;
-            out += e.text !== undefined ? e.text : blankText(src, cursor, e.end);
+            const piece = e.text !== undefined ? e.text : blankText(src, cursor, e.end);
+            out += piece;
+            if (map) mapEdit(map, src, piece, cursor, e.end);
             cursor = e.end;
             continue;
         }
         out += src.slice(cursor, e.start);
-        out += e.text !== undefined ? e.text : blankText(src, e.start, e.end);
+        if (map) mapKept(map, src, cursor, e.start);
+        const piece = e.text !== undefined ? e.text : blankText(src, e.start, e.end);
+        out += piece;
+        if (map) mapEdit(map, src, piece, e.start, e.end);
         cursor = e.end;
     }
     out += src.slice(cursor);
+    if (map) mapKept(map, src, cursor, src.length);
     return out;
+}
+
+export function applyEdits(src: string, edits: Edit[]): string {
+    return renderEdits(src, edits, null);
+}
+
+/** Render `edits` over `src` (source index `srcIdx`) into a trimmed, mapped {@link Part} — the
+ *  map version of `applyEdits(src, edits).trim()`, for assembly with `joinParts`. */
+export function renderMappedPart(src: string, edits: Edit[], srcIdx: number): Part {
+    const seg = newMappings();
+    const m: MapCtx = { seg, srcIdx, srcLine: 0, srcCol: 0, genLine: 0, genCol: 0 };
+    const code = trimMappings(renderEdits(src, edits, m), seg);
+    return { code, map: seg };
 }
 
 /**

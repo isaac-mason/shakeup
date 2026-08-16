@@ -4,7 +4,7 @@
 // WebSocket) is injected via `post` + feeding incoming frames to `handleFrame`.
 //
 // Mirrors makecat's `lib/build/dev`: `attachEnvironment` ≈ `attachRealm` (server
-// conduit), `EnvironmentBridge` ≈ `RunnerBridge`, `BundlerFrame` ≈ its frame type —
+// conduit), `EnvironmentBridge` ≈ `RunnerBridge`, `TransportFrame` = our own name; makecat calls it BundlerFrame —
 // so makecat's realm-host + port-bridge drive shakeup's dev server unchanged.
 
 import type { DevServer, FetchResult, ResolveResult } from './dev-server.ts';
@@ -12,7 +12,7 @@ import { createEnvironment, type Environment, type EnvironmentOptions } from './
 
 /** A frame crossing the transport. `invoke`/`result` carry fetchModule/resolveId
  *  request/response; `push` carries an HMR change from server → environment. */
-export type BundlerFrame =
+export type TransportFrame =
     | { __bundler: 'invoke'; id: number; call: string; args: unknown[] }
     | { __bundler: 'result'; id: number; result?: unknown; error?: string }
     | { __bundler: 'push'; payload: unknown };
@@ -23,8 +23,8 @@ export type BundlerFrame =
 export function attachEnvironment(
     server: DevServer,
     name: string,
-    post: (frame: BundlerFrame) => void,
-): { handleFrame(frame: BundlerFrame): void; close(): void } {
+    post: (frame: TransportFrame) => void,
+): { handleFrame(frame: TransportFrame): void; close(): void } {
     // The server-side handle: an edit fans out as a `push` frame; the remote env
     // applies it locally, so the result here is a noop.
     const close = server.register({
@@ -56,12 +56,12 @@ export function attachEnvironment(
 /** ENVIRONMENT (runner) side of the transport: turns frames into invoke promises +
  *  push callbacks. Mirrors makecat's RunnerBridge. */
 export type EnvironmentBridge = {
-    handleFrame(frame: BundlerFrame): void;
+    handleFrame(frame: TransportFrame): void;
     invoke(call: string, ...args: unknown[]): Promise<unknown>;
     onPush(cb: (payload: unknown) => void): void;
 };
 
-export function createEnvironmentBridge(post: (frame: BundlerFrame) => void): EnvironmentBridge {
+export function createEnvironmentBridge(post: (frame: TransportFrame) => void): EnvironmentBridge {
     const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
     let nextId = 1;
     let pushCb: ((payload: unknown) => void) | null = null;

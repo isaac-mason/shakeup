@@ -14,7 +14,7 @@ function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'>
             if (r.errors.length) throw new Error(r.errors.join('\n'));
             return r.code;
         },
-        metaUrl: (id) => `sk://${id}`,
+        createImportMeta: (id) => ({ url: `sk://${id}` }),
     });
     return { server, runner, files };
 }
@@ -167,7 +167,7 @@ describe('dev server — watch (change source)', () => {
             name: 'e',
             fetchModule: server.fetchModule,
             resolveId: server.resolveId,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         server.register(e);
         await e.import('/m.ts');

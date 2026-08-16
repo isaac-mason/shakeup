@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRunner } from '../src/runner.ts';
+import { createRunner, defaultEvaluator } from '../src/runner.ts';
 import { moduleRunnerTransform } from '../src/transform.ts';
 
 /** A runner over an in-memory source graph. Ids ARE the import specifiers; any
@@ -13,8 +13,8 @@ function graph(sources: Record<string, string>, externals: Record<string, unknow
             if (r.errors.length) throw new Error(r.errors.join('\n'));
             return r.code;
         },
-        nativeImport: async (spec) => externals[spec],
-        metaUrl: (id) => `sk://${id}`,
+        evaluator: { ...defaultEvaluator, runExternalModule: async (spec) => externals[spec] },
+        createImportMeta: (id) => ({ url: `sk://${id}` }),
     });
 }
 
@@ -56,7 +56,7 @@ describe('runner — basic linking', () => {
         const runner = createRunner({
             resolveId: (s) => s,
             fetchModule: (id) => moduleRunnerTransform(id, `export const m = import.meta.env.MODE;`).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
             env: { MODE: 'development' },
         });
         expect((await runner.import('x')).m).toBe('development');
@@ -120,7 +120,7 @@ describe('runner — HMR', () => {
         const runner = createRunner({
             resolveId: (spec) => spec,
             fetchModule: (id) => moduleRunnerTransform(id, sources[id]).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         const ns = await runner.import('m');
         expect(ns.v).toBe(1);
@@ -138,7 +138,7 @@ describe('runner — HMR', () => {
         const runner = createRunner({
             resolveId: (spec) => spec,
             fetchModule: (id) => moduleRunnerTransform(id, sources[id]).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('m');
         await runner.applyUpdate('m');
@@ -163,7 +163,7 @@ describe('runner — HMR', () => {
         const runner = createRunner({
             resolveId: (spec) => spec,
             fetchModule: () => moduleRunnerTransform('m', `export const v = 1;`).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('m');
         expect(await runner.applyUpdate('m')).toBe(false);
@@ -176,7 +176,7 @@ describe('runner — HMR robustness', () => {
         const runner = createRunner({
             resolveId: (s) => s,
             fetchModule: (id) => moduleRunnerTransform(id, src[id]).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         expect((await runner.import('m')).v).toBe(1);
         src.m = `throw new Error('boom');\nexport const v = 2;\nimport.meta.hot.accept();`;
@@ -194,7 +194,7 @@ describe('runner — HMR robustness', () => {
         const runner = createRunner({
             resolveId: (s) => s,
             fetchModule: (id) => moduleRunnerTransform(id, src[id]).code,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('imp');
         src.dep = `export const v = 2;`;
@@ -220,15 +220,73 @@ describe('runner — host seams', () => {
         expect(order).toEqual(['prepare', 'body', 'body']);
     });
 
-    it('nativeImport is the external policy — a browser host rejects node: (#8)', async () => {
+    it('the evaluator is the external policy — a browser host rejects node: (#8)', async () => {
         const runner = createRunner({
             resolveId: (spec) => ({ external: spec }),
             fetchModule: (id) => moduleRunnerTransform(id, `import fs from 'node:fs';\nexport const f = fs;`).code,
-            nativeImport: async (spec) => {
-                if (spec.startsWith('node:')) throw new Error(`node builtin '${spec}' in a browser realm`);
-                return {};
+            evaluator: {
+                ...defaultEvaluator,
+                runExternalModule: async (spec) => {
+                    if (spec.startsWith('node:')) throw new Error(`node builtin '${spec}' in a browser realm`);
+                    return {};
+                },
             },
         });
         await expect(runner.import('m')).rejects.toThrow(/node builtin 'node:fs'/);
+    });
+});
+
+describe('runner — custom HMR events (on/off/send)', () => {
+    it('send() forwards outbound; emit() delivers inbound to on() listeners', async () => {
+        const sent: Array<[string, unknown]> = [];
+        const got: unknown[] = [];
+        (globalThis as { __got?: unknown[] }).__got = got;
+        const runner = createRunner({
+            resolveId: (s) => s,
+            fetchModule: (id) =>
+                moduleRunnerTransform(
+                    id,
+                    `import.meta.hot.on('ping', (d) => { globalThis.__got.push(d); });\nimport.meta.hot.send('ready', { id: 1 });\nexport const v = 1;`,
+                ).code,
+            createImportMeta: (id) => ({ url: id }),
+            onHotSend: (event, data) => sent.push([event, data]),
+        });
+        await runner.import('m');
+        expect(sent).toEqual([['ready', { id: 1 }]]); // outbound send
+        runner.emit('ping', 'hello'); // inbound → on('ping')
+        expect(got).toEqual(['hello']);
+        (globalThis as { __got?: unknown[] }).__got = undefined;
+    });
+});
+
+describe('runner — evaluator + import.meta', () => {
+    it('createImportMeta provides url + filename', async () => {
+        const runner = createRunner({
+            resolveId: (s) => s,
+            fetchModule: (id) =>
+                moduleRunnerTransform(id, `export const u = import.meta.url;\nexport const f = import.meta.filename;`).code,
+            createImportMeta: (id) => ({ url: `sk://${id}`, filename: id }),
+        });
+        const ns = await runner.import('/m.ts');
+        expect(ns.u).toBe('sk:///m.ts');
+        expect(ns.f).toBe('/m.ts');
+    });
+
+    it('a custom evaluator replaces how modules are run (CSP/vm/edge seam)', async () => {
+        const ran: string[] = [];
+        const runner = createRunner({
+            resolveId: (s) => s,
+            fetchModule: (id) => moduleRunnerTransform(id, `export const v = 42;`).code,
+            evaluator: {
+                startOffset: 0,
+                runModule: (ctx, code) => {
+                    ran.push(code);
+                    return defaultEvaluator.runModule(ctx, code);
+                },
+                runExternalModule: defaultEvaluator.runExternalModule,
+            },
+        });
+        expect((await runner.import('m')).v).toBe(42);
+        expect(ran.length).toBe(1); // the injected evaluator ran the module
     });
 });

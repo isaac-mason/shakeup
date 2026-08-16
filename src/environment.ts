@@ -11,7 +11,7 @@
 // THIS env evaluated — matching makecat's "code shared, graph per-env" model.
 
 import type { FetchResult } from './dev-server.ts';
-import type { ResolveId, Runner } from './runner.ts';
+import type { ImportMetaInit, ModuleEvaluator, ResolveId, Runner } from './runner.ts';
 import { createRunner } from './runner.ts';
 import type { HmrInfo } from './transform.ts';
 
@@ -27,15 +27,19 @@ export type EnvironmentOptions = {
     fetchModule: (id: string) => FetchResult | Promise<FetchResult>;
     resolveId: ResolveId;
     // ── runner host injections (assembled per host) ─────────────────────────────
-    /** import.meta.url per module (browser: SW URL; node: file://). */
-    metaUrl?: (id: string) => string;
+    /** build a module's import.meta base (url + filename). Browser: the SW URL;
+     *  node: file://. Matches makecat's RunnerHost.createImportMeta. */
+    createImportMeta?: (id: string) => ImportMetaInit | Promise<ImportMetaInit>;
     /** import.meta.env — this env's runtime env (client vs server differ here). */
     env?: Record<string, unknown>;
-    /** native import for external specifiers (browser: reject `node:`). This IS the
-     *  node-rejection seam — a browser host passes one that throws on `node:*`. */
-    nativeImport?: (spec: string) => Promise<unknown>;
+    /** how modules are evaluated + externals imported (browser: a `node:`-rejecting
+     *  evaluator; default: AsyncFunction + dynamic import). */
+    evaluator?: ModuleEvaluator;
     /** run once before the first module evaluates (browser: process shim). */
     prepare?: () => void;
+    /** outbound custom HMR events (`import.meta.hot.send`) — forward to the server /
+     *  other realms. Inbound events are delivered via `env.runner.emit(event, data)`. */
+    onHotSend?: (event: string, data: unknown) => void;
     /** called when an edit can't be handled by HMR and this env needs a full reload
      *  (host decides how: re-import the entry, reload the realm/iframe). `id` is the
      *  changed module that triggered it. Host-neutral — the core only signals. */
@@ -103,10 +107,11 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
     const runner = createRunner({
         resolveId: options.resolveId,
         fetchModule,
-        metaUrl: options.metaUrl,
+        createImportMeta: options.createImportMeta,
         env: options.env,
-        nativeImport: options.nativeImport,
+        evaluator: options.evaluator,
         prepare: options.prepare,
+        onHotSend: options.onHotSend,
         onInvalidate: (id) => pendingInvalidations.add(id),
     });
 

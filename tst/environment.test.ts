@@ -13,7 +13,7 @@ function multiEnv(files: Record<string, string>) {
             name,
             fetchModule: server.fetchModule,
             resolveId: server.resolveId,
-            metaUrl: (id) => `sk://${name}${id}`,
+            createImportMeta: (id) => ({ url: `sk://${name}${id}` }),
             env: envObj,
         });
     return { server, env, files };
@@ -147,7 +147,7 @@ describe('environment — full-reload signal', () => {
             name: 'e',
             fetchModule: server.fetchModule,
             resolveId: server.resolveId,
-            metaUrl: (id) => id,
+            createImportMeta: (id) => ({ url: id }),
             onFullReload: (id) => reloaded.push(id),
         });
         await e.import('/entry.ts');
@@ -248,5 +248,85 @@ describe('dev server — handleChange fan-out', () => {
         files['/b.ts'] = files['/b.ts'].replace('b = 1', 'b = 2');
         const results = await server.handleChange('/b.ts');
         expect(results).toEqual([{ env: 'e', update: { type: 'noop' } }]);
+    });
+});
+
+describe('environment — HMR edge cases', () => {
+    it('multi-hop: editing a leaf bubbles to a grandparent that accepts the mid', async () => {
+        const { server, env, files } = multiEnv({
+            '/entry.ts': `globalThis.__log ??= [];\nimport { m } from './mid';\nimport.meta.hot.accept('./mid', (nm) => { globalThis.__log.push('entry-got:' + nm.m); });\nexport const r = m;`,
+            '/mid.ts': `import { leaf } from './leaf';\nexport const m = 'mid-' + leaf;`,
+            '/leaf.ts': `export const leaf = 1;`,
+        });
+        const e = env('e');
+        await e.import('/entry.ts');
+        files['/leaf.ts'] = `export const leaf = 2;`;
+        server.invalidate('/leaf.ts');
+        const u = await e.applyEdit('/leaf.ts');
+        expect(u).toEqual({ type: 'update', boundaries: ['/entry.ts'] });
+        // mid re-linked the fresh leaf; entry's cb got the fresh mid.
+        expect((globalThis as { __log?: string[] }).__log).toEqual(['entry-got:mid-2']);
+    });
+
+    it('a change fires every accepting importer', async () => {
+        const { server, env, files } = multiEnv({
+            '/a.ts': `globalThis.__log ??= [];\nimport { v } from './dep';\nimport.meta.hot.accept('./dep', (n) => { globalThis.__log.push('a:' + n.v); });\nexport const _ = v;`,
+            '/b.ts': `globalThis.__log ??= [];\nimport { v } from './dep';\nimport.meta.hot.accept('./dep', (n) => { globalThis.__log.push('b:' + n.v); });\nexport const _ = v;`,
+            '/entry.ts': `import './a';\nimport './b';\nimport.meta.hot.accept();`,
+            '/dep.ts': `export const v = 1;`,
+        });
+        const e = env('e');
+        await e.import('/entry.ts');
+        files['/dep.ts'] = `export const v = 2;`;
+        server.invalidate('/dep.ts');
+        const u = await e.applyEdit('/dep.ts');
+        expect(u.type).toBe('update');
+        expect(((globalThis as { __log?: string[] }).__log ?? []).sort()).toEqual(['a:2', 'b:2']);
+    });
+
+    it('hot.data persists across multiple updates', async () => {
+        const { server, env, files } = multiEnv({
+            '/m.ts': `globalThis.__log ??= [];\nimport.meta.hot.data.n = (import.meta.hot.data.n ?? 0) + 1;\nglobalThis.__log.push(import.meta.hot.data.n);\nexport let v = 0;\nimport.meta.hot.accept();`,
+        });
+        const e = env('e');
+        await e.import('/m.ts');
+        for (let i = 1; i <= 2; i++) {
+            files['/m.ts'] = files['/m.ts'].replace(`v = ${i - 1}`, `v = ${i}`);
+            server.invalidate('/m.ts');
+            await e.applyEdit('/m.ts');
+        }
+        expect((globalThis as { __log?: number[] }).__log).toEqual([1, 2, 3]);
+    });
+
+    it('circular dep member self-accepts and updates', async () => {
+        const { server, env, files } = multiEnv({
+            '/a.ts': `globalThis.__log ??= [];\nimport { b } from './b';\nexport let a = 'a1';\nexport const ab = () => a + b;\nimport.meta.hot.accept((n) => { globalThis.__log.push(n.ab()); });`,
+            '/b.ts': `import { a } from './a';\nexport const b = 'b';\nexport const ba = () => b + a;`,
+        });
+        const e = env('e');
+        await e.import('/a.ts');
+        files['/a.ts'] = files['/a.ts'].replace(`a = 'a1'`, `a = 'a2'`);
+        server.invalidate('/a.ts');
+        expect((await e.applyEdit('/a.ts')).type).toBe('update');
+        expect((globalThis as { __log?: string[] }).__log).toEqual(['a2b']);
+    });
+
+    it('re-imports a module after it was pruned', async () => {
+        const { server, env, files } = multiEnv({
+            '/entry.ts': `import './a';\nimport.meta.hot.accept();`,
+            '/a.ts': `export const a = 1;\nimport.meta.hot.accept();`,
+        });
+        const e = env('e');
+        await e.import('/entry.ts');
+        files['/entry.ts'] = `import.meta.hot.accept();`; // drop ./a → prune
+        server.invalidate('/entry.ts');
+        await e.applyEdit('/entry.ts');
+        expect(e.node('/a.ts')).toBeUndefined();
+        // re-add the import → /a loads fresh again.
+        files['/entry.ts'] = `import { a } from './a';\nexport const got = a;\nimport.meta.hot.accept();`;
+        server.invalidate('/entry.ts');
+        await e.applyEdit('/entry.ts');
+        expect(e.node('/a.ts')).toBeDefined();
+        expect((await e.import('/entry.ts')).got).toBe(1);
     });
 });
