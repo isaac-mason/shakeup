@@ -39,6 +39,27 @@ describe('dev server — resolution + serving', () => {
         });
         expect((await runner.import('/entry.ts')).result).toBe(42);
     });
+
+    it('stats() counts fetches/transforms and cache hits across the graph', async () => {
+        const { server } = setup({
+            '/entry.ts': `import { v } from './dep';\nexport const result = v * 2;`,
+            '/dep.ts': `export const v = 21;`,
+        });
+        await server.fetchModule('/entry.ts');
+        await server.fetchModule('/dep.ts');
+        let s = server.stats();
+        expect(s.fetches).toBe(2);
+        expect(s.transforms).toBe(2); // both cold
+        expect(s.cacheHits).toBe(0);
+
+        // a re-fetch of unchanged source hits the content-hash cache (no re-transform).
+        await server.fetchModule('/entry.ts');
+        s = server.stats();
+        expect(s.fetches).toBe(3);
+        expect(s.transforms).toBe(2);
+        expect(s.cacheHits).toBe(1);
+        expect(s.devTransformMs).toBeGreaterThanOrEqual(0); // timers populated, non-negative
+    });
 });
 
 describe('dev server — resolve config (shared with bundle)', () => {

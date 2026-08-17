@@ -71,6 +71,23 @@ export type DevServer = {
     handleChange(id: string): Promise<{ env: string; update: HmrUpdate }[]>;
     node(id: string): ModuleNode | undefined;
     moduleIds(): string[];
+    /** Cumulative bundling metrics since the server was created (see {@link DevServerStats}). */
+    stats(): DevServerStats;
+};
+
+/** Cumulative per-phase timing + counts across every `fetchModule` call — the cost of serving the
+ *  module graph. `transformMs`/`devTransformMs`/`resolveMs` are summed over cache MISSES only (a hit
+ *  re-transforms nothing). `wallMs` is the span from the first fetch to the last, so `wallMs` ≫ the
+ *  phase sums means the time is in the transport/eval waterfall, not the transform itself. */
+export type DevServerStats = {
+    fetches: number;
+    cacheHits: number;
+    transforms: number;
+    ioMs: number; // plugin load + fs read
+    transformMs: number; // plugin transform hooks (e.g. capture)
+    devTransformMs: number; // TS-strip + module-runner rewrite (+ any moduleParsed parse)
+    resolveMs: number; // resolving a module's dep specifiers to ids
+    wallMs: number;
 };
 
 /** A host-provided change source: it receives an `emit(paths)` and wires the host's
@@ -163,6 +180,8 @@ export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => options.warn?.(m));
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
+    // Cumulative bundling metrics (exposed via `stats()`). firstAt/lastAt bound the wall span.
+    const perf = { fetches: 0, cacheHits: 0, transforms: 0, ioMs: 0, transformMs: 0, devTransformMs: 0, resolveMs: 0, firstAt: 0, lastAt: 0 };
     const graph = new Map<string, ModuleNode>();
 
     /** Project a dev {@link ModuleNode} into the plugin-facing {@link ModuleInfo}.
@@ -245,16 +264,25 @@ export function createDevServer(options: DevServerOptions): DevServer {
 
     async function fetchModule(id: string): Promise<FetchResult> {
         if (id === EMPTY_MODULE_ID) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [] };
+        const t0 = performance.now();
+        if (perf.firstAt === 0) perf.firstAt = t0;
+        perf.fetches++;
         const loaded = await runLoad(pipeline, ctx, id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
             (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? (await fs.read(id));
-        if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
+        perf.ioMs += performance.now() - t0;
+        if (source === null) {
+            perf.lastAt = performance.now();
+            return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
+        }
 
         const hash = hashOf(source);
         const cached = graph.get(id);
         if (cached !== undefined && cached.hash === hash && cached.errors.length === 0) {
+            perf.cacheHits++;
+            perf.lastAt = performance.now();
             return {
                 code: cached.code,
                 map: cached.map,
@@ -264,10 +292,14 @@ export function createDevServer(options: DevServerOptions): DevServer {
                 errors: [],
             };
         }
+        perf.transforms++;
 
         // plugin source patches → fused strip + module-runner rewrite.
+        const tTransform = performance.now();
         const patched = (await runTransform(pipeline, ctx, source, id)).code;
+        perf.transformMs += performance.now() - tTransform;
 
+        const tDev = performance.now();
         // read-only moduleParsed: only pay a parse when a plugin needs it.
         if (pipeline.moduleParsed.length > 0) {
             const isx = id.endsWith('.tsx') || id.endsWith('.jsx');
@@ -287,7 +319,12 @@ export function createDevServer(options: DevServerOptions): DevServer {
         }
 
         const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: options.sourcemap ?? true });
-        if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
+        perf.devTransformMs += performance.now() - tDev;
+        if (result.errors.length > 0) {
+            perf.lastAt = performance.now();
+            return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
+        }
+        const tResolve = performance.now();
         const deps = await resolveDeps(id, result.deps);
         const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
         // resolve accepted-dep specifiers to ids so the graph walk matches `deps`.
@@ -295,6 +332,8 @@ export function createDevServer(options: DevServerOptions): DevServer {
             selfAccepts: result.hmr.selfAccepts,
             acceptedDeps: await resolveDeps(id, result.hmr.acceptedDeps),
         };
+        perf.resolveMs += performance.now() - tResolve;
+        perf.lastAt = performance.now();
 
         const prev = graph.get(id);
         if (prev !== undefined) {
@@ -357,5 +396,15 @@ export function createDevServer(options: DevServerOptions): DevServer {
         handleChange,
         node: (id) => graph.get(id),
         moduleIds: () => [...graph.keys()],
+        stats: () => ({
+            fetches: perf.fetches,
+            cacheHits: perf.cacheHits,
+            transforms: perf.transforms,
+            ioMs: perf.ioMs,
+            transformMs: perf.transformMs,
+            devTransformMs: perf.devTransformMs,
+            resolveMs: perf.resolveMs,
+            wallMs: perf.firstAt === 0 ? 0 : perf.lastAt - perf.firstAt,
+        }),
     };
 }
