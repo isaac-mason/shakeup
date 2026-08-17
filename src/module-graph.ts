@@ -733,6 +733,33 @@ function computeAffected(graph: Graph, changedExports: Set<string>): Set<string>
 /** Per-rebuild counters: modules freshly parsed vs reused from the cache. */
 export type ParseStats = { parsed: number; reused: number };
 
+/** Memoize `exists`/`realpath` for the duration of ONE build. Within a single build the
+ *  filesystem is fixed, so a path's existence and its realpath are constant — and module
+ *  resolution probes the same candidate paths many times over (≈⅔ of fs calls on a real graph
+ *  are exact repeats). `read` is left direct (each module loads once; package.json is cached in
+ *  the resolver). Correct-by-construction because it never crosses a build boundary. */
+function memoBuildFs(fs: Fs): Fs {
+    const exists = new Map<string, boolean>();
+    const realpath = fs.realpath === undefined ? undefined : new Map<string, string>();
+    const rp = fs.realpath;
+    return {
+        read: (id) => fs.read(id),
+        exists: (id) => {
+            let v = exists.get(id);
+            if (v === undefined) exists.set(id, (v = fs.exists(id)));
+            return v;
+        },
+        realpath:
+            rp === undefined
+                ? undefined
+                : (id) => {
+                      let v = realpath!.get(id);
+                      if (v === undefined) realpath!.set(id, (v = rp(id)));
+                      return v;
+                  },
+    };
+}
+
 export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const graph: Graph = {
         modules: [],
@@ -745,11 +772,12 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         changed: new Set(),
     };
     const cache = options.cache;
+    const fs = memoBuildFs(options.fs);
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
-    const baseResolve = makeBaseResolve(options.fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
+    const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
     // `symlinks:false` disables the realpath deref below (config form only).
     const normalizedResolve = normalizeResolve(
         typeof options.resolve === 'function' ? undefined : options.resolve,
@@ -864,7 +892,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const loadFn = (id: string): string | null => {
         if (id === EMPTY_MODULE_ID) return ''; // browser:false-disabled module → empty
         const r = assertSync(runLoad(pipe, ctx, id));
-        if (r === null || r === undefined) return options.fs.read(id);
+        if (r === null || r === undefined) return fs.read(id);
         if (typeof r === 'string') return r;
         // SourceDescription: take .code and merge its option overrides (load > resolveId).
         mergeOptions(pendingFor(id), r);
@@ -1008,7 +1036,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 continue;
             }
             // symlinks:false disables the realpath deref (preserve the symlinked path).
-            const depId = normalizedResolve.symlinks ? (options.fs.realpath?.(resolved) ?? resolved) : resolved;
+            const depId = normalizedResolve.symlinks ? (fs.realpath?.(resolved) ?? resolved) : resolved;
             rec.resolved = addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }
