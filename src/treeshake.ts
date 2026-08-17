@@ -1,5 +1,5 @@
 import { isPureStatement } from './analysis/effects';
-import { analyzeDynamicUsage, analyzeNsUsage } from './analysis/ns-usage';
+import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
@@ -79,20 +79,15 @@ const NS_MARKER = 0x1fffff;
 
 /** Determine which namespace-import targets can have their materialized namespace object narrowed
  *  to the exact members read. A target is narrowable only if EVERY namespace bind to it is a
- *  non-escaping body `import * as ns` — so any of these forces the whole surface instead:
- *  it's an entry, it's dynamically imported (whole surface may load at runtime; P4 refines this),
- *  it's re-exported as a namespace (`export * as ns` — opaque downstream), or some `import * as ns`
- *  of it escapes. Returns target idx → the union of member names read across its consumers. */
-function computeNsUsage(graph: Graph): Map<number, Set<string>> {
+ *  non-escaping member read (static `import * as ns` OR dynamic `import()` result) — so any of
+ *  these forces the whole surface instead: it's an entry, it's re-exported as a namespace
+ *  (`export * as ns` — opaque downstream), or some consumer escapes. A dead target is dropped
+ *  outright. Returns target idx → the union of member names read across all its consumers. */
+function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynamic: Set<number>): Map<number, Set<string>> {
     const forceWhole = new Set<number>();
     for (const { module } of graph.entries) forceWhole.add(module);
+    // `export * as ns from './m'` re-exports m's whole namespace opaquely.
     for (const mod of graph.modules) {
-        for (const rec of mod.importRecords) {
-            if (rec.external || rec.resolved < 0) continue;
-            // Dynamic namespaces (import() targets) must stay whole — the runtime may read any export.
-            if (rec.kind === 'dynamic' || rec.hasDynamicLiteral) forceWhole.add(rec.resolved);
-        }
-        // `export * as ns from './m'` re-exports m's whole namespace opaquely.
         for (const exp of mod.namedExports.values()) {
             if (exp.sourceName !== NAME_NAMESPACE || exp.rec < 0) continue;
             const rec = mod.importRecords[exp.rec];
@@ -100,8 +95,18 @@ function computeNsUsage(graph: Graph): Map<number, Set<string>> {
         }
     }
 
-    // Accumulate member reads (and escape) across every body `import * as ns` consumer, per target.
-    const acc = new Map<number, { escapes: boolean; members: Set<string> }>();
+    // Accumulate member reads (and escape) per target across BOTH `import * as ns` consumers and
+    // `import()` consumers — a module's namespace surface is the union of everything read of it.
+    const acc = new Map<number, NsUsage>();
+    const fold = (target: number, u: NsUsage): void => {
+        let a = acc.get(target);
+        if (a === undefined) {
+            a = { escapes: false, members: new Set() };
+            acc.set(target, a);
+        }
+        if (u.escapes) a.escapes = true;
+        for (const m of u.members) a.members.add(m);
+    };
     for (const mod of graph.modules) {
         const nsSyms = new Map<number, number>(); // local ns symbol → target module idx
         for (const [localSym, imp] of mod.namedImports) {
@@ -112,21 +117,15 @@ function computeNsUsage(graph: Graph): Map<number, Set<string>> {
         }
         if (nsSyms.size === 0) continue;
         const usage = analyzeNsUsage(mod.program, mod.semantic, new Set(nsSyms.keys()));
-        for (const [localSym, target] of nsSyms) {
-            const u = usage.get(localSym)!;
-            let a = acc.get(target);
-            if (a === undefined) {
-                a = { escapes: false, members: new Set() };
-                acc.set(target, a);
-            }
-            if (u.escapes) a.escapes = true;
-            for (const m of u.members) a.members.add(m);
-        }
+        for (const [localSym, target] of nsSyms) fold(target, usage.get(localSym)!);
     }
+    for (const [target, u] of dynUsage) fold(target, u);
 
     const narrowable = new Map<number, Set<string>>();
     for (const [target, a] of acc) {
-        if (a.escapes || forceWhole.has(target)) continue;
+        // Dead targets are dropped entirely (no namespace object); escaping / entry / re-exported
+        // targets need their whole surface.
+        if (a.escapes || forceWhole.has(target) || deadDynamic.has(target)) continue;
         narrowable.set(target, a.members);
     }
     return narrowable;
@@ -176,8 +175,9 @@ function computeDeadDynamic(graph: Graph, dynUsage: Map<number, { escapes: boole
 
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
 export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?: TreeshakeCache): TreeshakeResult {
-    const nsUsage = computeNsUsage(graph);
-    const deadDynamic = computeDeadDynamic(graph, computeDynamicUsage(graph));
+    const dynUsage = computeDynamicUsage(graph);
+    const deadDynamic = computeDeadDynamic(graph, dynUsage);
+    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic);
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
@@ -301,8 +301,13 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
     // export surface may be reached at runtime. Seed each dynamic target's export map.
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
-            if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0 || deadDynamic.has(rec.resolved)) continue;
-            markExportMap(linked.exportMaps.get(rec.resolved));
+            // Any literal `import()` of the target — whether its record is a pure dynamic edge or a
+            // statically-dominant one that also carries an `import()` (`hasDynamicLiteral`).
+            if (rec.kind !== 'dynamic' && !rec.hasDynamicLiteral) continue;
+            if (rec.external || rec.resolved < 0 || deadDynamic.has(rec.resolved)) continue;
+            // Narrowed to the members its consumers read (expandNs consults nsUsage); whole surface
+            // when the target escaped / is re-exported / is also a static entry.
+            expandNs(rec.resolved);
         }
     }
     for (const modIdx of linked.namespaceOf.keys()) markRef(packRef(modIdx, NS_MARKER));

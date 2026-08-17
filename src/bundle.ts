@@ -743,8 +743,12 @@ function renderChunk(
     // Entry (and dynamic-entry) chunks export their entry module's surface.
     if (!suppressEntryExports && chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
         const entryMap = linked.exportMaps.get(chunk.entryModule);
+        // A pure dynamic-entry chunk narrows to the members its `import()` consumers read (tree-shake
+        // dropped the rest); a real user entry always exports its whole surface.
+        const narrow = chunk.isDynamicEntry && !chunk.isEntry ? shaken?.nsUsage.get(chunk.entryModule) : undefined;
         if (entryMap !== undefined) {
             for (const [name, bind] of entryMap) {
+                if (narrow !== undefined && !narrow.has(name)) continue;
                 const local = nameOfBind(linked, bind, chunk);
                 if (local === null) continue;
                 if (seenExport.has(name)) continue;
