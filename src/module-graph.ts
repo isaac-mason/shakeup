@@ -243,6 +243,11 @@ export type GraphOptions = CommonOptions & {
     /** Incremental parse cache (id → parsed artifacts). Pass a persistent Map across builds
      *  to reuse unchanged modules; the build fills/reads it. See {@link createBuildContext}. */
     cache?: ParseCache;
+    /** Signal-mode incremental: when set, modules whose id is NOT in `changed` are reconstructed
+     *  straight from {@link ParseCache} — no load/transform/hash/parse — trusting the caller's
+     *  change signal (a {@link Watcher}). Resolution still runs every build, so it stays correct
+     *  under file create/delete. Omit for auto-detect (hash every module to find changes). */
+    incremental?: { changed: Set<string> };
     /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
 };
@@ -683,6 +688,12 @@ export type CachedParse = {
     /** Stable digest of the module's export surface (named-export keys + `export *`
      *  specifiers). A change here means importers' link/shake/render is stale. */
     exportSig: string;
+    /** Post-transform source + transform-derived fields, so a signal-mode rebuild can reconstruct
+     *  an unchanged module WITHOUT re-loading, re-transforming, re-hashing or re-parsing it. */
+    source: string;
+    sideEffects: ModuleSideEffects;
+    meta: CustomPluginOptions;
+    moduleType: ModuleType;
 };
 
 /** Persistent per-module cache for incremental rebuilds (id → parsed artifacts). */
@@ -748,7 +759,10 @@ function memoBuildFs(fs: Fs): Fs {
         read: (id) => fs.read(id),
         exists: (id) => {
             let v = exists.get(id);
-            if (v === undefined) exists.set(id, (v = fs.exists(id)));
+            if (v === undefined) {
+                v = fs.exists(id);
+                exists.set(id, v);
+            }
             return v;
         },
         realpath:
@@ -756,7 +770,10 @@ function memoBuildFs(fs: Fs): Fs {
                 ? undefined
                 : (id) => {
                       let v = realpath!.get(id);
-                      if (v === undefined) realpath!.set(id, (v = rp(id)));
+                      if (v === undefined) {
+                          v = rp(id);
+                          realpath!.set(id, v);
+                      }
                       return v;
                   },
     };
@@ -904,40 +921,70 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const addModule = (id: string, isEntry: boolean): number => {
         const existing = graph.byId.get(id);
         if (existing !== undefined) return existing;
-        const source0 = loadFn(id);
-        if (source0 === null) {
-            graph.errors.push(`cannot load module '${id}'`);
-            return -1;
-        }
-        const transformed = assertSync(runTransform(pipe, ctx, source0, id));
-        const source = transformed.code;
-        // Merge transform overrides (transform > load > resolveId precedence).
-        const pending = pendingFor(id);
-        mergeOptions(pending, transformed);
-        const sideEffects = resolveModuleSideEffects(pending);
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
 
-        // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
-        // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
-        const srcHash = hashSource(source);
-        const hit = cache?.get(id);
-        const reuse = hit !== undefined && hit.srcHash === srcHash;
+        // Signal-mode fast path: an unchanged module (not in the change signal) with a full cache
+        // entry is reconstructed straight from cache — no load, transform, hash or parse. Resolution
+        // still runs below, so file create/delete stays correct.
+        const signalHit =
+            options.incremental !== undefined && !options.incremental.changed.has(id) ? cache?.get(id) : undefined;
+
+        let source: string;
         let program: Program;
         let nodeCount: number;
         let semantic: Semantic;
-        if (reuse) {
-            ({ program, nodeCount, semantic } = hit);
+        let sideEffects: ModuleSideEffects;
+        let metaVal: CustomPluginOptions;
+        let moduleTypeVal: ModuleType;
+        let reuse: boolean;
+        let hit: CachedParse | undefined;
+        let srcHash = 0;
+
+        if (signalHit !== undefined) {
+            source = signalHit.source;
+            program = signalHit.program;
+            nodeCount = signalHit.nodeCount;
+            semantic = signalHit.semantic;
+            sideEffects = signalHit.sideEffects;
+            metaVal = signalHit.meta;
+            moduleTypeVal = signalHit.moduleType;
+            reuse = true;
+            hit = signalHit;
             graph.parseStats.reused++;
         } else {
-            const parsed = parse(source, { ts: true, jsx });
-            for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
-            collectUnsupported(parsed.program, id, graph.errors);
-            program = parsed.program;
-            nodeCount = parsed.nodeCount;
-            semantic = createSemantic();
-            analyze(semantic, program);
-            graph.parseStats.parsed++;
-            graph.changed.add(id);
+            const source0 = loadFn(id);
+            if (source0 === null) {
+                graph.errors.push(`cannot load module '${id}'`);
+                return -1;
+            }
+            const transformed = assertSync(runTransform(pipe, ctx, source0, id));
+            source = transformed.code;
+            // Merge transform overrides (transform > load > resolveId precedence).
+            const pending = pendingFor(id);
+            mergeOptions(pending, transformed);
+            sideEffects = resolveModuleSideEffects(pending);
+            metaVal = pending.meta;
+            moduleTypeVal = pending.moduleType ?? moduleTypeOf(id);
+
+            // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
+            // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
+            srcHash = hashSource(source);
+            hit = cache?.get(id);
+            reuse = hit !== undefined && hit.srcHash === srcHash;
+            if (reuse && hit !== undefined) {
+                ({ program, nodeCount, semantic } = hit);
+                graph.parseStats.reused++;
+            } else {
+                const parsed = parse(source, { ts: true, jsx });
+                for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
+                collectUnsupported(parsed.program, id, graph.errors);
+                program = parsed.program;
+                nodeCount = parsed.nodeCount;
+                semantic = createSemantic();
+                analyze(semantic, program);
+                graph.parseStats.parsed++;
+                graph.changed.add(id);
+            }
         }
         const mod: Module = {
             idx: graph.modules.length,
@@ -953,8 +1000,8 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             execOrder: -1,
             jsxRuntime: null,
             sideEffects,
-            meta: pending.meta,
-            moduleType: pending.moduleType ?? moduleTypeOf(id),
+            meta: metaVal,
+            moduleType: moduleTypeVal,
             isEntry,
             entryName: null,
             external: false,
@@ -999,6 +1046,10 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 starExports: mod.starExports,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
+                source,
+                sideEffects,
+                meta: metaVal,
+                moduleType: moduleTypeVal,
             });
         }
         for (const hook of pipe.moduleParsed) {

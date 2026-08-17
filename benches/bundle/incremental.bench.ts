@@ -7,7 +7,8 @@ import { makeGraph } from '../_graph';
 // link, tree-shake and render caches for everything else.
 group('incremental rebuild @bundle @incremental', () => {
     for (const N of [100, 300, 600]) {
-        bench(`rebuild after 1 body edit, ${N} modules`, function* () {
+        // Auto-detect: rebuild() hashes every module to find the change.
+        bench(`auto-detect rebuild after 1 body edit, ${N} modules`, function* () {
             const g = makeGraph(N);
             const ctx = createBuildContext(g.opts());
             ctx.rebuild();
@@ -15,6 +16,20 @@ group('incremental rebuild @bundle @incremental', () => {
             yield () => {
                 g.editBody(N >> 1, v++);
                 ctx.rebuild();
+            };
+        });
+
+        // Signal mode: the Watcher tells us exactly what changed, so unchanged modules skip
+        // load+transform+hash+parse entirely (resolution still runs).
+        bench(`signal-mode rebuild after 1 body edit, ${N} modules`, function* () {
+            const g = makeGraph(N);
+            const ctx = createBuildContext(g.opts());
+            ctx.rebuild();
+            const id = `/m${N >> 1}.ts`;
+            let v = 0;
+            yield () => {
+                g.editBody(N >> 1, v++);
+                ctx.rebuild([{ kind: 'update', id }]);
             };
         });
     }

@@ -154,3 +154,62 @@ describe('incremental: createBuildContext', () => {
         expect(ctx.rebuild().parseStats).toEqual({ parsed: 1, reused: 0 });
     });
 });
+
+describe('signal-mode rebuild (Watcher fast path)', () => {
+    it('an update signal re-parses ONLY the changed module, byte-identical to a cold build', () => {
+        const files: Record<string, string> = {
+            '/entry.ts': "import { a } from './a';\nexport const e = a + 1;",
+            '/a.ts': "import { b } from './b';\nexport const a = b + 1;",
+            '/b.ts': 'export const b = 2;',
+        };
+        const opts = () => ({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const ctx = createBuildContext(opts());
+        ctx.rebuild(); // cold build populates the cache
+
+        files['/b.ts'] = 'export const b = 200;';
+        const r = ctx.rebuild([{ kind: 'update', id: '/b.ts' }]);
+        // Only /b.ts is re-loaded/parsed; /a.ts + /entry.ts reconstruct straight from cache.
+        expect(r.parseStats).toEqual({ parsed: 1, reused: 2 });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toBe(bundle(opts()).chunks[0].code);
+    });
+
+    it('a create signal (new module + importer edit) is byte-identical to cold', () => {
+        const files: Record<string, string> = {
+            '/entry.ts': "import { a } from './a';\nexport const e = a;",
+            '/a.ts': 'export const a = 1;',
+        };
+        const opts = () => ({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const ctx = createBuildContext(opts());
+        ctx.rebuild();
+
+        files['/c.ts'] = 'export const c = 9;';
+        files['/a.ts'] = "import { c } from './c';\nexport const a = c;";
+        const r = ctx.rebuild([
+            { kind: 'update', id: '/a.ts' },
+            { kind: 'create', id: '/c.ts' },
+        ]);
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toBe(bundle(opts()).chunks[0].code);
+    });
+
+    it('a delete signal (module removed + importer edit) is byte-identical to cold', () => {
+        const files: Record<string, string> = {
+            '/entry.ts': "import { a } from './a';\nexport const e = a;",
+            '/a.ts': "import { b } from './b';\nexport const a = b;",
+            '/b.ts': 'export const b = 5;',
+        };
+        const opts = () => ({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const ctx = createBuildContext(opts());
+        ctx.rebuild();
+
+        files['/a.ts'] = 'export const a = 42;';
+        delete files['/b.ts'];
+        const r = ctx.rebuild([
+            { kind: 'update', id: '/a.ts' },
+            { kind: 'delete', id: '/b.ts' },
+        ]);
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toBe(bundle(opts()).chunks[0].code);
+    });
+});

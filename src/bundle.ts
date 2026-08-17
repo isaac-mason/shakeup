@@ -437,7 +437,7 @@ export function bundle(options: BundleOptions): BundleResult {
         getModuleIds: () => (graph === undefined ? [][Symbol.iterator]() : graph.byId.keys()),
     };
     // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
-    const timer = options.timer ?? Timer.init();
+    const timer = options.timer ?? Timer.init(true);
     Timer.start(timer, 'graph');
     graph = buildGraph(options, pipeline);
     Timer.end(timer, 'graph');
@@ -1329,18 +1329,23 @@ export function createBuildContext(options: BundleOptions): BuildContext {
     const treeshakeCache: TreeshakeCache = { moduleIds: [], infos: [], decls: [] };
     return {
         rebuild: (events?: FileEvent[]) => {
-            // A `delete` removes the file: drop its cached parse + render so a later recreate
-            // can't reuse stale artifacts. `update`/`create` need no pruning — the graph walk
-            // re-reads and the source-hash compare re-parses them (and diffs their export
-            // surface, which drives the affected-set; dropping the entry would lose that).
+            // With a change signal (a Watcher), enter SIGNAL MODE: only the changed ids are
+            // re-loaded/transformed/hashed/parsed; every other module is reconstructed from cache
+            // (resolution still runs, so create/delete stay correct). A `delete` also prunes the
+            // id-keyed caches so a later recreate can't reuse stale artifacts. Without events, the
+            // build auto-detects changes by hashing every module (the safe default).
+            let incremental: { changed: Set<string> } | undefined;
             if (events !== undefined) {
+                const changed = new Set<string>();
                 for (const e of events) {
-                    if (e.kind !== 'delete') continue;
-                    cache.delete(e.id); // parse cache (id-keyed)
-                    moduleRenderCache.modules.delete(e.id); // per-module render cache (id-keyed)
+                    if (e.kind === 'delete') {
+                        cache.delete(e.id);
+                        moduleRenderCache.modules.delete(e.id);
+                    } else changed.add(e.id); // update | create
                 }
+                incremental = { changed };
             }
-            return bundle({ ...options, cache, renderCache, moduleRenderCache, treeshakeCache });
+            return bundle({ ...options, cache, renderCache, moduleRenderCache, treeshakeCache, incremental });
         },
         invalidate: (id) => void cache.delete(id),
         close: () => {
