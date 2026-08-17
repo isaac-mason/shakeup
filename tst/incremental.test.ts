@@ -90,16 +90,59 @@ describe('incremental: createBuildContext', () => {
         const opts = () => ({ input: { a: '/a.ts', b: '/b.ts' }, fs: mutableFs(files), external: [] as string[] });
         const ctx = createBuildContext(opts());
         const first = ctx.rebuild();
-        expect(first.renderStats).toEqual({ rendered: 3, reused: 0 });
+        expect(first.renderStats).toEqual({ rendered: 3, reused: 0, moduleRendered: 3, moduleReused: 0 });
 
         // Change a's body only (export name av unchanged) — only a's chunk is dirty.
         files['/a.ts'] = "import { s } from './shared';\nexport const av = s + 100;";
         const r = ctx.rebuild();
-        expect(r.renderStats).toEqual({ rendered: 1, reused: 2 }); // shared + b reused
+        expect(r.renderStats).toEqual({ rendered: 1, reused: 2, moduleRendered: 1, moduleReused: 0 }); // shared + b reused
 
         // Reused chunks (incl. b's cross-chunk import to the hashed shared chunk) are byte-identical.
         const fresh = bundle(opts());
         for (const c of r.chunks) expect(c.code).toBe(fresh.chunks.find((x) => x.name === c.name)!.code);
+    });
+
+    it('module render cache: a body change in a single chunk re-renders only that module (byte-identical)', () => {
+        // One entry pulling four modules → a single chunk. A body-only edit to one module must
+        // re-render just that module; the other three reuse their cached text.
+        const files: Record<string, string> = {
+            '/entry.ts': "import { a } from './a';\nimport { b } from './b';\nimport { c } from './c';\nexport const t = a + b + c;",
+            '/a.ts': 'export const a = 1;',
+            '/b.ts': 'export const b = 2;',
+            '/c.ts': 'export const c = 3;',
+        };
+        const ctx = createBuildContext({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const first = ctx.rebuild();
+        expect(first.chunks.length).toBe(1);
+        expect(first.renderStats).toEqual({ rendered: 1, reused: 0, moduleRendered: 4, moduleReused: 0 });
+
+        // Edit b's body only. The chunk is dirty (a member changed), so it re-renders — but only
+        // module b re-renders; entry, a, c reuse their cached module text.
+        files['/b.ts'] = 'export const b = 20;';
+        const r = ctx.rebuild();
+        expect(r.renderStats).toEqual({ rendered: 1, reused: 0, moduleRendered: 1, moduleReused: 3 });
+
+        // Byte-identical to a cold build.
+        const fresh = bundle({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        expect(r.chunks[0].code).toBe(fresh.chunks[0].code);
+    });
+
+    it('module render cache: a rename that shifts deconflict names falls back safely (byte-identical)', () => {
+        // b and c both declare a top-level `x`; deconfliction renames the later one. Editing b to
+        // ADD a colliding top-level `x` shifts names, so the global names signature changes and
+        // per-module reuse is (correctly) disabled — output must still be byte-identical.
+        const files: Record<string, string> = {
+            '/entry.ts': "export { x as bx } from './b';\nexport { x as cx } from './c';",
+            '/b.ts': 'export const x = 1;',
+            '/c.ts': 'export const x = 2;',
+        };
+        const ctx = createBuildContext({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        ctx.rebuild();
+        // b gains a top-level binding that collides with c's `x` at bundle scope, shifting names.
+        files['/b.ts'] = 'const x = 9;\nexport const x2 = x + 1;';
+        const r = ctx.rebuild();
+        const fresh = bundle({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        expect(r.chunks[0].code).toBe(fresh.chunks[0].code);
     });
 
     it('invalidate() forces a re-parse', () => {

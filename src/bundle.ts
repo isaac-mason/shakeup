@@ -79,6 +79,9 @@ export type BundleOptions = GraphOptions & {
     /** Incremental per-chunk render cache. Pass a persistent Map across builds (via
      *  {@link createBuildContext}) to reuse the rendered code of clean chunks. */
     renderCache?: RenderCache;
+    /** Incremental per-module render cache — reuse the rendered text of clean modules within a
+     *  dirty chunk (the fine-grained companion to {@link renderCache}). */
+    moduleRenderCache?: ModuleRenderCache;
     /** Incremental tree-shake cache — reuse per-module liveness infos for unchanged modules. */
     treeshakeCache?: TreeshakeCache;
     /** Threaded profiling state ({@link Timer}). Inject a shared one to accumulate per-pass
@@ -508,15 +511,27 @@ export function bundle(options: BundleOptions): BundleResult {
     }
 
     // Two-pass render → content-hash → final-hash → substitute (see renderChunks below). The per-chunk
-    // renderer closes over graph/linked/shaken and threads the path resolver + addons.
+    // renderer closes over graph/linked/shaken and threads the path resolver + addons + module cache.
+    const renderStats: RenderStats = { rendered: 0, reused: 0, moduleRendered: 0, moduleReused: 0 };
+    let inc: RenderIncremental | undefined;
+    if (options.renderCache !== undefined) {
+        // Module-render reuse rides on a persistent cache + a global naming signature: when no
+        // final name shifted this build, any clean module renders identical bytes.
+        const mrc = options.moduleRenderCache ?? { modules: new Map(), namesHash: -1 };
+        const namesHash = nameSignature(linked);
+        const liveHash = graph.modules.map((_, i) => (shaken === null ? 0 : hashLiveSet(shaken.live[i])));
+        const mod: ModuleRenderCtx = {
+            cache: mrc.modules,
+            namesStable: mrc.namesHash === namesHash,
+            changed: graph.changed,
+            liveHash,
+            stats: renderStats,
+        };
+        inc = { cache: options.renderCache, dirty: new Set([...graph.changed, ...graph.affected]), stats: renderStats, mod };
+        mrc.namesHash = namesHash;
+    }
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
-        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim);
-
-    const renderStats: RenderStats = { rendered: 0, reused: 0 };
-    const inc: RenderIncremental | undefined =
-        options.renderCache === undefined
-            ? undefined
-            : { cache: options.renderCache, dirty: new Set([...graph.changed, ...graph.affected]), stats: renderStats };
+        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim, inc?.mod ?? null);
 
     let outputChunks: OutputChunk[];
     let assets: { fileName: string; source: string }[];
@@ -592,6 +607,7 @@ function renderChunk(
     naming: NormalizedOutputNaming,
     pathToChunk: (targetChunkIdx: number) => string,
     prelim: PreliminaryFileName,
+    modInc: ModuleRenderCtx | null,
 ): RenderedChunk | null {
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
@@ -599,9 +615,37 @@ function renderChunk(
     const moduleParts: Part[] = [];
     const mapSources: string[] = [];
     const mapSourcesContent: string[] = [];
+    const chunkKey = chunk.modules.map((i) => graph.modules[i].id).join('\x1f');
 
     for (const idx of chunk.modules) {
         const mod = graph.modules[idx];
+
+        // Per-module reuse: a clean module (not re-parsed, unchanged liveness, same chunk
+        // perspective) renders identical bytes when no final name shifted (`namesStable`). This
+        // is what makes a single-chunk edit cheap — only the touched module re-renders.
+        if (modInc !== null) {
+            const entry = modInc.cache.get(mod.id);
+            const mapOk =
+                !wantMap || entry === undefined || entry.text === '' || (entry.mapPart !== null && entry.srcIdx === mapSources.length);
+            if (
+                modInc.namesStable &&
+                entry !== undefined &&
+                !modInc.changed.has(mod.id) &&
+                entry.liveHash === modInc.liveHash[idx] &&
+                entry.chunkKey === chunkKey &&
+                mapOk
+            ) {
+                modInc.stats.moduleReused++;
+                if (entry.text !== '') moduleTexts.push(entry.text);
+                if (wantMap && entry.text !== '') {
+                    mapSources.push(mod.id);
+                    mapSourcesContent.push(mod.source);
+                    moduleParts.push(entry.mapPart!);
+                    if (entry.nsCode !== null) moduleParts.push({ code: entry.nsCode });
+                }
+                continue;
+            }
+        }
         const live = shaken === null ? null : shaken.live[idx];
         const enumFinalName = (idNode: Node): string | null => {
             const sym = symbolOf(mod.semantic, idNode);
@@ -630,16 +674,36 @@ function renderChunk(
         const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph, pathToChunk };
         moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
         let out = applyEdits(mod.source, ctx.edits).trim();
+        let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx)) {
-            out += `\n${renderNamespaceObject(linked, idx, chunk)}`;
+            nsCode = renderNamespaceObject(linked, idx, chunk);
+            out += `\n${nsCode}`;
         }
+        let mapPart: Part | null = null;
+        let srcIdx = -1;
         if (out !== '') moduleTexts.push(out);
         if (wantMap && out !== '') {
-            const part = renderMappedPart(mod.source, ctx.edits, mapSources.length);
+            srcIdx = mapSources.length;
+            mapPart = renderMappedPart(mod.source, ctx.edits, srcIdx);
             mapSources.push(mod.id);
             mapSourcesContent.push(mod.source);
-            moduleParts.push(part);
-            if (linked.namespaceOf.has(idx)) moduleParts.push({ code: renderNamespaceObject(linked, idx, chunk) });
+            moduleParts.push(mapPart);
+            if (nsCode !== null) moduleParts.push({ code: nsCode });
+        }
+        // Cache the render for reuse — unless it carries a per-build hash placeholder (its bytes
+        // are not counter-stable, so it must re-render every build).
+        if (modInc !== null) {
+            if (out.includes('!~{')) modInc.cache.delete(mod.id);
+            else
+                modInc.cache.set(mod.id, {
+                    liveHash: modInc.liveHash[idx],
+                    chunkKey,
+                    text: out,
+                    mapPart,
+                    srcIdx,
+                    nsCode,
+                });
+            modInc.stats.moduleRendered++;
         }
     }
 
@@ -937,15 +1001,70 @@ export type CachedRender = {
     exports: string[];
 };
 export type RenderCache = Map<string, CachedRender>;
-export type RenderStats = { rendered: number; reused: number };
+export type RenderStats = { rendered: number; reused: number; moduleRendered: number; moduleReused: number };
+
+/** A single module's rendered contribution to its chunk, reusable across builds. The rendered
+ *  text is a pure function of the module's source (→ `changed` set), its liveness (`liveHash`),
+ *  the final names it references (globally gated by `namesStable`), and its chunk perspective
+ *  (`chunkKey`). Modules whose text carries a per-build hash placeholder are never cached. */
+export type CachedModuleRender = {
+    liveHash: number;
+    chunkKey: string;
+    /** Full module text (type-stripped body + any appended namespace object), '' if it emits nothing. */
+    text: string;
+    /** Source-map part for the module body, and its baked source index (position in `mapSources`). */
+    mapPart: Part | null;
+    srcIdx: number;
+    /** Namespace-object code for the separate map part, when this module has one. */
+    nsCode: string | null;
+};
+/** Persistent per-module render cache + the naming signature of the build that populated it.
+ *  A rename anywhere (`namesHash` mismatch) disables per-module reuse for that build. */
+export type ModuleRenderCache = { modules: Map<string, CachedModuleRender>; namesHash: number };
+
+/** Per-module reuse inputs threaded into {@link renderChunk}. */
+export type ModuleRenderCtx = {
+    cache: Map<string, CachedModuleRender>;
+    /** Every final name is unchanged from the cached build → referenced names are stable. */
+    namesStable: boolean;
+    /** Module ids re-parsed this build (source changed) — never reused. */
+    changed: Set<string>;
+    /** Per-module-index liveness hash (0 when tree-shaking is off). */
+    liveHash: number[];
+    stats: RenderStats;
+};
+
 /** Incremental render inputs: the persistent cache + the render-dirty module ids
- *  (`graph.changed ∪ graph.affected`) + a stats sink. */
-export type RenderIncremental = { cache: RenderCache; dirty: Set<string>; stats: RenderStats };
+ *  (`graph.changed ∪ graph.affected`) + a stats sink + per-module reuse context. */
+export type RenderIncremental = { cache: RenderCache; dirty: Set<string>; stats: RenderStats; mod: ModuleRenderCtx };
 
 /** A chunk's stable cross-build identity: its member ids in exec order. Distinct chunks never
  *  share members, so this is unique; exec-order changes (which alter output) change it. */
 function chunkKeyOf(chunk: Chunk, moduleIdOf: (i: number) => string): string {
     return chunk.modules.map(moduleIdOf).join('\x1f');
+}
+
+/** Order-independent hash of a live statement-id set (XOR-fold + size), for cheap liveness diffing. */
+function hashLiveSet(set: Set<number>): number {
+    let h = 0;
+    for (const id of set) h = (h ^ Math.imul(id, 0x9e3779b1)) | 0;
+    return (Math.imul(h, 31) + set.size) | 0;
+}
+
+/** Order-independent signature of every final name rendered this build (module locals, namespace
+ *  objects, external import locals). Equal signatures ⇒ no name shifted, so any clean module's
+ *  referenced names are stable and its cached text is reusable. */
+function nameSignature(linked: Linked): number {
+    let acc = 0;
+    const fold = (key: string): void => {
+        let h = 5381;
+        for (let i = 0; i < key.length; i++) h = (Math.imul(h, 33) ^ key.charCodeAt(i)) | 0;
+        acc = (acc + h) | 0;
+    };
+    for (const [ref, name] of linked.finalNames) fold(`f${ref}=${name}`);
+    for (const [modIdx, name] of linked.namespaceOf) fold(`n${modIdx}=${name}`);
+    for (const [key, name] of linked.externalLocals) fold(`e${key}=${name}`);
+    return acc;
 }
 
 /** Everything that determines a chunk's rendered bytes EXCEPT its members' own source/binds
@@ -1204,13 +1323,16 @@ export type BuildContext = {
 export function createBuildContext(options: BundleOptions): BuildContext {
     const cache: ParseCache = new Map();
     const renderCache: RenderCache = new Map();
+    const moduleRenderCache: ModuleRenderCache = { modules: new Map(), namesHash: -1 };
     const treeshakeCache: TreeshakeCache = { moduleIds: [], infos: [], decls: [] };
     return {
-        rebuild: () => bundle({ ...options, cache, renderCache, treeshakeCache }),
+        rebuild: () => bundle({ ...options, cache, renderCache, moduleRenderCache, treeshakeCache }),
         invalidate: (id) => void cache.delete(id),
         close: () => {
             cache.clear();
             renderCache.clear();
+            moduleRenderCache.modules.clear();
+            moduleRenderCache.namesHash = -1;
             treeshakeCache.moduleIds = [];
             treeshakeCache.infos = [];
             treeshakeCache.decls = [];
