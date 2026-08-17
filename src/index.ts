@@ -4,6 +4,7 @@ export * from './analysis';
 export * from './emit';
 export * from './sourcemap';
 export * from './fs';
+export * from './watch';
 export * from './module-graph';
 export * from './treeshake';
 export * from './plugin';

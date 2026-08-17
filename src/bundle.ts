@@ -37,6 +37,7 @@ import {
 } from './output-options';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
+import type { FileEvent } from './watch';
 import * as Timer from './timer';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 
@@ -1312,8 +1313,9 @@ export function renderChunks(
  *  module parse cache across rebuilds, so unchanged modules skip parse/analyze/extract. */
 export type BuildContext = {
     /** Rebuild from the current sources, reusing unchanged modules. Read `.parseStats` on
-     *  the result for the parse/reuse counts. */
-    rebuild(): BundleResult;
+     *  the result for the parse/reuse counts. Pass the {@link FileEvent}s from a {@link Watcher}
+     *  to prune caches for deleted files; `update`/`create` are detected by source hash. */
+    rebuild(events?: FileEvent[]): BundleResult;
     /** Drop a module's cached parse so the next rebuild re-parses it (e.g. a known edit). */
     invalidate(id: string): void;
     /** Release the cache. */
@@ -1326,7 +1328,20 @@ export function createBuildContext(options: BundleOptions): BuildContext {
     const moduleRenderCache: ModuleRenderCache = { modules: new Map(), namesHash: -1 };
     const treeshakeCache: TreeshakeCache = { moduleIds: [], infos: [], decls: [] };
     return {
-        rebuild: () => bundle({ ...options, cache, renderCache, moduleRenderCache, treeshakeCache }),
+        rebuild: (events?: FileEvent[]) => {
+            // A `delete` removes the file: drop its cached parse + render so a later recreate
+            // can't reuse stale artifacts. `update`/`create` need no pruning — the graph walk
+            // re-reads and the source-hash compare re-parses them (and diffs their export
+            // surface, which drives the affected-set; dropping the entry would lose that).
+            if (events !== undefined) {
+                for (const e of events) {
+                    if (e.kind !== 'delete') continue;
+                    cache.delete(e.id); // parse cache (id-keyed)
+                    moduleRenderCache.modules.delete(e.id); // per-module render cache (id-keyed)
+                }
+            }
+            return bundle({ ...options, cache, renderCache, moduleRenderCache, treeshakeCache });
+        },
         invalidate: (id) => void cache.delete(id),
         close: () => {
             cache.clear();
