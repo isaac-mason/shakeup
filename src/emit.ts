@@ -40,14 +40,10 @@ function replace(ctx: Ctx, start: number, end: number, text: string): void {
     ctx.edits.push({ start, end, text });
 }
 
-/** whitespace version of a source slice: everything -> space except \n and \r. */
+/** whitespace version of a source slice: everything -> space except \n and \r. (Regex replace is
+ *  O(n); a per-char `out +=` build is O(n²) on a large blanked region.) */
 function blankText(src: string, start: number, end: number): string {
-    let out = '';
-    for (let i = start; i < end; i++) {
-        const c = src.charCodeAt(i);
-        out += c === 10 || c === 13 ? src[i] : ' ';
-    }
-    return out;
+    return src.slice(start, end).replace(/[^\n\r]/g, ' ');
 }
 
 function isWs(c: number): boolean {
