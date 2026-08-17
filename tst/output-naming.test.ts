@@ -85,7 +85,8 @@ describe('output naming — [hash] change-propagation across chunks (THE test)',
             external: [],
         });
 
-    const sharedName = (r: Awaited<ReturnType<typeof build>>) => r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!.fileName;
+    const sharedName = (r: Awaited<ReturnType<typeof build>>) =>
+        r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!.fileName;
     const entryA = (r: Awaited<ReturnType<typeof build>>) => r.chunks.find((c) => c.name === 'a')!;
 
     it('changing the shared chunk source changes its hash AND updates importers', async () => {
@@ -283,14 +284,18 @@ describe('output — exports mode & stubs', () => {
         expect(r.code).not.toContain('export {');
     });
 
-    it('minify is rejected with a clear error', async () => {
+    it('minify is accepted and produces whitespace-minified output', async () => {
         const r = await bundle({
             input: '/main.ts',
-            fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
+            fs: createMemoryFs({ '/main.ts': 'export const x = 1;\nexport function f(a) {\n    return a + 1;\n}' }),
             external: [],
-            output: { minify: true as never },
+            output: { minify: true },
         });
-        expect(r.errors[0]).toMatch(/minify is not supported/);
+        expect(r.errors).toEqual([]);
+        const code = r.chunks[0].code;
+        expect(code).not.toContain('\n    '); // no indentation
+        expect(code).toMatch(/const \w+=1/); // whitespace stripped; local mangled
+        expect(code).toContain(' as x'); // public export name preserved via alias
     });
 
     it('keepNames / topLevelVar are accepted with a not-implemented warning', async () => {

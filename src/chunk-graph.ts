@@ -4,6 +4,7 @@ import {
     type Graph,
     type ImportBind,
     type Linked,
+    mangleNestedScopes,
     packRef,
     refMod,
     refSym,
@@ -339,13 +340,14 @@ export function buildChunkGraph(
     linked: Linked,
     options: ChunkOptions,
     deadDynamic: Set<number> = new Set(),
+    mangle = false,
 ): ChunkGraph {
     const N = graph.modules.length;
 
     if (options.preserveModules) {
         const formed = formPreserveModulesChunks(graph, linked);
         const color: bigint[] = graph.modules.map(() => ZERO);
-        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf);
+        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf, mangle);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
 
@@ -426,7 +428,7 @@ export function buildChunkGraph(
         groupNames,
     );
 
-    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf);
+    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, mangle);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
 
@@ -438,6 +440,7 @@ function wireAndDeconflict(
     chunks: Chunk[],
     chunkByModule: Int32Array,
     entryChunkOf: Map<number, number>,
+    mangle = false,
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
@@ -467,7 +470,7 @@ function wireAndDeconflict(
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
         chunkTaken.push(taken);
-        const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], []);
+        const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], mangle, taken);
         chunkClaim.push(claim);
     }
 
@@ -522,6 +525,13 @@ function wireAndDeconflict(
         }
         // A producer already carrying named imports needn't also be a side-effect import.
         for (const p of chunk.imports.keys()) chunk.sideEffectImports.delete(p);
+    }
+
+    // Mangle nested locals last, once each chunk's top-level name set (`chunkTaken[c]`) is
+    // complete — including cross-chunk import locals claimed above — so no local shadows a
+    // chunk-top name it references.
+    if (mangle) {
+        for (let c = 0; c < chunks.length; c++) mangleNestedScopes(graph, linked, chunks[c].modules, chunkTaken[c]);
     }
 }
 

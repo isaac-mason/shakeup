@@ -43,7 +43,7 @@ export type OutputOptionsNaming = {
     sourcemapIgnoreList?: SourcemapIgnoreList;
     keepNames?: boolean; // not implemented — needs printer/name-preservation
     topLevelVar?: boolean; // not implemented — needs module-init wrapping
-    minify?: never; // rejected if set (printer-gated)
+    minify?: boolean; // whitespace + syntactic minification via the print-from-AST backend
 };
 
 /** Fully-resolved output naming config with defaults applied. */
@@ -64,6 +64,7 @@ export type NormalizedOutputNaming = {
     sourcemap: boolean | 'inline' | 'hidden';
     sourcemapExcludeSources: boolean;
     sourcemapIgnoreList: (source: string, mapPath: string) => boolean;
+    minify: boolean;
 };
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: RFC2396 invalid-char class, verbatim from rollup.
@@ -216,9 +217,6 @@ export function normalizeOutputOptions(
     warnings: string[],
 ): NormalizedOutputNaming {
     const o = output ?? {};
-    if ((o as { minify?: unknown }).minify !== undefined) {
-        throw new Error('output.minify is not supported (printer-gated, out of scope for ESM output).');
-    }
     if (o.keepNames === true)
         warnings.push('output.keepNames is not implemented (needs a name-preservation printer pass) — ignored.');
     if (o.topLevelVar === true) warnings.push('output.topLevelVar is not implemented (needs module-init wrapping) — ignored.');
@@ -257,6 +255,7 @@ export function normalizeOutputOptions(
         sourcemap: sm,
         sourcemapExcludeSources: o.sourcemapExcludeSources ?? false,
         sourcemapIgnoreList: ignore,
+        minify: o.minify ?? false,
     };
 }
 

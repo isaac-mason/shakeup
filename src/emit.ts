@@ -375,7 +375,7 @@ const JSX_NAMED_ENTITIES: Record<string, string> = {
     ldquo: '“',
     rdquo: '”',
 };
-function decodeJSXEntities(s: string): string {
+export function decodeJSXEntities(s: string): string {
     return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);/g, (m, body: string) => {
         if (body[0] === '#') {
             const cp = body[1] === 'x' || body[1] === 'X' ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
@@ -386,7 +386,7 @@ function decodeJSXEntities(s: string): string {
     });
 }
 
-function normalizeJSXText(raw: string): string | null {
+export function normalizeJSXText(raw: string): string | null {
     const lines = raw.split('\n');
     let acc = '';
     let first = true;
@@ -424,7 +424,7 @@ function lowerJSXTag(ctx: Ctx, name: Node): string {
 }
 
 /** A single attribute-name as an object-key text (identifier or quoted string). */
-function attrKeyText(name: Node): string {
+export function attrKeyText(name: Node): string {
     const raw =
         name.type === N.JSXNamespacedName ? `${(name.data.namespace as Node).name}:${(name.data.name as Node).name}` : name.name;
     return /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(raw) ? raw : JSON.stringify(raw);
@@ -485,7 +485,7 @@ function lowerJSXChildItems(ctx: Ctx, children: Node[]): PieceItem[] {
 
 /** True when the folded children form a static ARRAY (jsxs): >1 child, or a
  * single spread child. */
-function childrenAreStatic(childTexts: string[]): boolean {
+export function childrenAreStatic(childTexts: string[]): boolean {
     if (childTexts.length > 1) return true;
     return childTexts.length === 1 && childTexts[0].startsWith('...');
 }
@@ -614,7 +614,7 @@ function lowerJSX(ctx: Ctx, node: Node): { text: string; inner: Interior[] } {
 }
 
 /** Local copy of the key-after-spread check (emit side; graph has its own). */
-function attrsHaveKeyAfterSpreadEmit(attrs: Node[]): boolean {
+export function attrsHaveKeyAfterSpreadEmit(attrs: Node[]): boolean {
     let sawSpread = false;
     for (const a of attrs) {
         if (a.type === N.JSXSpreadAttribute) sawSpread = true;

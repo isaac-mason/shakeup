@@ -2,7 +2,7 @@ import { walkRefIdents } from './analysis/refs';
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { applyEdits, collectStripEdits, type Edit, type JSXLower, renderMappedPart } from './emit';
+import { applyEdits, buildLineTable, collectStripEdits, type Edit, type JSXLower, renderMappedPart } from './emit';
 import { basenameOf, dirnameOf, relativePath } from './fs';
 import {
     buildGraph,
@@ -37,7 +37,9 @@ import {
     replaceSinglePlaceholder,
 } from './output-options';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
-import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
+import { printModule } from './print/print-js';
+import { createPrinter, finishPrinter } from './print/printer';
+import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap, trimMappings } from './sourcemap';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
@@ -349,6 +351,91 @@ function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], s
     }
 }
 
+/** The chunk-level bookkeeping half of {@link moduleEdits}, without producing edits — used by
+ *  the printer backend, which drops import/export statements itself but still needs the
+ *  side-effect-import and entry-star tracking their removal implies. */
+function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
+    const { mod } = ctx;
+    const src = mod.source;
+    for (const statement of mod.program.data.body) {
+        if (ctx.live !== null && !ctx.live.has(statement.id)) continue;
+        if (statement.type === N.ImportDeclaration) {
+            if (statement.data.importKind === 'type') continue;
+            const source = statement.data.source;
+            if (source.type === N.StringLiteral && statement.data.specifiers.length === 0) {
+                const spec = src.slice(source.start + 1, source.end - 1);
+                const rec = mod.importRecords.find((r) => r.specifier === spec);
+                if (rec?.external) sideEffectSpecs.add(spec);
+            }
+        } else if (statement.type === N.ExportAllDeclaration) {
+            const source = statement.data.source;
+            const spec = source.type === N.StringLiteral ? src.slice(source.start + 1, source.end - 1) : '';
+            const rec = mod.importRecords.find((r) => r.specifier === spec);
+            if (rec?.external) {
+                if (isEntry) entryStarSpecs.push(spec);
+                else
+                    ctx.warnings.push(
+                        `'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`,
+                    );
+            }
+        }
+    }
+}
+
+/** Pre-resolve the node-level rewrites the edit engine applies inline — dynamic `import()`
+ *  retargeting ({@link rewriteDynamicImports}) and `new URL` asset URLs ({@link rewriteNewUrlAssets})
+ *  — into a node→text map the printer consults. Keyed on the exact node whose text is replaced
+ *  (the whole `import()` for same-chunk/dropped; the specifier string otherwise). */
+function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
+    const { mod, chunk, chunkGraph } = ctx;
+    const map = new Map<Node, string>();
+    walk(mod.program, (n) => {
+        if (n.type === N.ImportExpression && chunk !== null && chunkGraph !== null) {
+            const source = n.data.source;
+            if (source.type === N.StringLiteral) {
+                const spec = mod.source.slice(source.start + 1, source.end - 1);
+                const rec = mod.importRecords.find((r) => r.specifier === spec);
+                if (rec !== undefined && !rec.external && rec.resolved >= 0) {
+                    const targetChunk = chunkGraph.chunkByModule[rec.resolved];
+                    if (targetChunk < 0) {
+                        map.set(n, 'Promise.resolve({})');
+                    } else if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
+                        const nsName = ctx.linked.namespaceOf.get(rec.resolved);
+                        map.set(n, `Promise.resolve().then(() => ${nsName ?? '{}'})`);
+                    } else {
+                        const path =
+                            ctx.pathToChunk !== null
+                                ? ctx.pathToChunk(targetChunk)
+                                : `./${chunkGraph.chunks[targetChunk].name}.js`;
+                        map.set(source, `'${path}'`);
+                    }
+                }
+            }
+        }
+        if (
+            n.type === N.NewExpression &&
+            n.data.arguments.length === 2 &&
+            n.data.callee.type === N.IdentifierReference &&
+            n.data.callee.name === 'URL'
+        ) {
+            const base = n.data.arguments[1];
+            if (
+                base.type === N.StaticMemberExpression &&
+                base.data.object.type === N.ImportMeta &&
+                base.data.property.name === 'url'
+            ) {
+                const spec = n.data.arguments[0];
+                if (spec.type === N.StringLiteral) {
+                    const specifier = mod.source.slice(spec.start + 1, spec.end - 1);
+                    const rec = mod.importRecords.find((r) => r.kind === 'new-url' && r.specifier === specifier);
+                    if (rec?.assetFileName !== undefined) map.set(spec, JSON.stringify(rec.assetFileName));
+                }
+            }
+        }
+    });
+    return map;
+}
+
 /** True if the module has at least one live statement containing JSX (so its
  * injected runtime import is genuinely needed). `live === null` = no shaking. */
 function moduleHasLiveJSX(mod: Module, live: Set<number> | null): boolean {
@@ -521,7 +608,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic);
+    const mangle = options.output?.minify === true;
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, mangle);
     Timer.end(timer, 'chunk');
 
     let anyLiveJSX = false;
@@ -710,31 +798,64 @@ function renderChunk(
                           return finalNameOfSymbol(jsxCtx, sym) ?? kind;
                       },
                   };
-        let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName, jsxLower);
-        if (live !== null) {
-            const deadSpans: [number, number][] = [];
-            for (const statement of mod.program.data.body) {
-                if (!live.has(statement.id)) deadSpans.push([statement.start, statement.end]);
+        // Index this module will occupy in `mapSources` if it emits anything.
+        const srcIdx = mapSources.length;
+        let out: string;
+        let mapPart: Part | null = null;
+        if (naming.minify) {
+            // Printer backend: generate every token from the AST, in link mode (drop imports,
+            // unwrap exports, shake dead statements, apply renames + node rewrites).
+            const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
+            trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
+            const overrides = collectLinkOverrides(ctx);
+            const printer = createPrinter(
+                { minify: true },
+                {
+                    nameOf: (idNode: Node) => renameOf(ctx, idNode) ?? idNode.name,
+                    jsx: jsxLower,
+                    linkModule: true,
+                    defaultName: () => {
+                        const ref = linked.defaultRefs.get(mod.idx);
+                        return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
+                    },
+                    live,
+                    overrides,
+                    srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
+                    sourceIdx: srcIdx,
+                },
+            );
+            printModule(printer, mod.program);
+            if (wantMap) {
+                out = trimMappings(finishPrinter(printer), printer.map!);
+                mapPart = { code: out, map: printer.map! };
+            } else {
+                out = finishPrinter(printer).trim();
             }
-            stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
+        } else {
+            // Edit-engine backend: span-copy verbatim, blanking/replacing only what changes.
+            let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName, jsxLower);
+            if (live !== null) {
+                const deadSpans: [number, number][] = [];
+                for (const statement of mod.program.data.body) {
+                    if (!live.has(statement.id)) deadSpans.push([statement.start, statement.end]);
+                }
+                stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
+            }
+            const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph, pathToChunk };
+            moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
+            out = applyEdits(mod.source, ctx.edits).trim();
+            if (wantMap) mapPart = renderMappedPart(mod.source, ctx.edits, srcIdx);
         }
-        const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph, pathToChunk };
-        moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
-        let out = applyEdits(mod.source, ctx.edits).trim();
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx)) {
             nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx));
             out += `\n${nsCode}`;
         }
-        let mapPart: Part | null = null;
-        let srcIdx = -1;
         if (out !== '') moduleTexts.push(out);
         if (wantMap && out !== '') {
-            srcIdx = mapSources.length;
-            mapPart = renderMappedPart(mod.source, ctx.edits, srcIdx);
             mapSources.push(mod.id);
             mapSourcesContent.push(mod.source);
-            moduleParts.push(mapPart);
+            moduleParts.push(mapPart!);
             if (nsCode !== null) moduleParts.push({ code: nsCode });
         }
         // Cache the render for reuse — unless it carries a per-build hash placeholder (its bytes
