@@ -12,19 +12,15 @@ export type WorkerOptions = {
      *  otherwise recurse). Defaults to none. */
     plugins?: Plugin[];
     jsx?: JSXOptions;
-    /** Default for a bare `?worker` (no `&inline`): inline the worker as a blob (`true`) or emit it
-     *  as a separate chunk (`false`, default — Vite's `?worker`). A per-import `?worker&inline`
-     *  always inlines regardless. Inline is the only mode the dev server can serve (it has no output
-     *  sink), so a non-inline `?worker` falls back to inline in dev. */
-    inline?: boolean;
 };
 
 /** `import W from './render.worker.ts?worker'` → a module whose default export constructs a Worker.
  *
  *  The worker runs in its own thread with no dev-server runner, so its graph is bundled into ONE
  *  self-contained ESM chunk (via shakeup's OWN `bundle()` with `inlineDynamicImports` — no rolldown).
- *  `?worker&inline` (or `{inline:true}`) blobs that code into the module (Vite's `?worker&inline`);
- *  a plain `?worker` emits it as a separate chunk and `new Worker`s its URL. */
+ *  `?worker&inline` blobs that code into the module (Vite's `?worker&inline`); a plain `?worker`
+ *  emits it as a separate chunk and `new Worker`s its URL. Inline-vs-chunk is decided per import by
+ *  the query, not a plugin option — matching Vite. */
 export function worker(options: WorkerOptions = {}): Plugin {
     // resolved virtual id → wrapper module. The nested bundle is expensive; cache it (a worker's
     // graph is usually immutable seed/engine code — HMR of worker source is not invalidated here).
@@ -35,7 +31,7 @@ export function worker(options: WorkerOptions = {}): Plugin {
             filter: { id: /[?&]worker(&|$)/ },
             handler: async (ctx, spec, importer) => {
                 const q = spec.indexOf('?');
-                const inline = (options.inline ?? false) || /[?&]inline(&|$)/.test(spec.slice(q));
+                const inline = /[?&]inline(&|$)/.test(spec.slice(q));
                 const resolved = await ctx.resolve(spec.slice(0, q), importer);
                 return (inline ? INLINE_PREFIX : CHUNK_PREFIX) + (resolved?.id ?? spec.slice(0, q));
             },
@@ -89,7 +85,7 @@ function workerName(path: string): string {
 
 /** Blob a self-contained worker bundle + `new Worker` it, with a data-URL fallback (Vite
  *  `?worker&inline`). */
-export function inlineWrapperModule(code: string): string {
+function inlineWrapperModule(code: string): string {
     return `const __code = ${JSON.stringify(code)};
 const __blob = typeof self !== 'undefined' && self.Blob && new Blob([__code], { type: 'text/javascript;charset=utf-8' });
 export default function WorkerWrapper(options) {
@@ -108,7 +104,7 @@ export default function WorkerWrapper(options) {
 }
 
 /** `new Worker(new URL(fileName, import.meta.url))` — the emitted-chunk worker (Vite `?worker`). */
-export function urlWrapperModule(fileName: string): string {
+function urlWrapperModule(fileName: string): string {
     return `export default function WorkerWrapper(options) {
     return new Worker(new URL(${JSON.stringify(fileName)}, import.meta.url), { type: 'module', name: options && options.name });
 }

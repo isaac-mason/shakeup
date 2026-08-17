@@ -49,6 +49,10 @@ export type ImportRecord = {
      *  specifier is also imported statically (so `kind` is `static`). Drives export-map seeding
      *  for the `import()` → `Promise.resolve(ns)` emit without re-walking the AST at link time. */
     hasDynamicLiteral: boolean;
+    /** For a `new-url` asset edge: the content-hashed output fileName the asset was emitted as
+     *  (per-build, not cached). The emit rewrites the `new URL('…', import.meta.url)` specifier to
+     *  this. Undefined until the asset resolves + emits; unset means unresolved (left verbatim). */
+    assetFileName?: string;
 };
 
 /** A local binding that aliases an imported name. */
@@ -456,15 +460,19 @@ function collectPatternIdents(node: Node | null, out: Node[]): void {
 
 function addRecord(mod: Module, specifier: string, kind: ImportRecordKind): number {
     const dynamic = kind === 'dynamic';
+    const asset = kind === 'new-url';
     for (let i = 0; i < mod.importRecords.length; i++) {
-        if (mod.importRecords[i].specifier === specifier) {
-            // Static dominance: a specifier seen statically stays static regardless of a
-            // later dynamic hit; a dynamic-first record flips to static when the static
-            // import arrives. Order-independent because any static call demotes.
-            if (!dynamic) mod.importRecords[i].kind = 'static';
-            else mod.importRecords[i].hasDynamicLiteral = true;
-            return i;
-        }
+        const r = mod.importRecords[i];
+        if (r.specifier !== specifier) continue;
+        // An asset edge (`new URL`) and a code edge (`import`) for the same specifier are genuinely
+        // different things — never collapse them; only dedup like-for-like.
+        if (asset !== (r.kind === 'new-url')) continue;
+        if (asset) return i; // same asset referenced twice → one record
+        // Static dominance: a specifier seen statically stays static regardless of a later dynamic
+        // hit; a dynamic-first record flips to static when the static import arrives.
+        if (!dynamic) r.kind = 'static';
+        else r.hasDynamicLiteral = true;
+        return i;
     }
     mod.importRecords.push({ specifier, resolved: -1, external: false, kind, hasDynamicLiteral: dynamic });
     return mod.importRecords.length - 1;

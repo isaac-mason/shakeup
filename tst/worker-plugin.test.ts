@@ -48,19 +48,6 @@ describe('worker plugin — ?worker imports', () => {
         expect(r.code).not.toContain('createObjectURL');
     });
 
-    it('{ inline: true }: a bare ?worker inlines (host default for a blob-only target)', async () => {
-        const r = await bundle({
-            input: '/main.ts',
-            fs: createMemoryFs(files('./task.worker.ts?worker')),
-            external: [],
-            output: {},
-            plugins: [worker({ inline: true })],
-        });
-        expect(r.errors).toEqual([]);
-        expect(r.code).toContain('createObjectURL');
-        expect((r.assets ?? []).some((a) => a.fileName.startsWith('assets/task.worker-'))).toBe(false);
-    });
-
     it('DEV SERVER: a plain ?worker falls back to inline (no output sink) + default-exports the ctor', async () => {
         const f = files('./task.worker.ts?worker');
         const fs: Fs = { read: (id) => (f as Record<string, string>)[id] ?? null, exists: (id) => id in f };
