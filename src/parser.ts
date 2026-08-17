@@ -894,6 +894,10 @@ interface ParserState {
     /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
      * parseNew reads it to reject an optional chain as a `new` callee. */
     chainSawOptional: boolean;
+    /** True while parsing the `extends` type of a conditional type (or an `infer` constraint),
+     * where a trailing `? … : …` binds to the OUTER conditional rather than starting a new one.
+     * Public `parseType` clears it; nested bracketed types re-enter through `parseType`. */
+    noCondType: boolean;
 }
 
 /** Fresh parser state for one `parse` call. Every field is initialized here so
@@ -924,6 +928,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sp: 0,
         speculating: 0,
         chainSawOptional: false,
+        noCondType: false,
     };
 }
 
@@ -3760,7 +3765,18 @@ function parseTypeAnn(state: ParserState): Node {
     return m.TSTypeAnnotation(start, ty.end, 0, ty) as Node;
 }
 
+/** Public type entry: conditional types are ALLOWED here (a trailing `? … : …` starts a new
+ * conditional). Nested bracketed types (`(T)`, `{…}`, `T[…]`, `<…>`) route back through this,
+ * so disallow-conditional state never leaks across a bracket boundary — matching oxc/TS. */
 function parseType(state: ParserState): Node {
+    const saved = state.noCondType;
+    state.noCondType = false;
+    const t = parseTypeInner(state);
+    state.noCondType = saved;
+    return t;
+}
+
+function parseTypeInner(state: ParserState): Node {
     if (isP(state, P.LPAREN) && fnTypeAhead(state)) return parseFnType(state, 0, null);
     if (isP(state, P.LT)) {
         const tp = tryParseTypeParams(state);
@@ -3780,7 +3796,7 @@ function parseType(state: ParserState): Node {
         const ann = m.TSTypeAnnotation(ret.start, ret.end, 0, ret) as Node;
         return m.TSConstructorType(start, state.tokStart, 0, tp, params, ann) as Node;
     }
-    return parseUnionType(state);
+    return parseConditionalTypeOrHigher(state);
 }
 
 function parseFnType(state: ParserState, abstractFlag: number, typeParams: Ref): Node {
@@ -3816,16 +3832,31 @@ function fnTypeAhead(state: ParserState): boolean {
     return src.charCodeAt(p) === 61 && src.charCodeAt(p + 1) === 62;
 }
 
+function parseConditionalTypeOrHigher(state: ParserState): Node {
+    const checkType = parseUnionType(state);
+    // A conditional's extends-type is parsed with conditionals disallowed (`noCondType`), so a
+    // trailing `? … : …` there binds to THIS conditional, not a nested one.
+    if (state.noCondType || !isK(state, K.EXTENDS)) return checkType;
+    nextToken(state);
+    state.noCondType = true;
+    const extendsType = parseTypeInner(state);
+    state.noCondType = false;
+    expectP(state, P.QUESTION, "'?'");
+    const trueType = parseType(state);
+    expectP(state, P.COLON, "':'");
+    const falseType = parseType(state);
+    return m.TSConditionalType(checkType.start, falseType.end, 0, checkType, extendsType, trueType, falseType) as Node;
+}
+
 function parseUnionType(state: ParserState): Node {
     eatP(state, P.PIPE);
     const first = parseIntersectionType(state);
-    if (!isP(state, P.PIPE)) return parseCondTail(state, first);
+    if (!isP(state, P.PIPE)) return first;
     const start = first.start;
     const from = state.sp;
     push(state, first);
     while (eatP(state, P.PIPE)) push(state, parseIntersectionType(state));
-    const u = m.TSUnionType(start, state.tokStart, 0, finishList(state, from)) as Node;
-    return parseCondTail(state, u);
+    return m.TSUnionType(start, state.tokStart, 0, finishList(state, from)) as Node;
 }
 
 function parseIntersectionType(state: ParserState): Node {
@@ -3837,21 +3868,6 @@ function parseIntersectionType(state: ParserState): Node {
     push(state, first);
     while (eatP(state, P.AMP)) push(state, parseTypeOperator(state));
     return m.TSIntersectionType(start, state.tokStart, 0, finishList(state, from)) as Node;
-}
-
-function parseCondTail(state: ParserState, checkType: Node): Node {
-    if (!isK(state, K.EXTENDS)) return checkType;
-    nextToken(state);
-    const extendsType = parseIntersectionType(state);
-    if (!isP(state, P.QUESTION)) {
-        expectP(state, P.QUESTION, "'?'");
-        return checkType;
-    }
-    nextToken(state);
-    const trueType = parseType(state);
-    expectP(state, P.COLON, "':'");
-    const falseType = parseType(state);
-    return m.TSConditionalType(checkType.start, falseType.end, 0, checkType, extendsType, trueType, falseType) as Node;
 }
 
 function parseTypeOperator(state: ParserState): Node {
@@ -3874,7 +3890,21 @@ function parseTypeOperator(state: ParserState): Node {
     if (isK(state, K.INFER)) {
         nextToken(state);
         const name = parseIdent(state, R_BIND);
-        const tp = m.TSTypeParameter(name.start, name.end, 0, name, null, null) as Node;
+        // `infer X extends C`: the `extends C` is the inferred type's constraint — UNLESS we're in
+        // an allow-conditional context and a `?` follows, in which case `extends` opens the outer
+        // conditional and we roll back. (oxc/TS `tryParseConstraintOfInferType`.)
+        let constraint: Ref = null;
+        if (isK(state, K.EXTENDS)) {
+            const s = saveState(state);
+            const inDisallow = state.noCondType;
+            nextToken(state);
+            state.noCondType = true;
+            const c = parseTypeInner(state);
+            state.noCondType = inDisallow;
+            if (inDisallow || !isP(state, P.QUESTION)) constraint = c;
+            else restoreState(state, s);
+        }
+        const tp = m.TSTypeParameter(name.start, state.tokStart, 0, name, constraint, null) as Node;
         return m.TSInferType(start, state.tokStart, 0, tp) as Node;
     }
     return parseTypePostfixAndCond(state, parsePrimaryType(state));
@@ -3992,7 +4022,15 @@ function parsePrimaryType(state: ParserState): Node {
     if (isK(state, K.TYPEOF)) {
         nextToken(state);
         const s = state.tokStart;
-        let expr: Node = parseIdent(state, R_REF);
+        // `typeof this.foo` — the entity-name root may be `this` (or any reserved word). TS/oxc
+        // parse a reserved-word-tolerant entity name here.
+        let expr: Node;
+        if (isK(state, K.THIS)) {
+            expr = m.ThisExpression(state.tokStart, state.tokEnd, 0) as Node;
+            nextToken(state);
+        } else {
+            expr = parseIdent(state, R_REF);
+        }
         while (isP(state, P.DOT)) {
             nextToken(state);
             const r = parseNameAsIdent(state, R_NAME);

@@ -62,6 +62,12 @@ describe('tricky snippet corpus', () => {
         'interface computed key': 'enum E { A } interface I { [E.A]: string; readonly x?: number; }',
         'mapped type': 'type M<T> = { [K in keyof T]?: T[K] };',
         'conditional + infer': 'type Unwrap<T> = T extends Promise<infer U> ? U : T;',
+        'infer with extends constraint':
+            'type S<D> = D extends { sampleType: infer S extends string } ? S : never;',
+        'conditional extends union': 'type R<D> = D extends a | b | c ? x : D extends d | e ? y : z;',
+        'nested conditional chain': 'type N<T> = T extends 1 ? "a" : T extends 2 ? "b" : T extends 3 ? "c" : "d";',
+        'typeof this member': 'class C { f = {}; g() { const k: keyof typeof this.f = "x" as any; return k; } }',
+        'typeof this in type arg': 'class C { f = {}; g(): Array<keyof typeof this.f> { return []; } }',
         'template literal type': 'type Route = `/${string}/${number}`;',
         'tuple named members': 'type P = [x: number, y?: number, z: string[]];',
         'tuple labeled rest': 'type P = [x: number, ...rest: string[]];',
