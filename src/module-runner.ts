@@ -144,8 +144,14 @@ function attachSourceMap(code: string, map: SourceMap, startOffset: number): str
     if (typeof Buffer !== 'undefined') {
         b64 = Buffer.from(json, 'utf8').toString('base64');
     } else {
+        // btoa needs a binary string (one char per byte). Build it CHUNKED via fromCharCode.apply —
+        // a per-byte `bin += ...` is O(n²) and, on the engine chunks' large maps run per-module in
+        // the browser, was a dominant boot cost.
+        const bytes = new TextEncoder().encode(json);
         let bin = '';
-        for (const byte of new TextEncoder().encode(json)) bin += String.fromCharCode(byte);
+        for (let i = 0; i < bytes.length; i += 8192) {
+            bin += String.fromCharCode.apply(null, bytes.subarray(i, Math.min(i + 8192, bytes.length)) as unknown as number[]);
+        }
         b64 = btoa(bin);
     }
     return `${code}\n//# sourceMappingURL=data:application/json;charset=utf-8;base64,${b64}`;
