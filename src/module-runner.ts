@@ -122,6 +122,9 @@ export type ModuleRunner = {
     /** deliver an inbound custom HMR event to every module's `hot.on(event)` listeners
      *  (the host calls this on a server → realm push). */
     emit(event: string, data?: unknown): void;
+    /** cumulative fetch-wait (transport RTT + server transform) + fetch count across this runner —
+     *  `importWall − fetchMs ≈ module-body eval time`. */
+    stats(): { fetchMs: number; fetches: number };
 };
 
 // modules are `async (__shakeup) => { <body> }`.
@@ -162,6 +165,9 @@ export const defaultEvaluator: ModuleEvaluator = {
 export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     const modules = new Map<string, ModuleRecord>();
     const evaluating = new Set<string>(); // ids currently on the evaluation stack
+    // Cumulative fetch-wait: time spent awaiting fetchModule (transport RTT + server transform). The
+    // rest of an import's wall is module-body eval, so `importWall − fetchMs ≈ eval`.
+    const perf = { fetchMs: 0, fetches: 0 };
     const evaluator = options.evaluator ?? defaultEvaluator;
 
     let prepared = false;
@@ -270,7 +276,10 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         };
         modules.set(id, rec);
         evaluating.add(id);
+        const _tf = performance.now();
         const fetched = await options.fetchModule(id);
+        perf.fetchMs += performance.now() - _tf;
+        perf.fetches++;
         const code = typeof fetched === 'string' ? fetched : fetched.code;
         const map = typeof fetched === 'string' ? undefined : fetched.map;
         ensurePrepared();
@@ -386,5 +395,13 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         }
     }
 
-    return { import: loadModule, applyUpdate, applyHmr, invalidate, prune, emit };
+    return {
+        import: loadModule,
+        applyUpdate,
+        applyHmr,
+        invalidate,
+        prune,
+        emit,
+        stats: () => ({ fetchMs: perf.fetchMs, fetches: perf.fetches }),
+    };
 }
