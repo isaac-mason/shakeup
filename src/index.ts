@@ -11,6 +11,7 @@ export * from './plugin';
 export * from './plugins/json';
 export * from './plugins/asset';
 export * from './plugins/css';
+export * from './plugins/worker';
 export * from './node-resolve';
 export * from './bundle';
 export * from './transform';
