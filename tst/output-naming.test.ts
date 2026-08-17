@@ -5,8 +5,8 @@ import { createMemoryFs } from '../src/fs.ts';
 const NO_HASH = /!~\{/; // placeholder delimiter — must never leak into output
 
 describe('output naming — [name] and patterns', () => {
-    it('[name] comes from the entry name; entries carry no hash by default', () => {
-        const r = bundle({
+    it('[name] comes from the entry name; entries carry no hash by default', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -15,8 +15,8 @@ describe('output naming — [name] and patterns', () => {
         expect(r.chunks[0].fileName).toBe('main.js');
     });
 
-    it('object-input name override drives [name]', () => {
-        const r = bundle({
+    it('object-input name override drives [name]', async () => {
+        const r = await bundle({
             input: { app: '/main.ts' },
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -24,8 +24,8 @@ describe('output naming — [name] and patterns', () => {
         expect(r.chunks.find((c) => c.isEntry)!.fileName).toBe('app.js');
     });
 
-    it('custom entryFileNames pattern with [hash] hashes the entry too', () => {
-        const r = bundle({
+    it('custom entryFileNames pattern with [hash] hashes the entry too', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -41,29 +41,29 @@ describe('output naming — [hash] stability & size', () => {
         '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
         '/shared.ts': 'export const s = 40;',
     };
-    const build = (extra: Record<string, unknown> = {}) =>
+    const build = async (extra: Record<string, unknown> = {}) =>
         bundle({ input: { a: '/a.ts', b: '/b.ts' }, fs: createMemoryFs(files), external: [], output: extra });
 
-    it('shared chunk gets a hashed name of DEFAULT_HASH_SIZE (8) chars', () => {
-        const r = build();
+    it('shared chunk gets a hashed name of DEFAULT_HASH_SIZE (8) chars', async () => {
+        const r = await build();
         const shared = r.chunks.find((c) => !c.isEntry)!;
         expect(shared.fileName).toMatch(/^shared-[0-9A-Za-z_-]{8}\.js$/);
     });
 
-    it('[hash:12] widens the hash to 12 chars', () => {
-        const r = build({ chunkFileNames: '[name]-[hash:12].js' });
+    it('[hash:12] widens the hash to 12 chars', async () => {
+        const r = await build({ chunkFileNames: '[name]-[hash:12].js' });
         const shared = r.chunks.find((c) => !c.isEntry)!;
         expect(shared.fileName).toMatch(/^shared-[0-9A-Za-z_-]{12}\.js$/);
     });
 
-    it('bundling twice yields byte-identical filenames (determinism)', () => {
-        const one = build();
-        const two = build();
+    it('bundling twice yields byte-identical filenames (determinism)', async () => {
+        const one = await build();
+        const two = await build();
         expect(one.chunks.map((c) => c.fileName)).toEqual(two.chunks.map((c) => c.fileName));
     });
 
-    it('no placeholder leaks into any chunk code or filename', () => {
-        const r = build();
+    it('no placeholder leaks into any chunk code or filename', async () => {
+        const r = await build();
         for (const c of r.chunks) {
             expect(c.fileName).not.toMatch(NO_HASH);
             expect(c.code).not.toMatch(NO_HASH);
@@ -78,19 +78,19 @@ describe('output naming — [hash] change-propagation across chunks (THE test)',
         '/b.ts': "import { s } from './shared';\nexport const bv = s;",
         '/shared.ts': bBody,
     });
-    const build = (bBody: string, aBody = 'export const av = s + 1;') =>
+    const build = async (bBody: string, aBody = 'export const av = s + 1;') =>
         bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs(filesWith(bBody, aBody)),
             external: [],
         });
 
-    const sharedName = (r: ReturnType<typeof build>) => r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!.fileName;
-    const entryA = (r: ReturnType<typeof build>) => r.chunks.find((c) => c.name === 'a')!;
+    const sharedName = (r: Awaited<ReturnType<typeof build>>) => r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!.fileName;
+    const entryA = (r: Awaited<ReturnType<typeof build>>) => r.chunks.find((c) => c.name === 'a')!;
 
-    it('changing the shared chunk source changes its hash AND updates importers', () => {
-        const base = build('export const s = 40;');
-        const changed = build('export const s = 999;');
+    it('changing the shared chunk source changes its hash AND updates importers', async () => {
+        const base = await build('export const s = 40;');
+        const changed = await build('export const s = 999;');
 
         const sharedBase = sharedName(base);
         const sharedChanged = sharedName(changed);
@@ -101,22 +101,22 @@ describe('output naming — [hash] change-propagation across chunks (THE test)',
         expect(entryA(changed).code).toContain(`from './${sharedChanged}'`);
     });
 
-    it('changing ONLY entry A does not change the shared chunk hash', () => {
-        const base = build('export const s = 40;', 'export const av = s + 1;');
-        const changedA = build('export const s = 40;', 'export const av = s + 12345;');
+    it('changing ONLY entry A does not change the shared chunk hash', async () => {
+        const base = await build('export const s = 40;', 'export const av = s + 1;');
+        const changedA = await build('export const s = 40;', 'export const av = s + 12345;');
         // Shared chunk source is untouched → its hash is stable (entries are not hashed).
         expect(sharedName(changedA)).toBe(sharedName(base));
     });
 
-    it("A's import path string equals B's final filename", () => {
-        const r = build('export const s = 40;');
+    it("A's import path string equals B's final filename", async () => {
+        const r = await build('export const s = 40;');
         const shared = sharedName(r);
         expect(entryA(r).code).toContain(`from './${shared}'`);
     });
 });
 
 describe('output naming — hashCharacters', () => {
-    const build = (hashCharacters: 'base64' | 'base36' | 'hex') =>
+    const build = async (hashCharacters: 'base64' | 'base36' | 'hex') =>
         bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
@@ -127,20 +127,20 @@ describe('output naming — hashCharacters', () => {
             external: [],
             output: { hashCharacters, chunkFileNames: '[name]-[hash].js' },
         });
-    const hashOf = (r: ReturnType<typeof build>) =>
+    const hashOf = (r: Awaited<ReturnType<typeof build>>) =>
         r.chunks
             .find((c) => !c.isEntry)!
             .fileName.replace(/^shared-/, '')
             .replace(/\.js$/, '');
 
-    it('hex → [0-9a-f]', () => expect(hashOf(build('hex'))).toMatch(/^[0-9a-f]{8}$/));
-    it('base36 → [0-9a-z]', () => expect(hashOf(build('base36'))).toMatch(/^[0-9a-z]{8}$/));
-    it('base64 → url-safe set', () => expect(hashOf(build('base64'))).toMatch(/^[0-9A-Za-z_-]{8}$/));
+    it('hex → [0-9a-f]', async () => expect(hashOf(await build('hex'))).toMatch(/^[0-9a-f]{8}$/));
+    it('base36 → [0-9a-z]', async () => expect(hashOf(await build('base36'))).toMatch(/^[0-9a-z]{8}$/));
+    it('base64 → url-safe set', async () => expect(hashOf(await build('base64'))).toMatch(/^[0-9A-Za-z_-]{8}$/));
 });
 
 describe('output naming — sanitizeFileName', () => {
     // A group name with invalid chars is sanitized to '_'.
-    const build = (opt?: boolean | ((n: string) => string)) =>
+    const build = async (opt?: boolean | ((n: string) => string)) =>
         bundle({
             input: { app: '/app.ts' },
             fs: createMemoryFs({
@@ -155,26 +155,26 @@ describe('output naming — sanitizeFileName', () => {
             },
         });
 
-    it('default sanitizer replaces ? and * with _', () => {
-        const r = build();
+    it('default sanitizer replaces ? and * with _', async () => {
+        const r = await build();
         const vendor = r.chunks.find((c) => c.moduleIds.includes('/vendor.ts'))!;
         expect(vendor.fileName).toBe('a_b_c.js');
     });
 
-    it('sanitizeFileName:false leaves the raw name', () => {
-        const r = build(false);
+    it('sanitizeFileName:false leaves the raw name', async () => {
+        const r = await build(false);
         const vendor = r.chunks.find((c) => c.moduleIds.includes('/vendor.ts'))!;
         expect(vendor.fileName).toBe('a?b*c.js');
     });
 
-    it('a custom sanitizer fn is applied', () => {
-        const r = build((n) => n.replace(/[?*]/g, 'X'));
+    it('a custom sanitizer fn is applied', async () => {
+        const r = await build((n) => n.replace(/[?*]/g, 'X'));
         const vendor = r.chunks.find((c) => c.moduleIds.includes('/vendor.ts'))!;
         expect(vendor.fileName).toBe('aXbXc.js');
     });
 
-    it('/ subdirectory in the pattern survives (not sanitized away)', () => {
-        const r = bundle({
+    it('/ subdirectory in the pattern survives (not sanitized away)', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -185,10 +185,10 @@ describe('output naming — sanitizeFileName', () => {
 });
 
 describe('output naming — makeUnique collision', () => {
-    it('two non-hashed chunks resolving to the same name get a numeric suffix', () => {
+    it('two non-hashed chunks resolving to the same name get a numeric suffix', async () => {
         // a&b share x1, c&d share x2 → two distinct shared chunks. A constant chunkFileNames
         // (no [name]/[hash]) forces both to 'shared.js' → the second collides → 'shared2.js'.
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts', c: '/c.ts', d: '/d.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './x1';\nexport const av = x;",
@@ -213,8 +213,8 @@ describe('output naming — makeUnique collision', () => {
 });
 
 describe('output naming — file vs dir', () => {
-    it('output.file with >1 chunk errors', () => {
-        const r = bundle({
+    it('output.file with >1 chunk errors', async () => {
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { s } from './shared';\nexport const av = s;",
@@ -227,8 +227,8 @@ describe('output naming — file vs dir', () => {
         expect(r.errors[0]).toMatch(/output\.file.*single-chunk/);
     });
 
-    it('output.file single chunk uses its basename', () => {
-        const r = bundle({
+    it('output.file single chunk uses its basename', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -240,8 +240,8 @@ describe('output naming — file vs dir', () => {
 
 describe('output naming — banner/footer/intro/outro', () => {
     const files = { '/main.ts': 'export const x = 1;' };
-    it('string banner/footer/intro/outro prepend/append exactly', () => {
-        const r = bundle({
+    it('string banner/footer/intro/outro prepend/append exactly', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs(files),
             external: [],
@@ -254,9 +254,9 @@ describe('output naming — banner/footer/intro/outro', () => {
         expect(r.code.trimEnd().endsWith('/* F */')).toBe(true);
     });
 
-    it('function-form banner receives a PreRenderedChunk', () => {
+    it('function-form banner receives a PreRenderedChunk', async () => {
         let received: unknown;
-        const r = bundle({
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs(files),
             external: [],
@@ -273,8 +273,8 @@ describe('output naming — banner/footer/intro/outro', () => {
 });
 
 describe('output — exports mode & stubs', () => {
-    it("exports:'none' suppresses the entry export line", () => {
-        const r = bundle({
+    it("exports:'none' suppresses the entry export line", async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -283,8 +283,8 @@ describe('output — exports mode & stubs', () => {
         expect(r.code).not.toContain('export {');
     });
 
-    it('minify is rejected with a clear error', () => {
-        const r = bundle({
+    it('minify is rejected with a clear error', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -293,8 +293,8 @@ describe('output — exports mode & stubs', () => {
         expect(r.errors[0]).toMatch(/minify is not supported/);
     });
 
-    it('keepNames / topLevelVar are accepted with a not-implemented warning', () => {
-        const r = bundle({
+    it('keepNames / topLevelVar are accepted with a not-implemented warning', async () => {
+        const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],

@@ -2,16 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { createMemoryFs } from '../src/fs.ts';
 import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
 
-const build = (files: Record<string, string>, external: string[] = []) => {
-    const graph = buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });
+const build = async (files: Record<string, string>, external: string[] = []) => {
+    const graph = await buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });
     expect(graph.errors).toEqual([]);
     const linked = linkGraph(graph);
     return { graph, linked };
 };
 
 describe('graph + link', () => {
-    it('binds imports through re-export chains, orders deps first, deconflicts collisions', () => {
-        const { graph, linked } = build(
+    it('binds imports through re-export chains, orders deps first, deconflicts collisions', async () => {
+        const { graph, linked } = await build(
             {
                 '/main.ts': [
                     "import { add } from './math';",
@@ -57,8 +57,8 @@ describe('graph + link', () => {
         }
     });
 
-    it('star re-exports resolve, ambiguity across stars errors', () => {
-        const { linked } = build({
+    it('star re-exports resolve, ambiguity across stars errors', async () => {
+        const { linked } = await build({
             '/main.ts': "import { thing } from './barrel'; export const x = thing;",
             '/barrel.ts': "export * from './a'; export * from './b';",
             '/a.ts': 'export const thing = 1;',
@@ -66,7 +66,7 @@ describe('graph + link', () => {
         });
         expect(linked.errors).toEqual([]);
 
-        const ambiguous = build({
+        const ambiguous = await build({
             '/main.ts': "import { thing } from './barrel'; export const x = thing;",
             '/barrel.ts': "export * from './a'; export * from './b';",
             '/a.ts': 'export const thing = 1;',
@@ -75,14 +75,14 @@ describe('graph + link', () => {
         expect(ambiguous.linked.errors.join(' ')).toMatch(/ambiguous export 'thing'/);
     });
 
-    it('missing export is a link error; re-export cycles do not hang', () => {
-        const missing = build({
+    it('missing export is a link error; re-export cycles do not hang', async () => {
+        const missing = await build({
             '/main.ts': "import { nope } from './a'; export const x = nope;",
             '/a.ts': 'export const yes = 1;',
         });
         expect(missing.linked.errors.join(' ')).toMatch(/'nope' is not exported/);
 
-        const cyclic = build({
+        const cyclic = await build({
             '/main.ts': "import { ghost } from './a'; export const x = ghost;",
             '/a.ts': "export { ghost } from './b';",
             '/b.ts': "export { ghost } from './a';",
@@ -90,8 +90,8 @@ describe('graph + link', () => {
         expect(cyclic.linked.errors.join(' ')).toMatch(/'ghost' is not exported/);
     });
 
-    it('anonymous default export synthesizes a named binding', () => {
-        const { graph, linked } = build({
+    it('anonymous default export synthesizes a named binding', async () => {
+        const { graph, linked } = await build({
             '/main.ts': "import fn from './lib'; export const y = fn();",
             '/lib.ts': 'export default function () { return 7; }',
         });
@@ -103,8 +103,8 @@ describe('graph + link', () => {
         if (def && def.kind === 'found') expect(finalNameOf(linked, def.ref)).toBe('lib_default');
     });
 
-    it('import type and interface exports produce no runtime bindings', () => {
-        const { graph, linked } = build({
+    it('import type and interface exports produce no runtime bindings', async () => {
+        const { graph, linked } = await build({
             '/main.ts': "import type { Shape } from './types'; import { real } from './types'; export const z: Shape = real;",
             '/types.ts': 'export interface Shape { n: number }\nexport const real = { n: 1 };',
         });

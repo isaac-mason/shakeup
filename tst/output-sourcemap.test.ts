@@ -11,8 +11,8 @@ const FILES = {
 const build = (output: Record<string, unknown>) => bundle({ input: '/main.ts', fs: createMemoryFs(FILES), external: [], output });
 
 describe('output sourcemap variants', () => {
-    it('inline → data-URL comment in code, NO .map asset', () => {
-        const r = build({ sourcemap: 'inline' });
+    it('inline → data-URL comment in code, NO .map asset', async () => {
+        const r = await build({ sourcemap: 'inline' });
         expect(r.errors).toEqual([]);
         expect(r.code).toMatch(/\/\/# sourceMappingURL=data:application\/json;/);
         expect(r.assets ?? []).toHaveLength(0);
@@ -20,22 +20,22 @@ describe('output sourcemap variants', () => {
         expect(r.map).toBeDefined();
     });
 
-    it('hidden → .map asset present, NO sourceMappingURL comment', () => {
-        const r = build({ sourcemap: 'hidden' });
+    it('hidden → .map asset present, NO sourceMappingURL comment', async () => {
+        const r = await build({ sourcemap: 'hidden' });
         expect(r.errors).toEqual([]);
         expect(r.code).not.toContain('sourceMappingURL');
         expect((r.assets ?? []).some((a) => a.fileName === 'main.js.map')).toBe(true);
     });
 
-    it('true → .map asset AND sourceMappingURL=<name>.map comment', () => {
-        const r = build({ sourcemap: true });
+    it('true → .map asset AND sourceMappingURL=<name>.map comment', async () => {
+        const r = await build({ sourcemap: true });
         expect(r.errors).toEqual([]);
         expect(r.code).toContain('//# sourceMappingURL=main.js.map');
         expect((r.assets ?? []).some((a) => a.fileName === 'main.js.map')).toBe(true);
     });
 
-    it('the emitted .map asset is valid JSON with the right sources', () => {
-        const r = build({ sourcemap: true });
+    it('the emitted .map asset is valid JSON with the right sources', async () => {
+        const r = await build({ sourcemap: true });
         const asset = (r.assets ?? []).find((a) => a.fileName === 'main.js.map')!;
         const map = JSON.parse(asset.source) as { sources: string[]; file: string };
         expect(map.sources).toEqual(['/math.ts', '/main.ts']);
@@ -44,15 +44,15 @@ describe('output sourcemap variants', () => {
 });
 
 describe('output sourcemap — sourcesContent & ignoreList', () => {
-    it('sourcemapExcludeSources drops sourcesContent (keeps sources + mappings)', () => {
-        const r = build({ sourcemap: true, sourcemapExcludeSources: true });
+    it('sourcemapExcludeSources drops sourcesContent (keeps sources + mappings)', async () => {
+        const r = await build({ sourcemap: true, sourcemapExcludeSources: true });
         expect(r.map!.sources.length).toBeGreaterThan(0);
         expect(r.map!.sourcesContent).toBeUndefined();
         expect(r.map!.mappings.length).toBeGreaterThan(0);
     });
 
-    it('sourcemapIgnoreList RegExp populates x_google_ignoreList with the right indices', () => {
-        const r = bundle({
+    it('sourcemapIgnoreList RegExp populates x_google_ignoreList with the right indices', async () => {
+        const r = await bundle({
             input: '/main2.ts',
             fs: createMemoryFs({
                 '/main2.ts': "import { libv } from './node_modules/lib';\nexport const v = libv;",
@@ -67,16 +67,16 @@ describe('output sourcemap — sourcesContent & ignoreList', () => {
         expect(r.map!.x_google_ignoreList).toContain(nmIdx);
     });
 
-    it('sourcemapIgnoreList:false → field absent', () => {
-        const r = build({ sourcemap: true, sourcemapIgnoreList: false });
+    it('sourcemapIgnoreList:false → field absent', async () => {
+        const r = await build({ sourcemap: true, sourcemapIgnoreList: false });
         expect(r.map!.x_google_ignoreList).toBeUndefined();
     });
 });
 
-describe('output sourcemap — banner line offset (the footgun)', () => {
-    it('a 2-line banner shifts mapped segments down exactly 2 lines', () => {
-        const noBanner = build({ sourcemap: true });
-        const withBanner = build({ sourcemap: true, banner: '/* line1 */\n/* line2 */' });
+describe('output sourcemap — banner line offset (the footgun)', async () => {
+    it('a 2-line banner shifts mapped segments down exactly 2 lines', async () => {
+        const noBanner = await build({ sourcemap: true });
+        const withBanner = await build({ sourcemap: true, banner: '/* line1 */\n/* line2 */' });
         expect(withBanner.errors).toEqual([]);
 
         // The banner occupies the first two generated lines (unmapped). Every mapped segment in
@@ -93,8 +93,8 @@ describe('output sourcemap — banner line offset (the footgun)', () => {
         }
     });
 
-    it('the entry statement still traces to its original source line under a banner', () => {
-        const r = build({ sourcemap: true, banner: '/* b1 */\n/* b2 */' });
+    it('the entry statement still traces to its original source line under a banner', async () => {
+        const r = await build({ sourcemap: true, banner: '/* b1 */\n/* b2 */' });
         const decoded = decode(r.map!.mappings);
         const mainIdx = r.map!.sources.indexOf('/main.ts');
         let found = false;

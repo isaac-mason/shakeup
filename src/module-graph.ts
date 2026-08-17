@@ -1,10 +1,9 @@
 import { analyze, createSemantic, declareSyntheticImport, type Semantic, scopeOf, symbolOf } from './analysis/semantic';
 import { isJSXNode, N, type Node, node, type Program, walk } from './ast';
-import { dirnameOf, type Fs, joinPath } from './fs';
+import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import { createNodeResolver, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import {
-    assertSync,
     type CustomPluginOptions,
     compilePipeline,
     type ModuleInfo,
@@ -148,8 +147,8 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
  *  `Record<name, specifier>` = named entries. */
 export type InputOption = string | string[] | Record<string, string>;
 
-/** A low-level resolver override: specifier+importer → resolved id / null. */
-export type ResolveFn = (specifier: string, importer: string | null) => string | null;
+/** A low-level resolver override: specifier+importer → resolved id / null. May be sync or async. */
+export type ResolveFn = (specifier: string, importer: string | null) => MaybePromise<string | null>;
 
 /** Deployment target picking `mainFields`/`conditionNames` defaults. */
 export type Platform = 'node' | 'browser' | 'neutral';
@@ -314,7 +313,12 @@ function applyAlias(specifier: string, alias: Record<string, string>): string {
 
 /** Relative/absolute config-driven probe. Builds the probe set from `extensions` +
  *  `mainFiles`, honours `extensionAlias` (try mapped exts for a matching suffix first). */
-function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, importer: string | null): string | null {
+async function defaultResolve(
+    fs: Fs,
+    resolve: NormalizedResolve,
+    specifier: string,
+    importer: string | null,
+): Promise<string | null> {
     const aliased = applyAlias(specifier, resolve.alias);
     if (!aliased.startsWith('./') && !aliased.startsWith('../') && !aliased.startsWith('/')) return null;
     const base = aliased.startsWith('/') || importer === null ? aliased : joinPath(dirnameOf(importer), aliased);
@@ -326,20 +330,20 @@ function defaultResolve(fs: Fs, resolve: NormalizedResolve, specifier: string, i
             const stem = base.slice(0, base.length - ext.length);
             for (const alt of alts) {
                 const candidate = stem + alt;
-                if (fs.exists(candidate)) return candidate;
+                if (await fs.exists(candidate)) return candidate;
             }
         }
     }
 
     // Direct hit, then each extension, then directory-index (mainFiles × extensions).
-    if (fs.exists(base)) return base;
+    if (await fs.exists(base)) return base;
     for (const ext of resolve.extensions) {
-        if (fs.exists(base + ext)) return base + ext;
+        if (await fs.exists(base + ext)) return base + ext;
     }
     for (const main of resolve.mainFiles) {
         for (const ext of resolve.extensions) {
             const candidate = `${base}/${main}${ext}`;
-            if (fs.exists(candidate)) return candidate;
+            if (await fs.exists(candidate)) return candidate;
         }
     }
     return null;
@@ -367,7 +371,7 @@ export function makeBaseResolve(
     // workspace member) and browser-field remaps, and returns null for a plain relative import
     // (no browser-map owner). Those fall to the built-in probe (alias / extensionAlias /
     // extensions / mainFiles).
-    return (s, i) => node.resolve(applyAlias(s, normalized.alias), i) ?? defaultResolve(fs, normalized, s, i);
+    return async (s, i) => (await node.resolve(applyAlias(s, normalized.alias), i)) ?? (await defaultResolve(fs, normalized, s, i));
 }
 
 /** Whether a specifier is externalized by the `external` option. */
@@ -752,8 +756,10 @@ export type ParseStats = { parsed: number; reused: number };
  *  are exact repeats). `read` is left direct (each module loads once; package.json is cached in
  *  the resolver). Correct-by-construction because it never crosses a build boundary. */
 function memoBuildFs(fs: Fs): Fs {
-    const exists = new Map<string, boolean>();
-    const realpath = fs.realpath === undefined ? undefined : new Map<string, string>();
+    // Cache the MaybePromise: an async fs's Promise is cached + shared, so repeat/concurrent probes
+    // of the same path await ONE underlying call. A sync fs caches the plain value as before.
+    const exists = new Map<string, MaybePromise<boolean>>();
+    const realpath = fs.realpath === undefined ? undefined : new Map<string, MaybePromise<string>>();
     const rp = fs.realpath;
     return {
         read: (id) => fs.read(id),
@@ -779,7 +785,7 @@ function memoBuildFs(fs: Fs): Fs {
     };
 }
 
-export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
+export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Promise<Graph> {
     const graph: Graph = {
         modules: [],
         byId: new Map(),
@@ -822,13 +828,13 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
      *  against the resolved id, then falls through to `baseResolve`. `skipPipeline` bypasses the
      *  plugins (used by the recursion guard). Returns the resolved id string, `false` (external),
      *  or `null` (unresolved). */
-    const resolveThrough = (
+    const resolveThrough = async (
         specifier: string,
         importer: string | null,
         extra: ResolveIdExtra,
         skipPipeline = false,
-    ): string | false | null => {
-        const hit = skipPipeline ? null : assertSync(runResolveId(pipe, ctx, specifier, importer, extra));
+    ): Promise<string | false | null> => {
+        const hit = skipPipeline ? null : await runResolveId(pipe, ctx, specifier, importer, extra);
         if (hit === false) {
             pluginExternals.add(specifier);
             return false;
@@ -844,8 +850,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             mergeOptions(pendingFor(partial.id), partial);
             return partial.id;
         }
-        const base = baseResolve(specifier, importer);
-        return base;
+        return baseResolve(specifier, importer);
     };
 
     const ctx: PluginCtx = {
@@ -856,7 +861,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         info: (m) => graph.warnings.push(m),
         debug: () => {},
         fs: options.fs,
-        resolve: (source, importer = null, opts) => {
+        resolve: async (source, importer = null, opts) => {
             const extra: ResolveIdExtra = {
                 isEntry: opts?.isEntry ?? false,
                 kind: opts?.kind ?? 'import-statement',
@@ -873,7 +878,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             const marked = skipSelf && !guardHit;
             if (marked) resolving.add(key);
             try {
-                const r = resolveThrough(source, importer, extra, guardHit);
+                const r = await resolveThrough(source, importer, extra, guardHit);
                 if (r === false) return { id: source, external: true };
                 if (r === null) return null;
                 const pending = pendingOptions.get(r);
@@ -898,19 +903,23 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
 
     /** Graph-walk resolve: enters the resolving-set (so a plugin's `ctx.resolve`
      *  on the same pair is guarded), delegates to `resolveThrough`, exits. */
-    const resolveFn = (specifier: string, importer: string | null, extra: ResolveIdExtra): string | false | null => {
+    const resolveFn = async (
+        specifier: string,
+        importer: string | null,
+        extra: ResolveIdExtra,
+    ): Promise<string | false | null> => {
         const key = `${importer ?? ''}\x00${specifier}`;
         resolving.add(key);
         try {
-            return resolveThrough(specifier, importer, extra);
+            return await resolveThrough(specifier, importer, extra);
         } finally {
             resolving.delete(key);
         }
     };
 
-    const loadFn = (id: string): string | null => {
+    const loadFn = async (id: string): Promise<string | null> => {
         if (id === EMPTY_MODULE_ID) return ''; // browser:false-disabled module → empty
-        const r = assertSync(runLoad(pipe, ctx, id));
+        const r = await runLoad(pipe, ctx, id);
         if (r === null || r === undefined) return fs.read(id);
         if (typeof r === 'string') return r;
         // SourceDescription: take .code and merge its option overrides (load > resolveId).
@@ -918,7 +927,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
         return r.code;
     };
 
-    const addModule = (id: string, isEntry: boolean): number => {
+    const addModule = async (id: string, isEntry: boolean): Promise<number> => {
         const existing = graph.byId.get(id);
         if (existing !== undefined) return existing;
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
@@ -952,12 +961,12 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
             hit = signalHit;
             graph.parseStats.reused++;
         } else {
-            const source0 = loadFn(id);
+            const source0 = await loadFn(id);
             if (source0 === null) {
                 graph.errors.push(`cannot load module '${id}'`);
                 return -1;
             }
-            const transformed = assertSync(runTransform(pipe, ctx, source0, id));
+            const transformed = await runTransform(pipe, ctx, source0, id);
             source = transformed.code;
             // Merge transform overrides (transform > load > resolveId precedence).
             const pending = pendingFor(id);
@@ -1069,7 +1078,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 rec.external = true;
                 continue;
             }
-            const resolved = resolveFn(rec.specifier, id, {
+            const resolved = await resolveFn(rec.specifier, id, {
                 isEntry: false,
                 kind: rec.dynamic ? 'dynamic-import' : 'import-statement',
             });
@@ -1089,15 +1098,15 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 continue;
             }
             // symlinks:false disables the realpath deref (preserve the symlinked path).
-            const depId = normalizedResolve.symlinks ? (fs.realpath?.(resolved) ?? resolved) : resolved;
-            rec.resolved = addModule(depId, false);
+            const depId = normalizedResolve.symlinks ? ((await fs.realpath?.(resolved)) ?? resolved) : resolved;
+            rec.resolved = await addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }
         return mod.idx;
     };
 
     // buildStart runs with the full graph-backed ctx so `ctx.resolve` works from it.
-    for (const hook of pipe.buildStart) assertSync(hook.handler(ctx));
+    for (const hook of pipe.buildStart) await hook.handler(ctx);
 
     // Multi-entry rooting: resolve each normalized entry, add its module, mark it an entry, and
     // dedup into graph.entries (same module named twice ⇒ one root, first name wins). Rooting
@@ -1105,9 +1114,9 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
     const normalized = normalizeInput(options, graph.errors);
     const seen = new Set<number>();
     for (const { name, specifier } of normalized) {
-        const entryResolved = resolveFn(specifier, null, { isEntry: true, kind: 'entry' });
+        const entryResolved = await resolveFn(specifier, null, { isEntry: true, kind: 'entry' });
         const entryId = typeof entryResolved === 'string' ? entryResolved : specifier;
-        const idx = addModule(entryId, true);
+        const idx = await addModule(entryId, true);
         if (idx < 0) continue; // addModule already pushed a load error
         const mod = graph.modules[idx];
         mod.isEntry = true;

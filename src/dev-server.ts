@@ -222,7 +222,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         }
         // No plugin resolved it: honour `external`, then the shared config-driven resolver.
         if (isExternalSpecifier(options.external, spec)) return { external: spec };
-        const resolved = baseResolve(spec, importer);
+        const resolved = await baseResolve(spec, importer);
         if (resolved !== null) return resolved;
         // Unresolved: a bare specifier is native-imported; a relative one surfaces as a fetch error.
         if (isBare(spec)) return { external: spec };
@@ -244,7 +244,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
-            (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? fs.read(id);
+            (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? (await fs.read(id));
         if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
 
         const hash = hashOf(source);

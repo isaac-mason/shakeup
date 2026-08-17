@@ -1,7 +1,7 @@
 import type { Semantic } from './analysis/semantic';
 import type { Program } from './ast';
 import { applyEdits, type Edit } from './emit';
-import type { Fs } from './fs';
+import type { Fs, MaybePromise } from './fs';
 import type { SourceMap } from './sourcemap';
 
 /** false = no side effects (droppable if unused); true = default liveness;
@@ -134,7 +134,6 @@ export type ModuleParsedInfo = {
 
 /** A value or a promise of it. Hooks may be sync or async; the drivers below stay
  *  fully synchronous when no hook returns a thenable. */
-export type MaybePromise<T> = T | Promise<T>;
 
 const isThenable = (x: unknown): x is Promise<unknown> =>
     x !== null && typeof x === 'object' && typeof (x as { then?: unknown }).then === 'function';

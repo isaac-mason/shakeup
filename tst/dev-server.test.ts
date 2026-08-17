@@ -159,21 +159,25 @@ describe('dev server — object plugin returns (R1)', () => {
     });
 });
 
-describe('bundle mode — sync fast path guard', () => {
-    it('assertSync throws when a bundle-mode plugin hook goes async', () => {
+describe('bundle mode — async plugins', () => {
+    it('SUPPORTS async plugin hooks (first-class async Fs made the whole graph build async)', async () => {
         const asyncResolve: Plugin = {
             name: 'async-resolve',
             resolveId: async (_ctx, spec) => (spec === 'virtual:x' ? '\0x' : null),
         };
-        // The sync build refuses an async hook loudly (assertSync throws, no hang).
-        expect(() =>
-            bundle({
-                entry: '/main.ts',
-                fs: createMemoryFs({ '/main.ts': "import 'virtual:x';\nexport const y = 1;" }),
-                external: [],
-                plugins: [asyncResolve],
-            }),
-        ).toThrow('async plugin hook');
+        const asyncLoad: Plugin = {
+            name: 'async-load',
+            load: async (_ctx, id) => (id === '\0x' ? 'export const vx = 1;' : null),
+        };
+        // Once Fs became first-class async, bundle() became async too — so async resolveId/load
+        // hooks now resolve+load a virtual module in the bundle path (no more assertSync guard).
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': "import 'virtual:x';\nexport const y = 1;" }),
+            external: [],
+            plugins: [asyncResolve, asyncLoad],
+        });
+        expect(r.errors).toEqual([]);
     });
 });
 

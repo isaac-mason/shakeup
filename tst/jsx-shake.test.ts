@@ -13,9 +13,9 @@ export function createElement(t, p, ...c) { return { k: 'ce', type: t, props: p,
 const resolve = (spec: string): string | null =>
     spec === 'react/jsx-runtime' ? '/react/jsx-runtime.ts' : spec === 'react' ? '/react.ts' : null;
 
-function build(main: string, opts: { pure?: boolean } = {}) {
+async function build(main: string, opts: { pure?: boolean } = {}) {
     const files = { '/main.tsx': main, '/react/jsx-runtime.ts': SHIM_JS, '/react.ts': SHIM_JS };
-    const r = bundle({
+    const r = await bundle({
         entry: '/main.tsx',
         fs: createMemoryFs(files),
         external: [],
@@ -27,8 +27,8 @@ function build(main: string, opts: { pure?: boolean } = {}) {
 }
 
 describe('G-JSX-5: shake interplay', () => {
-    it('drops a dead `const x = <Foo/>` whose binding is unused', () => {
-        const { code } = build(`
+    it('drops a dead `const x = <Foo/>` whose binding is unused', async () => {
+        const { code } = await build(`
             function Foo() { return 'foo'; }
             const DEAD_UNUSED = <Foo className="marker-dead" />;
             export const kept = 1;
@@ -37,8 +37,8 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).not.toContain('DEAD_UNUSED');
     });
 
-    it('keeps a used JSX value', () => {
-        const { code } = build(`
+    it('keeps a used JSX value', async () => {
+        const { code } = await build(`
             function Foo() { return 'foo'; }
             export const kept = <Foo className="marker-live" />;
         `);
@@ -47,8 +47,8 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).toContain('$$frag');
     });
 
-    it('keeps a JSX statement with an EFFECTFUL attribute expression', () => {
-        const { code } = build(`
+    it('keeps a JSX statement with an EFFECTFUL attribute expression', async () => {
+        const { code } = await build(`
             function Foo(p) { return p; }
             let log = [];
             function sink() { log.push('ran'); return 1; }
@@ -58,8 +58,8 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).toContain('sink()');
     });
 
-    it('a module whose JSX fully shakes away leaves no dangling runtime import', () => {
-        const { code } = build(`
+    it('a module whose JSX fully shakes away leaves no dangling runtime import', async () => {
+        const { code } = await build(`
             function Foo() { return 'foo'; }
             const DEAD = <Foo />;
             export const kept = 99;
@@ -69,8 +69,8 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).not.toContain('$$frag');
     });
 
-    it('pure:false keeps unused JSX (treated as effectful)', () => {
-        const { code } = build(
+    it('pure:false keeps unused JSX (treated as effectful)', async () => {
+        const { code } = await build(
             `
             function Foo() { return 'foo'; }
             const KEPT_BECAUSE_IMPURE = <Foo className="marker-impure" />;
@@ -81,17 +81,17 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).toContain('marker-impure');
     });
 
-    it('EXTERNAL runtime: fully-shaken JSX drops the injected import; live keeps it', () => {
+    it('EXTERNAL runtime: fully-shaken JSX drops the injected import; live keeps it', async () => {
         const mk = (main: string) =>
             bundle({ entry: '/main.tsx', fs: createMemoryFs({ '/main.tsx': main }), external: ['react/jsx-runtime', 'react'] });
-        const dead = mk(`function Foo(){}\nconst DEAD = <Foo/>;\nexport const kept = 1;`);
+        const dead = await mk(`function Foo(){}\nconst DEAD = <Foo/>;\nexport const kept = 1;`);
         expect(dead.code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
-        const live = mk(`export const a = <div>{x}</div>;`);
+        const live = await mk(`export const a = <div>{x}</div>;`);
         expect(live.code).toMatch(/from ['"]react\/jsx-runtime['"]/);
     });
 
-    it('EXTERNAL runtime: an authored `react` import survives even when JSX shakes away', () => {
-        const r = bundle({
+    it('EXTERNAL runtime: an authored `react` import survives even when JSX shakes away', async () => {
+        const r = await bundle({
             entry: '/main.tsx',
             fs: createMemoryFs({
                 '/main.tsx': `import { useState } from 'react';\nfunction Foo(){}\nconst DEAD = <Foo/>;\nexport const s = useState(1);`,
@@ -103,7 +103,7 @@ describe('G-JSX-5: shake interplay', () => {
     });
 
     it('executes: live JSX renders, dead JSX absent', async () => {
-        const { code } = build(`
+        const { code } = await build(`
             function Foo(p) { return p; }
             const DEAD = <Foo className="dead" />;
             export const live = <Foo className="live" />;

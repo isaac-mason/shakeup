@@ -6,8 +6,8 @@ import type { ModuleSideEffects, Plugin } from '../src/plugin.ts';
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;
 
-const build = (files: Record<string, string>, plugins: Plugin[] = [], external: string[] = []) => {
-    const result = bundle({ entry: '/main.ts', fs: createMemoryFs(files), external, plugins });
+const build = async (files: Record<string, string>, plugins: Plugin[] = [], external: string[] = []) => {
+    const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external, plugins });
     expect(result.errors).toEqual([]);
     return result;
 };
@@ -19,28 +19,28 @@ describe('plugin resolve/load contract (R1)', () => {
             resolveId: (_ctx, spec) => (spec === 'virtual:config' ? { id: '\0virtual:config', moduleSideEffects: false } : null),
             load: (_ctx, id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { code } = build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
+        const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
         const mod = await run(code);
         expect(mod.v).toBe('9.9.9');
     });
 
-    it('resolveId { external: true } keeps the import external', () => {
+    it('resolveId { external: true } keeps the import external', async () => {
         const externalize: Plugin = {
             name: 'externalize',
             resolveId: (_ctx, spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
         };
-        const { code } = build({ '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" }, [
+        const { code } = await build({ '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" }, [
             externalize,
         ]);
         expect(code).toContain("from 'lib-esque'");
     });
 
-    it("resolveId { external: 'absolute' } is also treated external", () => {
+    it("resolveId { external: 'absolute' } is also treated external", async () => {
         const externalize: Plugin = {
             name: 'externalize-abs',
             resolveId: (_ctx, spec) => (spec === 'abs-lib' ? { id: '/abs/abs-lib', external: 'absolute' } : null),
         };
-        const { code } = build({ '/main.ts': "import { x } from 'abs-lib';\nexport const c = () => x();" }, [externalize]);
+        const { code } = await build({ '/main.ts': "import { x } from 'abs-lib';\nexport const c = () => x();" }, [externalize]);
         expect(code).toContain("from 'abs-lib'");
     });
 
@@ -54,17 +54,17 @@ describe('plugin resolve/load contract (R1)', () => {
             resolveId: (_ctx, spec, importer) =>
                 spec === './effect.ts' && importer !== null ? { id: '/effect.ts', moduleSideEffects: false } : null,
         };
-        const { code, shaken } = build(files, [markPure]);
+        const { code, shaken } = await build(files, [markPure]);
         expect(code).not.toContain('__EFFECT_MARKER__');
         expect(shaken!.dropped.length).toBeGreaterThan(0);
         const mod = await run(code);
         expect(mod.out).toBe(1);
 
-        const kept = build(files, []);
+        const kept = await build(files, []);
         expect(kept.code).toContain('__EFFECT_MARKER__');
     });
 
-    it("moduleSideEffects: 'no-treeshake' keeps every statement", () => {
+    it("moduleSideEffects: 'no-treeshake' keeps every statement", async () => {
         const files = {
             '/main.ts': "import { used } from './lib.ts';\nexport const out = used;",
             '/lib.ts': ['export const used = 1;', 'const DEAD_BUT_KEPT = 99;', 'globalThis.__NT__ = DEAD_BUT_KEPT;'].join('\n'),
@@ -73,12 +73,12 @@ describe('plugin resolve/load contract (R1)', () => {
             name: 'no-shake',
             resolveId: (_ctx, spec) => (spec === './lib.ts' ? { id: '/lib.ts', moduleSideEffects: 'no-treeshake' } : null),
         };
-        const { code } = build(files, [noShake]);
+        const { code } = await build(files, [noShake]);
         expect(code).toContain('DEAD_BUT_KEPT');
         expect(code).toContain('__NT__');
     });
 
-    it('side-effect precedence: transform wins over load over resolveId', () => {
+    it('side-effect precedence: transform wins over load over resolveId', async () => {
         let final: unknown;
         const layered: Plugin = {
             name: 'layered',
@@ -93,13 +93,13 @@ describe('plugin resolve/load contract (R1)', () => {
                 final = ctx.getModuleInfo('/lib.ts')?.moduleSideEffects;
             },
         };
-        build({ '/main.ts': "import { used } from './lib.ts';\nexport const out = used;", '/lib.ts': 'export const used = 1;' }, [
+        await build({ '/main.ts': "import { used } from './lib.ts';\nexport const out = used;", '/lib.ts': 'export const used = 1;' }, [
             layered,
         ]);
         expect(final).toBe(false);
     });
 
-    it('meta round-trips across plugins via getModuleInfo; getModuleIds enumerates', () => {
+    it('meta round-trips across plugins via getModuleInfo; getModuleIds enumerates', async () => {
         let readA: unknown;
         let ids: string[] = [];
         const setter: Plugin = {
@@ -115,7 +115,7 @@ describe('plugin resolve/load contract (R1)', () => {
                 ids = [...ctx.getModuleIds()];
             },
         };
-        build({ '/main.ts': "import { a } from './a.ts';\nexport const out = a;", '/a.ts': 'export const a = 1;' }, [
+        await build({ '/main.ts': "import { a } from './a.ts';\nexport const out = a;", '/a.ts': 'export const a = 1;' }, [
             setter,
             reader,
         ]);
@@ -123,14 +123,13 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(ids.sort()).toEqual(['/a.ts', '/main.ts']);
     });
 
-    it('ctx.resolve re-runs resolution and does not recurse', () => {
+    it('ctx.resolve re-runs resolution and does not recurse', async () => {
         let resolved: string | null = null;
         const asker: Plugin = {
             name: 'asker',
-            buildStart: (ctx) => {
-                const r = ctx.resolve('./lib.ts', '/main.ts');
-                // sync fast path: bundle mode never returns a promise here.
-                resolved = r === null || r instanceof Promise ? null : (r as { id: string }).id;
+            buildStart: async (ctx) => {
+                const r = await ctx.resolve('./lib.ts', '/main.ts');
+                resolved = r === null ? null : (r as { id: string }).id;
             },
         };
         // A resolveId hook that calls ctx.resolve on the SAME specifier must not loop:
@@ -138,15 +137,15 @@ describe('plugin resolve/load contract (R1)', () => {
         let guardedId: string | null = null;
         const recursive: Plugin = {
             name: 'recursive',
-            resolveId: (ctx, spec, importer) => {
+            resolveId: async (ctx, spec, importer) => {
                 if (spec === './lib.ts' && importer !== null) {
-                    const r = ctx.resolve('./lib.ts', importer);
-                    guardedId = r === null || r instanceof Promise ? null : (r as { id: string }).id;
+                    const r = await ctx.resolve('./lib.ts', importer);
+                    guardedId = r === null ? null : (r as { id: string }).id;
                 }
                 return null;
             },
         };
-        build({ '/main.ts': "import { x } from './lib.ts';\nexport const out = x;", '/lib.ts': 'export const x = 1;' }, [
+        await build({ '/main.ts': "import { x } from './lib.ts';\nexport const out = x;", '/lib.ts': 'export const x = 1;' }, [
             asker,
             recursive,
         ]);
@@ -165,7 +164,7 @@ describe('plugin resolve/load contract (R1)', () => {
                 sideEffects = ctx.getModuleInfo('\0d')?.moduleSideEffects;
             },
         };
-        const { code } = build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
+        const { code } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
         const mod = await run(code);
         expect(mod.v).toBe(7);
         // The side-effect assignment is droppable (module marked false, only `d` is used).

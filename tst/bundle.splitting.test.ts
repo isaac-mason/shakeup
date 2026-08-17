@@ -27,7 +27,7 @@ async function execEntries(chunks: OutputChunk[], names: string[]): Promise<Reco
 
 describe('bundle: base automatic chunking', () => {
     it('two entries sharing a module form a shared chunk both import (executes)', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
@@ -52,7 +52,7 @@ describe('bundle: base automatic chunking', () => {
     });
 
     it('cross-chunk `import * as ns` builds the namespace in the producer chunk and executes', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import * as m from './shared';\nexport const av = m.s + m.t;",
@@ -73,7 +73,7 @@ describe('bundle: base automatic chunking', () => {
 
     it('manualChunks receives a graph-backed getModuleInfo', async () => {
         let depInfoId: string | undefined;
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './dep';\nexport const v = x;",
@@ -94,7 +94,7 @@ describe('bundle: base automatic chunking', () => {
 
     it('codeSplitting maxSize splits an oversized group into multiple chunks', async () => {
         const mod = (n: number) => `export const v${n} = ${JSON.stringify('x'.repeat(120))};`;
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts':
@@ -113,7 +113,7 @@ describe('bundle: base automatic chunking', () => {
     });
 
     it('codeSplitting entriesAware splits a group by importing-entry set', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from '/lib/shared';\nimport { y } from '/lib/onlyA';\nexport const av = x + y;",
@@ -136,7 +136,7 @@ describe('bundle: base automatic chunking', () => {
     });
 
     it('cross-chunk import renders `import { … } from` and executes with live bindings', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { setValue, getValue } from './shared';\nsetValue(123);\nexport const got = getValue();",
@@ -155,9 +155,9 @@ describe('bundle: base automatic chunking', () => {
         expect(ns.a.got).toBe(123);
     });
 
-    it('single-entry no-dynamic build stays ONE chunk (byte-stable with code alias)', () => {
+    it('single-entry no-dynamic build stays ONE chunk (byte-stable with code alias)', async () => {
         const files = { '/main.ts': "import { v } from './d';\nexport const r = v + 1;", '/d.ts': 'export const v = 5;' };
-        const r = bundle({ input: '/main.ts', fs: createMemoryFs(files), external: [] });
+        const r = await bundle({ input: '/main.ts', fs: createMemoryFs(files), external: [] });
         expect(r.errors).toEqual([]);
         expect(r.chunks).toHaveLength(1);
         expect(r.chunks[0].isEntry).toBe(true);
@@ -168,7 +168,7 @@ describe('bundle: base automatic chunking', () => {
 
 describe('bundle: dynamic import splitting', () => {
     it('a dynamic import becomes its own chunk and the specifier is rewritten (executes)', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: '/entry.ts',
             fs: createMemoryFs({
                 '/entry.ts': "export const load = () => import('./lazy');",
@@ -188,7 +188,7 @@ describe('bundle: dynamic import splitting', () => {
     });
 
     it('a module imported statically AND dynamically folds into the importer (no dup, executes)', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: '/entry.ts',
             fs: createMemoryFs({
                 '/entry.ts': [
@@ -209,8 +209,8 @@ describe('bundle: dynamic import splitting', () => {
 });
 
 describe('bundle: config layer', () => {
-    it('codeSplitting:false inlines the dynamic import (single chunk, Promise.resolve)', () => {
-        const r = bundle({
+    it('codeSplitting:false inlines the dynamic import (single chunk, Promise.resolve)', async () => {
+        const r = await bundle({
             input: '/entry.ts',
             fs: createMemoryFs({
                 '/entry.ts': "export const load = () => import('./lazy');",
@@ -226,8 +226,8 @@ describe('bundle: config layer', () => {
         expect(r.chunks[0].code).not.toMatch(/import\('\.\/lazy/);
     });
 
-    it('manualChunks captures matching modules into a named group chunk', () => {
-        const r = bundle({
+    it('manualChunks captures matching modules into a named group chunk', async () => {
+        const r = await bundle({
             input: { app: '/app.ts' },
             fs: createMemoryFs({
                 '/app.ts': "import { v } from './vendor';\nexport const y = v;",
@@ -244,8 +244,8 @@ describe('bundle: config layer', () => {
         expect(app.moduleIds).toEqual(['/app.ts']);
     });
 
-    it('codeSplitting groups: a vendor group with a RegExp test forms its own chunk', () => {
-        const r = bundle({
+    it('codeSplitting groups: a vendor group with a RegExp test forms its own chunk', async () => {
+        const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { v } from './node_modules/lib';\nexport const av = v;",
@@ -261,7 +261,7 @@ describe('bundle: config layer', () => {
     });
 
     it('preserveModules emits one chunk per module with imports preserved (executes)', async () => {
-        const r = bundle({
+        const r = await bundle({
             input: '/a.ts',
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './b';\nexport const y = x + 1;",

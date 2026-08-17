@@ -30,7 +30,7 @@ async function ours(fixture: string): Promise<Record<string, unknown>> {
     const files = { '/main.tsx': fixture, '/react/jsx-runtime.ts': SHIM_JS, '/react.ts': SHIM_JS };
     const resolve = (spec: string): string | null =>
         spec === 'react/jsx-runtime' ? '/react/jsx-runtime.ts' : spec === 'react' ? '/react.ts' : null;
-    const r = bundle({ entry: '/main.tsx', fs: createMemoryFs(files), external: [], resolve });
+    const r = await bundle({ entry: '/main.tsx', fs: createMemoryFs(files), external: [], resolve });
     expect(r.errors, `our bundle errored: ${r.errors.join(', ')}`).toEqual([]);
     return run(r.code);
 }

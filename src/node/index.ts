@@ -85,17 +85,17 @@ function entryOf(options: Pick<NodeBuildOptions, 'entry' | 'input'>): string | n
 }
 
 /** One-shot build. Uses the node fs by default; writes to `outDir` when set. */
-export function build(options: NodeBuildOptions): BundleResult {
+export async function build(options: NodeBuildOptions): Promise<BundleResult> {
     const { outDir, write, ...bundleOptions } = options;
     const fs = bundleOptions.fs ?? createNodeFs();
-    const result = bundle({ ...bundleOptions, fs });
+    const result = await bundle({ ...bundleOptions, fs });
     if (outDir !== undefined && write !== false) writeOutput(result, outDir);
     return result;
 }
 
 export type WatchHandle = {
     /** Force a rebuild now, as if a change fired. */
-    rebuild(): BundleResult;
+    rebuild(): Promise<BundleResult>;
     /** Stop watching and release caches. */
     close(): void;
 };
@@ -121,14 +121,14 @@ export function watch(options: WatchOptions): WatchHandle {
     const fs = bundleOptions.fs ?? createNodeFs();
     const ctx = createBuildContext({ ...bundleOptions, fs });
 
-    const run = (events: FileEvent[] | null): BundleResult => {
-        const result = ctx.rebuild(events ?? undefined);
+    const run = async (events: FileEvent[] | null): Promise<BundleResult> => {
+        const result = await ctx.rebuild(events ?? undefined);
         if (outDir !== undefined && write !== false) writeOutput(result, outDir);
         onRebuild?.(result, events);
         return result;
     };
 
-    run(null); // initial build
+    void run(null).catch((e) => onError?.(e)); // initial build (fire-and-forget; onRebuild reports done)
 
     let roots = watchPaths;
     if (roots === undefined) {
@@ -136,7 +136,7 @@ export function watch(options: WatchOptions): WatchHandle {
         if (entry === null) throw new Error('watch(): pass `watch` paths (could not derive a root from the entry)');
         roots = dirname(resolve(entry));
     }
-    const driver = driveWatch(createNodeWatcher(roots), (events) => void run(events), {
+    const driver = driveWatch(createNodeWatcher(roots), (events) => void run(events).catch((e) => onError?.(e)), {
         debounceMs: debounceMs ?? 30,
         onError,
     });

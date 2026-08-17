@@ -5,15 +5,15 @@ import { createMemoryFs } from '../src/fs.ts';
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;
 
-const build = (files: Record<string, string>, external: string[] = []) => {
-    const result = bundle({ entry: '/main.ts', fs: createMemoryFs(files), external });
+const build = async (files: Record<string, string>, external: string[] = []) => {
+    const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external });
     expect(result.errors).toEqual([]);
     return result;
 };
 
 describe('bundle: executable output', () => {
     it('bundles + executes a multi-module TS package (types stripped, renames applied)', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': [
                 "import { add } from './math';",
                 "import { one } from './util';",
@@ -33,7 +33,7 @@ describe('bundle: executable output', () => {
     });
 
     it('re-export chains, star exports, and namespace imports execute', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': [
                 "import * as lib from './lib';",
                 "import { thing } from './barrel';",
@@ -48,7 +48,7 @@ describe('bundle: executable output', () => {
     });
 
     it('default exports (named + anonymous) execute', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': [
                 "import anon from './anon';",
                 "import named from './named';",
@@ -62,7 +62,7 @@ describe('bundle: executable output', () => {
     });
 
     it('enums lower and execute inside a bundle (no export keyword leakage)', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': ["import { Motion } from './motion';", 'export const kind = Motion[Motion.DYNAMIC];'].join('\n'),
             '/motion.ts': 'export enum Motion { STATIC = 0, DYNAMIC = 1 }',
         });
@@ -72,7 +72,7 @@ describe('bundle: executable output', () => {
     });
 
     it('external imports hoist and dedupe; externals stay imports', async () => {
-        const { code } = build(
+        const { code } = await build(
             {
                 '/main.ts': [
                     "import { platform } from 'node:process';",
@@ -90,7 +90,7 @@ describe('bundle: executable output', () => {
     });
 
     it('shorthand object properties survive renames', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': ["import { pack } from './a';", 'const value = 5;', 'export const packed = pack(value);'].join('\n'),
             '/a.ts': 'const value = 10;\nexport const pack = (v: number) => ({ value, v });',
         });
@@ -99,7 +99,7 @@ describe('bundle: executable output', () => {
     });
 
     it('type-only graphs produce runtime-clean output', async () => {
-        const { code } = build({
+        const { code } = await build({
             '/main.ts': [
                 "import type { Shape } from './types';",
                 "import { area } from './types';",
@@ -118,19 +118,20 @@ describe('bundle: executable output', () => {
 });
 
 describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)', () => {
-    const bundleErr = (src: string): string[] => bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) }).errors;
+    const bundleErr = async (src: string): Promise<string[]> =>
+        (await bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) })).errors;
 
-    it('value namespaces are rejected with a clear error', () => {
-        const errs = bundleErr('export namespace NS { export const v = 42; }');
+    it('value namespaces are rejected with a clear error', async () => {
+        const errs = await bundleErr('export namespace NS { export const v = 42; }');
         expect(errs.join('\n')).toMatch(/value namespaces are not supported/);
     });
 
-    it('nested value namespaces are rejected', () => {
-        expect(bundleErr('namespace A { export namespace B { export const c = 1; } }').length).toBeGreaterThan(0);
+    it('nested value namespaces are rejected', async () => {
+        expect((await bundleErr('namespace A { export namespace B { export const c = 1; } }')).length).toBeGreaterThan(0);
     });
 
-    it('declare namespace / declare global still erase cleanly (no error)', () => {
-        expect(bundleErr('declare namespace Foo { const x: number; }\nexport const y = 1;')).toEqual([]);
-        expect(bundleErr('declare global { const G: number; }\nexport const z = 2;')).toEqual([]);
+    it('declare namespace / declare global still erase cleanly (no error)', async () => {
+        expect(await bundleErr('declare namespace Foo { const x: number; }\nexport const y = 1;')).toEqual([]);
+        expect(await bundleErr('declare global { const G: number; }\nexport const z = 2;')).toEqual([]);
     });
 });

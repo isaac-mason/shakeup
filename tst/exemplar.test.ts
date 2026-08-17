@@ -28,7 +28,7 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 
 const stripComments = (src: string): string => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
-const built = bundle({ entry: '/main.ts', fs: createMemoryFs(loadFixtures()), external: ['node:path'] });
+const built = await bundle({ entry: '/main.ts', fs: createMemoryFs(loadFixtures()), external: ['node:path'] });
 
 describe('exemplar: the puddle mini-library bundles + executes', () => {
     it('bundles with no errors or warnings', () => {
@@ -112,10 +112,10 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
 });
 
 describe('exemplar: pinned known limitations', () => {
-    const buildOne = (files: Record<string, string>) => bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });
+    const buildOne = async (files: Record<string, string>) => bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });
 
     it('lowered enum qualifies intra-enum member references (A | B → E.A | E.B)', async () => {
-        const { code } = buildOne({
+        const { code } = await buildOne({
             '/main.ts': "import { E } from './e';\nexport const both = E.BOTH;",
             '/e.ts': 'export enum E { A = 1, B = 2, BOTH = A | B }',
         });
@@ -126,7 +126,7 @@ describe('exemplar: pinned known limitations', () => {
     });
 
     it('KNOWN LIMITATION: namespace object snapshots mutated `let` exports (no live binding)', async () => {
-        const { code } = buildOne({
+        const { code } = await buildOne({
             '/main.ts': [
                 "import * as ns from './c';",
                 "import { bump } from './c';",

@@ -1,12 +1,17 @@
+/** A value or a promise of it. An `Fs` may answer synchronously (node/in-memory) or
+ *  asynchronously (browser OPFS); the graph build awaits either. */
+export type MaybePromise<T> = T | Promise<T>;
+
 /**
  * The only seam through which core code touches an environment; core MUST NOT
  * import node builtins directly — go through an Fs so the browser stays a
- * first-class target. Paths are posix-style strings.
+ * first-class target. Paths are posix-style strings. Methods may be sync OR async
+ * (async filesystems like OPFS are first-class) — the graph build awaits them.
  */
 export type Fs = {
-    read(id: string): string | null;
-    exists(id: string): boolean;
-    realpath?(id: string): string;
+    read(id: string): MaybePromise<string | null>;
+    exists(id: string): MaybePromise<boolean>;
+    realpath?(id: string): MaybePromise<string>;
 };
 
 /** In-memory Fs over a map of id -> source; the browser default. */

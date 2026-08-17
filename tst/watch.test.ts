@@ -68,7 +68,7 @@ describe('driveWatch', () => {
 });
 
 describe('rebuild(events)', () => {
-    it('prunes a deleted module and stays byte-identical to a cold build', () => {
+    it('prunes a deleted module and stays byte-identical to a cold build', async () => {
         const files: Record<string, string> = {
             '/entry.ts': "import { a } from './a';\nexport const t = a + 1;",
             '/a.ts': 'export const a = 1;',
@@ -76,18 +76,18 @@ describe('rebuild(events)', () => {
         const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
         const opts = () => ({ entry: '/entry.ts', fs, external: [] as string[] });
         const ctx = createBuildContext(opts());
-        ctx.rebuild(); // prime caches with a.ts present
+        await ctx.rebuild(); // prime caches with a.ts present
 
         // entry stops importing a; a.ts is removed from the project.
         files['/entry.ts'] = 'export const t = 2;';
         delete files['/a.ts'];
-        const r = ctx.rebuild([
+        const r = await ctx.rebuild([
             { kind: 'update', id: '/entry.ts' },
             { kind: 'delete', id: '/a.ts' },
         ]);
         expect(r.errors).toEqual([]);
 
-        const cold = bundle(opts());
+        const cold = await bundle(opts());
         expect(r.chunks[0].code).toBe(cold.chunks[0].code);
     });
 });

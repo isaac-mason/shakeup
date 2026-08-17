@@ -10,8 +10,8 @@ const recordOf = (graph: Graph, id: string, specifier: string) => {
 };
 
 describe('bundle: dynamic import() edges', () => {
-    it('follows a dynamic edge, records it, and bundles the target', () => {
-        const result = bundle({
+    it('follows a dynamic edge, records it, and bundles the target', async () => {
+        const result = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': "export const load = () => import('./lazy');",
@@ -35,8 +35,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(lazyChunk.exports).toContain('secret');
     });
 
-    it('tree-shakes a dynamic target as a whole-namespace root (both exports kept)', () => {
-        const result = bundle({
+    it('tree-shakes a dynamic target as a whole-namespace root (both exports kept)', async () => {
+        const result = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': "export const load = () => import('./lazy');",
@@ -51,8 +51,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(allCode).toContain('UNUSED_MARKER');
     });
 
-    it('leaves non-literal import() as a runtime import with no edge', () => {
-        const result = bundle({
+    it('leaves non-literal import() as a runtime import with no edge', async () => {
+        const result = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': [
@@ -69,8 +69,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(result.code).toContain("import('./x' + y)");
     });
 
-    it('static + dynamic same specifier ⇒ one record, static dominates', () => {
-        const result = bundle({
+    it('static + dynamic same specifier ⇒ one record, static dominates', async () => {
+        const result = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': [
@@ -91,8 +91,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(order.indexOf('/dup.ts')).toBeLessThan(order.indexOf('/main.ts'));
     });
 
-    it('terminates on a cycle through a dynamic edge', () => {
-        const result = bundle({
+    it('terminates on a cycle through a dynamic edge', async () => {
+        const result = await bundle({
             input: '/a.ts',
             fs: createMemoryFs({
                 '/a.ts': ['export const a = 1;', "export const load = () => import('./b');"].join('\n'),
@@ -111,7 +111,7 @@ describe('bundle: dynamic import() edges', () => {
 
 describe('bundle: multi-entry input', () => {
     it('produces named entries with a shared module included once', async () => {
-        const result = bundle({
+        const result = await bundle({
             input: { main: '/main.ts', admin: '/admin.ts' },
             fs: createMemoryFs({
                 '/main.ts': ["import { util } from './shared';", 'export const m = util() + 1;'].join('\n'),
@@ -140,8 +140,8 @@ describe('bundle: multi-entry input', () => {
         expect(main.code).toContain(`from './${shared.fileName}'`);
     });
 
-    it('input: string[] derives distinct names and dedups repeats', () => {
-        const two = bundle({
+    it('input: string[] derives distinct names and dedups repeats', async () => {
+        const two = await bundle({
             input: ['/a.ts', '/b.ts'],
             fs: createMemoryFs({
                 '/a.ts': 'export const a = 1;',
@@ -152,7 +152,7 @@ describe('bundle: multi-entry input', () => {
         expect(two.errors).toEqual([]);
         expect(two.graph!.entries.map((e) => e.name)).toEqual(['a', 'b']);
 
-        const dup = bundle({
+        const dup = await bundle({
             input: ['/a.ts', '/a.ts'],
             fs: createMemoryFs({ '/a.ts': 'export const a = 1;' }),
             external: [],
@@ -161,18 +161,18 @@ describe('bundle: multi-entry input', () => {
         expect(dup.graph!.entries).toHaveLength(1);
     });
 
-    it('errors when neither input nor entry is set, and when both are set', () => {
+    it('errors when neither input nor entry is set, and when both are set', async () => {
         const fs = createMemoryFs({ '/main.ts': 'export const x = 1;' });
-        const neither = bundle({ fs } as never);
+        const neither = await bundle({ fs } as never);
         expect(neither.errors).toContain("exactly one of 'input' or 'entry' must be set");
-        const both = bundle({ input: '/main.ts', entry: '/main.ts', fs } as never);
+        const both = await bundle({ input: '/main.ts', entry: '/main.ts', fs } as never);
         expect(both.errors).toContain("exactly one of 'input' or 'entry' must be set");
     });
 });
 
 describe('bundle: back-compat + stubs', () => {
-    it('the `entry` alias still works and code === chunks[0].code', () => {
-        const result = bundle({
+    it('the `entry` alias still works and code === chunks[0].code', async () => {
+        const result = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
@@ -185,15 +185,15 @@ describe('bundle: back-compat + stubs', () => {
         expect(result.chunks[0].moduleIds).toContain('/main.ts');
     });
 
-    it('accepts preserveEntrySignatures without changing output', () => {
+    it('accepts preserveEntrySignatures without changing output', async () => {
         const files = { '/main.ts': "import { v } from './d';\nexport const r = v;", '/d.ts': 'export const v = 5;' };
-        const withOpt = bundle({
+        const withOpt = await bundle({
             input: '/main.ts',
             fs: createMemoryFs(files),
             external: [],
             preserveEntrySignatures: 'strict',
         });
-        const without = bundle({ input: '/main.ts', fs: createMemoryFs(files), external: [] });
+        const without = await bundle({ input: '/main.ts', fs: createMemoryFs(files), external: [] });
         expect(withOpt.errors).toEqual([]);
         expect(without.errors).toEqual([]);
         expect(withOpt.code).toBe(without.code);

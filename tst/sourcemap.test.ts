@@ -215,7 +215,7 @@ describe('sourcemap — runner transform + compose', () => {
 });
 
 describe('sourcemap — bundle() multi-module map', () => {
-    const build = (sourcemap: boolean) =>
+    const build = async (sourcemap: boolean) =>
         bundle({
             entry: '/main.ts',
             fs: createMemoryFs({
@@ -225,8 +225,8 @@ describe('sourcemap — bundle() multi-module map', () => {
             sourcemap,
         });
 
-    it('each token traces to the correct module source at the right position', () => {
-        const r = build(true);
+    it('each token traces to the correct module source at the right position', async () => {
+        const r = await build(true);
         expect(r.errors).toEqual([]);
         expect(r.map).toBeDefined();
         const hit = (token: string, occ: number, wantSource: string) => {
@@ -243,8 +243,8 @@ describe('sourcemap — bundle() multi-module map', () => {
         hit('r', 1, '/main.ts');
     });
 
-    it('sourcesContent holds each module verbatim; synthetic export line is unmapped', () => {
-        const r = build(true);
+    it('sourcesContent holds each module verbatim; synthetic export line is unmapped', async () => {
+        const r = await build(true);
         expect(r.map!.sources).toEqual(['/math.ts', '/main.ts']);
         expect(r.map!.sourcesContent).toEqual([
             'export const add = (a: number, b: number): number => a + b;',
@@ -254,9 +254,9 @@ describe('sourcemap — bundle() multi-module map', () => {
         expect(trace(r.map!.mappings, exportLineIdx, 0)).toBeNull();
     });
 
-    it('no bundle map unless requested; enabling it only appends the sourceMappingURL comment', () => {
-        expect(build(false).map).toBeUndefined();
-        const withMap = build(true).code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
-        expect(withMap).toBe(build(false).code);
+    it('no bundle map unless requested; enabling it only appends the sourceMappingURL comment', async () => {
+        expect((await build(false)).map).toBeUndefined();
+        const withMap = (await build(true)).code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
+        expect(withMap).toBe((await build(false)).code);
     });
 });

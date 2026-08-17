@@ -6,8 +6,8 @@ group('full build @bundle @full', () => {
     for (const N of [100, 300, 600]) {
         bench(`cold build ${N} modules`, function* () {
             const g = makeGraph(N);
-            yield () => {
-                bundle(g.opts());
+            yield async () => {
+                await bundle(g.opts());
             };
         });
     }

@@ -15,7 +15,7 @@ export type NodeResolverOptions = {
 /** Resolves bare specifiers (node_modules / package `exports` / workspace members) and
  *  browser-field remaps. `load` returns '' for a `browser: false`-disabled module. */
 export type NodeResolver = {
-    resolve(specifier: string, importer: string | null): string | null;
+    resolve(specifier: string, importer: string | null): Promise<string | null>;
     load(id: string): string | null;
 };
 
@@ -278,10 +278,10 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
 
     const pkgCache = new Map<string, PackageJson | null>();
 
-    const readPkg = (dir: string): PackageJson | null => {
+    const readPkg = async (dir: string): Promise<PackageJson | null> => {
         const cached = pkgCache.get(dir);
         if (cached !== undefined) return cached;
-        const text = fs.read(`${dir}/package.json`);
+        const text = await fs.read(`${dir}/package.json`);
         if (text === null) {
             pkgCache.set(dir, null);
             return null;
@@ -325,18 +325,18 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         return pkg;
     };
 
-    const loadAsFile = (path: string): string | null => {
-        if (fs.exists(path)) return path;
+    const loadAsFile = async (path: string): Promise<string | null> => {
+        if (await fs.exists(path)) return path;
         for (const ext of extensions) {
-            if (fs.exists(path + ext)) return path + ext;
+            if (await fs.exists(path + ext)) return path + ext;
         }
         return null;
     };
 
-    const loadAsIndex = (dir: string): string | null => {
+    const loadAsIndex = async (dir: string): Promise<string | null> => {
         for (const ext of extensions) {
             const cand = `${dir}/index${ext}`;
-            if (fs.exists(cand)) return cand;
+            if (await fs.exists(cand)) return cand;
         }
         return null;
     };
@@ -355,27 +355,27 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         return absPath;
     };
 
-    const loadAsFileOrDirectory = (pkg: PackageJson, absPath: string): string | null => {
+    const loadAsFileOrDirectory = async (pkg: PackageJson, absPath: string): Promise<string | null> => {
         const remapped = applyBrowserRemap(pkg, absPath);
         if (remapped === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
-        const asFile = loadAsFile(remapped);
+        const asFile = await loadAsFile(remapped);
         if (asFile !== null) {
             return finishBrowserRemap(pkg, asFile);
         }
-        const asIndex = loadAsIndex(remapped);
+        const asIndex = await loadAsIndex(remapped);
         if (asIndex !== null) return finishBrowserRemap(pkg, asIndex);
         return null;
     };
 
-    const finishBrowserRemap = (pkg: PackageJson, absPath: string): string => {
+    const finishBrowserRemap = async (pkg: PackageJson, absPath: string): Promise<string> => {
         const r = applyBrowserRemap(pkg, absPath);
         if (r === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
         if (r === absPath) return absPath;
-        const f = loadAsFile(r);
+        const f = await loadAsFile(r);
         return f ?? r;
     };
 
-    const loadPackageRoot = (pkg: PackageJson): string | null => {
+    const loadPackageRoot = async (pkg: PackageJson): Promise<string | null> => {
         const fields: Record<string, string | undefined> = {
             browser: typeof pkg.browser === 'string' ? pkg.browser : undefined,
             module: pkg.module,
@@ -385,23 +385,29 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
             const value = fields[key];
             if (value === undefined) continue;
             const abs = normalizePath(`${pkg.dir}/${value}`);
-            const hit = loadAsFileOrDirectory(pkg, abs);
+            const hit = await loadAsFileOrDirectory(pkg, abs);
             if (hit !== null) return hit;
         }
-        const idx = loadAsIndex(pkg.dir);
+        const idx = await loadAsIndex(pkg.dir);
         if (idx !== null) return finishBrowserRemap(pkg, idx);
         return null;
     };
 
-    const finishExports = (ctx: ResolveCtx, pkg: PackageJson, spec: string, subpath: string, r: PjResult): string | null => {
+    const finishExports = async (
+        ctx: ResolveCtx,
+        pkg: PackageJson,
+        spec: string,
+        subpath: string,
+        r: PjResult,
+    ): Promise<string | null> => {
         switch (r.status) {
             case 'exact': {
-                if (fs.exists(r.value)) return r.value;
+                if (await fs.exists(r.value)) return r.value;
                 warn(ctx, spec, `The module "${relativeForMsg(pkg, r.value)}" was not found on the file system`);
                 return null;
             }
             case 'inexact': {
-                const hit = loadAsFile(r.value) ?? loadAsIndex(r.value);
+                const hit = (await loadAsFile(r.value)) ?? (await loadAsIndex(r.value));
                 if (hit !== null) return hit;
                 warn(ctx, spec, `The module "${relativeForMsg(pkg, r.value)}" was not found on the file system`);
                 return null;
@@ -433,7 +439,12 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
 
     /** Resolve `specifier`/`subpath` against a located package (node_modules OR workspace
      *  member): its `exports` if present, else the mainFields / subpath file. */
-    const resolveInPackage = (ctx: ResolveCtx, pkg: PackageJson, specifier: string, subpath: string): string | null => {
+    const resolveInPackage = async (
+        ctx: ResolveCtx,
+        pkg: PackageJson,
+        specifier: string,
+        subpath: string,
+    ): Promise<string | null> => {
         if (pkg.exports !== undefined) {
             const mixed = mixedExportsKeys(pkg.exports);
             if (mixed !== null) {
@@ -448,11 +459,11 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
             return finishExports(ctx, pkg, specifier, subpath, r);
         }
         if (subpath === '.') {
-            const hit = loadPackageRoot(pkg);
+            const hit = await loadPackageRoot(pkg);
             if (hit !== null) return hit;
         } else {
             const abs = normalizePath(`${pkg.dir}/${subpath.slice(2)}`);
-            const hit = loadAsFileOrDirectory(pkg, abs);
+            const hit = await loadAsFileOrDirectory(pkg, abs);
             if (hit !== null) return hit;
         }
         warn(ctx, specifier, `The module "${specifier}" was not found on the file system`);
@@ -463,14 +474,14 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
      *  `workspaces` field. The Fs contract has no directory listing, so a `glob/*` member is
      *  located by convention — its dir basename matches the specifier's last segment (explicit
      *  paths are matched exactly). Returns the member dir, or null. */
-    const findWorkspaceMember = (fromDir: string, name: string): string | null => {
+    const findWorkspaceMember = async (fromDir: string, name: string): Promise<string | null> => {
         const last = name.slice(name.lastIndexOf('/') + 1);
         for (let dir: string | null = fromDir; dir !== null; dir = parentDir(dir)) {
-            const rootPkg = readPkg(dir);
+            const rootPkg = await readPkg(dir);
             if (rootPkg === null || rootPkg.workspaces === undefined) continue;
             for (const pat of rootPkg.workspaces) {
                 const candidate = pat.endsWith('/*') ? joinPath(dir, `${pat.slice(0, -2)}/${last}`) : joinPath(dir, pat);
-                const memberPkg = readPkg(candidate);
+                const memberPkg = await readPkg(candidate);
                 if (memberPkg !== null && memberPkg.name === name) return candidate;
             }
             return null; // workspace root found but no matching member
@@ -478,20 +489,20 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         return null;
     };
 
-    const resolveId = (
+    const resolveId = async (
         ctx: ResolveCtx,
         specifier: string,
         importer: string | null,
         skipBrowserMap = false,
-    ): string | null | undefined => {
+    ): Promise<string | null | undefined> => {
         if (specifier.startsWith('\0')) return null;
 
         if (specifier.startsWith('.') || specifier.startsWith('/')) {
             if (importer === null) return null;
-            const owner = findBrowserMapOwner(readPkg, dirnameOf(importer));
+            const owner = await findBrowserMapOwner(readPkg, dirnameOf(importer));
             if (owner === null) return null;
             const abs = joinPath(dirnameOf(importer), specifier);
-            const hit = loadAsFileOrDirectory(owner, abs);
+            const hit = await loadAsFileOrDirectory(owner, abs);
             if (hit === EMPTY_MODULE_ID) return EMPTY_MODULE_ID;
             const remapped = applyBrowserRemap(owner, abs);
             if (remapped !== abs) return hit;
@@ -505,14 +516,14 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         const importerDir = importer === null ? '' : dirnameOf(importer);
 
         if (!skipBrowserMap) {
-            const owner = findBrowserMapOwner(readPkg, importerDir);
+            const owner = await findBrowserMapOwner(readPkg, importerDir);
             if (owner !== null) {
                 const map = owner.browser as Record<string, string | false>;
                 if (Object.hasOwn(map, specifier)) {
                     const mapped = map[specifier];
                     if (mapped === false) return EMPTY_MODULE_ID;
                     if (mapped.startsWith('.')) {
-                        const hit = loadAsFileOrDirectory(owner, normalizePath(`${owner.dir}/${mapped}`));
+                        const hit = await loadAsFileOrDirectory(owner, normalizePath(`${owner.dir}/${mapped}`));
                         if (hit !== null) return hit;
                     } else {
                         return resolveId(ctx, mapped, importer, true);
@@ -521,7 +532,7 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
             }
         }
 
-        const selfPkg = findEnclosingPackage(readPkg, importerDir, name);
+        const selfPkg = await findEnclosingPackage(readPkg, importerDir, name);
         if (selfPkg !== null && selfPkg.exports !== undefined) {
             const mixed = mixedExportsKeys(selfPkg.exports);
             if (mixed !== null) {
@@ -539,23 +550,23 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         for (let dir: string | null = importerDir; dir !== null; dir = parentDir(dir)) {
             if (baseName(dir) === 'node_modules') continue;
             const pkgDir = joinPath(dir, `node_modules/${name}`);
-            const pkg = readPkg(pkgDir);
+            const pkg = await readPkg(pkgDir);
             if (pkg === null) continue;
 
             return resolveInPackage(ctx, pkg, specifier, subpath);
         }
 
         // Install-free workspace member fallback (no node_modules/<name> found).
-        const memberDir = findWorkspaceMember(importerDir, name);
+        const memberDir = await findWorkspaceMember(importerDir, name);
         if (memberDir !== null) {
-            const pkg = readPkg(memberDir);
+            const pkg = await readPkg(memberDir);
             if (pkg !== null) return resolveInPackage(ctx, pkg, specifier, subpath);
         }
         return null;
     };
 
     return {
-        resolve: (specifier, importer) => resolveId(warnCtx, specifier, importer) ?? null,
+        resolve: async (specifier, importer) => (await resolveId(warnCtx, specifier, importer)) ?? null,
         load: (id) => (id === EMPTY_MODULE_ID ? '' : null),
     };
 }
@@ -609,10 +620,14 @@ function relativeForMsg(pkg: PackageJson, absPath: string): string {
     return relativeTo(pkg.dir, absPath);
 }
 
-function findEnclosingPackage(readPkg: (dir: string) => PackageJson | null, startDir: string, name: string): PackageJson | null {
+async function findEnclosingPackage(
+    readPkg: (dir: string) => Promise<PackageJson | null>,
+    startDir: string,
+    name: string,
+): Promise<PackageJson | null> {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
         if (baseName(dir) === 'node_modules') return null;
-        const pkg = readPkg(dir);
+        const pkg = await readPkg(dir);
         if (pkg !== null) {
             return pkg.name === name ? pkg : null;
         }
@@ -620,9 +635,12 @@ function findEnclosingPackage(readPkg: (dir: string) => PackageJson | null, star
     return null;
 }
 
-function findBrowserMapOwner(readPkg: (dir: string) => PackageJson | null, startDir: string): PackageJson | null {
+async function findBrowserMapOwner(
+    readPkg: (dir: string) => Promise<PackageJson | null>,
+    startDir: string,
+): Promise<PackageJson | null> {
     for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
-        const pkg = readPkg(dir);
+        const pkg = await readPkg(dir);
         if (pkg !== null && pkg.browser !== undefined && typeof pkg.browser !== 'string') return pkg;
     }
     return null;

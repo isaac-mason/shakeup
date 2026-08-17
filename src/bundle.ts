@@ -412,7 +412,7 @@ function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | nu
 }
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
-export function bundle(options: BundleOptions): BundleResult {
+export async function bundle(options: BundleOptions): Promise<BundleResult> {
     const pipeline = compilePipeline(options.plugins ?? []);
     const warningsOut: string[] = [];
     // Full PluginCtx for the bundle-level hooks (buildStart/renderChunk/buildEnd).
@@ -439,7 +439,7 @@ export function bundle(options: BundleOptions): BundleResult {
     // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
     const timer = options.timer ?? Timer.init(true);
     Timer.start(timer, 'graph');
-    graph = buildGraph(options, pipeline);
+    graph = await buildGraph(options, pipeline);
     Timer.end(timer, 'graph');
     if (graph.errors.length > 0 || graph.entries.length === 0) {
         return {
@@ -1315,7 +1315,7 @@ export type BuildContext = {
     /** Rebuild from the current sources, reusing unchanged modules. Read `.parseStats` on
      *  the result for the parse/reuse counts. Pass the {@link FileEvent}s from a {@link Watcher}
      *  to prune caches for deleted files; `update`/`create` are detected by source hash. */
-    rebuild(events?: FileEvent[]): BundleResult;
+    rebuild(events?: FileEvent[]): Promise<BundleResult>;
     /** Drop a module's cached parse so the next rebuild re-parses it (e.g. a known edit). */
     invalidate(id: string): void;
     /** Release the cache. */

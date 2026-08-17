@@ -56,12 +56,12 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
         plugins: [reactShimPlugin],
     });
 
-    it('bundles with no errors', () => {
-        expect(built.errors).toEqual([]);
+    it('bundles with no errors', async () => {
+        expect((await built).errors).toEqual([]);
     });
 
     it('executes the JSX component against the shim', async () => {
-        const mod = await run(built.code);
+        const mod = await run((await built).code);
         type Tree = { k: string; type: unknown; key?: unknown; props: Record<string, unknown> };
         const Panel = mod.Panel as (p: { rows: { id: number; label: string }[]; particle: { motion: number } }) => Tree;
         const tree = Panel({
@@ -91,21 +91,21 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
         expect(items.map((i) => i.props['data-id'])).toEqual([1, 2]);
     });
 
-    it('the enum lowering still works through the tsx graph (motion.ts unchanged)', () => {
-        expect(built.code).toContain('MotionType');
+    it('the enum lowering still works through the tsx graph (motion.ts unchanged)', async () => {
+        expect((await built).code).toContain('MotionType');
     });
 
-    it('EXISTING exemplar output is unaffected by JSX machinery (no-tsx build stable)', () => {
+    it('EXISTING exemplar output is unaffected by JSX machinery (no-tsx build stable)', async () => {
         const tsOnly: Record<string, string> = {};
         for (const [k, v] of Object.entries(files)) if (k.endsWith('.ts')) tsOnly[k] = v;
-        const withJsxOpts = bundle({
+        const withJsxOpts = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs(tsOnly),
             external: ['node:path'],
             plugins: [reactShimPlugin],
             jsx: { importSource: 'react', pure: true },
         });
-        const plain = bundle({ entry: '/main.ts', fs: createMemoryFs(tsOnly), external: ['node:path'] });
+        const plain = await bundle({ entry: '/main.ts', fs: createMemoryFs(tsOnly), external: ['node:path'] });
         expect(withJsxOpts.errors).toEqual([]);
         expect(withJsxOpts.code).toBe(plain.code);
         expect(withJsxOpts.code).not.toContain('jsx-runtime');
