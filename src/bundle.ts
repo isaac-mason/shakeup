@@ -229,7 +229,12 @@ function rewriteDynamicImports(ctx: EmitCtx, node: Node): void {
         const rec = mod.importRecords.find((r) => r.specifier === spec);
         if (rec === undefined || rec.external || rec.resolved < 0) return;
         const targetChunk = chunkGraph.chunkByModule[rec.resolved];
-        if (targetChunk < 0) return;
+        if (targetChunk < 0) {
+            // Target dropped from the bundle (dead pure dynamic import): the module never made it
+            // into a chunk, so resolve to an empty namespace — the result was provably unused.
+            ctx.edits.push({ start: n.start, end: n.end, text: 'Promise.resolve({})' });
+            return;
+        }
         if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
             // Target folded into this chunk: resolve against its namespace object. Defer the
             // namespace access into a microtask (`Promise.resolve().then(() => ns)`) so a
@@ -485,7 +490,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions);
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic);
     Timer.end(timer, 'chunk');
 
     let anyLiveJSX = false;

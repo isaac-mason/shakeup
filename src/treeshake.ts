@@ -1,5 +1,5 @@
 import { isPureStatement } from './analysis/effects';
-import { analyzeNsUsage } from './analysis/ns-usage';
+import { analyzeDynamicUsage, analyzeNsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
@@ -13,6 +13,10 @@ export type TreeshakeResult = {
      *  is an entry, is dynamically imported, or is re-exported as a namespace). Consumed by the
      *  emit so the namespace object lists only these members. */
     nsUsage: Map<number, Set<string>>;
+    /** Dead pure dynamic-import targets: modules reached ONLY via `import()` whose result is never
+     *  used and that have no side effects. Not rooted, not promoted to a chunk; their `import()`
+     *  sites are rewritten to `Promise.resolve({})`. Consumed by chunk-graph and the emit. */
+    deadDynamic: Set<number>;
 };
 
 export type StatementInfo = {
@@ -128,9 +132,52 @@ function computeNsUsage(graph: Graph): Map<number, Set<string>> {
     return narrowable;
 }
 
+/** Aggregate how each dynamic-import target's resolved module is consumed, unioned across every
+ *  `import()` site (in any module) that resolves to it. */
+function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; members: Set<string> }> {
+    const acc = new Map<number, { escapes: boolean; members: Set<string> }>();
+    for (const mod of graph.modules) {
+        const sites = analyzeDynamicUsage(mod.program, mod.semantic, mod.source);
+        for (const { specifier, usage } of sites) {
+            const rec = mod.importRecords.find((r) => r.specifier === specifier);
+            if (rec === undefined || rec.external || rec.resolved < 0) continue;
+            let a = acc.get(rec.resolved);
+            if (a === undefined) {
+                a = { escapes: false, members: new Set() };
+                acc.set(rec.resolved, a);
+            }
+            if (usage.escapes) a.escapes = true;
+            for (const m of usage.members) a.members.add(m);
+        }
+    }
+    return acc;
+}
+
+/** Dead pure dynamic imports: a target reached ONLY through `import()` (no static edge), never an
+ *  entry, whose every `import()` result is discarded (usage is `none`), and which is declared
+ *  side-effect-free — so loading it is observably a no-op and it can be dropped entirely. */
+function computeDeadDynamic(graph: Graph, dynUsage: Map<number, { escapes: boolean; members: Set<string> }>): Set<number> {
+    const entrySet = new Set(graph.entries.map((e) => e.module));
+    const staticTargets = new Set<number>();
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.kind === 'static' && !rec.external && rec.resolved >= 0) staticTargets.add(rec.resolved);
+        }
+    }
+    const dead = new Set<number>();
+    for (const [target, usage] of dynUsage) {
+        if (usage.escapes || usage.members.size > 0) continue; // result is used somewhere
+        if (entrySet.has(target) || staticTargets.has(target)) continue; // reachable another way
+        if (graph.modules[target].sideEffects !== false) continue; // loading it may be observable
+        dead.add(target);
+    }
+    return dead;
+}
+
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
 export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?: TreeshakeCache): TreeshakeResult {
     const nsUsage = computeNsUsage(graph);
+    const deadDynamic = computeDeadDynamic(graph, computeDynamicUsage(graph));
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
@@ -254,7 +301,8 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
     // export surface may be reached at runtime. Seed each dynamic target's export map.
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
-            if (rec.kind === 'dynamic' && !rec.external && rec.resolved >= 0) markExportMap(linked.exportMaps.get(rec.resolved));
+            if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0 || deadDynamic.has(rec.resolved)) continue;
+            markExportMap(linked.exportMaps.get(rec.resolved));
         }
     }
     for (const modIdx of linked.namespaceOf.keys()) markRef(packRef(modIdx, NS_MARKER));
@@ -290,5 +338,5 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped, nsUsage };
+    return { live, dropped, nsUsage, deadDynamic };
 }

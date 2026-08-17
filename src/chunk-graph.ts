@@ -334,7 +334,12 @@ function producerBaseName(graph: Graph, linked: Linked, ref: number, isNs: boole
 /** Build the full chunk graph: color → atoms → chunks → wire imports/exports → per-chunk
  *  deconflict. `linked.finalNames` / `namespaceOf` / `externalLocals` are (re)populated by
  *  the per-chunk deconflict; for a single chunk this reproduces the whole-bundle names. */
-export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOptions): ChunkGraph {
+export function buildChunkGraph(
+    graph: Graph,
+    linked: Linked,
+    options: ChunkOptions,
+    deadDynamic: Set<number> = new Set(),
+): ChunkGraph {
     const N = graph.modules.length;
 
     if (options.preserveModules) {
@@ -363,7 +368,7 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
     if (options.codeSplitting) {
         for (const mod of graph.modules) {
             for (const rec of mod.importRecords) {
-                if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0) continue;
+                if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0 || deadDynamic.has(rec.resolved)) continue;
                 const target = rec.resolved;
                 let e = entryIndexOf.get(target);
                 if (e === undefined) {

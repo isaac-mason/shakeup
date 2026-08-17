@@ -25,10 +25,13 @@ export const NAME_NAMESPACE = '*';
 /** Imported/exported name for the default binding. */
 export const NAME_DEFAULT = 'default';
 
-/** How an import edge entered the graph. `static` and `dynamic` are wired here; the asset kinds
- *  (`new-url` / `css-url` / `css-import`) are added by later phases and ride the same record.
- *  Distinct from the plugin-facing {@link ./plugin.ImportKind} (the Rollup resolveId kind). */
-export type ImportRecordKind = 'static' | 'dynamic' | 'new-url' | 'css-url' | 'css-import';
+/** How an import edge entered the graph — enumerates exactly the edges shakeup's OWN (JS) parser
+ *  discovers: `static`/`dynamic` are wired here, and `new-url` (`new URL('./x', import.meta.url)`)
+ *  rides the same record once the asset phase lands. Edges that need another language's parser
+ *  (CSS `@import`/`url()`) are NOT core: a css plugin lowers them to JS + emitted assets before the
+ *  graph sees them (the Vite model), so they never become an ImportRecordKind. Distinct from the
+ *  plugin-facing {@link ./plugin.ImportKind} (the Rollup resolveId kind). */
+export type ImportRecordKind = 'static' | 'dynamic' | 'new-url';
 
 /** A resolved edge to another module (deduped per specifier for `static`/`dynamic`). */
 export type ImportRecord = {
