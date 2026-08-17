@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { analyzeNsUsage } from '../src/analysis/ns-usage.ts';
+import { analyzeDynamicUsage, analyzeNsUsage } from '../src/analysis/ns-usage.ts';
 import { analyze, createSemantic, symbolOf } from '../src/analysis/semantic.ts';
 import { N, walk } from '../src/ast.ts';
 import { parse } from '../src/parser.ts';
@@ -80,5 +80,89 @@ describe('analyzeNsUsage', () => {
             escapes: false,
             members: ['a'],
         });
+    });
+});
+
+/** Classify the single `import()` site in `src`. */
+function dynUsage(src: string): { escapes: boolean; members: string[] } {
+    const { program, errors } = parse(src, { ts: false, jsx: false });
+    expect(errors).toEqual([]);
+    const sem = createSemantic();
+    analyze(sem, program);
+    const sites = analyzeDynamicUsage(program, sem, src);
+    expect(sites).toHaveLength(1);
+    return { escapes: sites[0].usage.escapes, members: [...sites[0].usage.members].sort() };
+}
+
+describe('analyzeDynamicUsage', () => {
+    it('awaited binding, member reads', () => {
+        expect(dynUsage("const ns = await import('x'); ns.a; ns.b;")).toEqual({ escapes: false, members: ['a', 'b'] });
+    });
+
+    it('awaited destructure', () => {
+        expect(dynUsage("const { a, b } = await import('x');")).toEqual({ escapes: false, members: ['a', 'b'] });
+    });
+
+    it('awaited destructure with alias uses the source key', () => {
+        expect(dynUsage("const { a: local } = await import('x');")).toEqual({ escapes: false, members: ['a'] });
+    });
+
+    it('inline member on awaited import', () => {
+        expect(dynUsage("export const r = (await import('x')).a;")).toEqual({ escapes: false, members: ['a'] });
+    });
+
+    it('.then(m => m.a) narrows', () => {
+        expect(dynUsage("import('x').then((m) => m.a);")).toEqual({ escapes: false, members: ['a'] });
+    });
+
+    it('.then(({ a }) => …) narrows', () => {
+        expect(dynUsage("import('x').then(({ a }) => a);")).toEqual({ escapes: false, members: ['a'] });
+    });
+
+    it('bare import() statement is unused (none)', () => {
+        expect(dynUsage("import('x');")).toEqual({ escapes: false, members: [] });
+    });
+
+    it('awaited-and-discarded is unused (none)', () => {
+        expect(dynUsage("await import('x');")).toEqual({ escapes: false, members: [] });
+    });
+
+    it('.then with no-arg callback is unused (none)', () => {
+        expect(dynUsage("import('x').then(() => 1);")).toEqual({ escapes: false, members: [] });
+    });
+
+    it('.then(namedHandler) escapes', () => {
+        expect(dynUsage("import('x').then(handler);")).toEqual({ escapes: true, members: [] });
+    });
+
+    it('awaited binding that escapes', () => {
+        expect(dynUsage("const ns = await import('x'); sink(ns);")).toEqual({ escapes: true, members: [] });
+    });
+
+    it('awaited value passed as an argument escapes', () => {
+        expect(dynUsage("foo(await import('x'));")).toEqual({ escapes: true, members: [] });
+    });
+
+    it('destructure with rest escapes', () => {
+        expect(dynUsage("const { a, ...rest } = await import('x');")).toEqual({ escapes: true, members: [] });
+    });
+
+    it('.catch on the promise escapes', () => {
+        expect(dynUsage("import('x').catch((e) => e);")).toEqual({ escapes: true, members: [] });
+    });
+
+    it('classifies each site independently', () => {
+        const { program, errors } = parse("const { a } = await import('x'); import('y').then((m) => m.b);", {
+            ts: false,
+            jsx: false,
+        });
+        expect(errors).toEqual([]);
+        const sem = createSemantic();
+        analyze(sem, program);
+        const sites = analyzeDynamicUsage(program, sem, "const { a } = await import('x'); import('y').then((m) => m.b);");
+        expect(sites.map((s) => ({ specifier: s.specifier, members: [...s.usage.members].sort() }))).toEqual([
+            { specifier: 'x', members: ['a'] },
+            { specifier: 'y', members: ['b'] },
+        ]);
     });
 });
