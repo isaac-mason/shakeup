@@ -148,10 +148,11 @@ function joinPath(base: string, spec: string): string {
     return `/${out.join('/')}`;
 }
 
-/** Cheap deterministic content hash (djb2) for cache validity. */
+/** Cheap deterministic content hash (djb2) for cache validity. `Math.imul` keeps the multiply
+ *  in int32 (the trailing `^` already truncates, so the digest is bit-identical to `h * 33`). */
 function hashOf(s: string): number {
     let h = 5381;
-    for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
+    for (let i = 0; i < s.length; i++) h = Math.imul(h, 33) ^ s.charCodeAt(i);
     return h >>> 0;
 }
 

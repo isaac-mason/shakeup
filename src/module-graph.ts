@@ -660,8 +660,10 @@ export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
 /** Resolve, load, parse, and analyze the module graph reachable from the entry. */
 /** djb2 content hash keying the incremental parse cache. */
 function hashSource(s: string): number {
+    // djb2, but `Math.imul` keeps the multiply in int32 — `h * 33` would box to a double every
+    // iteration. The trailing `^` already truncates to int32, so the digest is bit-identical.
     let h = 5381;
-    for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
+    for (let i = 0; i < s.length; i++) h = Math.imul(h, 33) ^ s.charCodeAt(i);
     return h >>> 0;
 }
 
@@ -1182,7 +1184,7 @@ export function reprName(module: Module): string {
 
 function hashName(s: string): number {
     let h = 0;
-    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
     return (h >>> 0) % 0x1fffff;
 }
 
