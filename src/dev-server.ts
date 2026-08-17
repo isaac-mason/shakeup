@@ -27,6 +27,9 @@ export type DevServerOptions = CommonOptions & {
     /** emit source maps (mapping runner code → original) so the runner attaches them
      *  and dev stack traces map to source. Default true. */
     sourcemap?: boolean;
+    /** eagerly warm a module's static-import closure in the background on first transform, so the
+     *  runner's later fetches are cache hits (transform overlaps the runner's eval). Default true. */
+    preTransform?: boolean;
     warn?: (message: string) => void;
 };
 
@@ -201,6 +204,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     // (spec, importer) → resolution, cleared on any fs change (create/update can shift resolution).
     // Keeps boot from re-probing OPFS for the same specifiers across the graph.
     const resolveCache = new Map<string, ResolveResult>();
+    const preTransform = options.preTransform !== false;
     const graph = new Map<string, ModuleNode>();
 
     /** Project a dev {@link ModuleNode} into the plugin-facing {@link ModuleInfo}.
@@ -290,13 +294,25 @@ export function createDevServer(options: DevServerOptions): DevServer {
         return out;
     }
 
-    // Wrapper: whole-fetch metrics (fetches/wall span/busy-interval) around the impl.
-    async function fetchModule(id: string): Promise<FetchResult> {
+    // In-flight dedup: concurrent requests for one id share ONE transform — essential once
+    // preTransform fires prefetches alongside the runner's real fetches.
+    const inFlight = new Map<string, Promise<FetchResult>>();
+    function fetchModule(id: string): Promise<FetchResult> {
+        perf.fetches++;
+        const pending = inFlight.get(id);
+        if (pending !== undefined) return pending;
+        const p = fetchModuleTracked(id);
+        inFlight.set(id, p);
+        void p.finally(() => inFlight.delete(id));
+        return p;
+    }
+
+    // Whole-fetch metrics (wall span / busy-interval) around the impl.
+    async function fetchModuleTracked(id: string): Promise<FetchResult> {
         const t = performance.now();
         if (perf.firstAt === 0) perf.firstAt = t;
         if (perf.inFlight === 0) perf.busyStart = t;
         perf.inFlight++;
-        perf.fetches++;
         try {
             return await fetchModuleImpl(id);
         } finally {
@@ -414,6 +430,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
             }
             depNode.importers.add(id);
         }
+        // Eagerly warm this module's STATIC import closure in the background so the runner's later
+        // fetches hit the cache — overlapping transform with eval. Fire-and-forget; the in-flight
+        // dedup + known-clean cache prevent duplicate/repeat work.
+        if (preTransform) for (const dep of deps) void fetchModule(dep).catch(() => {});
         return { code: node.code, map: node.map, deps, dynamicDeps, hmr, errors: node.errors };
     }
 

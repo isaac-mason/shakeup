@@ -41,10 +41,14 @@ describe('dev server — resolution + serving', () => {
     });
 
     it('stats() counts fetches/transforms and cache hits across the graph', async () => {
-        const { server } = setup({
-            '/entry.ts': `import { v } from './dep';\nexport const result = v * 2;`,
-            '/dep.ts': `export const v = 21;`,
-        });
+        // preTransform off so counts reflect only the explicit fetches (prefetch would warm the dep).
+        const { server } = setup(
+            {
+                '/entry.ts': `import { v } from './dep';\nexport const result = v * 2;`,
+                '/dep.ts': `export const v = 21;`,
+            },
+            { preTransform: false },
+        );
         await server.fetchModule('/entry.ts');
         await server.fetchModule('/dep.ts');
         let s = server.stats();
@@ -59,6 +63,20 @@ describe('dev server — resolution + serving', () => {
         expect(s.transforms).toBe(2);
         expect(s.cacheHits).toBe(1);
         expect(s.devTransformMs).toBeGreaterThanOrEqual(0); // timers populated, non-negative
+    });
+
+    it('preTransform eagerly warms a module\'s static-import closure in the background', async () => {
+        const { server } = setup({
+            '/entry.ts': `import { v } from './dep';\nexport const result = v;`,
+            '/dep.ts': `export const v = 7;`,
+        });
+        // Fetch ONLY the entry; its static dep should get transformed in the background.
+        await server.fetchModule('/entry.ts');
+        await new Promise((r) => setTimeout(r, 20)); // let the fire-and-forget prefetch settle
+        const dep = server.node('/dep.ts');
+        expect(dep?.hash).not.toBe(0); // transformed (not just a dep stub)
+        expect(dep?.code).toContain('__shakeup'); // runner-rewritten
+        expect(server.stats().transforms).toBe(2); // entry + prefetched dep, without an explicit fetch
     });
 });
 
