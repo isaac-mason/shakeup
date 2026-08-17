@@ -1,12 +1,18 @@
 import { isPureStatement } from './analysis/effects';
+import { analyzeNsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
-import { type Graph, type ImportBind, type Linked, type Module, packRef, refMod, refSym } from './module-graph';
+import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './module-graph';
 
 export type TreeshakeResult = {
     live: Set<number>[];
     dropped: [number, Node][];
+    /** Per-target narrowed namespace surface: module idx → the exact member names its
+     *  `import * as ns` consumers read. A module absent here keeps its whole surface (it escapes,
+     *  is an entry, is dynamically imported, or is re-exported as a namespace). Consumed by the
+     *  emit so the namespace object lists only these members. */
+    nsUsage: Map<number, Set<string>>;
 };
 
 export type StatementInfo = {
@@ -67,8 +73,64 @@ function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolea
 /** pseudo-symbol id marking "the whole namespace of this module" */
 const NS_MARKER = 0x1fffff;
 
+/** Determine which namespace-import targets can have their materialized namespace object narrowed
+ *  to the exact members read. A target is narrowable only if EVERY namespace bind to it is a
+ *  non-escaping body `import * as ns` — so any of these forces the whole surface instead:
+ *  it's an entry, it's dynamically imported (whole surface may load at runtime; P4 refines this),
+ *  it's re-exported as a namespace (`export * as ns` — opaque downstream), or some `import * as ns`
+ *  of it escapes. Returns target idx → the union of member names read across its consumers. */
+function computeNsUsage(graph: Graph): Map<number, Set<string>> {
+    const forceWhole = new Set<number>();
+    for (const { module } of graph.entries) forceWhole.add(module);
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.external || rec.resolved < 0) continue;
+            // Dynamic namespaces (import() targets) must stay whole — the runtime may read any export.
+            if (rec.kind === 'dynamic' || rec.hasDynamicLiteral) forceWhole.add(rec.resolved);
+        }
+        // `export * as ns from './m'` re-exports m's whole namespace opaquely.
+        for (const exp of mod.namedExports.values()) {
+            if (exp.sourceName !== NAME_NAMESPACE || exp.rec < 0) continue;
+            const rec = mod.importRecords[exp.rec];
+            if (!rec.external && rec.resolved >= 0) forceWhole.add(rec.resolved);
+        }
+    }
+
+    // Accumulate member reads (and escape) across every body `import * as ns` consumer, per target.
+    const acc = new Map<number, { escapes: boolean; members: Set<string> }>();
+    for (const mod of graph.modules) {
+        const nsSyms = new Map<number, number>(); // local ns symbol → target module idx
+        for (const [localSym, imp] of mod.namedImports) {
+            if (imp.name !== NAME_NAMESPACE) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (rec.external || rec.resolved < 0) continue;
+            nsSyms.set(localSym, rec.resolved);
+        }
+        if (nsSyms.size === 0) continue;
+        const usage = analyzeNsUsage(mod.program, mod.semantic, new Set(nsSyms.keys()));
+        for (const [localSym, target] of nsSyms) {
+            const u = usage.get(localSym)!;
+            let a = acc.get(target);
+            if (a === undefined) {
+                a = { escapes: false, members: new Set() };
+                acc.set(target, a);
+            }
+            if (u.escapes) a.escapes = true;
+            for (const m of u.members) a.members.add(m);
+        }
+    }
+
+    const narrowable = new Map<number, Set<string>>();
+    for (const [target, a] of acc) {
+        if (a.escapes || forceWhole.has(target)) continue;
+        narrowable.set(target, a.members);
+    }
+    return narrowable;
+}
+
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
 export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?: TreeshakeCache): TreeshakeResult {
+    const nsUsage = computeNsUsage(graph);
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
@@ -163,11 +225,27 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
             if (forceAll || !infos[mod.idx][i].pure) includeStatement(mod.idx, i);
         }
     }
+    const markBind = (bind: ImportBind): void => {
+        if (bind.kind === 'found') markRef(bind.ref);
+        else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
+    };
     const markExportMap = (map: Map<string, ImportBind> | undefined): void => {
         if (map === undefined) return;
-        for (const bind of map.values()) {
-            if (bind.kind === 'found') markRef(bind.ref);
-            else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
+        for (const bind of map.values()) markBind(bind);
+    };
+    /** Expand a live NS_MARKER: mark the target's export surface — narrowed to just the members its
+     *  consumers read when the target is narrowable, otherwise the whole surface. */
+    const expandNs = (modIdx: number): void => {
+        const map = linked.exportMaps.get(modIdx);
+        if (map === undefined) return;
+        const narrow = nsUsage.get(modIdx);
+        if (narrow === undefined) {
+            for (const bind of map.values()) markBind(bind);
+            return;
+        }
+        for (const name of narrow) {
+            const bind = map.get(name);
+            if (bind !== undefined) markBind(bind);
         }
     };
     // Root from every entry's export surface (multi-entry).
@@ -184,14 +262,7 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
     while (worklist.length > 0) {
         const ref = worklist.pop()!;
         if (refSym(ref) === NS_MARKER) {
-            const modIdx = refMod(ref);
-            const map = linked.exportMaps.get(modIdx);
-            if (map !== undefined) {
-                for (const bind of map.values()) {
-                    if (bind.kind === 'found') markRef(bind.ref);
-                    else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
-                }
-            }
+            expandNs(refMod(ref));
             continue;
         }
         const decl = declToStatement.get(ref);
@@ -219,5 +290,5 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped };
+    return { live, dropped, nsUsage };
 }

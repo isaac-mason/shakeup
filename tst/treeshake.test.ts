@@ -95,14 +95,73 @@ describe('tree shaking', () => {
         expect(mod.out).toBe(1);
     });
 
-    it('namespace-imported modules keep their whole export surface', async () => {
+    it('narrows a namespace object to the members actually read', async () => {
         const { code } = await build({
             '/main.ts': ["import * as ops from './ops';", 'export const r = ops.a();'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
         const mod = await run(code);
         expect(mod.r as number).toBe(1);
+        expect(code).toContain('a:');
+        expect(code).not.toContain('b:');
+    });
+
+    it('keeps the whole namespace surface when the namespace escapes', async () => {
+        const { code } = await build({
+            '/main.ts': ["import * as ops from './ops';", 'export const ns = ops;'].join('\n'),
+            '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
+        });
+        const mod = await run(code);
+        expect((mod.ns as { a: () => number }).a()).toBe(1);
+        expect((mod.ns as { b: () => number }).b()).toBe(2);
+        expect(code).toContain('a:');
         expect(code).toContain('b:');
+    });
+
+    it('unions member reads across multiple namespace importers', async () => {
+        const { code } = await build({
+            '/main.ts': [
+                "import * as ops from './ops';",
+                "import { viaB } from './other';",
+                'export const r = ops.a() + viaB();',
+            ].join('\n'),
+            '/other.ts': ["import * as ops from './ops';", 'export const viaB = () => ops.b();'].join('\n'),
+            '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;', 'export const c = () => 3;'].join('\n'),
+        });
+        const mod = await run(code);
+        expect(mod.r as number).toBe(3);
+        expect(code).toContain('a:');
+        expect(code).toContain('b:');
+        expect(code).not.toContain('c:'); // c read by nobody
+    });
+
+    it('keeps the whole surface when the module is also dynamically imported', async () => {
+        const { code } = await build({
+            '/main.ts': [
+                "import * as ops from './ops';",
+                'export const r = ops.a();',
+                "export const lazy = () => import('./ops');",
+            ].join('\n'),
+            '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
+        });
+        const mod = await run(code);
+        expect(mod.r as number).toBe(1);
+        expect(code).toContain('a:');
+        expect(code).toContain('b:'); // dynamic import may read any export → whole surface
+    });
+
+    it('keeps the whole surface when re-exported as a namespace', async () => {
+        const { code } = await build({
+            '/main.ts': ["import * as ops from './ops';", "export * as reexport from './ops';", 'export const r = ops.a();'].join(
+                '\n',
+            ),
+            '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
+        });
+        const mod = await run(code);
+        expect(mod.r as number).toBe(1);
+        expect((mod.reexport as { b: () => number }).b()).toBe(2);
+        expect(code).toContain('a:');
+        expect(code).toContain('b:'); // export * as → opaque downstream → whole surface
     });
 });
 

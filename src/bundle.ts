@@ -37,9 +37,9 @@ import {
 } from './output-options';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
-import type { FileEvent } from './watch';
-import * as Timer from './util/timer';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
+import * as Timer from './util/timer';
+import type { FileEvent } from './watch';
 
 /** A codeSplitting group as a user config. */
 export type CodeSplittingGroup = {
@@ -397,12 +397,15 @@ function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): st
 
 const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
 
-function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | null): string {
+function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | null, nsMembers: Set<string> | undefined): string {
     const nsName = linked.namespaceOf.get(modIdx)!;
     const map = linked.exportMaps.get(modIdx);
     const entries: string[] = [];
     if (map !== undefined) {
         for (const [name, bind] of map) {
+            // Narrowed target: emit only the members its consumers read (tree-shake seeded exactly
+            // these live). Absent set → whole surface (target escaped / entry / dynamic).
+            if (nsMembers !== undefined && !nsMembers.has(name)) continue;
             const value = nameOfBind(linked, bind, chunk);
             if (value === null) continue;
             entries.push(`${isIdentName(name) ? name : JSON.stringify(name)}: ${value}`);
@@ -627,7 +630,10 @@ function renderChunk(
         if (modInc !== null) {
             const entry = modInc.cache.get(mod.id);
             const mapOk =
-                !wantMap || entry === undefined || entry.text === '' || (entry.mapPart !== null && entry.srcIdx === mapSources.length);
+                !wantMap ||
+                entry === undefined ||
+                entry.text === '' ||
+                (entry.mapPart !== null && entry.srcIdx === mapSources.length);
             if (
                 modInc.namesStable &&
                 entry !== undefined &&
@@ -677,7 +683,7 @@ function renderChunk(
         let out = applyEdits(mod.source, ctx.edits).trim();
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx)) {
-            nsCode = renderNamespaceObject(linked, idx, chunk);
+            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx));
             out += `\n${nsCode}`;
         }
         let mapPart: Part | null = null;
