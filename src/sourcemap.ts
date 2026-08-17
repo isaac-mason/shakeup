@@ -1,14 +1,22 @@
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+// char CODES for each base64 digit — write these into a byte buffer instead of pushing 1-char
+// strings, which for a large module means a giant string[] + join (the old hot path + GC).
+const BASE64_CODES = /* @__PURE__ */ (() => {
+    const t = new Uint8Array(64);
+    for (let i = 0; i < BASE64.length; i++) t[i] = BASE64.charCodeAt(i);
+    return t;
+})();
+const CH_SEMI = 59; // ';'
+const CH_COMMA = 44; // ','
 
-/** Append the base64-VLQ encoding of one signed integer to `out` (sign in the low bit). */
-function encodeVLQ(out: string[], value: number): void {
-    let vlq = value < 0 ? (-value << 1) | 1 : value << 1;
-    do {
-        let digit = vlq & 0x1f;
-        vlq >>>= 5;
-        if (vlq > 0) digit |= 0x20;
-        out.push(BASE64[digit]);
-    } while (vlq > 0);
+/** Decode an ASCII (latin1) byte buffer `[0,len)` to a string, chunked to dodge fromCharCode's
+ *  argument-count limit on large maps. */
+function asciiBufToString(buf: Uint8Array, len: number): string {
+    let s = '';
+    for (let i = 0; i < len; i += 8192) {
+        s += String.fromCharCode.apply(null, buf.subarray(i, Math.min(i + 8192, len)) as unknown as number[]);
+    }
+    return s;
 }
 
 /**
@@ -47,34 +55,60 @@ export function addSegment(m: Mappings, genCol: number, sourceIdx: number, srcLi
 
 /** Encode accumulated segments to the SMv3 `mappings` VLQ string (fields delta-encoded per spec). */
 export function encodeMappings(m: Mappings): string {
-    const out: string[] = [];
+    let buf = new Uint8Array(1024);
+    let pos = 0;
+    const ensure = (n: number): void => {
+        if (pos + n <= buf.length) return;
+        let cap = buf.length * 2;
+        while (cap < pos + n) cap *= 2;
+        const nb = new Uint8Array(cap);
+        nb.set(buf);
+        buf = nb;
+    };
+    const vlq = (value: number): void => {
+        let v = value < 0 ? (-value << 1) | 1 : value << 1;
+        ensure(6); // a 32-bit VLQ is ≤ 6 base64 digits
+        do {
+            let digit = v & 0x1f;
+            v >>>= 5;
+            if (v > 0) digit |= 0x20;
+            buf[pos++] = BASE64_CODES[digit];
+        } while (v > 0);
+    };
+
     let prevSourceIdx = 0;
     let prevSrcLine = 0;
     let prevSrcCol = 0;
     let prevNameIdx = 0;
     for (let li = 0; li < m.lines.length; li++) {
-        if (li > 0) out.push(';');
+        if (li > 0) {
+            ensure(1);
+            buf[pos++] = CH_SEMI;
+        }
         const segs = m.lines[li];
         let prevGenCol = 0; // generated column resets to 0 at the start of every line
         for (let si = 0; si < segs.length; si++) {
-            if (si > 0) out.push(',');
+            if (si > 0) {
+                ensure(1);
+                buf[pos++] = CH_COMMA;
+            }
             const seg = segs[si];
-            encodeVLQ(out, seg[0] - prevGenCol);
+            vlq(seg[0] - prevGenCol);
             prevGenCol = seg[0];
             if (seg.length === 1) continue;
-            encodeVLQ(out, seg[1] - prevSourceIdx);
+            vlq(seg[1] - prevSourceIdx);
             prevSourceIdx = seg[1];
-            encodeVLQ(out, seg[2] - prevSrcLine);
+            vlq(seg[2] - prevSrcLine);
             prevSrcLine = seg[2];
-            encodeVLQ(out, seg[3] - prevSrcCol);
+            vlq(seg[3] - prevSrcCol);
             prevSrcCol = seg[3];
             if (seg.length === 5) {
-                encodeVLQ(out, seg[4] - prevNameIdx);
+                vlq(seg[4] - prevNameIdx);
                 prevNameIdx = seg[4];
             }
         }
     }
-    return out.join('');
+    return asciiBufToString(buf, pos);
 }
 
 const B64_INV = (() => {
