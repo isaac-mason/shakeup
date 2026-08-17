@@ -37,6 +37,7 @@ import {
 } from './output-options';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
+import * as Timer from './timer';
 import { type TreeshakeResult, treeshake } from './treeshake';
 
 /** A codeSplitting group as a user config. */
@@ -78,6 +79,9 @@ export type BundleOptions = GraphOptions & {
     /** Incremental per-chunk render cache. Pass a persistent Map across builds (via
      *  {@link createBuildContext}) to reuse the rendered code of clean chunks. */
     renderCache?: RenderCache;
+    /** Threaded profiling state ({@link Timer}). Inject a shared one to accumulate per-pass
+     *  timings across rebuilds; omit and a fresh (enabled) one is used per build. */
+    timer?: Timer.TimerState;
 };
 
 export type OutputChunk = {
@@ -117,6 +121,8 @@ export type BundleResult = {
     parseStats: ParseStats;
     /** Chunks rendered vs reused from `options.renderCache` (present only with a render cache). */
     renderStats?: RenderStats;
+    /** Per-pass wall-clock (graph/link/treeshake/chunk/render), by total ms (success builds only). */
+    timings?: Timer.TimerReport;
     /** @deprecated alias for the entry chunk's `map`. */
     map?: SourceMap;
 };
@@ -425,7 +431,10 @@ export function bundle(options: BundleOptions): BundleResult {
         getModuleIds: () => (graph === undefined ? [][Symbol.iterator]() : graph.byId.keys()),
     };
     // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
+    const timer = options.timer ?? Timer.init();
+    Timer.start(timer, 'graph');
     graph = buildGraph(options, pipeline);
+    Timer.end(timer, 'graph');
     if (graph.errors.length > 0 || graph.entries.length === 0) {
         return {
             code: '',
@@ -441,7 +450,9 @@ export function bundle(options: BundleOptions): BundleResult {
     // Link WITHOUT whole-bundle deconflict — the per-chunk deconflict inside buildChunkGraph
     // assigns names in fresh per-chunk scopes. For a single chunk this reproduces the
     // whole-bundle names byte-for-byte (same order, same taken seeding).
+    Timer.start(timer, 'link');
     const linked = linkGraph(graph, { deconflict: false });
+    Timer.end(timer, 'link');
     if (linked.errors.length > 0) {
         return {
             code: '',
@@ -458,11 +469,15 @@ export function bundle(options: BundleOptions): BundleResult {
     const warnings: string[] = [...warningsOut, ...graph.warnings];
     const jsxPure = resolveJSXOptions(options.jsx).pure;
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
+    Timer.start(timer, 'treeshake');
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
+    Timer.end(timer, 'treeshake');
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
+    Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions);
+    Timer.end(timer, 'chunk');
 
     let anyLiveJSX = false;
     for (const mod of graph.modules) {
@@ -503,6 +518,7 @@ export function bundle(options: BundleOptions): BundleResult {
 
     let outputChunks: OutputChunk[];
     let assets: { fileName: string; source: string }[];
+    Timer.start(timer, 'render');
     try {
         const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, inc);
         outputChunks = r.chunks;
@@ -519,6 +535,7 @@ export function bundle(options: BundleOptions): BundleResult {
             parseStats: graph.parseStats,
         };
     }
+    Timer.end(timer, 'render');
 
     // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
     for (let i = 0; i < outputChunks.length; i++) {
@@ -551,6 +568,7 @@ export function bundle(options: BundleOptions): BundleResult {
         shaken,
         parseStats: graph.parseStats,
         renderStats,
+        timings: Timer.report(timer),
         map: entryFirst?.map,
     };
 }
