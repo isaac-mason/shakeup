@@ -196,6 +196,19 @@ describe('dev server — object plugin returns (R1)', () => {
         const { server } = setup({ '/a.ts': '' }, { plugins: [externalize] });
         expect(await server.resolveId('lib-esque', '/a.ts')).toEqual({ external: 'lib-esque' });
     });
+
+    it('externalises to the plugin RESOLVED id — a rewritten URL the runner native-imports', async () => {
+        // A plugin can externalise a bare dep to a served URL (no import map needed).
+        const toUrl: Plugin = {
+            name: 'ext-url',
+            resolveId: (_ctx, spec) =>
+                spec === 'gpucat' ? { id: 'https://app.test/@project/node_modules/gpucat/dist/index.js', external: true } : null,
+        };
+        const { server } = setup({ '/a.ts': '' }, { plugins: [toUrl] });
+        expect(await server.resolveId('gpucat', '/a.ts')).toEqual({
+            external: 'https://app.test/@project/node_modules/gpucat/dist/index.js',
+        });
+    });
 });
 
 describe('bundle mode — async plugins', () => {

@@ -273,7 +273,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
         if (typeof hit === 'string') return hit;
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
             // PartialResolvedId: external:true|'absolute'|'relative' → runner native-import.
-            if (hit.external !== undefined && hit.external !== false) return { external: spec };
+            // External target is the plugin's RESOLVED id (Rollup semantics), so a plugin can
+            // externalize to a rewritten target — e.g. resolve a bare dep to a served URL the runner
+            // native-imports, instead of keeping the bare specifier (which needs an import map).
+            if (hit.external !== undefined && hit.external !== false) return { external: hit.id };
             return hit.id;
         }
         // No plugin resolved it: honour `external`, then the shared config-driven resolver.
