@@ -87,6 +87,8 @@ export type DevServerStats = {
     transformMs: number; // plugin transform hooks (e.g. capture)
     devTransformMs: number; // TS-strip + module-runner rewrite (+ any moduleParsed parse)
     resolveMs: number; // resolving a module's dep specifiers to ids
+    /** wall time with ≥1 fetch in flight — `wallMs − busyMs` ≈ idle/eval/transport waterfall. */
+    busyMs: number;
     wallMs: number;
 };
 
@@ -180,8 +182,25 @@ export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => options.warn?.(m));
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
-    // Cumulative bundling metrics (exposed via `stats()`). firstAt/lastAt bound the wall span.
-    const perf = { fetches: 0, cacheHits: 0, transforms: 0, ioMs: 0, transformMs: 0, devTransformMs: 0, resolveMs: 0, firstAt: 0, lastAt: 0 };
+    // Cumulative bundling metrics (exposed via `stats()`). firstAt/lastAt bound the wall span;
+    // busyMs is the wall time with ≥1 fetch in flight (so wall − busyMs ≈ idle/eval/transport).
+    const perf = {
+        fetches: 0,
+        cacheHits: 0,
+        transforms: 0,
+        ioMs: 0,
+        transformMs: 0,
+        devTransformMs: 0,
+        resolveMs: 0,
+        firstAt: 0,
+        lastAt: 0,
+        busyMs: 0,
+        inFlight: 0,
+        busyStart: 0,
+    };
+    // (spec, importer) → resolution, cleared on any fs change (create/update can shift resolution).
+    // Keeps boot from re-probing OPFS for the same specifiers across the graph.
+    const resolveCache = new Map<string, ResolveResult>();
     const graph = new Map<string, ModuleNode>();
 
     /** Project a dev {@link ModuleNode} into the plugin-facing {@link ModuleInfo}.
@@ -236,6 +255,15 @@ export function createDevServer(options: DevServerOptions): DevServer {
     };
 
     async function resolveId(spec: string, importer: string | null, _extra?: ResolveIdExtra): Promise<ResolveResult> {
+        const key = `${importer ?? ''}\x00${spec}`;
+        const cached = resolveCache.get(key);
+        if (cached !== undefined) return cached;
+        const result = await resolveIdInner(spec, importer);
+        resolveCache.set(key, result);
+        return result;
+    }
+
+    async function resolveIdInner(spec: string, importer: string | null): Promise<ResolveResult> {
         const hit = await runResolveId(pipeline, ctx, spec, importer);
         if (hit === false) return { external: spec };
         if (typeof hit === 'string') return hit;
@@ -262,27 +290,49 @@ export function createDevServer(options: DevServerOptions): DevServer {
         return out;
     }
 
+    // Wrapper: whole-fetch metrics (fetches/wall span/busy-interval) around the impl.
     async function fetchModule(id: string): Promise<FetchResult> {
-        if (id === EMPTY_MODULE_ID) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [] };
-        const t0 = performance.now();
-        if (perf.firstAt === 0) perf.firstAt = t0;
+        const t = performance.now();
+        if (perf.firstAt === 0) perf.firstAt = t;
+        if (perf.inFlight === 0) perf.busyStart = t;
+        perf.inFlight++;
         perf.fetches++;
+        try {
+            return await fetchModuleImpl(id);
+        } finally {
+            perf.inFlight--;
+            const now = performance.now();
+            perf.lastAt = now;
+            if (perf.inFlight === 0) perf.busyMs += now - perf.busyStart;
+        }
+    }
+
+    async function fetchModuleImpl(id: string): Promise<FetchResult> {
+        if (id === EMPTY_MODULE_ID) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [] };
+        // Known-clean fast path: a fully-transformed module whose cache wasn't invalidated
+        // (invalidate/handleChange zero the hash) is served WITHOUT re-reading source — the big
+        // cross-realm re-fetch win. Trusts the change signal (handleChange), which HMR requires anyway.
+        const known = graph.get(id);
+        if (known !== undefined && known.hash !== 0 && known.errors.length === 0) {
+            perf.cacheHits++;
+            return { code: known.code, map: known.map, deps: known.deps, dynamicDeps: known.dynamicDeps, hmr: known.hmr, errors: [] };
+        }
+
+        const tIo = performance.now();
         const loaded = await runLoad(pipeline, ctx, id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
             (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? (await fs.read(id));
-        perf.ioMs += performance.now() - t0;
-        if (source === null) {
-            perf.lastAt = performance.now();
-            return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
-        }
+        perf.ioMs += performance.now() - tIo;
+        if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
 
         const hash = hashOf(source);
+        // Re-read reached only after invalidation/first-fetch; content-hash still matching (e.g. a
+        // no-op save) skips the transform.
         const cached = graph.get(id);
         if (cached !== undefined && cached.hash === hash && cached.errors.length === 0) {
             perf.cacheHits++;
-            perf.lastAt = performance.now();
             return {
                 code: cached.code,
                 map: cached.map,
@@ -320,10 +370,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
 
         const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: options.sourcemap ?? true });
         perf.devTransformMs += performance.now() - tDev;
-        if (result.errors.length > 0) {
-            perf.lastAt = performance.now();
-            return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
-        }
+        if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
         const tResolve = performance.now();
         const deps = await resolveDeps(id, result.deps);
         const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
@@ -333,7 +380,6 @@ export function createDevServer(options: DevServerOptions): DevServer {
             acceptedDeps: await resolveDeps(id, result.hmr.acceptedDeps),
         };
         perf.resolveMs += performance.now() - tResolve;
-        perf.lastAt = performance.now();
 
         const prev = graph.get(id);
         if (prev !== undefined) {
@@ -383,6 +429,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
     async function handleChange(id: string): Promise<{ env: string; update: HmrUpdate }[]> {
         invalidate(id); // shared transform cache — the module is re-transformed once
+        resolveCache.clear(); // a create/edit can shift resolution (new file, shadowing) — re-resolve lazily
         const out: { env: string; update: HmrUpdate }[] = [];
         for (const env of environments) out.push({ env: env.name, update: await env.applyEdit(id) });
         return out;
@@ -404,6 +451,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
             transformMs: perf.transformMs,
             devTransformMs: perf.devTransformMs,
             resolveMs: perf.resolveMs,
+            busyMs: perf.busyMs,
             wallMs: perf.firstAt === 0 ? 0 : perf.lastAt - perf.firstAt,
         }),
     };
