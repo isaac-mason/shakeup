@@ -1,5 +1,5 @@
 import type { FetchResult } from './dev-server.ts';
-import type { ImportMetaInit, ModuleEvaluator, ResolveId, ModuleRunner } from './module-runner.ts';
+import type { ImportMetaInit, ModuleEvaluator, ModuleRunner, ResolveId } from './module-runner.ts';
 import { createModuleRunner } from './module-runner.ts';
 import type { HmrInfo } from './transform.ts';
 
@@ -206,7 +206,15 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
     return {
         name: options.name,
         runner,
-        import: (id) => {
+        import: async (spec) => {
+            // Resolve the entry spec through the SAME resolver deps use — the entry is
+            // otherwise the one import that bypasses resolution. A bare npm specifier
+            // ('pkg/sub') thus resolves to its real id; a spec the resolver can't place
+            // (or externalises) falls back to a direct fetch by the spec itself, so a
+            // host id-scheme the resolver doesn't understand (e.g. a project-relative
+            // 'src/app.ts') still loads as it did before.
+            const resolved = await options.resolveId(spec, null);
+            const id = typeof resolved === 'string' ? resolved : spec;
             roots.add(id); // an explicitly-imported module is a root (never orphaned)
             return runner.import(id);
         },

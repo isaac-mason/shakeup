@@ -38,6 +38,17 @@ describe('environment — isolation (one bundler, many apps)', () => {
         expect((server.box as { n: number }).n).toBe(1); // server's — isolated singleton
     });
 
+    it('a bare-specifier entry resolves through the resolver (npm-style package entry)', async () => {
+        // The boot case: import('pkg/sub') — the entry must go through node-resolve
+        // (package.json exports), not be fetched as the literal id 'pkg/sub'.
+        const { env } = multiEnv({
+            'node_modules/pkg/package.json': `{"name":"pkg","exports":{"./sub":"./sub.js"}}`,
+            'node_modules/pkg/sub.js': `export const hello = 'from pkg/sub';`,
+        });
+        const ns = await env('boot').import('pkg/sub');
+        expect(ns.hello).toBe('from pkg/sub');
+    });
+
     it('import.meta.env differs per env (client vs server) from one transform', async () => {
         const { env } = multiEnv({ '/m.ts': `export const mode = import.meta.env.MODE;` });
         const client = await env('client', { MODE: 'client' }).import('/m.ts');

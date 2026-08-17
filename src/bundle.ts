@@ -38,7 +38,7 @@ import {
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
 import type { FileEvent } from './watch';
-import * as Timer from './timer';
+import * as Timer from './util/timer';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 
 /** A codeSplitting group as a user config. */

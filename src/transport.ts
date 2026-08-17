@@ -1,16 +1,11 @@
 import type { DevServer, FetchResult, ResolveResult } from './dev-server.ts';
 import { createEnvironment, type Environment, type EnvironmentOptions } from './environment.ts';
 
-/** A frame crossing the transport. `invoke`/`result` carry fetchModule/resolveId
- *  request/response; `push` carries an HMR change from server → environment. */
 export type TransportFrame =
     | { __bundler: 'invoke'; id: number; call: string; args: unknown[] }
     | { __bundler: 'result'; id: number; result?: unknown; error?: string }
     | { __bundler: 'push'; payload: unknown };
 
-/** SERVER side: connect one (possibly remote) environment to the dev server.
- *  `post` sends a frame to the environment; feed incoming frames to `handleFrame`.
- *  Registers the env for HMR fan-out (server.handleChange → a `push` frame). */
 export function attachEnvironment(
     server: DevServer,
     name: string,
@@ -44,8 +39,6 @@ export function attachEnvironment(
     };
 }
 
-/** ENVIRONMENT (runner) side of the transport: turns frames into invoke promises +
- *  push callbacks. */
 export type EnvironmentBridge = {
     handleFrame(frame: TransportFrame): void;
     invoke(call: string, ...args: unknown[]): Promise<unknown>;
@@ -81,8 +74,6 @@ export function createEnvironmentBridge(post: (frame: TransportFrame) => void): 
     };
 }
 
-/** Create an Environment whose fetchModule/resolveId route over a bridge (to a
- *  possibly-remote dev server), and whose HMR is driven by the server's pushes. */
 export function connectEnvironment(
     bridge: EnvironmentBridge,
     options: Omit<EnvironmentOptions, 'fetchModule' | 'resolveId'>,
