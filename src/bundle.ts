@@ -218,6 +218,26 @@ function renameWalk(ctx: EmitCtx, node: Node): void {
         });
     });
     rewriteDynamicImports(ctx, node);
+    rewriteNewUrlAssets(ctx, node);
+}
+
+/** Rewrite each `new URL('./x', import.meta.url)` whose asset was emitted to point at the emitted
+ *  fileName (relative to the chunk, so `import.meta.url` still resolves it at runtime). */
+function rewriteNewUrlAssets(ctx: EmitCtx, node: Node): void {
+    const { mod } = ctx;
+    walk(node, (n) => {
+        if (n.type !== N.NewExpression || n.data.arguments.length !== 2) return;
+        if (n.data.callee.type !== N.IdentifierReference || n.data.callee.name !== 'URL') return;
+        const base = n.data.arguments[1];
+        if (base.type !== N.StaticMemberExpression || base.data.object.type !== N.ImportMeta || base.data.property.name !== 'url')
+            return;
+        const spec = n.data.arguments[0];
+        if (spec.type !== N.StringLiteral) return;
+        const specifier = mod.source.slice(spec.start + 1, spec.end - 1);
+        const rec = mod.importRecords.find((r) => r.kind === 'new-url' && r.specifier === specifier);
+        if (rec?.assetFileName === undefined) return;
+        ctx.edits.push({ start: spec.start, end: spec.end, text: JSON.stringify(rec.assetFileName) });
+    });
 }
 
 /** Rewrite each literal dynamic `import('./spec')` in `node` to point at the target chunk's

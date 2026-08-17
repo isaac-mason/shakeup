@@ -6,8 +6,8 @@ import { parse } from './parser';
 import {
     type CustomPluginOptions,
     compilePipeline,
-    type ModuleInfo,
     type EmittedFile,
+    type ModuleInfo,
     type ModuleOptions,
     type ModuleSideEffects,
     type ModuleType,
@@ -387,7 +387,8 @@ export function makeBaseResolve(
     // workspace member) and browser-field remaps, and returns null for a plain relative import
     // (no browser-map owner). Those fall to the built-in probe (alias / extensionAlias /
     // extensions / mainFiles).
-    return async (s, i) => (await node.resolve(applyAlias(s, normalized.alias), i)) ?? (await defaultResolve(fs, normalized, s, i));
+    return async (s, i) =>
+        (await node.resolve(applyAlias(s, normalized.alias), i)) ?? (await defaultResolve(fs, normalized, s, i));
 }
 
 /** Whether a specifier is externalized by the `external` option. */
@@ -604,8 +605,23 @@ function extractRecords(mod: Module): void {
     walk(mod.program, (n) => {
         if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) {
             addRecord(mod, strValue(source, n.data.source), 'dynamic');
+        } else if (n.type === N.NewExpression && isNewUrlAsset(mod, n)) {
+            addRecord(mod, strValue(source, n.data.arguments[0]), 'new-url');
         }
     });
+}
+
+/** Match `new URL('./relative', import.meta.url)` — the web-standard asset-reference idiom. The
+ *  callee must be the GLOBAL `URL` (unresolved symbol), arg0 a relative string literal, and arg1
+ *  exactly `import.meta.url`. Non-literal / non-relative / bare `URL()` are left verbatim. */
+function isNewUrlAsset(mod: Module, n: Node): boolean {
+    if (n.type !== N.NewExpression || n.data.arguments.length !== 2) return false;
+    const callee = n.data.callee;
+    if (callee.type !== N.IdentifierReference || callee.name !== 'URL' || symbolOf(mod.semantic, callee) !== 0) return false;
+    const spec = n.data.arguments[0];
+    if (spec.type !== N.StringLiteral || !mod.source.slice(spec.start + 1, spec.end - 1).startsWith('.')) return false;
+    const base = n.data.arguments[1];
+    return base.type === N.StaticMemberExpression && base.data.object.type === N.ImportMeta && base.data.property.name === 'url';
 }
 
 /** True if `openingName`-carrying attrs put a `key` attribute AFTER a spread
@@ -984,8 +1000,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         // Signal-mode fast path: an unchanged module (not in the change signal) with a full cache
         // entry is reconstructed straight from cache — no load, transform, hash or parse. Resolution
         // still runs below, so file create/delete stays correct.
-        const signalHit =
-            options.incremental !== undefined && !options.incremental.changed.has(id) ? cache?.get(id) : undefined;
+        const signalHit = options.incremental !== undefined && !options.incremental.changed.has(id) ? cache?.get(id) : undefined;
 
         let source: string;
         let program: Program;
@@ -1123,6 +1138,24 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             });
         }
         for (const rec of mod.importRecords) {
+            // `new URL('./x', import.meta.url)` asset: resolve to a real file, read + emit its bytes
+            // as a content-hashed output, and record the emitted fileName for the specifier rewrite.
+            // It is NOT a JS module — no parse, no chunk, no graph edge.
+            if (rec.kind === 'new-url') {
+                const hit = await resolveFn(rec.specifier, id, { isEntry: false, kind: 'import-statement' });
+                if (typeof hit !== 'string') continue; // unresolved → leave the `new URL(...)` verbatim
+                const assetPath = normalizedResolve.symlinks ? ((await fs.realpath?.(hit)) ?? hit) : hit;
+                const bytes = await fs.read(assetPath);
+                if (bytes === null) {
+                    graph.errors.push(`cannot load asset '${rec.specifier}' from '${id}'`);
+                    continue;
+                }
+                const name = assetPath.slice(assetPath.lastIndexOf('/') + 1);
+                const fileName = resolveEmittedFileName({ type: 'asset', name, source: bytes });
+                if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, bytes);
+                rec.assetFileName = fileName;
+                continue;
+            }
             if (isExternal(options, rec.specifier) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
                 continue;
