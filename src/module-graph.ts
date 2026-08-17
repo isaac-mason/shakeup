@@ -37,6 +37,10 @@ export type ImportRecord = {
      *  graph; the dynamic-ness adds nothing to chunking once static). Dynamic records
      *  carry no `namedImports` (a bare `import()` binds no names). */
     dynamic: boolean;
+    /** True iff a literal `import('…')` for this specifier appears in source — even when the
+     *  specifier is also imported statically (so `dynamic` is false). Drives export-map seeding
+     *  for the `import()` → `Promise.resolve(ns)` emit without re-walking the AST at link time. */
+    hasDynamicLiteral: boolean;
 };
 
 /** A local binding that aliases an imported name. */
@@ -436,10 +440,11 @@ function addRecord(mod: Module, specifier: string, dynamic = false): number {
             // later dynamic hit; a dynamic-first record flips to static when the static
             // import arrives. Order-independent because any static call demotes.
             if (!dynamic) mod.importRecords[i].dynamic = false;
+            else mod.importRecords[i].hasDynamicLiteral = true;
             return i;
         }
     }
-    mod.importRecords.push({ specifier, resolved: -1, external: false, dynamic });
+    mod.importRecords.push({ specifier, resolved: -1, external: false, dynamic, hasDynamicLiteral: dynamic });
     return mod.importRecords.length - 1;
 }
 
@@ -668,7 +673,7 @@ export type CachedParse = {
     program: Program;
     nodeCount: number;
     semantic: Semantic;
-    importRecords: { specifier: string; dynamic: boolean }[];
+    importRecords: { specifier: string; dynamic: boolean; hasDynamicLiteral: boolean }[];
     namedImports: Map<number, NamedImport>;
     namedExports: Map<string, NamedExport>;
     starExports: number[];
@@ -936,6 +941,7 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 resolved: -1,
                 external: false,
                 dynamic: r.dynamic,
+                hasDynamicLiteral: r.hasDynamicLiteral,
             }));
             mod.namedImports = c.namedImports;
             mod.namedExports = c.namedExports;
@@ -953,7 +959,11 @@ export function buildGraph(options: GraphOptions, pipeline?: Pipeline): Graph {
                 program,
                 nodeCount,
                 semantic,
-                importRecords: mod.importRecords.map((r) => ({ specifier: r.specifier, dynamic: r.dynamic })),
+                importRecords: mod.importRecords.map((r) => ({
+                    specifier: r.specifier,
+                    dynamic: r.dynamic,
+                    hasDynamicLiteral: r.hasDynamicLiteral,
+                })),
                 namedImports: mod.namedImports,
                 namedExports: mod.namedExports,
                 starExports: mod.starExports,
@@ -1386,18 +1396,15 @@ export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked
 
     for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
     for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);
-    // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion
-    // roots and needs the resolved surface present in `linked.exportMaps`. A target may be
-    // statically-dominated (its record is `dynamic:false`) yet still have a literal `import()`
-    // in source rewritten to `Promise.resolve(namespaceObject)` — so we detect the target from
-    // the AST, not the record's `dynamic` flag.
+    // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion roots
+    // and the emit rewrites an in-bundle `import('./x')` to `Promise.resolve(namespaceObject)`,
+    // needing the surface. A target may be statically-dominated (its record is `dynamic:false`)
+    // yet still have a literal `import()` — `hasDynamicLiteral` records that at parse time, so we
+    // read it off the (cached) import records instead of re-walking every module's whole AST.
     for (const mod of graph.modules) {
-        walk(mod.program, (n) => {
-            if (n.type !== N.ImportExpression || n.data.source.type !== N.StringLiteral) return;
-            const spec = mod.source.slice(n.data.source.start + 1, n.data.source.end - 1);
-            const rec = mod.importRecords.find((r) => r.specifier === spec);
-            if (rec !== undefined && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
-        });
+        for (const rec of mod.importRecords) {
+            if (rec.hasDynamicLiteral && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
+        }
     }
 
     if (opts?.deconflict !== false) deconflict(ctx);
