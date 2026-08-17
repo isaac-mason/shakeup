@@ -283,6 +283,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         const code = typeof fetched === 'string' ? fetched : fetched.code;
         const map = typeof fetched === 'string' ? undefined : fetched.map;
         ensurePrepared();
+        const _te = performance.now();
         try {
             await evaluator.runModule(await makeContext(rec), code, map);
         } catch (err) {
@@ -293,6 +294,11 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         } finally {
             evaluating.delete(id);
             resolveReady();
+            // Timeline annotation: this module's eval span (includes nested imports it awaits, which
+            // nest UNDER it in a DevTools recording — so the flame attributes eval per module).
+            try {
+                performance.measure(`eval ${id}`, { start: _te });
+            } catch {}
         }
         return rec.exports;
     }

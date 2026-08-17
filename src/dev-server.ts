@@ -434,6 +434,11 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // fetches hit the cache — overlapping transform with eval. Fire-and-forget; the in-flight
         // dedup + known-clean cache prevent duplicate/repeat work.
         if (preTransform) for (const dep of deps) void fetchModule(dep).catch(() => {});
+        // Timeline annotation: this module's cold-transform span (load+read+transform+resolve), so a
+        // DevTools recording of the bundler-worker attributes transform time per module.
+        try {
+            performance.measure(`transform ${id}`, { start: tIo });
+        } catch {}
         return { code: node.code, map: node.map, deps, dynamicDeps, hmr, errors: node.errors };
     }
 
