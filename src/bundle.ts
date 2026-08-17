@@ -75,6 +75,9 @@ export type BundleOptions = GraphOptions & {
     sourcemap?: boolean;
     /** Output-shaping config (code splitting, manualChunks, preserveModules). */
     output?: OutputOptions;
+    /** Incremental per-chunk render cache. Pass a persistent Map across builds (via
+     *  {@link createBuildContext}) to reuse the rendered code of clean chunks. */
+    renderCache?: RenderCache;
 };
 
 export type OutputChunk = {
@@ -112,6 +115,8 @@ export type BundleResult = {
     shaken: TreeshakeResult | null;
     /** Modules freshly parsed vs reused from `options.cache` this build (incremental). */
     parseStats: ParseStats;
+    /** Chunks rendered vs reused from `options.renderCache` (present only with a render cache). */
+    renderStats?: RenderStats;
     /** @deprecated alias for the entry chunk's `map`. */
     map?: SourceMap;
 };
@@ -490,10 +495,16 @@ export function bundle(options: BundleOptions): BundleResult {
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
         renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim);
 
+    const renderStats: RenderStats = { rendered: 0, reused: 0 };
+    const inc: RenderIncremental | undefined =
+        options.renderCache === undefined
+            ? undefined
+            : { cache: options.renderCache, dirty: new Set([...graph.changed, ...graph.affected]), stats: renderStats };
+
     let outputChunks: OutputChunk[];
     let assets: { fileName: string; source: string }[];
     try {
-        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id);
+        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, inc);
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
@@ -539,6 +550,7 @@ export function bundle(options: BundleOptions): BundleResult {
         linked,
         shaken,
         parseStats: graph.parseStats,
+        renderStats,
         map: entryFirst?.map,
     };
 }
@@ -887,16 +899,87 @@ function getPreliminaryFileName(
 
 type HashResult = { containedPlaceholders: Set<string>; contentHash: string };
 
+/** A cached chunk render, reusable across builds. `code` holds cross-chunk hash placeholders
+ *  rewritten to stable `!~⟦key⟧~` markers (per-build placeholders are re-injected on reuse), so
+ *  it is independent of the placeholder counter. Keyed by the chunk's stable member-id list. */
+export type CachedRender = {
+    signature: string;
+    code: string;
+    parts: Part[];
+    mapSources: string[];
+    mapSourcesContent: string[];
+    name: string;
+    isEntry: boolean;
+    isDynamicEntry: boolean;
+    moduleIds: string[];
+    imports: string[];
+    dynamicImports: string[];
+    exports: string[];
+};
+export type RenderCache = Map<string, CachedRender>;
+export type RenderStats = { rendered: number; reused: number };
+/** Incremental render inputs: the persistent cache + the render-dirty module ids
+ *  (`graph.changed ∪ graph.affected`) + a stats sink. */
+export type RenderIncremental = { cache: RenderCache; dirty: Set<string>; stats: RenderStats };
+
+/** A chunk's stable cross-build identity: its member ids in exec order. Distinct chunks never
+ *  share members, so this is unique; exec-order changes (which alter output) change it. */
+function chunkKeyOf(chunk: Chunk, moduleIdOf: (i: number) => string): string {
+    return chunk.modules.map(moduleIdOf).join('\x1f');
+}
+
+/** Everything that determines a chunk's rendered bytes EXCEPT its members' own source/binds
+ *  (covered by the `dirty` check): member set + order, and all cross-chunk wiring (producers by
+ *  stable key, imported/exported names, dynamic + side-effect targets). A change here invalidates. */
+function chunkSignature(chunk: Chunk, keyOf: string[]): string {
+    const imps = [...chunk.imports.entries()]
+        .map(
+            ([p, list]) =>
+                `${keyOf[p]}>${list
+                    .map((c) => `${c.imported}=${c.local}`)
+                    .sort()
+                    .join(',')}`,
+        )
+        .sort();
+    const exps = [...chunk.exports.values()].map((e) => `${e.exportedName}=${e.local}`).sort();
+    const dyn = [...chunk.dynamicImports].map((t) => keyOf[t]).sort();
+    const side = [...chunk.sideEffectImports].map((p) => keyOf[p]).sort();
+    return [
+        `n:${chunk.name}`,
+        `e:${chunk.isEntry ? 1 : 0}${chunk.isDynamicEntry ? 'd' : ''}`,
+        `i:${imps.join(';')}`,
+        `x:${exps.join(',')}`,
+        `d:${dyn.join(',')}`,
+        `s:${side.join(',')}`,
+    ].join('\n');
+}
+
+/** Rewrite live per-build placeholders → stable `!~⟦targetKey⟧~` markers for the cache store. */
+function toMarkers(code: string, keyByPlaceholder: Map<string, string>): string {
+    let out = code;
+    for (const [ph, key] of keyByPlaceholder) {
+        if (out.includes(ph)) out = out.split(ph).join(`!~⟦${key}⟧~`);
+    }
+    return out;
+}
+
+/** Rewrite stable markers → this build's placeholders for a reused chunk. */
+function fromMarkers(code: string, placeholderByKey: Map<string, string>): string {
+    return code.replace(/!~⟦([\s\S]*?)⟧~/g, (m, key) => placeholderByKey.get(key) ?? m);
+}
+
 /**
  * Drive the whole two-pass flow. `chunkGraph` gives the partition; `naming` the resolved output
  * config; `render` the per-chunk text builder. Returns finalized {@link OutputChunk}s
- * (fileName/code/map placeholder-free) plus emitted `.map` asset entries.
+ * (fileName/code/map placeholder-free) plus emitted `.map` asset entries. When `inc` is present,
+ * a chunk whose members are all clean and whose signature is unchanged reuses its cached render.
  */
 export function renderChunks(
     chunkGraph: ChunkGraph,
     naming: NormalizedOutputNaming,
     render: ChunkRenderer,
     moduleIdOf: (i: number) => string,
+    inc?: RenderIncremental,
 ): { chunks: OutputChunk[]; assets: { fileName: string; source: string }[] } {
     const chunks = chunkGraph.chunks;
     const wantMap = naming.sourcemap !== false;
@@ -924,11 +1007,68 @@ export function renderChunks(
         (toIdx: number): string =>
             relativePath(dirnameOf(prelim[fromIdx].fileName), prelim[toIdx].fileName);
 
-    // Pass 0b — render every chunk with placeholder-bearing paths.
+    // Stable per-chunk keys + placeholder↔key maps for cross-build render reuse.
+    const keyOf = chunks.map((c) => chunkKeyOf(c, moduleIdOf));
+    const placeholderByKey = new Map<string, string>();
+    const keyByPlaceholder = new Map<string, string>();
+    for (let i = 0; i < chunks.length; i++) {
+        const ph = prelim[i].hashPlaceholder;
+        if (ph !== null) {
+            placeholderByKey.set(keyOf[i], ph);
+            keyByPlaceholder.set(ph, keyOf[i]);
+        }
+    }
+    // A chunk is render-dirty if any member changed (body) or was affected (bind). A clean chunk
+    // whose signature matches its cache reuses the render — signature captures member set/order +
+    // all cross-chunk wiring names, so a producer's rename/move invalidates the importer too.
+    const dirtyChunk = inc === undefined ? null : chunks.map((c) => c.modules.some((idx) => inc.dirty.has(moduleIdOf(idx))));
+
+    // Pass 0b — render each chunk (or reuse its cached render with placeholders remapped).
     const rendered: RenderedChunk[] = [];
     for (let i = 0; i < chunks.length; i++) {
-        const rc = render(chunks[i], i, prelim[i], pathFrom(i), wantMap);
-        if (rc !== null) rendered.push(rc);
+        const chunk = chunks[i];
+        const sig = inc !== undefined ? chunkSignature(chunk, keyOf) : '';
+        const cached = inc !== undefined && dirtyChunk !== null && !dirtyChunk[i] ? inc.cache.get(keyOf[i]) : undefined;
+        if (inc !== undefined && cached !== undefined && cached.signature === sig) {
+            rendered.push({
+                chunk,
+                chunkIdx: i,
+                prelim: prelim[i],
+                code: fromMarkers(cached.code, placeholderByKey),
+                parts: cached.parts,
+                mapSources: cached.mapSources,
+                mapSourcesContent: cached.mapSourcesContent,
+                name: cached.name,
+                isEntry: cached.isEntry,
+                isDynamicEntry: cached.isDynamicEntry,
+                moduleIds: cached.moduleIds,
+                imports: cached.imports,
+                dynamicImports: cached.dynamicImports,
+                exports: cached.exports,
+            });
+            inc.stats.reused++;
+            continue;
+        }
+        const rc = render(chunk, i, prelim[i], pathFrom(i), wantMap);
+        if (rc === null) continue;
+        if (inc !== undefined) {
+            inc.cache.set(keyOf[i], {
+                signature: sig,
+                code: toMarkers(rc.code, keyByPlaceholder),
+                parts: rc.parts,
+                mapSources: rc.mapSources,
+                mapSourcesContent: rc.mapSourcesContent,
+                name: rc.name,
+                isEntry: rc.isEntry,
+                isDynamicEntry: rc.isDynamicEntry,
+                moduleIds: rc.moduleIds,
+                imports: rc.imports,
+                dynamicImports: rc.dynamicImports,
+                exports: rc.exports,
+            });
+            inc.stats.rendered++;
+        }
+        rendered.push(rc);
     }
 
     // Collect every chunk placeholder up-front.
@@ -1043,9 +1183,13 @@ export type BuildContext = {
 
 export function createBuildContext(options: BundleOptions): BuildContext {
     const cache: ParseCache = new Map();
+    const renderCache: RenderCache = new Map();
     return {
-        rebuild: () => bundle({ ...options, cache }),
+        rebuild: () => bundle({ ...options, cache, renderCache }),
         invalidate: (id) => void cache.delete(id),
-        close: () => cache.clear(),
+        close: () => {
+            cache.clear();
+            renderCache.clear();
+        },
     };
 }

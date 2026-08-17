@@ -81,6 +81,27 @@ describe('incremental: createBuildContext', () => {
         expect(r.graph!.affected.has('/entry.ts')).toBe(true);
     });
 
+    it('render cache: a body change re-renders only its chunk; others reuse (byte-identical)', () => {
+        const files: Record<string, string> = {
+            '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
+            '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
+            '/shared.ts': 'export const s = 40;',
+        };
+        const opts = () => ({ input: { a: '/a.ts', b: '/b.ts' }, fs: mutableFs(files), external: [] as string[] });
+        const ctx = createBuildContext(opts());
+        const first = ctx.rebuild();
+        expect(first.renderStats).toEqual({ rendered: 3, reused: 0 });
+
+        // Change a's body only (export name av unchanged) — only a's chunk is dirty.
+        files['/a.ts'] = "import { s } from './shared';\nexport const av = s + 100;";
+        const r = ctx.rebuild();
+        expect(r.renderStats).toEqual({ rendered: 1, reused: 2 }); // shared + b reused
+
+        // Reused chunks (incl. b's cross-chunk import to the hashed shared chunk) are byte-identical.
+        const fresh = bundle(opts());
+        for (const c of r.chunks) expect(c.code).toBe(fresh.chunks.find((x) => x.name === c.name)!.code);
+    });
+
     it('invalidate() forces a re-parse', () => {
         const files: Record<string, string> = { '/a.ts': 'export const a = 1;' };
         const ctx = createBuildContext({ entry: '/a.ts', fs: mutableFs(files) });
