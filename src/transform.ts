@@ -80,7 +80,7 @@ export function transform(filename: string, code: string, options: TransformOpti
 
     const { program, errors: parseErrors } = parse(code, { ts, jsx });
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
-    collectUnsupported(program, filename, errors);
+    if (ts) collectUnsupported(program, filename, errors); // only TS can carry a value `namespace`
     if (errors.length > 0) return { code: '', errors };
 
     // Plain JS with no JSX: nothing to strip or lower (map is identity).
@@ -472,7 +472,8 @@ export function devTransform(filename: string, source: string, options: DevTrans
 
     const { program, errors: parseErrors } = parse(source, { ts, jsx });
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
-    collectUnsupported(program, filename, errors);
+    // Only TS can carry the unsupported node (a value `namespace`); JS/JSX can't, so skip the walk.
+    if (ts) collectUnsupported(program, filename, errors);
     if (errors.length > 0) return emptyResult(errors);
 
     // JSX: not yet fused — use the proven sequential path. No source map yet: it
