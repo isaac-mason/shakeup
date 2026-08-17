@@ -94,6 +94,17 @@ export type ModuleInfo = {
     exports: string[]; // own named-export keys
 };
 
+/** A file a plugin asks the bundler to emit alongside the output chunks. `source` is the contents;
+ *  give `name` for a content-hashed fileName (`assets/<stem>-<hash><ext>`), or `fileName` to force
+ *  an exact one. Only assets today; emitted chunks are a later addition. */
+export type EmittedAsset = {
+    type: 'asset';
+    name?: string;
+    fileName?: string;
+    source: string | Uint8Array;
+};
+export type EmittedFile = EmittedAsset;
+
 /** Context passed to every plugin hook. Every method returns {@link MaybePromise}
  *  so the sync fast path holds (`assertSync` unwraps in bundle mode). */
 export type PluginCtx = {
@@ -109,6 +120,11 @@ export type PluginCtx = {
         importer?: string | null,
         options?: { isEntry?: boolean; kind?: ImportKind; skipSelf?: boolean; custom?: CustomPluginOptions },
     ): MaybePromise<PartialResolvedId | null>;
+    /** Emit a file alongside the output; returns its final (content-hashed) fileName, which a
+     *  plugin embeds in code (e.g. a `?url` import's default export). In bundle mode the file lands
+     *  in {@link BundleResult.assets}; the dev server has no output sink, so its assets resolve via a
+     *  host `url()` strategy and calling emitFile there throws. */
+    emitFile(file: EmittedFile): string;
     /** Backed by the live graph. */
     getModuleInfo(id: string): ModuleInfo | null;
     /** All module ids currently in the graph. */

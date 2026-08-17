@@ -9,6 +9,7 @@ export * from './module-graph';
 export * from './treeshake';
 export * from './plugin';
 export * from './plugins/json';
+export * from './plugins/asset';
 export * from './node-resolve';
 export * from './bundle';
 export * from './transform';

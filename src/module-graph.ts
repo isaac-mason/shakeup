@@ -7,6 +7,7 @@ import {
     type CustomPluginOptions,
     compilePipeline,
     type ModuleInfo,
+    type EmittedFile,
     type ModuleOptions,
     type ModuleSideEffects,
     type ModuleType,
@@ -115,6 +116,9 @@ export type Graph = {
     entries: { module: number; name: string }[];
     errors: string[];
     warnings: string[];
+    /** Files a plugin emitted via `ctx.emitFile`, deduped by content-hashed fileName. Merged into
+     *  {@link BundleResult.assets} by `bundle()`. */
+    emitted: Map<string, string | Uint8Array>;
     /** Modules freshly parsed vs reused from `options.cache` this build. */
     parseStats: ParseStats;
     /** Module ids whose downstream artifacts (link/shake/render) are stale this rebuild —
@@ -794,6 +798,28 @@ function memoBuildFs(fs: Fs): Fs {
     };
 }
 
+/** FNV-1a over the source bytes → 8 hex chars, for content-addressed emitted-asset fileNames. */
+function hashSourceHex(source: string | Uint8Array): string {
+    const bytes = typeof source === 'string' ? new TextEncoder().encode(source) : source;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) {
+        h ^= bytes[i];
+        h = Math.imul(h, 0x01000193);
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/** The output fileName for an emitted file: an explicit `fileName`, else `assets/<stem>-<hash><ext>`
+ *  derived from `name` (default 'asset') and the content hash. */
+export function resolveEmittedFileName(file: EmittedFile): string {
+    if (file.fileName !== undefined) return file.fileName;
+    const base = file.name ?? 'asset';
+    const dot = base.lastIndexOf('.');
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    const ext = dot > 0 ? base.slice(dot) : '';
+    return `assets/${stem}-${hashSourceHex(file.source)}${ext}`;
+}
+
 export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Promise<Graph> {
     const graph: Graph = {
         modules: [],
@@ -801,6 +827,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         entries: [],
         errors: [],
         warnings: [],
+        emitted: new Map(),
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
         changed: new Set(),
@@ -901,6 +928,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             } finally {
                 if (marked) resolving.delete(key);
             }
+        },
+        emitFile: (file) => {
+            const fileName = resolveEmittedFileName(file);
+            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
+            return fileName;
         },
         getModuleInfo: (id) => {
             const idx = graph.byId.get(id);

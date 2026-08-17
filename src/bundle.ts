@@ -18,6 +18,7 @@ import {
     type ParseCache,
     type ParseStats,
     packRef,
+    resolveEmittedFileName,
     resolveJSXOptions,
     toModuleInfo,
 } from './module-graph';
@@ -110,14 +111,18 @@ export type OutputChunk = {
     map?: SourceMap;
 };
 
+/** A non-chunk output file: a `.map` sidecar, or an asset a plugin emitted via `ctx.emitFile`
+ *  (bytes for a binary asset, a string for text). */
+export type OutputAsset = { fileName: string; source: string | Uint8Array };
+
 /** `map` is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
     /** @deprecated single-chunk convenience alias for the ENTRY chunk's `code`. */
     code: string;
     /** The chunk graph. Length ≥ 1 (0 on error). */
     chunks: OutputChunk[];
-    /** Emitted non-chunk files — currently `.map` sidecars (sourcemap: true|'hidden'). */
-    assets?: { fileName: string; source: string }[];
+    /** Emitted non-chunk files — `.map` sidecars plus plugin `ctx.emitFile` assets. */
+    assets?: OutputAsset[];
     errors: string[];
     warnings: string[];
     graph: Graph | null;
@@ -437,6 +442,12 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         debug: () => {},
         fs: options.fs,
         resolve: () => null,
+        emitFile: (file) => {
+            // Only reached from renderChunk/buildEnd, which run after `graph` is built.
+            const fileName = resolveEmittedFileName(file);
+            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
+            return fileName;
+        },
         getModuleInfo: (id): ModuleInfo | null => {
             if (graph === undefined) return null;
             const idx = graph.byId.get(id);
@@ -543,7 +554,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim, inc?.mod ?? null);
 
     let outputChunks: OutputChunk[];
-    let assets: { fileName: string; source: string }[];
+    let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
         const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, inc);
@@ -579,6 +590,10 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
     for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
     warnings.push(...warningsOut.splice(0));
+
+    // plugin ctx.emitFile assets (content-hashed fileName → source), collected across graph build +
+    // renderChunk/buildEnd. Appended after buildEnd so a late emit still lands in the output.
+    for (const [fileName, source] of graph.emitted) assets.push({ fileName, source });
 
     // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
     // `code`/`map` aliases point at the FIRST entry chunk (back-compat).

@@ -37,7 +37,7 @@ describe('output sourcemap variants', () => {
     it('the emitted .map asset is valid JSON with the right sources', async () => {
         const r = await build({ sourcemap: true });
         const asset = (r.assets ?? []).find((a) => a.fileName === 'main.js.map')!;
-        const map = JSON.parse(asset.source) as { sources: string[]; file: string };
+        const map = JSON.parse(asset.source as string) as { sources: string[]; file: string };
         expect(map.sources).toEqual(['/math.ts', '/main.ts']);
         expect(map.file).toBe('main.js');
     });

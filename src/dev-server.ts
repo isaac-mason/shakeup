@@ -204,6 +204,11 @@ export function createDevServer(options: DevServerOptions): DevServer {
                 typeof r === 'string' ? { id: r, external: false } : { id: r.external, external: true };
             return partial;
         },
+        emitFile: () => {
+            // The dev server has no output sink — assets resolve through a host url() strategy
+            // (e.g. the asset plugin's `url` option) rather than being emitted.
+            throw new Error('emitFile is not supported by the dev server — configure the asset plugin with a url() strategy');
+        },
         getModuleInfo: (id) => {
             const node = graph.get(id);
             return node === undefined ? null : toModuleInfo(id, node);
