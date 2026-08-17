@@ -1,4 +1,3 @@
-import { N, type Node, walk } from './ast';
 import {
     deconflictChunk,
     finalNameOf,
@@ -444,15 +443,12 @@ function wireAndDeconflict(
     // so the per-chunk deconflict claims it. (Cross-chunk dynamic targets export named bindings
     // instead — no namespace needed.)
     for (const mod of graph.modules) {
-        walk(mod.program, (n: Node) => {
-            if (n.type !== N.ImportExpression || n.data.source.type !== N.StringLiteral) return;
-            const spec = mod.source.slice(n.data.source.start + 1, n.data.source.end - 1);
-            const rec = mod.importRecords.find((r) => r.specifier === spec);
-            if (rec === undefined || rec.external || rec.resolved < 0) return;
+        for (const rec of mod.importRecords) {
+            if (!rec.hasDynamicLiteral || rec.external || rec.resolved < 0) continue;
             if (chunkByModule[rec.resolved] === chunkByModule[mod.idx] && !linked.namespaceOf.has(rec.resolved)) {
                 linked.namespaceOf.set(rec.resolved, `${reprName(graph.modules[rec.resolved])}_ns`);
             }
-        });
+        }
     }
 
     // Producer-side deconflict FIRST (each chunk's own names + external locals), seeded empty.
