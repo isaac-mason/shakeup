@@ -106,7 +106,7 @@ function staticDeps(graph: Graph, idx: number, includeDynamic: boolean): number[
     const out: number[] = [];
     for (const rec of mod.importRecords) {
         if (rec.external || rec.resolved < 0) continue;
-        if (!rec.dynamic || includeDynamic) out.push(rec.resolved);
+        if (rec.kind !== 'dynamic' || includeDynamic) out.push(rec.resolved);
     }
     return out;
 }
@@ -275,7 +275,7 @@ function formPreserveModulesChunks(
     for (const { module, name } of graph.entries) nameOf.set(module, name);
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
-            if (rec.dynamic && !rec.external && rec.resolved >= 0) dynamicSet.add(rec.resolved);
+            if (rec.kind === 'dynamic' && !rec.external && rec.resolved >= 0) dynamicSet.add(rec.resolved);
         }
     }
     for (const idx of linked.order) {
@@ -363,7 +363,7 @@ export function buildChunkGraph(graph: Graph, linked: Linked, options: ChunkOpti
     if (options.codeSplitting) {
         for (const mod of graph.modules) {
             for (const rec of mod.importRecords) {
-                if (!rec.dynamic || rec.external || rec.resolved < 0) continue;
+                if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0) continue;
                 const target = rec.resolved;
                 let e = entryIndexOf.get(target);
                 if (e === undefined) {
@@ -500,7 +500,7 @@ function wireAndDeconflict(
             const mod = graph.modules[idx];
             for (const rec of mod.importRecords) {
                 if (rec.external || rec.resolved < 0) continue;
-                if (rec.dynamic) {
+                if (rec.kind === 'dynamic') {
                     const targetChunk = chunkByModule[rec.resolved];
                     if (targetChunk >= 0 && targetChunk !== c) chunk.dynamicImports.add(targetChunk);
                 } else {

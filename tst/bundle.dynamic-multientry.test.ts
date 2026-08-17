@@ -23,7 +23,7 @@ describe('bundle: dynamic import() edges', () => {
         expect(result.graph!.byId.has('/lazy.ts')).toBe(true);
         const rec = recordOf(result.graph!, '/main.ts', './lazy');
         expect(rec).toBeDefined();
-        expect(rec!.dynamic).toBe(true);
+        expect(rec!.kind).toBe('dynamic');
         expect(result.chunks).toHaveLength(2);
         const entryChunk = result.chunks.find((c) => c.isEntry)!;
         const lazyChunk = result.chunks.find((c) => c.isDynamicEntry)!;
@@ -86,7 +86,7 @@ describe('bundle: dynamic import() edges', () => {
         const mod = result.graph!.modules[result.graph!.byId.get('/main.ts')!];
         const dupRecs = mod.importRecords.filter((r) => r.specifier === './dup');
         expect(dupRecs).toHaveLength(1);
-        expect(dupRecs[0].dynamic).toBe(false);
+        expect(dupRecs[0].kind).toBe('static');
         const order = result.linked!.order.map((i) => result.graph!.modules[i].id);
         expect(order.indexOf('/dup.ts')).toBeLessThan(order.indexOf('/main.ts'));
     });

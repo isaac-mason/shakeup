@@ -15,9 +15,6 @@ export type StatementInfo = {
     pure: boolean;
 };
 
-/** Incremental tree-shake cache: the prior build's per-module infos + decl entries, plus the
- *  module-id list to validate index stability. Reused for modules that didn't re-parse and don't
- *  import a re-parsed module (their refs are unchanged). */
 export type TreeshakeCache = {
     moduleIds: string[];
     infos: StatementInfo[][];
@@ -47,7 +44,6 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
     }
 }
 
-/** True if the statement subtree contains any JSX element/fragment. */
 function statementContainsJSX(statement: Node): boolean {
     let found = false;
     walk(statement, (n) => {
@@ -76,6 +72,7 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
+
     /** packed declared-symbol ref -> [moduleIdx, statement list index] */
     const declToStatement = new Map<number, [number, number]>();
 
@@ -179,7 +176,7 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
     // export surface may be reached at runtime. Seed each dynamic target's export map.
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
-            if (rec.dynamic && !rec.external && rec.resolved >= 0) markExportMap(linked.exportMaps.get(rec.resolved));
+            if (rec.kind === 'dynamic' && !rec.external && rec.resolved >= 0) markExportMap(linked.exportMaps.get(rec.resolved));
         }
     }
     for (const modIdx of linked.namespaceOf.keys()) markRef(packRef(modIdx, NS_MARKER));
