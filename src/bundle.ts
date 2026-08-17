@@ -38,7 +38,7 @@ import {
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from './sourcemap';
 import * as Timer from './timer';
-import { type TreeshakeResult, treeshake } from './treeshake';
+import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 
 /** A codeSplitting group as a user config. */
 export type CodeSplittingGroup = {
@@ -79,6 +79,8 @@ export type BundleOptions = GraphOptions & {
     /** Incremental per-chunk render cache. Pass a persistent Map across builds (via
      *  {@link createBuildContext}) to reuse the rendered code of clean chunks. */
     renderCache?: RenderCache;
+    /** Incremental tree-shake cache — reuse per-module liveness infos for unchanged modules. */
+    treeshakeCache?: TreeshakeCache;
     /** Threaded profiling state ({@link Timer}). Inject a shared one to accumulate per-pass
      *  timings across rebuilds; omit and a fresh (enabled) one is used per build. */
     timer?: Timer.TimerState;
@@ -470,7 +472,7 @@ export function bundle(options: BundleOptions): BundleResult {
     const jsxPure = resolveJSXOptions(options.jsx).pure;
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
     Timer.start(timer, 'treeshake');
-    const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure);
+    const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure, options.treeshakeCache);
     Timer.end(timer, 'treeshake');
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
@@ -1202,12 +1204,16 @@ export type BuildContext = {
 export function createBuildContext(options: BundleOptions): BuildContext {
     const cache: ParseCache = new Map();
     const renderCache: RenderCache = new Map();
+    const treeshakeCache: TreeshakeCache = { moduleIds: [], infos: [], decls: [] };
     return {
-        rebuild: () => bundle({ ...options, cache, renderCache }),
+        rebuild: () => bundle({ ...options, cache, renderCache, treeshakeCache }),
         invalidate: (id) => void cache.delete(id),
         close: () => {
             cache.clear();
             renderCache.clear();
+            treeshakeCache.moduleIds = [];
+            treeshakeCache.infos = [];
+            treeshakeCache.decls = [];
         },
     };
 }

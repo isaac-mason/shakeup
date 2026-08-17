@@ -9,10 +9,19 @@ export type TreeshakeResult = {
     dropped: [number, Node][];
 };
 
-type StatementInfo = {
+export type StatementInfo = {
     statement: Node;
     refs: number[];
     pure: boolean;
+};
+
+/** Incremental tree-shake cache: the prior build's per-module infos + decl entries, plus the
+ *  module-id list to validate index stability. Reused for modules that didn't re-parse and don't
+ *  import a re-parsed module (their refs are unchanged). */
+export type TreeshakeCache = {
+    moduleIds: string[];
+    infos: StatementInfo[][];
+    decls: [number, [number, number]][][];
 };
 
 function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]): void {
@@ -63,14 +72,41 @@ function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolea
 const NS_MARKER = 0x1fffff;
 
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
-export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): TreeshakeResult {
+export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?: TreeshakeCache): TreeshakeResult {
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
+    const declArrays: [number, [number, number]][][] = [];
     /** packed declared-symbol ref -> [moduleIdx, statement list index] */
     const declToStatement = new Map<number, [number, number]>();
 
+    // Incremental reuse: when topology is unchanged (module id list identical → stable indices),
+    // reuse a module's infos unless it was re-parsed or imports a re-parsed module (whose new
+    // symbol ids would change this module's binds/refs). The rest rebuild; propagation re-runs.
+    const moduleIds = graph.modules.map((m) => m.id);
+    const topoStable =
+        cache !== undefined &&
+        cache.moduleIds.length === moduleIds.length &&
+        moduleIds.every((id, i) => id === cache.moduleIds[i]);
+    const reshake = new Set<number>();
+    if (topoStable) {
+        for (let i = 0; i < graph.modules.length; i++) if (graph.changed.has(moduleIds[i])) reshake.add(i);
+        for (const c of [...reshake]) {
+            for (const impId of graph.modules[c].importers) {
+                const ii = graph.byId.get(impId);
+                if (ii !== undefined) reshake.add(ii);
+            }
+        }
+    }
+
     for (const mod of graph.modules) {
+        if (topoStable && cache !== undefined && !reshake.has(mod.idx)) {
+            infos.push(cache.infos[mod.idx]);
+            declArrays.push(cache.decls[mod.idx]);
+            for (const [ref, val] of cache.decls[mod.idx]) declToStatement.set(ref, val);
+            continue;
+        }
         const list: StatementInfo[] = [];
+        const localDecls: [number, [number, number]][] = [];
         const moduleScope = scopeOf(mod.semantic, mod.program);
         const spans: [number, number, number][] = [];
         for (const statement of mod.program.data.body) {
@@ -85,7 +121,9 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
             const at = sem.symbols[sym].decl!.start;
             for (const [s, e, idx] of spans) {
                 if (at >= s && at < e) {
-                    declToStatement.set(packRef(mod.idx, sym), [mod.idx, idx]);
+                    const ref = packRef(mod.idx, sym);
+                    declToStatement.set(ref, [mod.idx, idx]);
+                    localDecls.push([ref, [mod.idx, idx]]);
                     break;
                 }
             }
@@ -95,11 +133,13 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
             for (let i = 0; i < list.length; i++) {
                 if (list[i].statement.type === N.ExportDefaultDeclaration) {
                     declToStatement.set(defRef, [mod.idx, i]);
+                    localDecls.push([defRef, [mod.idx, i]]);
                     break;
                 }
             }
         }
         infos.push(list);
+        declArrays.push(localDecls);
     }
 
     const worklist: number[] = [];
@@ -176,6 +216,11 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean): Trees
                 continue;
             dropped.push([mod.idx, info.statement]);
         }
+    }
+    if (cache !== undefined) {
+        cache.moduleIds = moduleIds;
+        cache.infos = infos;
+        cache.decls = declArrays;
     }
     return { live, dropped };
 }
