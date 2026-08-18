@@ -65,7 +65,8 @@ export function createSemantic(): Semantic {
  * run holds no module-global state (reentrant). `sem` is the table being filled; `scope`
  * is the current-scope cursor, saved/restored as the walk descends and ascends.
  */
-type AnalyseState = { sem: Semantic; scope: number };
+type RefColl = { node: Node; scope: number; ns: number };
+type AnalyseState = { sem: Semantic; scope: number; pending: RefColl[] };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
     const id = state.sem.scopes.length;
@@ -150,26 +151,32 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
     if (ns === NS_VALUE) state.sem.unresolved.push(identNode);
 }
 
-/**
- * Build scope and symbol tables for `program` into `out` (reset first, mutated in place).
- * Runs a declare pass (scopes + bindings) then a resolve pass that fills
- * `node.sym` for every referencing Ident. LIMIT: no TDZ or redeclaration
- * diagnostics; labels are not tracked.
- */
-export function analyze(out: Semantic, program: Node): void {
+/** Reset a warm {@link Semantic} for reuse across analyze() calls. */
+function resetSem(out: Semantic): void {
     out.scopes.length = 1;
     out.symbols.length = 1;
     out.unresolved.length = 0;
     out.names.clear();
     out.bindings.clear();
     out.nodeScope.clear();
+}
 
-    const state: AnalyseState = { sem: out, scope: 0 };
+/**
+ * Single traversal (oxc SemanticBuilder model): declare bindings + create scopes + COLLECT
+ * references in one walk; resolution is DEFERRED to after the walk so forward/hoisted refs see
+ * every binding. `resolveRef` is reused verbatim for the deferred step, so resolution is identical
+ * to the two-pass. LIMIT: no TDZ or redeclaration diagnostics; labels not tracked.
+ */
+export function analyze(out: Semantic, program: Node): void {
+    resetSem(out);
+    const state: AnalyseState = { sem: out, scope: 0, pending: [] };
     const moduleScope = newScope(state, SCOPE.MODULE, program);
     state.scope = moduleScope;
-    declarePass(state, program);
-    state.scope = moduleScope;
-    resolvePass(state, program);
+    visit(state, program);
+    for (const p of state.pending) {
+        state.scope = p.scope;
+        resolveRef(state, p.node, p.ns);
+    }
 }
 
 /** declare all bindings introduced by a pattern (decl contexts) */
@@ -200,10 +207,6 @@ function declarePattern(state: AnalyseState, node: Node | null, flags: number, t
     }
 }
 
-function declareParams(state: AnalyseState, list: Node[]): void {
-    for (const p of list) declarePattern(state, p, SYM.PARAM, state.scope);
-}
-
 function declareTypeParams(state: AnalyseState, node: Node | null): void {
     if (node === null || node.type !== N.TSTypeParameterDeclaration) return;
     for (const tp of node.data.params) {
@@ -218,9 +221,116 @@ function declareInScope(state: AnalyseState, kind: number, node: Node, body: () 
     state.scope = prev;
 }
 
-function declarePass(state: AnalyseState, node: Node | null): void {
+// ─── single-pass traversal: declare + create scopes + COLLECT refs (resolution deferred) ──────────
+
+const collect = (state: AnalyseState, node: Node, ns: number): void => {
+    state.pending.push({ node, scope: state.scope, ns });
+};
+
+function collectEntityName(state: AnalyseState, node: Node | null, ns: number): void {
+    if (node === null) return;
+    if (node.type === N.IdentifierReference) collect(state, node, ns);
+    else if (node.type === N.TSQualifiedName) collectEntityName(state, node.data.left, ns);
+}
+
+/** type-context traversal: collect type refs (+ the value-ns `typeof` head); declares nothing. */
+function visitType(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
     switch (node.type) {
+        case N.TSTypeReference:
+            collectEntityName(state, node.data.typeName, NS_TYPE);
+            visitType(state, node.data.typeArguments);
+            return;
+        case N.TSTypeQuery:
+            collectEntityName(state, node.data.exprName, NS_VALUE);
+            visitType(state, node.data.typeArguments);
+            return;
+        case N.TSMappedType:
+            walkChildren(node, (c) => visitType(state, c));
+            return;
+        case N.TSPropertySignature:
+            if (node.data.computed) visit(state, node.data.key);
+            visitType(state, node.data.typeAnnotation);
+            return;
+    }
+    if (isIdentifier(node.type)) return;
+    walkChildren(node, (c) => visitType(state, c));
+}
+
+/** pattern in value context: the caller already declared the bindings; here collect refs in
+ *  computed keys, defaults, and type annotations. */
+function collectPattern(state: AnalyseState, node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.BindingIdentifier:
+            return;
+        case N.ArrayPattern:
+            for (const el of node.data.elements) collectPattern(state, el);
+            return;
+        case N.ObjectPattern:
+            for (const p of node.data.properties) collectPattern(state, p);
+            return;
+        case N.ObjectProperty:
+            if (node.data.computed) visit(state, node.data.key);
+            collectPattern(state, node.data.value);
+            return;
+        case N.AssignmentPattern:
+            collectPattern(state, node.data.left);
+            visit(state, node.data.right);
+            return;
+        case N.RestElement:
+            collectPattern(state, node.data.argument);
+            return;
+        case N.FormalParameter:
+            collectPattern(state, node.data.pattern);
+            visitType(state, node.data.typeAnnotation);
+            visit(state, node.data.init);
+            return;
+    }
+}
+
+/** declare params into the current scope, then collect refs in their defaults/types. */
+function declareCollectParams(state: AnalyseState, list: Node[]): void {
+    for (const p of list) declarePattern(state, p, SYM.PARAM, state.scope);
+    for (const p of list) {
+        if (p.type === N.RestElement) {
+            collectPattern(state, p.data.argument);
+            visitType(state, p.data.typeAnnotation);
+        } else collectPattern(state, p);
+    }
+}
+
+/** value-context traversal: declares bindings + creates scopes + collects value references. */
+function visit(state: AnalyseState, node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.IdentifierReference:
+            collect(state, node, NS_VALUE);
+            return;
+        case N.StaticMemberExpression:
+        case N.PrivateFieldExpression:
+            visit(state, node.data.object);
+            return;
+        case N.ComputedMemberExpression:
+            visit(state, node.data.object);
+            visit(state, node.data.expression);
+            return;
+        case N.ChainExpression:
+            visit(state, node.data.expression);
+            return;
+        case N.ObjectProperty:
+            if (node.data.computed) visit(state, node.data.key);
+            visit(state, node.data.value);
+            return;
+        case N.MethodDefinition:
+            if (node.data.computed) visit(state, node.data.key);
+            visit(state, node.data.value);
+            return;
+        case N.PropertyDefinition:
+            if (node.data.computed) visit(state, node.data.key);
+            visit(state, node.data.value);
+            visitType(state, node.data.typeAnnotation);
+            return;
         case N.VariableDeclaration: {
             const kind = node.data.kind;
             const flags = kind === 'var' ? SYM.VAR : kind === 'let' ? SYM.LET : SYM.CONST;
@@ -228,7 +338,9 @@ function declarePass(state: AnalyseState, node: Node | null): void {
             for (const d of node.data.declarations) {
                 if (d.type !== N.VariableDeclarator) continue;
                 declarePattern(state, d.data.id, flags, target);
-                declarePass(state, d.data.init);
+                collectPattern(state, d.data.id);
+                visitType(state, d.data.typeAnnotation);
+                visit(state, d.data.init);
             }
             return;
         }
@@ -237,79 +349,94 @@ function declarePass(state: AnalyseState, node: Node | null): void {
             if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, hoistTarget(state));
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 declareTypeParams(state, node.data.typeParameters);
-                declareParams(state, node.data.params);
-                declarePass(state, node.data.body);
+                declareCollectParams(state, node.data.params);
+                visitType(state, node.data.returnType);
+                visit(state, node.data.body);
             });
             return;
         }
-        case N.FunctionExpression: {
+        case N.FunctionExpression:
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, state.scope);
                 declareTypeParams(state, node.data.typeParameters);
-                declareParams(state, node.data.params);
-                declarePass(state, node.data.body);
+                declareCollectParams(state, node.data.params);
+                visitType(state, node.data.returnType);
+                visit(state, node.data.body);
             });
             return;
-        }
         case N.ArrowFunctionExpression:
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 declareTypeParams(state, node.data.typeParameters);
-                declareParams(state, node.data.params);
-                declarePass(state, node.data.body);
+                declareCollectParams(state, node.data.params);
+                visitType(state, node.data.returnType);
+                visit(state, node.data.body);
             });
             return;
         case N.ClassDeclaration: {
             const id = node.data.id;
             if (id !== null) declareDualNs(state, id, SYM.CLASS | SYM.TYPE, state.scope);
+            visit(state, node.data.superClass);
             declareInScope(state, SCOPE.CLASS, node, () => {
                 declareTypeParams(state, node.data.typeParameters);
-                declareClassBody(state, node.data.body);
+                for (const h of node.data.implements) {
+                    if (h.type !== N.TSClassImplements) continue;
+                    collectEntityName(state, h.data.expression, NS_TYPE);
+                    visitType(state, h.data.typeArguments);
+                }
+                visitType(state, node.data.superTypeArguments);
+                for (const m of node.data.body) visit(state, m);
             });
-            declarePass(state, node.data.superClass);
             return;
         }
         case N.ClassExpression:
+            visit(state, node.data.superClass);
             declareInScope(state, SCOPE.CLASS, node, () => {
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.CLASS, NS_VALUE, state.scope);
                 declareTypeParams(state, node.data.typeParameters);
-                declareClassBody(state, node.data.body);
+                for (const h of node.data.implements) {
+                    if (h.type !== N.TSClassImplements) continue;
+                    collectEntityName(state, h.data.expression, NS_TYPE);
+                    visitType(state, h.data.typeArguments);
+                }
+                visitType(state, node.data.superTypeArguments);
+                for (const m of node.data.body) visit(state, m);
             });
-            declarePass(state, node.data.superClass);
             return;
         case N.BlockStatement:
         case N.StaticBlock:
             declareInScope(state, SCOPE.BLOCK, node, () => {
-                for (const s of node.data.body) declarePass(state, s);
+                for (const s of node.data.body) visit(state, s);
             });
             return;
         case N.ForStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
-                declarePass(state, node.data.init);
-                declarePass(state, node.data.test);
-                declarePass(state, node.data.update);
-                declarePass(state, node.data.body);
+                visit(state, node.data.init);
+                visit(state, node.data.test);
+                visit(state, node.data.update);
+                visit(state, node.data.body);
             });
             return;
         case N.ForInStatement:
         case N.ForOfStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
-                declarePass(state, node.data.left);
-                declarePass(state, node.data.right);
-                declarePass(state, node.data.body);
+                visit(state, node.data.left);
+                visit(state, node.data.right);
+                visit(state, node.data.body);
             });
             return;
         case N.SwitchStatement:
             declareInScope(state, SCOPE.SWITCH, node, () => {
-                declarePass(state, node.data.discriminant);
-                for (const c of node.data.cases) declarePass(state, c);
+                visit(state, node.data.discriminant);
+                for (const c of node.data.cases) visit(state, c);
             });
             return;
         case N.CatchClause:
             declareInScope(state, SCOPE.CATCH, node, () => {
                 declarePattern(state, node.data.param, SYM.CATCH, state.scope);
-                declarePass(state, node.data.body);
+                collectPattern(state, node.data.param);
+                visit(state, node.data.body);
             });
             return;
         case N.ImportDeclaration: {
@@ -326,290 +453,81 @@ function declarePass(state: AnalyseState, node: Node | null): void {
             }
             return;
         }
-        case N.TSInterfaceDeclaration:
-            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
-            declareInScope(state, SCOPE.TYPE, node, () => {
-                declareTypeParams(state, node.data.typeParameters);
-            });
-            return;
-        case N.TSTypeAliasDeclaration:
-            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
-            declareInScope(state, SCOPE.TYPE, node, () => {
-                declareTypeParams(state, node.data.typeParameters);
-            });
-            return;
-        case N.TSEnumDeclaration: {
-            declareDualNs(state, node.data.id, SYM.ENUM | SYM.TYPE, state.scope);
-            for (const member of node.data.members) {
-                if (member.type === N.TSEnumMember) declarePass(state, member.data.initializer);
-            }
-            return;
-        }
-        case N.TSModuleDeclaration: {
-            const id = node.data.id;
-            if (id.type === N.BindingIdentifier) declare(state, id, SYM.NAMESPACE, NS_VALUE, state.scope);
-            declareInScope(state, SCOPE.NAMESPACE, node, () => {
-                for (const s of node.data.body) declarePass(state, s);
-            });
-            return;
-        }
-        case N.TSTypeAnnotation:
-        case N.TSTypeReference:
-            return;
-    }
-    walkChildren(node, (c) => declarePass(state, c));
-}
-
-function declareClassBody(state: AnalyseState, list: Node[]): void {
-    for (const m of list) {
-        if (m.type === N.MethodDefinition) {
-            if (m.data.computed) declarePass(state, m.data.key);
-            declarePass(state, m.data.value);
-        } else if (m.type === N.PropertyDefinition) {
-            if (m.data.computed) declarePass(state, m.data.key);
-            declarePass(state, m.data.value);
-        } else declarePass(state, m);
-    }
-}
-
-/** enter the scope this node created in pass 1 (if any), run body, restore */
-function inNodeScope(state: AnalyseState, node: Node, body: () => void): void {
-    const s = state.sem.nodeScope.get(node);
-    if (s === undefined) {
-        body();
-        return;
-    }
-    const prev = state.scope;
-    state.scope = s;
-    body();
-    state.scope = prev;
-}
-
-function resolvePattern(state: AnalyseState, node: Node | null): void {
-    if (node === null) return;
-    switch (node.type) {
-        case N.BindingIdentifier:
-            return;
-        case N.ArrayPattern:
-            for (const el of node.data.elements) resolvePattern(state, el);
-            return;
-        case N.ObjectPattern:
-            for (const p of node.data.properties) resolvePattern(state, p);
-            return;
-        case N.ObjectProperty:
-            if (node.data.computed) resolvePass(state, node.data.key);
-            resolvePattern(state, node.data.value);
-            return;
-        case N.AssignmentPattern:
-            resolvePattern(state, node.data.left);
-            resolvePass(state, node.data.right);
-            return;
-        case N.RestElement:
-            resolvePattern(state, node.data.argument);
-            return;
-        case N.FormalParameter:
-            resolvePattern(state, node.data.pattern);
-            resolveType(state, node.data.typeAnnotation);
-            resolvePass(state, node.data.init);
-            return;
-    }
-}
-
-function resolveParams(state: AnalyseState, list: Node[]): void {
-    for (const p of list) {
-        if (p.type === N.RestElement) {
-            resolvePattern(state, p.data.argument);
-            resolveType(state, p.data.typeAnnotation);
-        } else resolvePattern(state, p);
-    }
-}
-
-/** resolve a TS type subtree (type namespace for TSTypeRef heads, value ns for typeof) */
-function resolveType(state: AnalyseState, node: Node | null): void {
-    if (node === null) return;
-    switch (node.type) {
-        case N.TSTypeReference:
-            resolveEntityName(state, node.data.typeName, NS_TYPE);
-            resolveType(state, node.data.typeArguments);
-            return;
-        case N.TSTypeQuery:
-            resolveEntityName(state, node.data.exprName, NS_VALUE);
-            resolveType(state, node.data.typeArguments);
-            return;
-        case N.TSMappedType:
-            inNodeScope(state, node, () => {
-                walkChildren(node, (c) => resolveType(state, c));
-            });
-            return;
-        case N.TSPropertySignature:
-            if (node.data.computed) resolvePass(state, node.data.key);
-            resolveType(state, node.data.typeAnnotation);
-            return;
-    }
-    if (isIdentifier(node.type)) return;
-    walkChildren(node, (c) => resolveType(state, c));
-}
-
-/** qualified name head resolves; the rest are member-ish */
-function resolveEntityName(state: AnalyseState, node: Node | null, ns: number): void {
-    if (node === null) return;
-    if (node.type === N.IdentifierReference) resolveRef(state, node, ns);
-    else if (node.type === N.TSQualifiedName) resolveEntityName(state, node.data.left, ns);
-}
-
-function resolvePass(state: AnalyseState, node: Node | null): void {
-    if (node === null) return;
-    switch (node.type) {
-        case N.IdentifierReference:
-            resolveRef(state, node, NS_VALUE);
-            return;
-        case N.StaticMemberExpression:
-        case N.PrivateFieldExpression:
-            resolvePass(state, node.data.object);
-            return;
-        case N.ComputedMemberExpression:
-            resolvePass(state, node.data.object);
-            resolvePass(state, node.data.expression);
-            return;
-        case N.ChainExpression:
-            resolvePass(state, node.data.expression);
-            return;
-        case N.ObjectProperty:
-            if (node.data.computed) resolvePass(state, node.data.key);
-            resolvePass(state, node.data.value);
-            return;
-        case N.MethodDefinition:
-            if (node.data.computed) resolvePass(state, node.data.key);
-            resolvePass(state, node.data.value);
-            return;
-        case N.PropertyDefinition:
-            if (node.data.computed) resolvePass(state, node.data.key);
-            resolvePass(state, node.data.value);
-            resolveType(state, node.data.typeAnnotation);
-            return;
-        case N.VariableDeclaration: {
-            for (const d of node.data.declarations) {
-                if (d.type !== N.VariableDeclarator) continue;
-                resolvePattern(state, d.data.id);
-                resolveType(state, d.data.typeAnnotation);
-                resolvePass(state, d.data.init);
-            }
-            return;
-        }
-        case N.FunctionDeclaration:
-        case N.FunctionExpression:
-            inNodeScope(state, node, () => {
-                resolveParams(state, node.data.params);
-                resolveType(state, node.data.returnType);
-                resolvePass(state, node.data.body);
-            });
-            return;
-        case N.ArrowFunctionExpression:
-            inNodeScope(state, node, () => {
-                resolveParams(state, node.data.params);
-                resolveType(state, node.data.returnType);
-                resolvePass(state, node.data.body);
-            });
-            return;
-        case N.ClassDeclaration:
-        case N.ClassExpression: {
-            resolvePass(state, node.data.superClass);
-            inNodeScope(state, node, () => {
-                for (const h of node.data.implements) {
-                    if (h.type !== N.TSClassImplements) continue;
-                    resolveEntityName(state, h.data.expression, NS_TYPE);
-                    resolveType(state, h.data.typeArguments);
-                }
-                resolveType(state, node.data.superTypeArguments);
-                for (const m of node.data.body) resolvePass(state, m);
-            });
-            return;
-        }
-        case N.BlockStatement:
-        case N.StaticBlock:
-        case N.ForStatement:
-        case N.SwitchStatement:
-        case N.TSModuleDeclaration:
-            inNodeScope(state, node, () => {
-                walkChildren(node, (c) => resolvePass(state, c));
-            });
-            return;
-        case N.CatchClause:
-            inNodeScope(state, node, () => {
-                resolvePattern(state, node.data.param);
-                resolvePass(state, node.data.body);
-            });
-            return;
-        case N.ForInStatement:
-        case N.ForOfStatement:
-            inNodeScope(state, node, () => {
-                resolvePass(state, node.data.left);
-                resolvePass(state, node.data.right);
-                resolvePass(state, node.data.body);
-            });
-            return;
-        case N.ImportDeclaration:
-            return;
         case N.ExportNamedDeclaration: {
             const decl = node.data.declaration;
             if (decl !== null) {
-                resolvePass(state, decl);
+                visit(state, decl);
                 return;
             }
             if (node.data.source !== null) return;
             for (const s of node.data.specifiers) {
                 if (s.type !== N.ExportSpecifier) continue;
                 const local = s.data.local;
-                if (local.type === N.IdentifierReference) resolveRef(state, local, NS_VALUE);
+                if (local.type === N.IdentifierReference) collect(state, local, NS_VALUE);
             }
             return;
         }
         case N.LabeledStatement:
-            resolvePass(state, node.data.body);
+            visit(state, node.data.body);
             return;
         case N.BreakStatement:
         case N.ContinueStatement:
             return;
         case N.TSInterfaceDeclaration:
-            inNodeScope(state, node, () => {
+            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
+            declareInScope(state, SCOPE.TYPE, node, () => {
+                declareTypeParams(state, node.data.typeParameters);
                 for (const h of node.data.extends) {
                     if (h.type !== N.TSInterfaceHeritage) continue;
-                    resolveEntityName(state, h.data.expression, NS_TYPE);
-                    resolveType(state, h.data.typeArguments);
+                    collectEntityName(state, h.data.expression, NS_TYPE);
+                    visitType(state, h.data.typeArguments);
                 }
-                for (const m of node.data.body) resolveType(state, m);
+                for (const m of node.data.body) visitType(state, m);
             });
             return;
         case N.TSTypeAliasDeclaration:
-            inNodeScope(state, node, () => {
-                resolveType(state, node.data.typeAnnotation);
+            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
+            declareInScope(state, SCOPE.TYPE, node, () => {
+                declareTypeParams(state, node.data.typeParameters);
+                visitType(state, node.data.typeAnnotation);
             });
             return;
         case N.TSEnumDeclaration:
+            declareDualNs(state, node.data.id, SYM.ENUM | SYM.TYPE, state.scope);
             for (const member of node.data.members) {
-                if (member.type === N.TSEnumMember) resolvePass(state, member.data.initializer);
+                if (member.type === N.TSEnumMember) visit(state, member.data.initializer);
             }
             return;
+        case N.TSModuleDeclaration: {
+            const id = node.data.id;
+            if (id.type === N.BindingIdentifier) declare(state, id, SYM.NAMESPACE, NS_VALUE, state.scope);
+            declareInScope(state, SCOPE.NAMESPACE, node, () => {
+                for (const s of node.data.body) visit(state, s);
+            });
+            return;
+        }
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
-            resolvePass(state, node.data.expression);
-            resolveType(state, node.data.typeAnnotation);
+            visit(state, node.data.expression);
+            visitType(state, node.data.typeAnnotation);
             return;
         case N.TSInstantiationExpression:
-            resolvePass(state, node.data.expression);
-            resolveType(state, node.data.typeArguments);
+            visit(state, node.data.expression);
+            visitType(state, node.data.typeArguments);
             return;
         case N.TSTypeAnnotation:
-            resolveType(state, node);
+            visitType(state, node);
+            return;
+        case N.TSTypeReference:
             return;
         case N.CallExpression:
         case N.NewExpression:
-            resolvePass(state, node.data.callee);
-            resolveType(state, node.data.typeArguments);
-            for (const a of node.data.arguments) resolvePass(state, a);
+            visit(state, node.data.callee);
+            visitType(state, node.data.typeArguments);
+            for (const a of node.data.arguments) visit(state, a);
             return;
     }
-    walkChildren(node, (c) => resolvePass(state, c));
+    walkChildren(node, (c) => visit(state, c));
 }
 
 /**
