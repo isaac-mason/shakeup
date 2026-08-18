@@ -1,5 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
-import { mutateChildren, N, type Node, node, type Program, walk } from './ast';
+import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './ast';
 import { attrsHaveKeyAfterSpreadEmit, type JSXLower } from './jsx-text';
 import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
@@ -362,17 +362,32 @@ function hotMethod(call: Node): string | null {
     return isHot ? callee.data.property.name : null;
 }
 
+/** Retype an import-bound reference IN PLACE into its runtime member (`_0.foo` / `_0["n-m"]`), or
+ *  rename for a namespace import (`ns` → `_0`, the local IS the namespace). */
+function setMember(n: Node, b: ImportBinding): void {
+    if (b.imported === null) {
+        n.name = b.local;
+        return;
+    }
+    if (isIdentName(b.imported)) {
+        set(n, N.StaticMemberExpression, { object: ident(b.local, n.start), property: identName(b.imported, n.end), optional: false });
+    } else {
+        set(n, N.ComputedMemberExpression, { object: ident(b.local, n.start), expression: node(N.StringLiteral, n.start, n.end, JSON.stringify(b.imported), null), optional: false });
+    }
+}
+
 /**
- * Per-node enter logic: returns a replacement Node, `null` to drop, or `undefined` to leave. Rewrites
- * imports/exports (at `Program`), import-bound references → member access (with `(0, …)` for
- * import-member callees), `import.meta` → `__shakeup.meta`, dynamic `import()` → `__shakeup.link()`,
- * and detects JSX / value-namespace / `import.meta.hot.accept`.
+ * The runner-link visitor, applied by {@link walk} to every node. Mutates IN PLACE (via {@link set}):
+ * imports/exports at `Program`, import-bound references → member access (with `(0, …)` for import-
+ * member callees), `import.meta` → `__shakeup.meta`, dynamic `import()` → `__shakeup.link()`. Also
+ * detects JSX / value-namespace / `import.meta.hot.accept`. Returns `false` to prune type-only
+ * subtrees — the printer strips them, so there's nothing to rewrite inside.
  */
-function runnerEnter(n: Node, ctx: RunnerCtx): Node | null | undefined {
+function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
     switch (n.type) {
         case N.Program:
             processModuleStatements(ctx, n);
-            return undefined;
+            return;
         case N.CallExpression: {
             if (n.data.callee.type === N.IdentifierReference) ctx.calleeIdents.add(n.data.callee);
             const hm = hotMethod(n);
@@ -384,69 +399,59 @@ function runnerEnter(n: Node, ctx: RunnerCtx): Node | null | undefined {
                     } else ctx.hmr.selfAccepts = true;
                 } else ctx.hmr.acceptedDeps.push(strVal(ctx.code, first));
             } else if (hm === 'acceptExports') ctx.hmr.selfAccepts = true;
-            return undefined;
+            return;
         }
         case N.TaggedTemplateExpression:
             if (n.data.tag.type === N.IdentifierReference) ctx.calleeIdents.add(n.data.tag);
-            return undefined;
+            return;
         // Detection folded in (no separate scanJSX / collectUnsupported walk):
         case N.JSXElement:
         case N.JSXFragment:
             ctx.hasJSX = true;
-            return undefined;
+            return;
         case N.JSXOpeningElement:
             if (attrsHaveKeyAfterSpreadEmit(n.data.attributes)) ctx.needsCreateElement = true;
-            return undefined;
+            return;
         case N.TSModuleDeclaration:
             if (!n.data.declare) ctx.unsupported.push(n.start); // value namespace
-            return undefined;
+            return;
         case N.ImportMeta:
-            return shakeupMember('meta', n.start, n.end);
+            set(n, N.StaticMemberExpression, { object: ident('__shakeup', n.start), property: identName('meta', n.end), optional: false });
+            return;
         case N.ImportExpression: {
             const d = n.data;
             if (d.source.type === N.StringLiteral) ctx.dynamicDeps.push(strVal(ctx.code, d.source));
-            return node(N.CallExpression, n.start, n.end, '', {
+            set(n, N.CallExpression, {
                 callee: shakeupMember('link', n.start, n.start),
                 arguments: d.options === null ? [d.source] : [d.source, d.options],
                 optional: false,
                 typeArguments: null,
             });
+            return;
         }
-        case N.ObjectProperty: {
+        case N.ObjectProperty:
             if (n.data.shorthand && n.data.value.type === N.IdentifierReference) {
                 if (ctx.bindings.get(symbolOf(ctx.semantic, n.data.value)) !== undefined) n.data.shorthand = false;
             }
-            return undefined;
-        }
+            return;
         case N.IdentifierReference: {
             const b = ctx.bindings.get(symbolOf(ctx.semantic, n));
-            if (b === undefined) return undefined;
-            const m = memberOf(b, n.start, n.end);
+            if (b === undefined) return;
             if (b.imported !== null && ctx.calleeIdents.has(n)) {
-                return node(N.SequenceExpression, n.start, n.end, '', {
-                    expressions: [node(N.NumericLiteral, n.start, n.start, '0', null), m],
-                });
+                const m = memberOf(b, n.start, n.end);
+                set(n, N.SequenceExpression, { expressions: [node(N.NumericLiteral, n.start, n.start, '0', null), m] });
+                return;
             }
-            return m;
+            setMember(n, b);
+            return;
         }
-        default:
-            return undefined;
     }
+    if (isTypeOnlyNode(n.type)) return false; // prune type subtrees — nothing to rewrite inside
 }
 
-/** Visit a node then recurse into its children, writing back replacements/drops. */
-function runnerVisit(n: Node, ctx: RunnerCtx): Node | null {
-    const r = runnerEnter(n, ctx);
-    if (r === null) return null;
-    const cur = r === undefined ? n : r;
-    mutateChildren(cur, (c) => runnerVisit(c, ctx));
-    return cur;
-}
-
-/** Lower a parsed module into the `__shakeup.*` runner protocol, in place, in ONE traversal. */
+/** Lower a parsed module into the `__shakeup.*` runner protocol, in place, in ONE walk. */
 function runnerLink(program: Program, ctx: RunnerCtx): void {
-    runnerEnter(program, ctx); // Program → processModuleStatements (root is never replaced)
-    mutateChildren(program, (c) => runnerVisit(c, ctx));
+    walk(program, (n) => runnerVisit(n, ctx));
 }
 
 export type DevTransformOptions = { lang?: TransformLang; jsx?: JSXOptions; sourcemap?: boolean };

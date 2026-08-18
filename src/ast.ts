@@ -434,6 +434,19 @@ export function node<Id extends NodeType>(type: Id, start: number, end: number, 
     return { id: allocId(), type, start, end, name, data } as Node;
 }
 
+/**
+ * Retype a node IN PLACE — change its `type` and `data`. The JS spelling of oxc's `*expr = new`:
+ * a mutation pass replaces a node by overwriting it, and because parents hold the same object
+ * reference, the parent sees the new node with no rewiring. The one localized cast where a node
+ * becomes a different node type (a tagged union can't express that in the type system). Span
+ * (`start`/`end`) is kept; `name` is left as-is (unused by most node types).
+ */
+export function set<Id extends NodeType>(n: Node, type: Id, data: DataForId<Id>): void {
+    const w = n as { type: number; data: unknown };
+    w.type = type;
+    w.data = data;
+}
+
 /** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
 export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => boolean | void): void {
     const fields = FIELDS[n.type];
@@ -452,41 +465,9 @@ export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex
     }
 }
 
-/**
- * Like {@link walkChildren} but the callback may MUTATE the slot: return a Node to replace the
- * child, `null` to drop it (list slots compact; a direct slot is set null — only valid where the
- * field is nullable), or `undefined` to leave it. The substrate for AST-as-IR mutation passes.
- */
-export function mutateChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => Node | null | undefined): void {
-    const fields = FIELDS[n.type];
-    const data = payload(n);
-    if (data === null) return;
-    for (let i = 0; i < fields.length; i++) {
-        const f = fields[i];
-        const v = data[f.name];
-        if (v == null) continue;
-        if (f.list) {
-            const arr = v as (Node | null)[];
-            let w = 0;
-            for (let j = 0; j < arr.length; j++) {
-                const c = arr[j];
-                if (c == null) {
-                    arr[w++] = c;
-                    continue;
-                }
-                const r = cb(c, f.name, j);
-                if (r === null) continue; // drop
-                arr[w++] = r === undefined ? c : r;
-            }
-            arr.length = w;
-        } else {
-            const r = cb(v as Node, f.name, -1);
-            if (r !== undefined) (data as Record<string, unknown>)[f.name] = r;
-        }
-    }
-}
-
-/** Depth-first pre-order walk. `enter` may return false to skip the subtree. */
+/** Depth-first pre-order walk. `enter` may return false to skip the subtree. When `enter` mutates a
+ *  node in place (via {@link set}), recursion follows the NEW type — `enter` runs before `n.type` is
+ *  read — so this doubles as the mutation traversal (no separate mutating walk needed). */
 export function walk(n: Node, enter: (n: Node) => boolean | void): void {
     if (enter(n) === false) return;
     const d = payload(n);
