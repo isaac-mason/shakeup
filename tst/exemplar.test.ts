@@ -120,7 +120,7 @@ describe('exemplar: pinned known limitations', () => {
             '/e.ts': 'export enum E { A = 1, B = 2, BOTH = A | B }',
         });
         // prior-member refs are qualified to the enum object, so BOTH = 1 | 2 = 3.
-        expect(code).toMatch(/\["BOTH"\] = \w+\.A \| \w+\.B\]/);
+        expect(code).toMatch(/\["BOTH"\]\s*=\s*\w+\.A \| \w+\.B\]/);
         const ns = await run(code);
         expect(ns.both).toBe(3);
     });

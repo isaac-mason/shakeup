@@ -117,7 +117,9 @@ function emitJSXTag(p: Printer, name: Node): void {
             write(p, JSON.stringify(`${(jd(name).namespace as Node).name}:${(jd(name).name as Node).name}`));
             return;
         default:
-            write(p, name.name);
+            // A runner-rewritten import tag (`<Foo/>` where Foo is imported → `_0.Foo`): the pass
+            // replaced the IdentifierReference with a member expression, so print it as one.
+            printExpr(p, name, Prec.Assign);
     }
 }
 

@@ -1,8 +1,7 @@
-import { walkRefIdents } from './analysis/refs';
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { applyEdits, buildLineTable, collectStripEdits, type Edit, type JSXLower, renderMappedPart } from './emit';
+import { buildLineTable, type Edit, type JSXLower } from './emit';
 import { basenameOf, dirnameOf, relativePath } from './fs';
 import {
     buildGraph,
@@ -207,153 +206,9 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
     }
 }
 
-/** Walk an expression/statement subtree adding rename edits (shorthand-aware) AND
- *  rewriting dynamic `import()` specifiers to their target chunk. */
-function renameWalk(ctx: EmitCtx, node: Node): void {
-    walkRefIdents(node, (ident, shorthandProp) => {
-        const newName = renameOf(ctx, ident);
-        if (newName === null || newName === ident.name) return;
-        ctx.edits.push({
-            start: ident.start,
-            end: ident.end,
-            text: shorthandProp !== null ? `${ident.name}: ${newName}` : newName,
-        });
-    });
-    rewriteDynamicImports(ctx, node);
-    rewriteNewUrlAssets(ctx, node);
-}
 
-/** Rewrite each `new URL('./x', import.meta.url)` whose asset was emitted to point at the emitted
- *  fileName (relative to the chunk, so `import.meta.url` still resolves it at runtime). */
-function rewriteNewUrlAssets(ctx: EmitCtx, node: Node): void {
-    const { mod } = ctx;
-    walk(node, (n) => {
-        if (n.type !== N.NewExpression || n.data.arguments.length !== 2) return;
-        if (n.data.callee.type !== N.IdentifierReference || n.data.callee.name !== 'URL') return;
-        const base = n.data.arguments[1];
-        if (base.type !== N.StaticMemberExpression || base.data.object.type !== N.ImportMeta || base.data.property.name !== 'url')
-            return;
-        const spec = n.data.arguments[0];
-        if (spec.type !== N.StringLiteral) return;
-        const specifier = mod.source.slice(spec.start + 1, spec.end - 1);
-        const rec = mod.importRecords.find((r) => r.kind === 'new-url' && r.specifier === specifier);
-        if (rec?.assetFileName === undefined) return;
-        ctx.edits.push({ start: spec.start, end: spec.end, text: JSON.stringify(rec.assetFileName) });
-    });
-}
-
-/** Rewrite each literal dynamic `import('./spec')` in `node` to point at the target chunk's
- *  logical import path; if the target collapsed into THIS chunk, replace with
- *  `Promise.resolve(<namespaceObject>)`. External / non-literal import() is left verbatim. */
-function rewriteDynamicImports(ctx: EmitCtx, node: Node): void {
-    const { mod, chunk, chunkGraph } = ctx;
-    if (chunk === null || chunkGraph === null) return;
-    walk(node, (n) => {
-        if (n.type !== N.ImportExpression) return;
-        const source = n.data.source;
-        if (source.type !== N.StringLiteral) return;
-        const spec = mod.source.slice(source.start + 1, source.end - 1);
-        const rec = mod.importRecords.find((r) => r.specifier === spec);
-        if (rec === undefined || rec.external || rec.resolved < 0) return;
-        const targetChunk = chunkGraph.chunkByModule[rec.resolved];
-        if (targetChunk < 0) {
-            // Target dropped from the bundle (dead pure dynamic import): the module never made it
-            // into a chunk, so resolve to an empty namespace — the result was provably unused.
-            ctx.edits.push({ start: n.start, end: n.end, text: 'Promise.resolve({})' });
-            return;
-        }
-        if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
-            // Target folded into this chunk: resolve against its namespace object. Defer the
-            // namespace access into a microtask (`Promise.resolve().then(() => ns)`) so a
-            // top-level `import().then()` doesn't read the ns const before it's declared (TDZ).
-            const nsName = ctx.linked.namespaceOf.get(rec.resolved);
-            const inner = nsName ?? '{}';
-            ctx.edits.push({ start: n.start, end: n.end, text: `Promise.resolve().then(() => ${inner})` });
-        } else {
-            // Point the specifier at the target chunk's import path (preliminary
-            // placeholder-bearing path, resolved to the final hashed name in pass C).
-            const path = ctx.pathToChunk !== null ? ctx.pathToChunk(targetChunk) : `./${chunkGraph.chunks[targetChunk].name}.js`;
-            ctx.edits.push({ start: source.start, end: source.end, text: `'${path}'` });
-        }
-    });
-}
-
-function moduleEdits(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
-    const { mod } = ctx;
-    const src = mod.source;
-    for (const statement of mod.program.data.body) {
-        if (ctx.live !== null && !ctx.live.has(statement.id)) {
-            ctx.edits.push({ start: statement.start, end: statement.end });
-            continue;
-        }
-
-        if (statement.type === N.ImportDeclaration) {
-            if (statement.data.importKind !== 'type') {
-                const source = statement.data.source;
-                if (source.type === N.StringLiteral && statement.data.specifiers.length === 0) {
-                    const spec = src.slice(source.start + 1, source.end - 1);
-                    const rec = mod.importRecords.find((r) => r.specifier === spec);
-                    if (rec?.external) sideEffectSpecs.add(spec);
-                }
-            }
-            ctx.edits.push({ start: statement.start, end: statement.end });
-            continue;
-        }
-
-        if (statement.type === N.ExportAllDeclaration) {
-            const source = statement.data.source;
-            const spec = source.type === N.StringLiteral ? src.slice(source.start + 1, source.end - 1) : '';
-            const rec = mod.importRecords.find((r) => r.specifier === spec);
-            if (rec?.external) {
-                if (isEntry) entryStarSpecs.push(spec);
-                else
-                    ctx.warnings.push(
-                        `'export * from "${spec}"' in non-entry module '${mod.id}' is dropped (external star re-export)`,
-                    );
-            }
-            ctx.edits.push({ start: statement.start, end: statement.end });
-            continue;
-        }
-
-        if (statement.type === N.ExportNamedDeclaration) {
-            if (statement.data.exportKind === 'type') continue;
-            const decl = statement.data.declaration;
-            if (decl !== null) {
-                if (
-                    decl.type === N.TSEnumDeclaration ||
-                    decl.type === N.TSInterfaceDeclaration ||
-                    decl.type === N.TSTypeAliasDeclaration
-                )
-                    continue;
-                ctx.edits.push({ start: statement.start, end: decl.start });
-                renameWalk(ctx, decl);
-            } else {
-                ctx.edits.push({ start: statement.start, end: statement.end });
-            }
-            continue;
-        }
-
-        if (statement.type === N.ExportDefaultDeclaration) {
-            const decl = statement.data.declaration;
-            const named = (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) && decl.data.id !== null;
-            if (named) {
-                ctx.edits.push({ start: statement.start, end: decl.start });
-            } else {
-                const ref = ctx.linked.defaultRefs.get(mod.idx);
-                const name = ref !== undefined ? finalNameOf(ctx.linked, ref) : `${mod.idx}_default`;
-                ctx.edits.push({ start: statement.start, end: decl.start, text: `const ${name} = ` });
-            }
-            renameWalk(ctx, decl);
-            continue;
-        }
-
-        renameWalk(ctx, statement);
-    }
-}
-
-/** The chunk-level bookkeeping half of {@link moduleEdits}, without producing edits — used by
- *  the printer backend, which drops import/export statements itself but still needs the
- *  side-effect-import and entry-star tracking their removal implies. */
+/** The printer backend drops import/export statements itself, but still needs the side-effect-import
+ *  and entry-star tracking that their removal implies — this records it without producing edits. */
 function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[], sideEffectSpecs: Set<string>): void {
     const { mod } = ctx;
     const src = mod.source;
@@ -782,11 +637,6 @@ function renderChunk(
             }
         }
         const live = shaken === null ? null : shaken.live[idx];
-        const enumFinalName = (idNode: Node): string | null => {
-            const sym = symbolOf(mod.semantic, idNode);
-            if (sym === 0) return null;
-            return linked.finalNames.get(packRef(mod.idx, sym)) ?? null;
-        };
         const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
         const jsxLower: JSXLower | null =
             mod.jsxRuntime === null
@@ -802,14 +652,15 @@ function renderChunk(
         const srcIdx = mapSources.length;
         let out: string;
         let mapPart: Part | null = null;
-        if (naming.minify) {
-            // Printer backend: generate every token from the AST, in link mode (drop imports,
-            // unwrap exports, shake dead statements, apply renames + node rewrites).
+        // Printer backend (minify and non-minify): generate every token from the AST, in link mode
+        // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
+        // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
+        {
             const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
             const printer = createPrinter(
-                { minify: true },
+                { minify: naming.minify },
                 {
                     nameOf: (idNode: Node) => renameOf(ctx, idNode) ?? idNode.name,
                     jsx: jsxLower,
@@ -831,20 +682,6 @@ function renderChunk(
             } else {
                 out = finishPrinter(printer).trim();
             }
-        } else {
-            // Edit-engine backend: span-copy verbatim, blanking/replacing only what changes.
-            let stripEdits = collectStripEdits(mod.program, mod.source, true, enumFinalName, jsxLower);
-            if (live !== null) {
-                const deadSpans: [number, number][] = [];
-                for (const statement of mod.program.data.body) {
-                    if (!live.has(statement.id)) deadSpans.push([statement.start, statement.end]);
-                }
-                stripEdits = stripEdits.filter((e) => !deadSpans.some(([s, x]) => e.start >= s && e.end <= x));
-            }
-            const ctx: EmitCtx = { graph, linked, mod, edits: stripEdits, warnings, live, chunk, chunkGraph, pathToChunk };
-            moduleEdits(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
-            out = applyEdits(mod.source, ctx.edits).trim();
-            if (wantMap) mapPart = renderMappedPart(mod.source, ctx.edits, srcIdx);
         }
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx)) {

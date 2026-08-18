@@ -69,6 +69,62 @@ function printBinaryOperand(p: Printer, child: Node, minPrec: Prec): void {
     printExpr(p, child, minPrec);
 }
 
+/** The leading '+'/'-' char the printed form of `n` starts with (via its left spine), or ''.
+ *  Used to force a mandatory space so `a - -b` / `a + ++b` can't merge into `a--b` / `a+++b`
+ *  under minify. A parenthesised operand starts with '(' so this over-reporting is harmless
+ *  (a spurious space, never a wrong token). */
+function leadingSign(n: Node): string {
+    switch (n.type) {
+        case N.UnaryExpression: {
+            const op = data(n).operator as string;
+            return op === '+' || op === '-' ? op : '';
+        }
+        case N.UpdateExpression:
+            return (data(n).prefix as boolean) ? (data(n).operator as string)[0] : leadingSign(data(n).argument as Node);
+        case N.BinaryExpression:
+        case N.LogicalExpression:
+        case N.AssignmentExpression:
+            return leadingSign(data(n).left as Node);
+        case N.ConditionalExpression:
+            return leadingSign(data(n).test as Node);
+        case N.SequenceExpression:
+            return leadingSign((data(n).expressions as Node[])[0]);
+        case N.CallExpression:
+            return leadingSign(data(n).callee as Node);
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+            return leadingSign(data(n).object as Node);
+        case N.TaggedTemplateExpression:
+            return leadingSign(data(n).tag as Node);
+        case N.ChainExpression:
+        case N.TSNonNullExpression:
+        case N.TSAsExpression:
+        case N.TSSatisfiesExpression:
+        case N.TSInstantiationExpression:
+            return leadingSign(data(n).expression as Node);
+        default:
+            return '';
+    }
+}
+
+/** Does a `new` callee contain a call on its member spine? Such a callee must be
+ *  parenthesised (see {@link emitExpr} NewExpression). */
+function newCalleeHasCall(n: Node): boolean {
+    switch (n.type) {
+        case N.CallExpression:
+            return true;
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+            return newCalleeHasCall(data(n).object as Node);
+        case N.ChainExpression:
+        case N.TSNonNullExpression:
+        case N.TSInstantiationExpression:
+            return newCalleeHasCall(data(n).expression as Node);
+        default:
+            return false;
+    }
+}
+
 function emitBinary(p: Printer, n: Node): void {
     const d = data(n);
     const op = d.operator as string;
@@ -83,7 +139,10 @@ function emitBinary(p: Printer, n: Node): void {
     if (wordOp) space(p);
     else softSpace(p);
     write(p, op);
-    if (wordOp) space(p);
+    // `+`/`-` before a right operand that also leads with that sign needs a real space,
+    // else `-` `-b` collapses to the `--` token (`a--b`) — a different program.
+    const mergeRisk = (op === '+' || op === '-') && leadingSign(d.right as Node) === op;
+    if (wordOp || mergeRisk) space(p);
     else softSpace(p);
     printBinaryOperand(p, d.right as Node, op === '**' ? prec : ((prec + 1) as Prec));
 }
@@ -204,13 +263,28 @@ function emitObjectMember(p: Printer, n: Node): void {
     }
     emitPropertyKey(p, d.key as Node, computed);
     if (d.shorthand as boolean) {
-        // `{ w = 1 }` in a pattern: shorthand key plus a default — the value is an
-        // AssignmentPattern whose left is the key, so append only its `= <default>` tail.
+        // Shorthand omits the value — but if the value binding was RENAMED (bundle deconflict /
+        // minify), the shorthand must expand to `key: <renamed>` or the reference dangles.
         if (value.type === N.AssignmentPattern) {
+            // `{ w = 1 }` in a pattern: left is the binding (maybe renamed), right is the default.
+            const left = data(value).left as Node;
+            const rn = p.nameOf(left);
+            if (rn !== left.name) {
+                write(p, ':');
+                softSpace(p);
+                write(p, rn);
+            }
             softSpace(p);
             write(p, '=');
             softSpace(p);
             printExpr(p, data(value).right as Node, Prec.Assign);
+            return;
+        }
+        const rn = p.nameOf(value);
+        if (rn !== value.name) {
+            write(p, ':');
+            softSpace(p);
+            write(p, rn);
         }
         return;
     }
@@ -408,12 +482,22 @@ function emitExpr(p: Printer, n: Node): void {
             if (d.optional as boolean) write(p, '?.');
             emitArgs(p, d.arguments as Node[]);
             return;
-        case N.NewExpression:
+        case N.NewExpression: {
             write(p, 'new');
             space(p);
-            printExpr(p, d.callee as Node, Prec.New);
+            // A call on the callee's member spine must be parenthesised, else `new (foo())()`
+            // degrades to `new foo()()` = `(new foo())()` — the `()` binds as the new's args.
+            const callee = d.callee as Node;
+            if (newCalleeHasCall(callee)) {
+                write(p, '(');
+                emitExpr(p, callee);
+                write(p, ')');
+            } else {
+                printExpr(p, callee, Prec.New);
+            }
             emitArgs(p, d.arguments as Node[]);
             return;
+        }
         case N.ImportExpression: {
             write(p, 'import(');
             printExpr(p, d.source as Node, Prec.Assign);
@@ -522,6 +606,54 @@ function isErasedClassMember(n: Node): boolean {
     return false;
 }
 
+/** True if `n` is a `super(...)` statement — parameter-property assignments must follow it. */
+function isSuperCallStmt(n: Node): boolean {
+    if (n.type !== N.ExpressionStatement) return false;
+    const e = data(n).expression as Node;
+    return e.type === N.CallExpression && (data(e).callee as Node).type === N.Super;
+}
+
+/** Binding nodes of a constructor's TS parameter properties (`constructor(private x)`), in order. */
+function constructorParamProps(value: Node): Node[] {
+    const out: Node[] = [];
+    if (value.type !== N.FunctionExpression) return out;
+    for (const par of data(value).params as Node[]) {
+        if (par.type !== N.FormalParameter) continue;
+        const pd = data(par);
+        if (pd.accessibility === null && !(pd.readonly as boolean)) continue;
+        const pat = pd.pattern as Node;
+        if (pat.type === N.BindingIdentifier) out.push(pat); // TS forbids destructuring param props
+    }
+    return out;
+}
+
+/** Emit a constructor body with `this.x = x;` synthesized for each parameter property, after a
+ *  leading `super(...)` (touching `this` before super is illegal). The field name is the original
+ *  param name; the RHS is the (possibly renamed) parameter binding. Ported from emit.ts. */
+function emitConstructorBody(p: Printer, body: Node, props: Node[]): void {
+    write(p, '{');
+    const stmts = body.type === N.BlockStatement ? (data(body).body as Node[]) : [];
+    let i = 0;
+    p.indent++;
+    if (stmts.length > 0 && isSuperCallStmt(stmts[0])) {
+        softNewline(p);
+        printStmt(p, stmts[0]);
+        i = 1;
+    }
+    for (const pat of props) {
+        softNewline(p);
+        write(p, `this.${pat.name} = ${p.nameOf(pat)};`);
+    }
+    for (; i < stmts.length; i++) {
+        softNewline(p);
+        printStmt(p, stmts[i]);
+    }
+    dropTrailingSemi(p);
+    p.indent--;
+    softNewline(p);
+    write(p, '}');
+}
+
 function emitClassMember(p: Printer, n: Node): void {
     const d = data(n);
     if (n.type === N.StaticBlock) {
@@ -560,6 +692,15 @@ function emitClassMember(p: Printer, n: Node): void {
     }
     if (vd.generator as boolean) write(p, '*');
     emitPropertyKey(p, d.key as Node, d.computed as boolean);
+    if (kind === 'constructor') {
+        const props = constructorParamProps(value);
+        if (props.length > 0) {
+            emitParams(p, vd.params as Node[]);
+            softSpace(p);
+            emitConstructorBody(p, vd.body as Node, props);
+            return;
+        }
+    }
     emitFunctionTail(p, vd);
 }
 

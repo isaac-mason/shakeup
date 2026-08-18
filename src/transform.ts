@@ -13,6 +13,16 @@ import {
 } from './emit';
 import { collectUnsupported, type JSXOptions, resolveJSXOptions, scanJSX } from './module-graph';
 import { parse } from './parser';
+import {
+    assembleRunner as buildRunnerCode,
+    assembleRunnerMapped as buildRunnerMapped,
+    createRunnerCtx,
+    linkRuntime,
+    moduleRunnerPass,
+} from './pass/module-runner';
+import { runPass } from './pass/traverse';
+import { printModule } from './print/print-js';
+import { createPrinter, finishPrinter, printerPart } from './print/printer';
 import { addLine, encodeMappings, joinParts, newMappings, type Part, type SourceMap } from './sourcemap';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
@@ -459,11 +469,11 @@ export function moduleRunnerTransform(filename: string, code: string, options: {
 export type DevTransformOptions = { lang?: TransformLang; jsx?: JSXOptions; sourcemap?: boolean };
 
 /**
- * The FUSED dev-path transform: TS/JSX strip + module-runner rewrite over a SINGLE parse. For
- * NON-JSX modules the strip edits + runner-rewrite edits are collected over one AST and applied
- * together (one parse instead of two). JSX modules fall back to the sequential 2-parse path
- * (`transform` → `moduleRunnerTransform`): JSX lowering generates runtime + component references
- * the runner-rewrite must also resolve, which the fused path doesn't do yet.
+ * The dev-path transform (Branch A): ONE parse → analyze → module-runner mutation pass → print.
+ * TS-stripping and JSX-lowering are printer concerns (config over the immutable AST); the
+ * structural runner rewrite (`import`→`link`, exports→`live`, refs→member) is the AST mutation
+ * pass. JSX is no longer a special 2-parse case: the pass rewrites component-tag references and
+ * the runtime is linked + referenced as member text, so JSX/TSX costs a single parse+pass+print.
  */
 export function devTransform(filename: string, source: string, options: DevTransformOptions = {}): ModuleRunnerResult {
     const lang = options.lang ?? inferLang(filename);
@@ -476,18 +486,32 @@ export function devTransform(filename: string, source: string, options: DevTrans
     if (ts) collectUnsupported(program, filename, errors);
     if (errors.length > 0) return emptyResult(errors);
 
-    // JSX: not yet fused — use the proven sequential path. No source map yet: it
-    // would map runner-code→stripped, and composing strip∘runner needs a chain step.
-    if (jsx && scanJSX(program).hasJSX) {
-        const stripped = transform(filename, source, { lang, jsx: options.jsx });
-        if (stripped.errors.length > 0) return emptyResult(stripped.errors);
-        return moduleRunnerTransform(filename, stripped.code);
-    }
-
-    // one parse feeds both the TS strip and the runner-rewrite.
     const semantic = createSemantic();
     analyze(semantic, program);
-    const r = collectRunnerEdits(program, semantic, source);
-    if (ts) r.edits.push(...collectStripEdits(program, source, true, null, null));
-    return assembleRunner(filename, source, r, errors, options.sourcemap);
+    const scan = jsx ? scanJSX(program) : { hasJSX: false, needsCreateElement: false };
+
+    const ctx = createRunnerCtx(source, semantic);
+    runPass(program as Node, moduleRunnerPass, ctx);
+
+    // JSX runtime: linked post-pass; the printer's lowering references it as member text.
+    let jsxLower: JSXLower | null = null;
+    if (scan.hasJSX) {
+        const { importSource } = resolveJSXOptions(options.jsx);
+        const rt = linkRuntime(ctx, `${importSource}/jsx-runtime`);
+        const ce = scan.needsCreateElement ? linkRuntime(ctx, importSource) : '';
+        jsxLower = { renameIdent: () => null, runtimeName: (k) => (k === 'createElement' ? `${ce}.createElement` : `${rt}.${k}`) };
+    }
+
+    const wantMap = options.sourcemap ?? false;
+    const p = createPrinter(
+        { minify: false },
+        { jsx: jsxLower, srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
+    );
+    printModule(p, program);
+
+    if (wantMap) {
+        const { code, map } = buildRunnerMapped(ctx, filename, printerPart(p));
+        return { code, deps: ctx.deps, dynamicDeps: ctx.dynamicDeps, errors, hmr: ctx.hmr, map };
+    }
+    return { code: buildRunnerCode(ctx, finishPrinter(p)), deps: ctx.deps, dynamicDeps: ctx.dynamicDeps, errors, hmr: ctx.hmr };
 }

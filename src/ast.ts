@@ -323,7 +323,9 @@ const DEFS = [
 type Defs = typeof DEFS;
 type DefOf<T extends TypeName> = Extract<Defs[number], { name: T }>;
 
-type PayloadOf<D extends NodeDef> = D extends null ? null : { [K in keyof D]: D[K] extends Schema ? Infer<D[K]> : never } & {};
+// Payload fields are mutable: the AST is the mutable IR (passes rewrite nodes in place). `-readonly`
+// strips the readonly the `as const` DEFS would otherwise propagate.
+type PayloadOf<D extends NodeDef> = D extends null ? null : { -readonly [K in keyof D]: D[K] extends Schema ? Infer<D[K]> : never } & {};
 
 export type TypeName = Defs[number]['name'];
 
@@ -447,6 +449,40 @@ export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex
                 if (c != null && cb(c, fields[i].name, j) === false) return;
             }
         } else if (cb(v as Node, fields[i].name, -1) === false) return;
+    }
+}
+
+/**
+ * Like {@link walkChildren} but the callback may MUTATE the slot: return a Node to replace the
+ * child, `null` to drop it (list slots compact; a direct slot is set null — only valid where the
+ * field is nullable), or `undefined` to leave it. The substrate for AST-as-IR mutation passes.
+ */
+export function mutateChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => Node | null | undefined): void {
+    const fields = FIELDS[n.type];
+    const data = payload(n);
+    if (data === null) return;
+    for (let i = 0; i < fields.length; i++) {
+        const f = fields[i];
+        const v = data[f.name];
+        if (v == null) continue;
+        if (f.list) {
+            const arr = v as (Node | null)[];
+            let w = 0;
+            for (let j = 0; j < arr.length; j++) {
+                const c = arr[j];
+                if (c == null) {
+                    arr[w++] = c;
+                    continue;
+                }
+                const r = cb(c, f.name, j);
+                if (r === null) continue; // drop
+                arr[w++] = r === undefined ? c : r;
+            }
+            arr.length = w;
+        } else {
+            const r = cb(v as Node, f.name, -1);
+            if (r !== undefined) (data as Record<string, unknown>)[f.name] = r;
+        }
     }
 }
 
