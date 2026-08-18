@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { N, type Node, walk } from '../src/ast.ts';
-import { parse } from '../src/parser.ts';
+import { parse } from '../src/parser';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JSX_DIR = resolve(__dirname, 'fixtures/jsx');

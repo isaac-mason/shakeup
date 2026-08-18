@@ -3,7 +3,7 @@ import type { HmrUpdate } from './environment.ts';
 import type { Fs } from './fs.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from './module-graph.ts';
 import { EMPTY_MODULE_ID } from './node-resolve.ts';
-import { parse } from './parser.ts';
+import { parse } from './parser';
 import {
     compilePipeline,
     type ModuleInfo,

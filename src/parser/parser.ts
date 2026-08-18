@@ -10,8 +10,44 @@ import {
     type Node,
     node,
     type Program,
-} from './ast.ts';
-import { enumeration } from './util/enumeration';
+} from '../ast.ts';
+import { enumeration } from '../util/enumeration';
+import { ParseErrorCode } from './errors.ts';
+import {
+    C_DIG,
+    C_ID,
+    C_NL,
+    C_WS,
+    CHAR,
+    hashRange,
+    intern,
+    nextToken,
+    recordNL,
+    reScanRegex,
+    reScanTemplateContinue,
+    sliceFlat,
+} from './lexer.ts';
+import {
+    F_NL,
+    K,
+    P,
+    type ParseError,
+    type ParserState,
+    raise,
+    T_BIGINT,
+    T_EOF,
+    T_IDENT,
+    T_NUM,
+    T_PRIVATE,
+    T_REGEX,
+    T_STR,
+    T_TEMPLATE_FULL,
+    T_TEMPLATE_HEAD,
+} from './state.ts';
+import { isAssignOp, isBinaryOp, isContextual, isKeyword, isLogical, isPunct, opTextOf, precedenceOf } from './token.ts';
+
+// Re-exported so the parser's public surface (via index.ts) still carries ParseError.
+export type { ParseError };
 
 /** Any of the four identifier-role leaves; the role is fixed by the constructing call site. */
 type Identifier = BindingIdentifier | IdentifierReference | IdentifierName | LabelIdentifier;
@@ -46,92 +82,19 @@ const FL = {
 
 const VAR_KIND = { VAR: 1, LET: 2, CONST: 3, KIND_MASK: 3 } as const;
 
-const OP = enumeration(
-    'ADD',
-    'SUB',
-    'MUL',
-    'DIV',
-    'MOD',
-    'EXP',
-    'SHL',
-    'SHR',
-    'USHR',
-    'BIT_AND',
-    'BIT_OR',
-    'BIT_XOR',
-    'LT',
-    'GT',
-    'LE',
-    'GE',
-    'EQ',
-    'NE',
-    'SEQ',
-    'SNE',
-    'IN',
-    'INSTANCEOF',
-    'AND',
-    'OR',
-    'NULLISH',
-    'NEG',
-    'POS',
-    'NOT',
-    'BIT_NOT',
-    'TYPEOF',
-    'VOID',
-    'DELETE',
-    'INC',
-    'DEC',
-    'ASSIGN',
-    'ADD_A',
-    'SUB_A',
-    'MUL_A',
-    'DIV_A',
-    'MOD_A',
-    'EXP_A',
-    'SHL_A',
-    'SHR_A',
-    'USHR_A',
-    'AND_A',
-    'OR_A',
-    'XOR_A',
-    'LOGAND_A',
-    'LOGOR_A',
-    'NULLISH_A',
-);
+// Unary & update operator ids (their text lives in UNARY_OP_NAME/UPDATE_OP_NAME).
+// Binary/logical/assignment operators no longer need an id — their text comes
+// straight off the packed token via `opTextOf` (token.ts).
+const OP = enumeration('NEG', 'POS', 'NOT', 'BIT_NOT', 'TYPEOF', 'VOID', 'DELETE', 'INC', 'DEC');
 
 const TSOP = enumeration('KEYOF', 'READONLY', 'UNIQUE');
 
-const BIN_OP_NAME: string[] = [];
-const ASSIGN_OP_NAME: string[] = [];
+// Binary / logical / assignment operator text now comes from token.ts (`opTextOf`).
+// Unary & update still carry an `OP` id (parseUnary maps token → OP inline), so
+// only their name tables remain.
 const UNARY_OP_NAME: string[] = [];
 const UPDATE_OP_NAME: string[] = [];
-const LOGICAL_OP_NAME: string[] = [];
 {
-    BIN_OP_NAME[OP.ADD] = '+';
-    BIN_OP_NAME[OP.SUB] = '-';
-    BIN_OP_NAME[OP.MUL] = '*';
-    BIN_OP_NAME[OP.DIV] = '/';
-    BIN_OP_NAME[OP.MOD] = '%';
-    BIN_OP_NAME[OP.EXP] = '**';
-    BIN_OP_NAME[OP.SHL] = '<<';
-    BIN_OP_NAME[OP.SHR] = '>>';
-    BIN_OP_NAME[OP.USHR] = '>>>';
-    BIN_OP_NAME[OP.BIT_AND] = '&';
-    BIN_OP_NAME[OP.BIT_OR] = '|';
-    BIN_OP_NAME[OP.BIT_XOR] = '^';
-    BIN_OP_NAME[OP.LT] = '<';
-    BIN_OP_NAME[OP.GT] = '>';
-    BIN_OP_NAME[OP.LE] = '<=';
-    BIN_OP_NAME[OP.GE] = '>=';
-    BIN_OP_NAME[OP.EQ] = '==';
-    BIN_OP_NAME[OP.NE] = '!=';
-    BIN_OP_NAME[OP.SEQ] = '===';
-    BIN_OP_NAME[OP.SNE] = '!==';
-    BIN_OP_NAME[OP.IN] = 'in';
-    BIN_OP_NAME[OP.INSTANCEOF] = 'instanceof';
-    LOGICAL_OP_NAME[OP.AND] = '&&';
-    LOGICAL_OP_NAME[OP.OR] = '||';
-    LOGICAL_OP_NAME[OP.NULLISH] = '??';
     UNARY_OP_NAME[OP.NEG] = '-';
     UNARY_OP_NAME[OP.POS] = '+';
     UNARY_OP_NAME[OP.NOT] = '!';
@@ -141,22 +104,6 @@ const LOGICAL_OP_NAME: string[] = [];
     UNARY_OP_NAME[OP.DELETE] = 'delete';
     UPDATE_OP_NAME[OP.INC] = '++';
     UPDATE_OP_NAME[OP.DEC] = '--';
-    ASSIGN_OP_NAME[OP.ASSIGN] = '=';
-    ASSIGN_OP_NAME[OP.ADD_A] = '+=';
-    ASSIGN_OP_NAME[OP.SUB_A] = '-=';
-    ASSIGN_OP_NAME[OP.MUL_A] = '*=';
-    ASSIGN_OP_NAME[OP.DIV_A] = '/=';
-    ASSIGN_OP_NAME[OP.MOD_A] = '%=';
-    ASSIGN_OP_NAME[OP.EXP_A] = '**=';
-    ASSIGN_OP_NAME[OP.SHL_A] = '<<=';
-    ASSIGN_OP_NAME[OP.SHR_A] = '>>=';
-    ASSIGN_OP_NAME[OP.USHR_A] = '>>>=';
-    ASSIGN_OP_NAME[OP.AND_A] = '&=';
-    ASSIGN_OP_NAME[OP.OR_A] = '|=';
-    ASSIGN_OP_NAME[OP.XOR_A] = '^=';
-    ASSIGN_OP_NAME[OP.LOGAND_A] = '&&=';
-    ASSIGN_OP_NAME[OP.LOGOR_A] = '||=';
-    ASSIGN_OP_NAME[OP.NULLISH_A] = '??=';
 }
 
 /** Decode the 2-bit accessibility group of a parser flags int. */
@@ -184,9 +131,6 @@ type KeywordType =
     | typeof N.TSUnknownKeyword
     | typeof N.TSThisType;
 
-/** Parse errors and offsets. */
-export type ParseError = { pos: number; msg: string };
-
 const m = {
     BooleanLiteral: (s: number, e: number, flags: number): Node =>
         node(N.BooleanLiteral, s, e, flags !== 0 ? 'true' : 'false', null),
@@ -198,12 +142,12 @@ const m = {
     ImportMeta: (s: number, e: number, _f: number): Node => node(N.ImportMeta, s, e, '', null),
     NewTarget: (s: number, e: number, _f: number): Node => node(N.NewTarget, s, e, '', null),
 
-    BinaryExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node =>
-        node(N.BinaryExpression, s, e, '', { operator: BIN_OP_NAME[flags & 63], left: l, right: r }),
-    LogicalExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node =>
-        node(N.LogicalExpression, s, e, '', { operator: LOGICAL_OP_NAME[flags & 63], left: l, right: r }),
-    AssignmentExpression: (s: number, e: number, flags: number, l: Node, r: Node): Node =>
-        node(N.AssignmentExpression, s, e, '', { operator: ASSIGN_OP_NAME[flags & 63], left: l, right: r }),
+    BinaryExpression: (s: number, e: number, op: string, l: Node, r: Node): Node =>
+        node(N.BinaryExpression, s, e, '', { operator: op, left: l, right: r }),
+    LogicalExpression: (s: number, e: number, op: string, l: Node, r: Node): Node =>
+        node(N.LogicalExpression, s, e, '', { operator: op, left: l, right: r }),
+    AssignmentExpression: (s: number, e: number, op: string, l: Node, r: Node): Node =>
+        node(N.AssignmentExpression, s, e, '', { operator: op, left: l, right: r }),
     UnaryExpression: (s: number, e: number, flags: number, a: Node): Node =>
         node(N.UnaryExpression, s, e, '', { operator: UNARY_OP_NAME[flags & 63], prefix: true, argument: a }),
     UpdateExpression: (s: number, e: number, flags: number, a: Node): Node =>
@@ -696,214 +640,16 @@ const m = {
         node(N.JSXSpreadChild, s, e, '', { expression }),
 };
 
-const T_EOF = 0;
-const T_IDENT = 1;
-const T_KW = 2;
-const T_NUM = 3;
-const T_BIGINT = 4;
-const T_STR = 5;
-const T_TEMPLATE_FULL = 6;
-const T_TEMPLATE_HEAD = 7;
-const T_REGEX = 9;
-const T_PUNCT = 10;
-const T_PRIVATE = 11;
-
-const P = enumeration(
-    'LPAREN',
-    'RPAREN',
-    'LBRACE',
-    'RBRACE',
-    'LBRACKET',
-    'RBRACKET',
-    'SEMI',
-    'COMMA',
-    'DOT',
-    'DOTDOTDOT',
-    'ARROW',
-    'COLON',
-    'QUESTION',
-    'QDOT',
-    'QQ',
-    'QQEQ',
-    'AT',
-    'EQ',
-    'EQEQ',
-    'EQEQEQ',
-    'NEQ',
-    'NEQEQ',
-    'LT',
-    'GT',
-    'LE',
-    'GE',
-    'PLUS',
-    'MINUS',
-    'STAR',
-    'STARSTAR',
-    'SLASH',
-    'PERCENT',
-    'PLUSPLUS',
-    'MINUSMINUS',
-    'SHL',
-    'SHR',
-    'USHR',
-    'AMP',
-    'PIPE',
-    'CARET',
-    'TILDE',
-    'BANG',
-    'AMPAMP',
-    'PIPEPIPE',
-    'PLUSEQ',
-    'MINUSEQ',
-    'STAREQ',
-    'STARSTAREQ',
-    'SLASHEQ',
-    'PERCENTEQ',
-    'SHLEQ',
-    'SHREQ',
-    'USHREQ',
-    'AMPEQ',
-    'PIPEEQ',
-    'CARETEQ',
-    'AMPAMPEQ',
-    'PIPEPIPEEQ',
-);
-
-const K = enumeration(
-    'BREAK',
-    'CASE',
-    'CATCH',
-    'CLASS',
-    'CONST',
-    'CONTINUE',
-    'DEBUGGER',
-    'DEFAULT',
-    'DELETE',
-    'DO',
-    'ELSE',
-    'EXPORT',
-    'EXTENDS',
-    'FINALLY',
-    'FOR',
-    'FUNCTION',
-    'IF',
-    'IMPORT',
-    'IN',
-    'INSTANCEOF',
-    'LET',
-    'NEW',
-    'RETURN',
-    'SUPER',
-    'SWITCH',
-    'THIS',
-    'THROW',
-    'TRY',
-    'TYPEOF',
-    'VAR',
-    'VOID',
-    'WHILE',
-    'WITH',
-    'TRUE',
-    'FALSE',
-    'NULL',
-    'YIELD',
-    'AWAIT',
-    'ASYNC',
-    'OF',
-    'AS',
-    'FROM',
-    'GET',
-    'SET',
-    'STATIC',
-    'TYPE',
-    'INTERFACE',
-    'ENUM',
-    'NAMESPACE',
-    'MODULE',
-    'DECLARE',
-    'ABSTRACT',
-    'OVERRIDE',
-    'READONLY',
-    'SATISFIES',
-    'KEYOF',
-    'INFER',
-    'IS',
-    'ASSERTS',
-    'IMPLEMENTS',
-    'UNIQUE',
-    'ACCESSOR',
-);
-
-const CONTEXTUAL = new Set<number>([
-    K.ASYNC,
-    K.OF,
-    K.AS,
-    K.FROM,
-    K.GET,
-    K.SET,
-    K.STATIC,
-    K.TYPE,
-    K.INTERFACE,
-    K.NAMESPACE,
-    K.MODULE,
-    K.DECLARE,
-    K.ABSTRACT,
-    K.OVERRIDE,
-    K.READONLY,
-    K.SATISFIES,
-    K.KEYOF,
-    K.INFER,
-    K.IS,
-    K.ASSERTS,
-    K.IMPLEMENTS,
-    K.UNIQUE,
-    K.ACCESSOR,
-    K.YIELD,
-    K.AWAIT,
-    K.LET,
-]);
-
-const F_NL = 1;
-
-/** All mutable parser state for one `parse` call, threaded as the first argument
- * (`state`) to every lexing/parsing function. Explicit state (rather than
- * module-scope `let`s) keeps the parser re-entrant. */
-interface ParserState {
-    src: string;
-    srcLen: number;
-    pos: number;
-    tok: number;
-    tokStart: number;
-    tokEnd: number;
-    tokFlags: number;
-    tokVal: number;
-    tokHash: number;
-    tsMode: boolean;
-    jsxMode: boolean;
-    errors: ParseError[];
-    baseId: number;
-    itKeys: (string | undefined)[];
-    itHashes: Int32Array;
-    itMask: number;
-    itCount: number;
-    lineStarts: Uint32Array;
-    lineCount: number;
-    stk: Ref[];
-    sp: number;
-    speculating: number;
-    /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
-     * parseNew reads it to reject an optional chain as a `new` callee. */
-    chainSawOptional: boolean;
-    /** True while parsing the `extends` type of a conditional type (or an `infer` constraint),
-     * where a trailing `? … : …` binds to the OUTER conditional rather than starting a new one.
-     * Public `parseType` clears it; nested bracketed types re-enter through `parseType`. */
-    noCondType: boolean;
-}
+// Token-identity aliases (P / K / T_*), F_NL, ParserState, and raise now live in
+// state.ts; the lexer/scanner lives in lexer.ts (both imported at the top).
 
 /** Fresh parser state for one `parse` call. Every field is initialized here so
  * `state` keeps a single stable hidden class for the whole parse. */
 function createParserState(source: string, options: ParseOptions): ParserState {
-    const cap = 1 << 13;
+    // Start the per-file buffers small and let them grow on demand (push / internGrow /
+    // recordNL). Most modules are small; oversizing every state (esp. the null-filled stk
+    // and the zeroed interner arrays) was pure per-file allocation. Large files just regrow.
+    const cap = 1 << 10;
     return {
         src: source,
         srcLen: source.length,
@@ -912,7 +658,6 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokStart: 0,
         tokEnd: 0,
         tokFlags: 0,
-        tokVal: 0,
         tokHash: 0,
         tsMode: options.ts,
         jsxMode: options.jsx,
@@ -922,9 +667,9 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         itHashes: new Int32Array(cap),
         itMask: cap - 1,
         itCount: 0,
-        lineStarts: new Uint32Array(1 << 12),
+        lineStarts: new Uint32Array(1 << 9),
         lineCount: 0,
-        stk: new Array(1 << 12).fill(null),
+        stk: new Array(1 << 8).fill(null),
         sp: 0,
         speculating: 0,
         chainSawOptional: false,
@@ -938,660 +683,10 @@ function nextId(state: ParserState): number {
     return id;
 }
 
-const FLATTEN_MIN = 13;
-
-/** Materialize src[start,end) as a string that NEVER retains the source. */
-function sliceFlat(state: ParserState, start: number, end: number): string {
-    const s = state.src.slice(start, end);
-    return end - start >= FLATTEN_MIN ? (' ' + s).substring(1) : s;
-}
-
-function internGrow(state: ParserState): void {
-    const oldKeys = state.itKeys,
-        oldHashes = state.itHashes;
-    const cap = (state.itMask + 1) << 1;
-    const itKeys: (string | undefined)[] = new Array(cap);
-    const itHashes = new Int32Array(cap);
-    const itMask = cap - 1;
-    for (let i = 0; i < oldKeys.length; i++) {
-        const k = oldKeys[i];
-        if (k === undefined) continue;
-        const h = oldHashes[i];
-        let j = h & itMask;
-        while (itKeys[j] !== undefined) j = (j + 1) & itMask;
-        itKeys[j] = k;
-        itHashes[j] = h;
-    }
-    state.itKeys = itKeys;
-    state.itHashes = itHashes;
-    state.itMask = itMask;
-}
-
-/** Rolling hash over src[start,end) — same formula the lexer computes inline. */
-function hashRange(state: ParserState, start: number, end: number): number {
-    const src = state.src;
-    let h = 0;
-    for (let i = start; i < end; i++) h = (Math.imul(h, 31) + src.charCodeAt(i)) | 0;
-    return h;
-}
-
-/** Intern src[start,end) given its rolling hash. The probe is slice-free: hash,
- * then length, then direct charCodeAt comparison against the source. */
-function intern(state: ParserState, start: number, end: number, hash: number): string {
-    const src = state.src,
-        itKeys = state.itKeys,
-        itHashes = state.itHashes,
-        itMask = state.itMask;
-    let i = hash & itMask;
-    const len = end - start;
-    for (;;) {
-        const k = itKeys[i];
-        if (k === undefined) break;
-        if (itHashes[i] === hash && k.length === len) {
-            let j = 0;
-            while (j < len && k.charCodeAt(j) === src.charCodeAt(start + j)) j++;
-            if (j === len) return k;
-        }
-        i = (i + 1) & itMask;
-    }
-    const s = sliceFlat(state, start, end);
-    itKeys[i] = s;
-    itHashes[i] = hash;
-    if (++state.itCount * 4 > (itMask + 1) * 3) internGrow(state);
-    return s;
-}
-
-/** Record a newline AT offset i (line starts at i+1). */
-function recordNL(state: ParserState, i: number): void {
-    if (state.lineCount >= state.lineStarts.length) {
-        const bigger = new Uint32Array(state.lineStarts.length << 1);
-        bigger.set(state.lineStarts);
-        state.lineStarts = bigger;
-    }
-    state.lineStarts[state.lineCount++] = i + 1;
-}
-
-const C_WS = 1,
-    C_NL = 2,
-    C_ID = 3,
-    C_DIG = 4;
-const CHAR = new Uint8Array(128);
-CHAR[9] = C_WS;
-CHAR[11] = C_WS;
-CHAR[12] = C_WS;
-CHAR[32] = C_WS;
-CHAR[10] = C_NL;
-CHAR[13] = C_NL;
-for (let i = 97; i <= 122; i++) CHAR[i] = C_ID;
-for (let i = 65; i <= 90; i++) CHAR[i] = C_ID;
-CHAR[95] = C_ID;
-CHAR[36] = C_ID;
-for (let i = 48; i <= 57; i++) CHAR[i] = C_DIG;
-
-function keywordCode(state: ParserState, s: number, e: number): number {
-    const src = state.src;
-    switch (e - s) {
-        case 2:
-            if (src.startsWith('if', s)) return K.IF;
-            if (src.startsWith('in', s)) return K.IN;
-            if (src.startsWith('do', s)) return K.DO;
-            if (src.startsWith('of', s)) return K.OF;
-            if (src.startsWith('as', s)) return K.AS;
-            if (src.startsWith('is', s)) return K.IS;
-            return 0;
-        case 3:
-            if (src.startsWith('var', s)) return K.VAR;
-            if (src.startsWith('for', s)) return K.FOR;
-            if (src.startsWith('new', s)) return K.NEW;
-            if (src.startsWith('let', s)) return K.LET;
-            if (src.startsWith('try', s)) return K.TRY;
-            if (src.startsWith('get', s)) return K.GET;
-            if (src.startsWith('set', s)) return K.SET;
-            return 0;
-        case 4:
-            if (src.startsWith('this', s)) return K.THIS;
-            if (src.startsWith('else', s)) return K.ELSE;
-            if (src.startsWith('case', s)) return K.CASE;
-            if (src.startsWith('true', s)) return K.TRUE;
-            if (src.startsWith('null', s)) return K.NULL;
-            if (src.startsWith('void', s)) return K.VOID;
-            if (src.startsWith('with', s)) return K.WITH;
-            if (src.startsWith('enum', s)) return K.ENUM;
-            if (src.startsWith('from', s)) return K.FROM;
-            if (src.startsWith('type', s)) return K.TYPE;
-            return 0;
-        case 5:
-            if (src.startsWith('const', s)) return K.CONST;
-            if (src.startsWith('class', s)) return K.CLASS;
-            if (src.startsWith('super', s)) return K.SUPER;
-            if (src.startsWith('while', s)) return K.WHILE;
-            if (src.startsWith('break', s)) return K.BREAK;
-            if (src.startsWith('catch', s)) return K.CATCH;
-            if (src.startsWith('throw', s)) return K.THROW;
-            if (src.startsWith('false', s)) return K.FALSE;
-            if (src.startsWith('yield', s)) return K.YIELD;
-            if (src.startsWith('async', s)) return K.ASYNC;
-            if (src.startsWith('await', s)) return K.AWAIT;
-            if (src.startsWith('keyof', s)) return K.KEYOF;
-            if (src.startsWith('infer', s)) return K.INFER;
-            return 0;
-        case 6:
-            if (src.startsWith('return', s)) return K.RETURN;
-            if (src.startsWith('typeof', s)) return K.TYPEOF;
-            if (src.startsWith('delete', s)) return K.DELETE;
-            if (src.startsWith('import', s)) return K.IMPORT;
-            if (src.startsWith('export', s)) return K.EXPORT;
-            if (src.startsWith('switch', s)) return K.SWITCH;
-            if (src.startsWith('static', s)) return K.STATIC;
-            if (src.startsWith('module', s)) return K.MODULE;
-            if (src.startsWith('unique', s)) return K.UNIQUE;
-            return 0;
-        case 7:
-            if (src.startsWith('default', s)) return K.DEFAULT;
-            if (src.startsWith('extends', s)) return K.EXTENDS;
-            if (src.startsWith('finally', s)) return K.FINALLY;
-            if (src.startsWith('declare', s)) return K.DECLARE;
-            if (src.startsWith('asserts', s)) return K.ASSERTS;
-            return 0;
-        case 8:
-            if (src.startsWith('function', s)) return K.FUNCTION;
-            if (src.startsWith('continue', s)) return K.CONTINUE;
-            if (src.startsWith('debugger', s)) return K.DEBUGGER;
-            if (src.startsWith('abstract', s)) return K.ABSTRACT;
-            if (src.startsWith('override', s)) return K.OVERRIDE;
-            if (src.startsWith('readonly', s)) return K.READONLY;
-            if (src.startsWith('accessor', s)) return K.ACCESSOR;
-            return 0;
-        case 9:
-            if (src.startsWith('interface', s)) return K.INTERFACE;
-            if (src.startsWith('namespace', s)) return K.NAMESPACE;
-            if (src.startsWith('satisfies', s)) return K.SATISFIES;
-            return 0;
-        case 10:
-            if (src.startsWith('instanceof', s)) return K.INSTANCEOF;
-            if (src.startsWith('implements', s)) return K.IMPLEMENTS;
-            return 0;
-        default:
-            return 0;
-    }
-}
-
-function nextToken(state: ParserState): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.pos;
-    let nl = 0;
-    while (pos < srcLen) {
-        const c = src.charCodeAt(pos);
-        if (c < 128) {
-            const cls = CHAR[c];
-            if (cls === C_WS) {
-                pos++;
-                continue;
-            }
-            if (cls === C_NL) {
-                nl = F_NL;
-                if (c === 10) recordNL(state, pos);
-                pos++;
-                continue;
-            }
-            if (c === 47) {
-                const c1 = src.charCodeAt(pos + 1);
-                if (c1 === 47) {
-                    pos += 2;
-                    while (pos < srcLen && src.charCodeAt(pos) !== 10) pos++;
-                    continue;
-                }
-                if (c1 === 42) {
-                    pos += 2;
-                    while (pos < srcLen) {
-                        const cc = src.charCodeAt(pos);
-                        if (cc === 42 && src.charCodeAt(pos + 1) === 47) {
-                            pos += 2;
-                            break;
-                        }
-                        if (cc === 10) {
-                            nl = F_NL;
-                            recordNL(state, pos);
-                        }
-                        pos++;
-                    }
-                    continue;
-                }
-            }
-            break;
-        }
-        if (c === 0x2028 || c === 0x2029) {
-            nl = F_NL;
-            pos++;
-            continue;
-        }
-        if (c === 0xa0 || c === 0xfeff) {
-            pos++;
-            continue;
-        }
-        break;
-    }
-    state.tokFlags = nl;
-    state.tokStart = pos;
-    if (pos >= srcLen) {
-        state.pos = pos;
-        state.tok = T_EOF;
-        state.tokEnd = pos;
-        state.tokVal = 0;
-        return;
-    }
-    const c = src.charCodeAt(pos);
-
-    if (c < 128 ? CHAR[c] === C_ID : true) {
-        let h = c;
-        pos++;
-        while (pos < srcLen) {
-            const cc = src.charCodeAt(pos);
-            if (cc < 128) {
-                const cl = CHAR[cc];
-                if (cl !== C_ID && cl !== C_DIG) break;
-            } else if (cc === 0x2028 || cc === 0x2029) break;
-            h = (Math.imul(h, 31) + cc) | 0;
-            pos++;
-        }
-        state.pos = pos;
-        state.tokHash = h;
-        const kw = keywordCode(state, state.tokStart, pos);
-        if (kw === 0) {
-            state.tok = T_IDENT;
-            state.tokVal = 0;
-        } else {
-            state.tok = T_KW;
-            state.tokVal = kw;
-        }
-        state.tokEnd = pos;
-        return;
-    }
-    if (CHAR[c] === C_DIG || (c === 46 && CHAR[src.charCodeAt(pos + 1)] === C_DIG)) {
-        state.pos = pos;
-        scanNumber(state);
-        return;
-    }
-    if (c === 34 || c === 39) {
-        pos++;
-        while (pos < srcLen) {
-            const cc = src.charCodeAt(pos);
-            if (cc === c) {
-                pos++;
-                break;
-            }
-            if (cc === 92) {
-                if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
-                pos += 2;
-            } else {
-                if (cc === 10) recordNL(state, pos);
-                pos++;
-            }
-        }
-        state.pos = pos;
-        state.tok = T_STR;
-        state.tokEnd = pos;
-        state.tokVal = 0;
-        return;
-    }
-    if (c === 96) {
-        state.pos = pos + 1;
-        scanTemplatePart(state);
-        return;
-    }
-    if (c === 35) {
-        if (state.tokStart === 0 && src.charCodeAt(1) === 33) {
-            while (pos < srcLen && src.charCodeAt(pos) !== 10) pos++;
-            state.pos = pos;
-            nextToken(state);
-            return;
-        }
-        pos++;
-        let h = 0;
-        while (pos < srcLen) {
-            const cc = src.charCodeAt(pos);
-            if (cc < 128 && CHAR[cc] !== C_ID && CHAR[cc] !== C_DIG) break;
-            if (cc >= 128 && (cc === 0x2028 || cc === 0x2029)) break;
-            h = (Math.imul(h, 31) + cc) | 0;
-            pos++;
-        }
-        state.pos = pos;
-        state.tokHash = h;
-        state.tok = T_PRIVATE;
-        state.tokEnd = pos;
-        state.tokVal = 0;
-        return;
-    }
-    state.pos = pos;
-    scanPunct(state, c);
-}
-
-function scanNumber(state: ParserState): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.pos;
-    let c = src.charCodeAt(pos);
-    pos++;
-    if (c === 48 && pos < srcLen) {
-        const x = src.charCodeAt(pos) | 32;
-        if (x === 120 || x === 111 || x === 98) pos++;
-    }
-    while (pos < srcLen) {
-        c = src.charCodeAt(pos);
-        if (c < 128 && (CHAR[c] === C_DIG || CHAR[c] === C_ID)) {
-            if ((c | 32) === 101 && pos + 1 < srcLen) {
-                const nx = src.charCodeAt(pos + 1);
-                if (nx === 43 || nx === 45) pos++;
-            }
-            pos++;
-        } else if (c === 46) pos++;
-        else break;
-    }
-    state.pos = pos;
-    state.tok = src.charCodeAt(pos - 1) === 110 ? T_BIGINT : T_NUM;
-    state.tokEnd = pos;
-    state.tokVal = 0;
-}
-
-function scanTemplatePart(state: ParserState): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.pos;
-    while (pos < srcLen) {
-        const c = src.charCodeAt(pos);
-        if (c === 96) {
-            pos++;
-            state.pos = pos;
-            state.tok = T_TEMPLATE_FULL;
-            state.tokEnd = pos;
-            state.tokVal = 0;
-            return;
-        }
-        if (c === 36 && src.charCodeAt(pos + 1) === 123) {
-            pos += 2;
-            state.pos = pos;
-            state.tok = T_TEMPLATE_HEAD;
-            state.tokEnd = pos;
-            state.tokVal = 0;
-            return;
-        }
-        if (c === 92) {
-            if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
-            pos += 2;
-        } else {
-            if (c === 10) recordNL(state, pos);
-            pos++;
-        }
-    }
-    state.pos = pos;
-    state.tok = T_TEMPLATE_FULL;
-    state.tokEnd = pos;
-    state.tokVal = 0;
-}
-
-function reScanTemplateContinue(state: ParserState): void {
-    state.pos = state.tokStart + 1;
-    state.tokStart = state.pos - 1;
-    scanTemplatePart(state);
-}
-
-function reScanRegex(state: ParserState): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.tokStart + 1;
-    let inClass = false;
-    while (pos < srcLen) {
-        const c = src.charCodeAt(pos);
-        if (c === 92) {
-            if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
-            pos += 2;
-            continue;
-        }
-        if (c === 91) inClass = true;
-        else if (c === 93) inClass = false;
-        else if (c === 47 && !inClass) {
-            pos++;
-            while (pos < srcLen) {
-                const f = src.charCodeAt(pos);
-                if (f < 128 && (CHAR[f] === C_ID || CHAR[f] === C_DIG)) pos++;
-                else break;
-            }
-            state.pos = pos;
-            state.tok = T_REGEX;
-            state.tokEnd = pos;
-            state.tokVal = 0;
-            return;
-        } else if (c === 10) break;
-        pos++;
-    }
-    state.pos = pos;
-    err(state, 'unterminated regex');
-    state.tok = T_REGEX;
-    state.tokEnd = pos;
-    state.tokVal = 0;
-}
-
-function scanPunct(state: ParserState, c: number): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.pos;
-    const c1 = pos + 1 < srcLen ? src.charCodeAt(pos + 1) : 0;
-    const c2 = pos + 2 < srcLen ? src.charCodeAt(pos + 2) : 0;
-    let v = 0;
-    let n = 1;
-    switch (c) {
-        case 40:
-            v = P.LPAREN;
-            break;
-        case 41:
-            v = P.RPAREN;
-            break;
-        case 123:
-            v = P.LBRACE;
-            break;
-        case 125:
-            v = P.RBRACE;
-            break;
-        case 91:
-            v = P.LBRACKET;
-            break;
-        case 93:
-            v = P.RBRACKET;
-            break;
-        case 59:
-            v = P.SEMI;
-            break;
-        case 44:
-            v = P.COMMA;
-            break;
-        case 64:
-            v = P.AT;
-            break;
-        case 126:
-            v = P.TILDE;
-            break;
-        case 46:
-            if (c1 === 46 && c2 === 46) {
-                v = P.DOTDOTDOT;
-                n = 3;
-            } else v = P.DOT;
-            break;
-        case 61:
-            if (c1 === 61) {
-                if (c2 === 61) {
-                    v = P.EQEQEQ;
-                    n = 3;
-                } else {
-                    v = P.EQEQ;
-                    n = 2;
-                }
-            } else if (c1 === 62) {
-                v = P.ARROW;
-                n = 2;
-            } else v = P.EQ;
-            break;
-        case 33:
-            if (c1 === 61) {
-                if (c2 === 61) {
-                    v = P.NEQEQ;
-                    n = 3;
-                } else {
-                    v = P.NEQ;
-                    n = 2;
-                }
-            } else v = P.BANG;
-            break;
-        case 60:
-            if (c1 === 60) {
-                if (c2 === 61) {
-                    v = P.SHLEQ;
-                    n = 3;
-                } else {
-                    v = P.SHL;
-                    n = 2;
-                }
-            } else if (c1 === 61) {
-                v = P.LE;
-                n = 2;
-            } else v = P.LT;
-            break;
-        case 62:
-            if (c1 === 62) {
-                if (c2 === 62) {
-                    if (src.charCodeAt(pos + 3) === 61) {
-                        v = P.USHREQ;
-                        n = 4;
-                    } else {
-                        v = P.USHR;
-                        n = 3;
-                    }
-                } else if (c2 === 61) {
-                    v = P.SHREQ;
-                    n = 3;
-                } else {
-                    v = P.SHR;
-                    n = 2;
-                }
-            } else if (c1 === 61) {
-                v = P.GE;
-                n = 2;
-            } else v = P.GT;
-            break;
-        case 43:
-            if (c1 === 43) {
-                v = P.PLUSPLUS;
-                n = 2;
-            } else if (c1 === 61) {
-                v = P.PLUSEQ;
-                n = 2;
-            } else v = P.PLUS;
-            break;
-        case 45:
-            if (c1 === 45) {
-                v = P.MINUSMINUS;
-                n = 2;
-            } else if (c1 === 61) {
-                v = P.MINUSEQ;
-                n = 2;
-            } else v = P.MINUS;
-            break;
-        case 42:
-            if (c1 === 42) {
-                if (c2 === 61) {
-                    v = P.STARSTAREQ;
-                    n = 3;
-                } else {
-                    v = P.STARSTAR;
-                    n = 2;
-                }
-            } else if (c1 === 61) {
-                v = P.STAREQ;
-                n = 2;
-            } else v = P.STAR;
-            break;
-        case 47:
-            if (c1 === 61) {
-                v = P.SLASHEQ;
-                n = 2;
-            } else v = P.SLASH;
-            break;
-        case 37:
-            if (c1 === 61) {
-                v = P.PERCENTEQ;
-                n = 2;
-            } else v = P.PERCENT;
-            break;
-        case 38:
-            if (c1 === 38) {
-                if (c2 === 61) {
-                    v = P.AMPAMPEQ;
-                    n = 3;
-                } else {
-                    v = P.AMPAMP;
-                    n = 2;
-                }
-            } else if (c1 === 61) {
-                v = P.AMPEQ;
-                n = 2;
-            } else v = P.AMP;
-            break;
-        case 124:
-            if (c1 === 124) {
-                if (c2 === 61) {
-                    v = P.PIPEPIPEEQ;
-                    n = 3;
-                } else {
-                    v = P.PIPEPIPE;
-                    n = 2;
-                }
-            } else if (c1 === 61) {
-                v = P.PIPEEQ;
-                n = 2;
-            } else v = P.PIPE;
-            break;
-        case 94:
-            if (c1 === 61) {
-                v = P.CARETEQ;
-                n = 2;
-            } else v = P.CARET;
-            break;
-        case 63:
-            if (c1 === 63) {
-                if (c2 === 61) {
-                    v = P.QQEQ;
-                    n = 3;
-                } else {
-                    v = P.QQ;
-                    n = 2;
-                }
-            } else if (c1 === 46 && !(c2 >= 48 && c2 <= 57)) {
-                v = P.QDOT;
-                n = 2;
-            } else v = P.QUESTION;
-            break;
-        case 58:
-            v = P.COLON;
-            break;
-        default:
-            err(state, `unexpected character '${String.fromCharCode(c)}'`);
-            state.pos = pos + 1;
-            nextToken(state);
-            return;
-    }
-    pos += n;
-    state.pos = pos;
-    state.tok = T_PUNCT;
-    state.tokEnd = pos;
-    state.tokVal = v;
-}
-
-function err(state: ParserState, msg: string): void {
-    if (state.errors.length < 100) state.errors.push({ pos: state.tokStart, msg });
-}
-
-const isP = (state: ParserState, v: number): boolean => state.tok === T_PUNCT && state.tokVal === v;
-const isK = (state: ParserState, v: number): boolean => state.tok === T_KW && state.tokVal === v;
+// `v` is a packed token constant (P.* / K.*); packed values are unique per kind,
+// so a whole-value compare is both the kind check and the identity check.
+const isP = (state: ParserState, v: number): boolean => state.tok === v;
+const isK = (state: ParserState, v: number): boolean => state.tok === v;
 
 function eatP(state: ParserState, v: number): boolean {
     if (isP(state, v)) {
@@ -1602,7 +697,7 @@ function eatP(state: ParserState, v: number): boolean {
 }
 function expectP(state: ParserState, v: number, what: string): void {
     if (isP(state, v)) nextToken(state);
-    else err(state, `expected ${what}`);
+    else raise(state, ParseErrorCode.Expected, what);
 }
 function eatK(state: ParserState, v: number): boolean {
     if (isK(state, v)) {
@@ -1613,10 +708,15 @@ function eatK(state: ParserState, v: number): boolean {
 }
 
 function isIdentLike(state: ParserState): boolean {
-    return state.tok === T_IDENT || (state.tok === T_KW && CONTEXTUAL.has(state.tokVal));
+    return state.tok === T_IDENT || isContextual(state.tok);
 }
 function isNameLike(state: ParserState): boolean {
-    return state.tok === T_IDENT || state.tok === T_KW;
+    return state.tok === T_IDENT || isKeyword(state.tok);
+}
+
+/** Human description of the current token for diagnostics: `token 'foo'`, or `end of input`. */
+function tokenDesc(state: ParserState): string {
+    return state.tokEnd > state.tokStart ? `token '${state.src.slice(state.tokStart, state.tokEnd)}'` : 'end of input';
 }
 
 function ident(state: ParserState, role: number, start: number, end: number): Identifier {
@@ -1629,7 +729,7 @@ function leafRaw(state: ParserState, flatType: number, start: number, end: numbe
 /** Parse an identifier token in the given role. `role` picks the leaf type. */
 function parseIdent(state: ParserState, role: number): Identifier {
     if (!isIdentLike(state)) {
-        err(state, 'expected identifier');
+        raise(state, ParseErrorCode.ExpectedIdentifier);
         return makeMissingIdent(state, role);
     }
     const id = ident(state, role, state.tokStart, state.tokEnd);
@@ -1640,7 +740,7 @@ function parseIdent(state: ParserState, role: number): Identifier {
  * keys, member names, specifier names — usually IdentifierName). */
 function parseNameAsIdent(state: ParserState, role: number): Identifier {
     if (!isNameLike(state)) {
-        err(state, 'expected name');
+        raise(state, ParseErrorCode.ExpectedName);
         return makeMissingIdent(state, role);
     }
     const id = ident(state, role, state.tokStart, state.tokEnd);
@@ -1659,17 +759,16 @@ const canInsertSemi = (state: ParserState): boolean =>
     (state.tokFlags & F_NL) !== 0 || state.tok === T_EOF || isP(state, P.RBRACE);
 function consumeSemi(state: ParserState): void {
     if (eatP(state, P.SEMI)) return;
-    if (!canInsertSemi(state)) err(state, "expected ';'");
+    if (!canInsertSemi(state)) raise(state, ParseErrorCode.Expected, "';'");
 }
 
-type LexState = [number, number, number, number, number, number, number, number, number];
+type LexState = [number, number, number, number, number, number, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
     state.tokStart,
     state.tokEnd,
     state.tokFlags,
-    state.tokVal,
     state.errors.length,
     state.tokHash,
     state.lineCount,
@@ -1680,10 +779,9 @@ function restoreState(state: ParserState, s: LexState): void {
     state.tokStart = s[2];
     state.tokEnd = s[3];
     state.tokFlags = s[4];
-    state.tokVal = s[5];
-    state.errors.length = s[6];
-    state.tokHash = s[7];
-    state.lineCount = s[8];
+    state.errors.length = s[5];
+    state.tokHash = s[6];
+    state.lineCount = s[7];
 }
 
 function push(state: ParserState, v: Ref): void {
@@ -1726,60 +824,6 @@ function applyDeclare(inner: Node, start: number): void {
     inner.start = start;
 }
 
-const BIN_PREC = new Uint8Array(64);
-const BIN_OP = new Uint8Array(64);
-{
-    const set = (p: number, prec: number, op: number) => {
-        BIN_PREC[p] = prec;
-        BIN_OP[p] = op;
-    };
-    set(P.QQ, 1, OP.NULLISH);
-    set(P.PIPEPIPE, 2, OP.OR);
-    set(P.AMPAMP, 3, OP.AND);
-    set(P.PIPE, 4, OP.BIT_OR);
-    set(P.CARET, 5, OP.BIT_XOR);
-    set(P.AMP, 6, OP.BIT_AND);
-    set(P.EQEQ, 7, OP.EQ);
-    set(P.NEQ, 7, OP.NE);
-    set(P.EQEQEQ, 7, OP.SEQ);
-    set(P.NEQEQ, 7, OP.SNE);
-    set(P.LT, 8, OP.LT);
-    set(P.GT, 8, OP.GT);
-    set(P.LE, 8, OP.LE);
-    set(P.GE, 8, OP.GE);
-    set(P.SHL, 9, OP.SHL);
-    set(P.SHR, 9, OP.SHR);
-    set(P.USHR, 9, OP.USHR);
-    set(P.PLUS, 10, OP.ADD);
-    set(P.MINUS, 10, OP.SUB);
-    set(P.STAR, 11, OP.MUL);
-    set(P.SLASH, 11, OP.DIV);
-    set(P.PERCENT, 11, OP.MOD);
-    set(P.STARSTAR, 12, OP.EXP);
-}
-const ASSIGN_OP = new Uint8Array(64);
-{
-    const a = (p: number, op: number) => {
-        ASSIGN_OP[p] = op;
-    };
-    a(P.EQ, OP.ASSIGN);
-    a(P.PLUSEQ, OP.ADD_A);
-    a(P.MINUSEQ, OP.SUB_A);
-    a(P.STAREQ, OP.MUL_A);
-    a(P.SLASHEQ, OP.DIV_A);
-    a(P.PERCENTEQ, OP.MOD_A);
-    a(P.STARSTAREQ, OP.EXP_A);
-    a(P.SHLEQ, OP.SHL_A);
-    a(P.SHREQ, OP.SHR_A);
-    a(P.USHREQ, OP.USHR_A);
-    a(P.AMPEQ, OP.AND_A);
-    a(P.PIPEEQ, OP.OR_A);
-    a(P.CARETEQ, OP.XOR_A);
-    a(P.AMPAMPEQ, OP.LOGAND_A);
-    a(P.PIPEPIPEEQ, OP.LOGOR_A);
-    a(P.QQEQ, OP.NULLISH_A);
-}
-
 function parseExpression(state: ParserState, noIn = false): Node {
     const expr = parseAssign(state, noIn);
     if (isP(state, P.COMMA)) {
@@ -1796,7 +840,7 @@ function parseAssign(state: ParserState, noIn = false): Node {
     if (isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, state.tokStart, 0, null);
     if (isIdentLike(state) && !isK(state, K.ASYNC)) {
         const s = saveState(state);
-        if (state.tok === T_IDENT || CONTEXTUAL.has(state.tokVal)) {
+        if (state.tok === T_IDENT || isContextual(state.tok)) {
             const idStart = state.tokStart;
             const maybe = parseIdent(state, R_BIND);
             if (isP(state, P.ARROW) && (state.tokFlags & F_NL) === 0) return parseArrowAfterSingleParam(state, idStart, maybe, 0);
@@ -1847,8 +891,8 @@ function parseAssign(state: ParserState, noIn = false): Node {
     }
 
     const left = parseConditional(state, noIn);
-    if (state.tok === T_PUNCT && ASSIGN_OP[state.tokVal] !== 0) {
-        const op = ASSIGN_OP[state.tokVal];
+    if (isAssignOp(state.tok)) {
+        const op = opTextOf(state.tok);
         nextToken(state);
         const right = parseAssign(state, noIn);
         return m.AssignmentExpression(left.start, right.end, op, left, right) as Node;
@@ -1869,35 +913,27 @@ function parseConditional(state: ParserState, noIn: boolean): Node {
 function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
     let left = parseUnary(state);
     for (;;) {
-        let prec = 0;
-        let op = 0;
-        let logical = false;
-        if (state.tok === T_PUNCT) {
-            prec = BIN_PREC[state.tokVal];
-            op = BIN_OP[state.tokVal];
-            logical = state.tokVal === P.QQ || state.tokVal === P.PIPEPIPE || state.tokVal === P.AMPAMP;
-        } else if (state.tok === T_KW) {
-            if (state.tokVal === K.IN && !noIn) {
-                prec = 8;
-                op = OP.IN;
-            } else if (state.tokVal === K.INSTANCEOF) {
-                prec = 8;
-                op = OP.INSTANCEOF;
-            } else if (state.tsMode && (state.tokVal === K.AS || state.tokVal === K.SATISFIES) && (state.tokFlags & F_NL) === 0) {
-                const satisfies = state.tokVal === K.SATISFIES;
-                nextToken(state);
-                const ty = parseType(state);
-                left = satisfies
-                    ? (m.TSSatisfiesExpression(left.start, ty.end, 0, left, ty) as Node)
-                    : (m.TSAsExpression(left.start, ty.end, 0, left, ty) as Node);
-                continue;
-            }
+        const tok = state.tok;
+        // TS `as` / `satisfies` are type operators (they consume a type), not binary ops.
+        if (state.tsMode && (tok === K.AS || tok === K.SATISFIES) && (state.tokFlags & F_NL) === 0) {
+            const satisfies = tok === K.SATISFIES;
+            nextToken(state);
+            const ty = parseType(state);
+            left = satisfies
+                ? (m.TSSatisfiesExpression(left.start, ty.end, 0, left, ty) as Node)
+                : (m.TSAsExpression(left.start, ty.end, 0, left, ty) as Node);
+            continue;
         }
-        if (prec === 0 || prec <= minPrec) return left;
-        const rightAssoc = op === OP.EXP;
+        // One uniform path: punctuator ops and `in`/`instanceof` all carry precedence
+        // + IsBinaryOp in the packed token (token.ts), so there is no punct-vs-keyword branch.
+        if (!isBinaryOp(tok)) return left;
+        if (tok === K.IN && noIn) return left; // `in` is not an operator in a no-in context
+        const prec = precedenceOf(tok);
+        if (prec <= minPrec) return left;
         nextToken(state);
-        const right = parseBinary(state, rightAssoc ? prec - 1 : prec, noIn);
-        left = logical
+        const right = parseBinary(state, tok === P.STARSTAR ? prec - 1 : prec, noIn);
+        const op = opTextOf(tok);
+        left = isLogical(tok)
             ? (m.LogicalExpression(left.start, right.end, op, left, right) as Node)
             : (m.BinaryExpression(left.start, right.end, op, left, right) as Node);
     }
@@ -1905,38 +941,32 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
 
 function parseUnary(state: ParserState): Node {
     const start = state.tokStart;
-    if (state.tok === T_PUNCT) {
-        switch (state.tokVal as number) {
+    if (isPunct(state.tok)) {
+        switch (state.tok as number) {
             case P.PLUS:
             case P.MINUS:
             case P.BANG:
             case P.TILDE: {
                 const op =
-                    state.tokVal === P.PLUS
-                        ? OP.POS
-                        : state.tokVal === P.MINUS
-                          ? OP.NEG
-                          : state.tokVal === P.BANG
-                            ? OP.NOT
-                            : OP.BIT_NOT;
+                    state.tok === P.PLUS ? OP.POS : state.tok === P.MINUS ? OP.NEG : state.tok === P.BANG ? OP.NOT : OP.BIT_NOT;
                 nextToken(state);
                 const arg = parseUnary(state);
                 return m.UnaryExpression(start, arg.end, op, arg) as Node;
             }
             case P.PLUSPLUS:
             case P.MINUSMINUS: {
-                const op = state.tokVal === P.PLUSPLUS ? OP.INC : OP.DEC;
+                const op = state.tok === P.PLUSPLUS ? OP.INC : OP.DEC;
                 nextToken(state);
                 const arg = parseUnary(state);
                 return m.UpdateExpression(start, arg.end, op | FL.PREFIX, arg) as Node;
             }
         }
-    } else if (state.tok === T_KW) {
-        switch (state.tokVal as number) {
+    } else if (isKeyword(state.tok)) {
+        switch (state.tok as number) {
             case K.TYPEOF:
             case K.VOID:
             case K.DELETE: {
-                const op = state.tokVal === K.TYPEOF ? OP.TYPEOF : state.tokVal === K.VOID ? OP.VOID : OP.DELETE;
+                const op = state.tok === K.TYPEOF ? OP.TYPEOF : state.tok === K.VOID ? OP.VOID : OP.DELETE;
                 nextToken(state);
                 const arg = parseUnary(state);
                 return m.UnaryExpression(start, arg.end, op, arg) as Node;
@@ -1949,12 +979,8 @@ function parseUnary(state: ParserState): Node {
         }
     }
     let expr = parsePostfixChain(state);
-    if (
-        state.tok === T_PUNCT &&
-        (state.tokVal === P.PLUSPLUS || state.tokVal === P.MINUSMINUS) &&
-        (state.tokFlags & F_NL) === 0
-    ) {
-        const op = state.tokVal === P.PLUSPLUS ? OP.INC : OP.DEC;
+    if (isPunct(state.tok) && (state.tok === P.PLUSPLUS || state.tok === P.MINUSMINUS) && (state.tokFlags & F_NL) === 0) {
+        const op = state.tok === P.PLUSPLUS ? OP.INC : OP.DEC;
         nextToken(state);
         expr = m.UpdateExpression(expr.start, state.tokStart, op, expr) as Node;
     }
@@ -1981,7 +1007,7 @@ function parseNew(state: ParserState): Node {
         callee = parseMemberChain(state, parsePrimary(state), false);
         // `new a?.b()` is a SyntaxError; the parenthesized `new (a?.b)()` is legal (the `?.`
         // is consumed inside parsePrimary, so this frame's flag stays false there).
-        if (state.chainSawOptional) err(state, 'optional chain is not allowed in a new expression');
+        if (state.chainSawOptional) raise(state, ParseErrorCode.NewOptionalChain);
     }
     let typeArgs: Ref = null;
     if (state.tsMode && isP(state, P.LT)) {
@@ -2058,7 +1084,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             const args = parseArgs(state);
             expr = m.CallExpression(expr.start, state.tokStart, 0, expr, args, null) as Node;
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
-            if (sawOptional) err(state, 'tagged template cannot be used with an optional chain');
+            if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
             const quasi = parseTemplate(state);
             expr = m.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
         } else if (state.tsMode && isP(state, P.BANG) && (state.tokFlags & F_NL) === 0) {
@@ -2071,7 +1097,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 const args = parseArgs(state);
                 expr = m.CallExpression(expr.start, state.tokStart, 0, expr, args, t) as Node;
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
-                if (sawOptional) err(state, 'tagged template cannot be used with an optional chain');
+                if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
                 const quasi = parseTemplate(state);
                 expr = m.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
             } else {
@@ -2112,7 +1138,7 @@ function parseTemplate(state: ParserState): Node {
     for (;;) {
         eFrom.push(parseExpression(state));
         if (!isP(state, P.RBRACE)) {
-            err(state, "expected '}' in template");
+            raise(state, ParseErrorCode.ExpectedRBraceInTemplate);
             break;
         }
         reScanTemplateContinue(state);
@@ -2179,7 +1205,15 @@ function skipJSXTagWs(state: ParserState): void {
 
 /** A JSXIdentifier leaf (data:null, raw name in the name slot). */
 function jsxIdent(state: ParserState, start: number, end: number): Node {
-    return { id: nextId(state), type: N.JSXIdentifier, start, end, name: sliceFlat(state, start, end), sym: 0, data: null } as Node;
+    return {
+        id: nextId(state),
+        type: N.JSXIdentifier,
+        start,
+        end,
+        name: sliceFlat(state, start, end),
+        sym: 0,
+        data: null,
+    } as Node;
 }
 
 function parseJSXName(state: ParserState): Node {
@@ -2187,7 +1221,7 @@ function parseJSXName(state: ParserState): Node {
         srcLen = state.srcLen;
     skipJSXTagWs(state);
     if (!isJSXIdentStart(src.charCodeAt(state.pos))) {
-        err(state, 'expected JSX name');
+        raise(state, ParseErrorCode.ExpectedJSXName);
         return makeMissingIdent(state, R_NAME) as Node;
     }
     const [s0, e0] = scanJSXName(state);
@@ -2250,7 +1284,7 @@ function parseJSXBrace(state: ParserState, inChildren: boolean): Node {
     if (isP(state, P.RBRACE)) {
         state.pos = state.tokEnd;
     } else {
-        err(state, "expected '}' in JSX");
+        raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
         state.pos = state.tokStart;
     }
     return node;
@@ -2260,13 +1294,13 @@ function parseJSXSpreadAttribute(state: ParserState): Node {
     const bracePos = state.pos;
     state.pos = bracePos + 1;
     nextToken(state);
-    if (!eatP(state, P.DOTDOTDOT)) err(state, "expected '...' in JSX spread attribute");
+    if (!eatP(state, P.DOTDOTDOT)) raise(state, ParseErrorCode.ExpectedJSXSpread);
     const arg = parseAssign(state);
     const node = m.JSXSpreadAttribute(bracePos, state.tokEnd, 0, arg) as Node;
     if (isP(state, P.RBRACE)) {
         state.pos = state.tokEnd;
     } else {
-        err(state, "expected '}' in JSX");
+        raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
         state.pos = state.tokStart;
     }
     return node;
@@ -2287,7 +1321,7 @@ function parseJSXAttributes(state: ParserState): Node[] {
             continue;
         }
         if (!isJSXIdentStart(c)) {
-            err(state, 'unexpected character in JSX attributes');
+            raise(state, ParseErrorCode.UnexpectedCharInJSXAttrs);
             state.pos++;
             continue;
         }
@@ -2317,7 +1351,7 @@ function parseJSXAttributes(state: ParserState): Node[] {
                 value = parseJSXNested(state);
                 end = state.pos;
             } else {
-                err(state, 'expected JSX attribute value');
+                raise(state, ParseErrorCode.ExpectedJSXAttrValue);
             }
         }
         push(state, m.JSXAttribute(name.start, end, 0, name, value) as Node);
@@ -2350,7 +1384,7 @@ function parseJSXChildren(state: ParserState): Node[] {
                 data: null,
             } as Node);
         if (state.pos >= srcLen) {
-            err(state, 'unterminated JSX element');
+            raise(state, ParseErrorCode.UnterminatedJSXElement);
             break;
         }
         const c = src.charCodeAt(state.pos);
@@ -2427,12 +1461,12 @@ function expectRawChar(state: ParserState, ch: number, what: string): void {
         state.pos++;
         return;
     }
-    err(state, `expected ${what} in JSX`);
+    raise(state, ParseErrorCode.ExpectedInJSX, what);
 }
 
 function parsePrimary(state: ParserState): Node {
     const start = state.tokStart;
-    switch (state.tok) {
+    switch (state.tok as number) {
         case T_NUM: {
             const n = leaf(state, N.NumericLiteral, start, state.tokEnd);
             nextToken(state);
@@ -2461,8 +1495,8 @@ function parsePrimary(state: ParserState): Node {
         case T_IDENT:
             return parseIdent(state, R_REF);
     }
-    if (state.tok === T_PUNCT) {
-        switch (state.tokVal as number) {
+    if (isPunct(state.tok)) {
+        switch (state.tok as number) {
             case P.LT:
                 if (state.jsxMode) return parseJSXRoot(state);
                 break;
@@ -2499,8 +1533,8 @@ function parsePrimary(state: ParserState): Node {
             case P.LBRACE:
                 return parseObjectLiteral(state);
         }
-    } else if (state.tok === T_KW) {
-        switch (state.tokVal as number) {
+    } else if (isKeyword(state.tok)) {
+        switch (state.tok as number) {
             case K.THIS:
                 nextToken(state);
                 return m.ThisExpression(start, state.tokStart, 0) as Node;
@@ -2542,9 +1576,9 @@ function parsePrimary(state: ParserState): Node {
             case K.NEW:
                 return parseNew(state);
         }
-        if (CONTEXTUAL.has(state.tokVal)) return parseIdent(state, R_REF);
+        if (isContextual(state.tok)) return parseIdent(state, R_REF);
     }
-    err(state, 'unexpected token in expression');
+    raise(state, ParseErrorCode.UnexpectedInExpression, tokenDesc(state));
     nextToken(state);
     return makeMissingIdent(state, R_REF);
 }
@@ -2556,7 +1590,7 @@ function parseObjectLiteral(state: ParserState): Node {
     let last = -1;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         if (state.tokStart === last) {
-            err(state, 'unexpected token in object literal');
+            raise(state, ParseErrorCode.UnexpectedInObjectLiteral, tokenDesc(state));
             nextToken(state);
             continue;
         }
@@ -2630,18 +1664,18 @@ function nextIsPropertyEnd(state: ParserState): boolean {
     nextToken(state);
     const endLike =
         state.tok === T_EOF ||
-        (state.tok === T_PUNCT &&
-            (state.tokVal === P.COLON ||
-                state.tokVal === P.COMMA ||
-                state.tokVal === P.RBRACE ||
-                state.tokVal === P.LPAREN ||
-                state.tokVal === P.EQ ||
-                state.tokVal === P.QUESTION ||
-                state.tokVal === P.SEMI ||
-                state.tokVal === P.RPAREN ||
-                state.tokVal === P.LT ||
-                state.tokVal === P.BANG ||
-                state.tokVal === P.RBRACKET));
+        (isPunct(state.tok) &&
+            (state.tok === P.COLON ||
+                state.tok === P.COMMA ||
+                state.tok === P.RBRACE ||
+                state.tok === P.LPAREN ||
+                state.tok === P.EQ ||
+                state.tok === P.QUESTION ||
+                state.tok === P.SEMI ||
+                state.tok === P.RPAREN ||
+                state.tok === P.LT ||
+                state.tok === P.BANG ||
+                state.tok === P.RBRACKET));
     restoreState(state, s);
     return endLike;
 }
@@ -2860,8 +1894,8 @@ function parseParams(state: ParserState): Node[] {
                     nextToken(state);
                 } else if (isK(state, K.STATIC) && !nextIsParamNameEnd(state)) nextToken(state);
                 else if (
-                    state.tok === T_KW &&
-                    (state.tokVal === K.IMPLEMENTS || state.tokVal === K.INTERFACE) &&
+                    isKeyword(state.tok) &&
+                    (state.tok === K.IMPLEMENTS || state.tok === K.INTERFACE) &&
                     !nextIsParamNameEnd(state)
                 )
                     nextToken(state);
@@ -2921,12 +1955,12 @@ function nextIsParamNameEnd(state: ParserState): boolean {
     nextToken(state);
     const end =
         state.tok === T_EOF ||
-        (state.tok === T_PUNCT &&
-            (state.tokVal === P.COLON ||
-                state.tokVal === P.COMMA ||
-                state.tokVal === P.RPAREN ||
-                state.tokVal === P.QUESTION ||
-                state.tokVal === P.EQ));
+        (isPunct(state.tok) &&
+            (state.tok === P.COLON ||
+                state.tok === P.COMMA ||
+                state.tok === P.RPAREN ||
+                state.tok === P.QUESTION ||
+                state.tok === P.EQ));
     restoreState(state, s);
     return end;
 }
@@ -3008,7 +2042,7 @@ function parseClassBody(state: ParserState): Node[] {
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         if (eatP(state, P.SEMI)) continue;
         if (state.tokStart === last) {
-            err(state, 'unexpected token in class body');
+            raise(state, ParseErrorCode.UnexpectedInClassBody, tokenDesc(state));
             nextToken(state);
             continue;
         }
@@ -3144,21 +2178,21 @@ function parseBlock(state: ParserState): Node {
 
 function parseStatement(state: ParserState): Node {
     const start = state.tokStart;
-    if (state.tok === T_PUNCT) {
-        switch (state.tokVal as number) {
+    if (isPunct(state.tok)) {
+        switch (state.tok as number) {
             case P.LBRACE:
                 return parseBlock(state);
             case P.SEMI:
                 nextToken(state);
                 return m.EmptyStatement(start, state.tokStart, 0) as Node;
             case P.AT:
-                err(state, 'decorators not supported');
+                raise(state, ParseErrorCode.DecoratorsUnsupported);
                 nextToken(state);
                 return parseStatement(state);
         }
     }
-    if (state.tok === T_KW) {
-        switch (state.tokVal as number) {
+    if (isKeyword(state.tok)) {
+        switch (state.tok as number) {
             case K.VAR:
                 return parseVarDecl(state, VAR_KIND.VAR, 0);
             case K.CONST: {
@@ -3212,7 +2246,7 @@ function parseStatement(state: ParserState): Node {
             case K.DO: {
                 nextToken(state);
                 const body = parseStatement(state);
-                if (!eatK(state, K.WHILE)) err(state, "expected 'while'");
+                if (!eatK(state, K.WHILE)) raise(state, ParseErrorCode.Expected, "'while'");
                 expectP(state, P.LPAREN, "'('");
                 const test = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
@@ -3232,7 +2266,7 @@ function parseStatement(state: ParserState): Node {
                     if (eatK(state, K.CASE)) {
                         test = parseExpression(state);
                     } else if (!eatK(state, K.DEFAULT)) {
-                        err(state, "expected 'case'");
+                        raise(state, ParseErrorCode.Expected, "'case'");
                         nextToken(state);
                         continue;
                     }
@@ -3286,7 +2320,7 @@ function parseStatement(state: ParserState): Node {
             }
             case K.BREAK:
             case K.CONTINUE: {
-                const isBreak = state.tokVal === K.BREAK;
+                const isBreak = state.tok === K.BREAK;
                 nextToken(state);
                 let label: Ref = null;
                 if (isIdentLike(state) && (state.tokFlags & F_NL) === 0) label = parseIdent(state, R_LABEL);
@@ -3333,19 +2367,19 @@ function parseStatement(state: ParserState): Node {
                     const s = saveState(state);
                     nextToken(state);
                     if (
-                        state.tok === T_KW &&
-                        (state.tokVal === K.CONST ||
-                            state.tokVal === K.LET ||
-                            state.tokVal === K.VAR ||
-                            state.tokVal === K.FUNCTION ||
-                            state.tokVal === K.CLASS ||
-                            state.tokVal === K.INTERFACE ||
-                            state.tokVal === K.TYPE ||
-                            state.tokVal === K.ENUM ||
-                            state.tokVal === K.NAMESPACE ||
-                            state.tokVal === K.MODULE ||
-                            state.tokVal === K.ABSTRACT ||
-                            state.tokVal === K.ASYNC)
+                        isKeyword(state.tok) &&
+                        (state.tok === K.CONST ||
+                            state.tok === K.LET ||
+                            state.tok === K.VAR ||
+                            state.tok === K.FUNCTION ||
+                            state.tok === K.CLASS ||
+                            state.tok === K.INTERFACE ||
+                            state.tok === K.TYPE ||
+                            state.tok === K.ENUM ||
+                            state.tok === K.NAMESPACE ||
+                            state.tok === K.MODULE ||
+                            state.tok === K.ABSTRACT ||
+                            state.tok === K.ASYNC)
                     ) {
                         const inner = parseStatement(state);
                         applyDeclare(inner, start);
@@ -3452,8 +2486,8 @@ function parseFor(state: ParserState, start: number): Node {
     let init: Ref = null;
     if (isP(state, P.SEMI)) nextToken(state);
     else {
-        if (state.tok === T_KW && (state.tokVal === K.VAR || state.tokVal === K.LET || state.tokVal === K.CONST)) {
-            const kind = state.tokVal === K.VAR ? VAR_KIND.VAR : state.tokVal === K.LET ? VAR_KIND.LET : VAR_KIND.CONST;
+        if (isKeyword(state.tok) && (state.tok === K.VAR || state.tok === K.LET || state.tok === K.CONST)) {
+            const kind = state.tok === K.VAR ? VAR_KIND.VAR : state.tok === K.LET ? VAR_KIND.LET : VAR_KIND.CONST;
             const ds = state.tokStart;
             nextToken(state);
             const target = parseBindingTarget(state);
@@ -3502,7 +2536,7 @@ function parseFor(state: ParserState, start: number): Node {
         } else {
             init = parseExpression(state, true);
             if (isK(state, K.OF) || isK(state, K.IN)) {
-                const isOf = state.tokVal === K.OF;
+                const isOf = state.tok === K.OF;
                 nextToken(state);
                 const right = isOf ? parseAssign(state) : parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
@@ -3549,7 +2583,7 @@ function parseImport(state: ParserState): Node {
     if (isP(state, P.STAR)) {
         const s = state.tokStart;
         nextToken(state);
-        if (!eatK(state, K.AS)) err(state, "expected 'as'");
+        if (!eatK(state, K.AS)) raise(state, ParseErrorCode.Expected, "'as'");
         const local = parseIdent(state, R_BIND);
         push(state, m.ImportNamespaceSpecifier(s, local.end, 0, local) as Node);
     } else if (isP(state, P.LBRACE)) {
@@ -3574,12 +2608,12 @@ function parseImport(state: ParserState): Node {
         }
         expectP(state, P.RBRACE, "'}'");
     }
-    if (!eatK(state, K.FROM)) err(state, "expected 'from'");
+    if (!eatK(state, K.FROM)) raise(state, ParseErrorCode.Expected, "'from'");
     let source: Ref = null;
     if ((state.tok as number) === T_STR) {
         source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
-    } else err(state, 'expected module specifier');
+    } else raise(state, ParseErrorCode.ExpectedModuleSpecifier);
     consumeSemi(state);
     return m.ImportDeclaration(
         start,
@@ -3610,7 +2644,7 @@ function parseExport(state: ParserState): Node {
         nextToken(state);
         let exported: Ref = null;
         if (eatK(state, K.AS)) exported = parseIdent(state, R_NAME);
-        if (!eatK(state, K.FROM)) err(state, "expected 'from'");
+        if (!eatK(state, K.FROM)) raise(state, ParseErrorCode.Expected, "'from'");
         let source: Ref = null;
         if ((state.tok as number) === T_STR) {
             source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
@@ -3960,7 +2994,7 @@ function parsePrimaryType(state: ParserState): Node {
             nextToken(state);
             return m.TSLiteralType(start, state.tokStart, 0, l) as Node;
         }
-        err(state, 'expected number');
+        raise(state, ParseErrorCode.ExpectedNumber);
         return m.keyword(start, state.tokStart, N.TSAnyKeyword) as Node;
     }
     if (isP(state, P.LBRACKET)) {
@@ -4083,7 +3117,7 @@ function parsePrimaryType(state: ParserState): Node {
         nextToken(state);
         return m.keyword(start, state.tokStart, N.TSThisType) as Node;
     }
-    if (isIdentLike(state) || state.tok === T_KW) {
+    if (isIdentLike(state) || isKeyword(state.tok)) {
         const kw = tsKeywordType(state);
         if (kw !== 0) {
             nextToken(state);
@@ -4103,7 +3137,7 @@ function parsePrimaryType(state: ParserState): Node {
         }
         return m.TSTypeReference(start, state.tokStart, 0, name, targs) as Node;
     }
-    err(state, 'expected type');
+    raise(state, ParseErrorCode.ExpectedType);
     nextToken(state);
     return m.keyword(start, state.tokStart, N.TSAnyKeyword) as Node;
 }
@@ -4154,7 +3188,7 @@ function parseTemplateLiteralType(state: ParserState): Node {
     for (;;) {
         types.push(parseType(state));
         if (!isP(state, P.RBRACE)) {
-            err(state, "expected '}'");
+            raise(state, ParseErrorCode.Expected, "'}'");
             break;
         }
         reScanTemplateContinue(state);
@@ -4200,7 +3234,7 @@ function parseMappedType(state: ParserState): Node {
     } else if (eatK(state, K.READONLY)) flags |= 3 << 4;
     expectP(state, P.LBRACKET, "'['");
     const name = parseIdent(state, R_BIND);
-    if (!eatK(state, K.IN)) err(state, "expected 'in'");
+    if (!eatK(state, K.IN)) raise(state, ParseErrorCode.Expected, "'in'");
     const constraint = parseType(state);
     let nameType: Ref = null;
     if (eatK(state, K.AS)) nameType = parseType(state);
@@ -4229,7 +3263,7 @@ function parseTypeMembers(state: ParserState): Node[] {
     let last = -1;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         if (state.tokStart === last) {
-            err(state, 'unexpected token in type member');
+            raise(state, ParseErrorCode.UnexpectedInTypeMember, tokenDesc(state));
             nextToken(state);
             continue;
         }
@@ -4357,27 +3391,23 @@ function expectGtInType(state: ParserState): void {
         return;
     }
     if (
-        state.tok === T_PUNCT &&
-        (state.tokVal === P.SHR ||
-            state.tokVal === P.USHR ||
-            state.tokVal === P.GE ||
-            state.tokVal === P.SHREQ ||
-            state.tokVal === P.USHREQ)
+        isPunct(state.tok) &&
+        (state.tok === P.SHR || state.tok === P.USHR || state.tok === P.GE || state.tok === P.SHREQ || state.tok === P.USHREQ)
     ) {
         state.pos = state.tokStart + 1;
         nextToken(state);
         return;
     }
-    err(state, "expected '>'");
+    raise(state, ParseErrorCode.Expected, "'>'");
 }
 const isGtLike = (state: ParserState): boolean =>
-    state.tok === T_PUNCT &&
-    (state.tokVal === P.GT ||
-        state.tokVal === P.SHR ||
-        state.tokVal === P.USHR ||
-        state.tokVal === P.GE ||
-        state.tokVal === P.SHREQ ||
-        state.tokVal === P.USHREQ);
+    isPunct(state.tok) &&
+    (state.tok === P.GT ||
+        state.tok === P.SHR ||
+        state.tok === P.USHR ||
+        state.tok === P.GE ||
+        state.tok === P.SHREQ ||
+        state.tok === P.USHREQ);
 
 function tryParseTypeParams(state: ParserState): Node | null {
     const src = state.src;
@@ -4497,7 +3527,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     let lastPos = -1;
     while ((state.tok as number) !== T_EOF) {
         if (state.pos === lastPos && (state.tok as number) !== T_EOF) {
-            err(state, 'parser stalled');
+            raise(state, ParseErrorCode.ParserStalled);
             nextToken(state);
         }
         lastPos = state.pos;

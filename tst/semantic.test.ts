@@ -6,7 +6,7 @@ import * as meriyah from 'meriyah';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic, type Semantic, symbolOf } from '../src/analysis/semantic.ts';
 import { isIdentifier, N, type Node, walk } from '../src/ast.ts';
-import { parse } from '../src/parser.ts';
+import { parse } from '../src/parser';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');

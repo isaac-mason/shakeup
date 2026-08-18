@@ -1,5 +1,5 @@
 import { type Node, type Program, N, isIdentifier, cloneNode, walkChildren } from '../src/ast.ts';
-import { parse } from '../src/parser.ts';
+import { parse } from '../src/parser';
 import { analyze, createSemantic, symbolOf, type Semantic } from '../src/analysis/semantic.ts';
 import { isPureExpr } from '../src/analysis/effects.ts';
 
