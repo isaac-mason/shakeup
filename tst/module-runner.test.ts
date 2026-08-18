@@ -1,15 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createModuleRunner, defaultEvaluator } from '../src/module-runner.ts';
-import { moduleRunnerTransform } from '../src/transform.ts';
+import { devTransform } from '../src/transform.ts';
 
 /** A runner over an in-memory source graph. Ids ARE the import specifiers; any
  *  unknown specifier is treated as external. Each module is transformed for real
- *  by moduleRunnerTransform, so this is a source→transform→run end-to-end test. */
+ *  by devTransform, so this is a source→transform→run end-to-end test. */
 function graph(sources: Record<string, string>, externals: Record<string, unknown> = {}) {
     return createModuleRunner({
         resolveId: (spec) => (spec in sources ? spec : { external: spec }),
         fetchModule: (id) => {
-            const r = moduleRunnerTransform(id, sources[id]);
+            const r = devTransform(id, sources[id]);
             if (r.errors.length) throw new Error(r.errors.join('\n'));
             return r.code;
         },
@@ -55,7 +55,7 @@ describe('runner — basic linking', () => {
     it('provides import.meta.env (never throws; realm-injected)', async () => {
         const runner = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, `export const m = import.meta.env.MODE;`).code,
+            fetchModule: (id) => devTransform(id, `export const m = import.meta.env.MODE;`).code,
             createImportMeta: (id) => ({ url: id }),
             env: { MODE: 'development' },
         });
@@ -63,14 +63,14 @@ describe('runner — basic linking', () => {
         // default {} so access never throws even without config
         const bare = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, `export const m = import.meta.env.MODE ?? 'none';`).code,
+            fetchModule: (id) => devTransform(id, `export const m = import.meta.env.MODE ?? 'none';`).code,
         });
         expect((await bare.import('y')).m).toBe('none');
     });
 
     it('does NOT cache a module that threw during evaluation', async () => {
         const src: Record<string, string> = { bad: `throw new Error('boom');` };
-        const runner = createModuleRunner({ resolveId: (s) => s, fetchModule: (id) => moduleRunnerTransform(id, src[id]).code });
+        const runner = createModuleRunner({ resolveId: (s) => s, fetchModule: (id) => devTransform(id, src[id]).code });
         await expect(runner.import('bad')).rejects.toThrow('boom');
         src.bad = `export const v = 99;`; // fixed edit
         expect((await runner.import('bad')).v).toBe(99); // re-evaluates, not stale partial
@@ -119,7 +119,7 @@ describe('runner — HMR', () => {
         };
         const runner = createModuleRunner({
             resolveId: (spec) => spec,
-            fetchModule: (id) => moduleRunnerTransform(id, sources[id]).code,
+            fetchModule: (id) => devTransform(id, sources[id]).code,
             createImportMeta: (id) => ({ url: id }),
         });
         const ns = await runner.import('m');
@@ -137,7 +137,7 @@ describe('runner — HMR', () => {
         };
         const runner = createModuleRunner({
             resolveId: (spec) => spec,
-            fetchModule: (id) => moduleRunnerTransform(id, sources[id]).code,
+            fetchModule: (id) => devTransform(id, sources[id]).code,
             createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('m');
@@ -151,7 +151,7 @@ describe('runner — HMR', () => {
             m: `import { v } from 'dep';\nimport.meta.hot.accept('dep', () => {});\nexport const got = v;`,
             dep: `export const v = 1;`,
         };
-        const runner = createModuleRunner({ resolveId: (s) => s, fetchModule: (id) => moduleRunnerTransform(id, src[id]).code });
+        const runner = createModuleRunner({ resolveId: (s) => s, fetchModule: (id) => devTransform(id, src[id]).code });
         await runner.import('m');
         src.dep = `export const v = 2;`;
         // m dep-accepts 'dep' but does NOT self-accept → its own update bubbles (false),
@@ -162,7 +162,7 @@ describe('runner — HMR', () => {
     it('applyUpdate returns false for a module that does not self-accept', async () => {
         const runner = createModuleRunner({
             resolveId: (spec) => spec,
-            fetchModule: () => moduleRunnerTransform('m', `export const v = 1;`).code,
+            fetchModule: () => devTransform('m', `export const v = 1;`).code,
             createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('m');
@@ -175,7 +175,7 @@ describe('runner — HMR robustness', () => {
         const src: Record<string, string> = { m: `export const v = 1;\nimport.meta.hot.accept();` };
         const runner = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, src[id]).code,
+            fetchModule: (id) => devTransform(id, src[id]).code,
             createImportMeta: (id) => ({ url: id }),
         });
         expect((await runner.import('m')).v).toBe(1);
@@ -193,7 +193,7 @@ describe('runner — HMR robustness', () => {
         };
         const runner = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, src[id]).code,
+            fetchModule: (id) => devTransform(id, src[id]).code,
             createImportMeta: (id) => ({ url: id }),
         });
         await runner.import('imp');
@@ -210,7 +210,7 @@ describe('runner — host seams', () => {
         const order: string[] = [];
         const runner = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, `globalThis.__ord.push('body');\nexport const v = 1;`).code,
+            fetchModule: (id) => devTransform(id, `globalThis.__ord.push('body');\nexport const v = 1;`).code,
             prepare: () => order.push('prepare'),
         });
         (globalThis as { __ord?: string[] }).__ord = order;
@@ -223,7 +223,7 @@ describe('runner — host seams', () => {
     it('the evaluator is the external policy — a browser host rejects node: (#8)', async () => {
         const runner = createModuleRunner({
             resolveId: (spec) => ({ external: spec }),
-            fetchModule: (id) => moduleRunnerTransform(id, `import fs from 'node:fs';\nexport const f = fs;`).code,
+            fetchModule: (id) => devTransform(id, `import fs from 'node:fs';\nexport const f = fs;`).code,
             evaluator: {
                 ...defaultEvaluator,
                 runExternalModule: async (spec) => {
@@ -244,7 +244,7 @@ describe('runner — custom HMR events (on/off/send)', () => {
         const runner = createModuleRunner({
             resolveId: (s) => s,
             fetchModule: (id) =>
-                moduleRunnerTransform(
+                devTransform(
                     id,
                     `import.meta.hot.on('ping', (d) => { globalThis.__got.push(d); });\nimport.meta.hot.send('ready', { id: 1 });\nexport const v = 1;`,
                 ).code,
@@ -264,7 +264,7 @@ describe('runner — evaluator + import.meta', () => {
         const runner = createModuleRunner({
             resolveId: (s) => s,
             fetchModule: (id) =>
-                moduleRunnerTransform(id, `export const u = import.meta.url;\nexport const f = import.meta.filename;`).code,
+                devTransform(id, `export const u = import.meta.url;\nexport const f = import.meta.filename;`).code,
             createImportMeta: (id) => ({ url: `sk://${id}`, filename: id }),
         });
         const ns = await runner.import('/m.ts');
@@ -276,7 +276,7 @@ describe('runner — evaluator + import.meta', () => {
         const ran: string[] = [];
         const runner = createModuleRunner({
             resolveId: (s) => s,
-            fetchModule: (id) => moduleRunnerTransform(id, `export const v = 42;`).code,
+            fetchModule: (id) => devTransform(id, `export const v = 42;`).code,
             evaluator: {
                 startOffset: 0,
                 runModule: (ctx, code) => {
@@ -296,7 +296,7 @@ describe('runner — source maps', () => {
         const runner = createModuleRunner({
             resolveId: (s) => s,
             fetchModule: (id) => {
-                const r = moduleRunnerTransform(id, `export const v = 42;`, { sourcemap: true });
+                const r = devTransform(id, `export const v = 42;`, { sourcemap: true });
                 return { code: r.code, map: r.map };
             },
         });

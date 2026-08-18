@@ -1,8 +1,8 @@
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { buildLineTable, type Edit, type JSXLower } from './emit';
 import { basenameOf, dirnameOf, relativePath } from './fs';
+import type { JSXLower } from './jsx-text';
 import {
     buildGraph,
     externalKey,
@@ -35,10 +35,19 @@ import {
     replacePlaceholdersWithDefaultAndGetContainedPlaceholders,
     replaceSinglePlaceholder,
 } from './output-options';
+import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
-import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap, trimMappings } from './sourcemap';
+import {
+    buildLineTable,
+    encodeMappings,
+    inlineSourceMapComment,
+    joinParts,
+    type Part,
+    type SourceMap,
+    trimMappings,
+} from './sourcemap';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
@@ -205,7 +214,6 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
             return null;
     }
 }
-
 
 /** The printer backend drops import/export statements itself, but still needs the side-effect-import
  *  and entry-star tracking that their removal implies — this records it without producing edits. */

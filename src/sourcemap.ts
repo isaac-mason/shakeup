@@ -195,6 +195,13 @@ export function trimMappings(code: string, m: Mappings): string {
     return trimmed;
 }
 
+/** Line-start offsets of `src` (index 0 = offset 0), for offset→(line,col) lookup during emit. */
+export const buildLineTable = (src: string): number[] => {
+    const t = [0];
+    for (let i = 0; i < src.length; i++) if (src.charCodeAt(i) === 10) t.push(i + 1);
+    return t;
+};
+
 /** A piece of assembled output. `map` present ⇒ its segments (relative to the piece's own line 0);
  *  absent ⇒ synthetic generated-only content (no source origin). */
 export type Part = { code: string; map?: Mappings };

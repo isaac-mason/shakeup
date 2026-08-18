@@ -1,5 +1,5 @@
 import { N, type Node } from '../ast';
-import { attrKeyText, attrsHaveKeyAfterSpreadEmit, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../emit';
+import { attrKeyText, attrsHaveKeyAfterSpreadEmit, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../jsx-text';
 import { Prec } from './precedence';
 import { printExpr } from './print-js';
 import { mark, type Printer, softSpace, write } from './printer';

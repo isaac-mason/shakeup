@@ -1,5 +1,6 @@
+import esbuild from 'esbuild';
 import { describe, expect, it } from 'vitest';
-import { applyEdits, collectStripEdits, emitModule, type JSXLower, parse } from '../src/index.ts';
+import { parse } from '../src/index.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 import { astEqual, semanticEqual } from './print-helpers.ts';
@@ -16,18 +17,19 @@ function roundTrip(src: string, minify: boolean): { printed: string; equal: bool
     return { printed, equal };
 }
 
-/** TS parity: the printer's type-stripped output must be structurally identical to the
- *  proven edit engine's strip (both re-parsed as JS). This is Phase-1 gate #3. */
-function stripParity(src: string): { printed: string; edit: string; equal: boolean } {
+/** TS parity vs an INDEPENDENT stripper (esbuild `loader: 'ts'`): the printer's type-stripped
+ *  output must be structurally identical to esbuild's, both re-parsed as JS. Anchors the printer's
+ *  strip to a production reference, not to our old edit engine. */
+async function stripParity(src: string): Promise<{ printed: string; ref: string; equal: boolean }> {
     const program = parse(src, { ts: true, jsx: false }).program;
     const p = createPrinter({ minify: false });
     printModule(p, program);
     const printed = finishPrinter(p);
-    const edit = emitModule(parse(src, { ts: true, jsx: false }).program, src, { stripTypes: true });
+    const ref = (await esbuild.transform(src, { loader: 'ts' })).code;
     const a = parse(printed, { ts: false, jsx: false });
-    const b = parse(edit, { ts: false, jsx: false });
+    const b = parse(ref, { ts: false, jsx: false });
     const equal = a.errors.length === 0 && b.errors.length === 0 && astEqual(a.program, b.program);
-    return { printed, edit, equal };
+    return { printed, ref, equal };
 }
 
 const CASES = [
@@ -116,7 +118,7 @@ const CASES = [
     "export * as ns from 'm';",
 ];
 
-/** TS source (stripped) — compared against the edit engine, not round-tripped as-is. */
+/** TS source (stripped) — compared against esbuild, not round-tripped as-is. */
 const TS_CASES = [
     'const x: number = 1;',
     'let y: string | null = null;',
@@ -145,53 +147,11 @@ describe('printer — structural round-trip parity', () => {
     }
 });
 
-describe('printer — TS strip parity vs edit engine', () => {
+describe('printer — TS strip parity vs esbuild', () => {
     for (const src of TS_CASES) {
-        it(src, () => {
-            const { printed, edit, equal } = stripParity(src);
-            expect(equal, `printed: ${printed}\n   edit: ${edit}`).toBe(true);
-        });
-    }
-});
-
-/** Identity JSX runtime: names pass through, no renames — so the printer's native lowering
- *  and the edit engine's `lowerJSX` produce comparable output. */
-const JSX_STUB: JSXLower = { runtimeName: (k) => k, renameIdent: () => null };
-
-/** JSX parity: the printer's native `jsx()` lowering must be structurally identical to the
- *  proven edit-engine `lowerJSX`, both re-parsed as plain JS. */
-function jsxParity(src: string): { printed: string; edit: string; equal: boolean } {
-    const program = parse(src, { ts: true, jsx: true }).program;
-    const p = createPrinter({ minify: false }, { jsx: JSX_STUB });
-    printModule(p, program);
-    const printed = finishPrinter(p);
-    const edits = collectStripEdits(parse(src, { ts: true, jsx: true }).program, src, false, null, JSX_STUB);
-    const edit = applyEdits(src, edits);
-    const a = parse(printed, { ts: false, jsx: false });
-    const b = parse(edit, { ts: false, jsx: false });
-    const equal = a.errors.length === 0 && b.errors.length === 0 && astEqual(a.program, b.program);
-    return { printed, edit, equal };
-}
-
-const JSX_CASES = [
-    'const a = <div />;',
-    'const b = <div className="x" id="y">hi</div>;',
-    'const c = <Comp a={1} b="two" flag>text</Comp>;',
-    'const d = <><a /><b /></>;',
-    'const e = <div>{items.map((x) => <Item key={x.id} value={x} />)}</div>;',
-    'const f = <a.b.C prop={1} />;',
-    'const g = <input disabled value={v} />;',
-    'const h = <p>a &amp; b &lt; c</p>;',
-    'const i = <Comp {...props} key={k}>{child}</Comp>;',
-    'const j = <ul>{a}{b}{c}</ul>;',
-    'const k = <div style={{ color: "red" }}>{cond ? <A /> : <B />}</div>;',
-];
-
-describe('printer — JSX parity vs edit engine', () => {
-    for (const src of JSX_CASES) {
-        it(src, () => {
-            const { printed, edit, equal } = jsxParity(src);
-            expect(equal, `printed: ${printed}\n   edit: ${edit}`).toBe(true);
+        it(src, async () => {
+            const { printed, ref, equal } = await stripParity(src);
+            expect(equal, `printed: ${printed}\n    ref: ${ref}`).toBe(true);
         });
     }
 });
@@ -229,17 +189,4 @@ describe('printer — Phase 2 syntactic minification', () => {
         printModule(plain, parse(src, { ts: false, jsx: false }).program);
         expect(minified(src).length).toBeLessThan(finishPrinter(plain).length);
     });
-});
-
-describe('printer — structural round-trip parity', () => {
-    for (const src of CASES) {
-        it(`non-minify: ${src}`, () => {
-            const { printed, equal } = roundTrip(src, false);
-            expect(equal, `printed: ${printed}`).toBe(true);
-        });
-        it(`minify: ${src}`, () => {
-            const { printed, equal } = roundTrip(src, true);
-            expect(equal, `printed: ${printed}`).toBe(true);
-        });
-    }
 });

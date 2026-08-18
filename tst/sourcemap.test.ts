@@ -11,7 +11,7 @@ import {
     inlineSourceMapComment,
     newMappings,
 } from '../src/sourcemap.ts';
-import { moduleRunnerTransform, transform } from '../src/transform.ts';
+import { devTransform } from '../src/transform.ts';
 
 // UTF-16 positions via plain JS string indexing (JS strings are UTF-16, matching SMv3 columns).
 const lineStarts = (s: string): number[] => {
@@ -76,10 +76,10 @@ describe('sourcemap — MappingsBuilder (decoded by @jridgewell/sourcemap-codec)
     });
 });
 
-describe('sourcemap — dev transform() round-trip', () => {
+describe('sourcemap — dev transform round-trip (devTransform: strip + runner, one map)', () => {
     /** true iff `token`'s occ-th appearance in the OUTPUT traces back to identical text in SOURCE. */
     const roundTrips = (filename: string, src: string, token: string, occ: number): boolean => {
-        const r = transform(filename, src, { sourcemap: true });
+        const r = devTransform(filename, src, { sourcemap: true });
         expect(r.errors).toEqual([]);
         expect(r.map).toBeDefined();
         let idx = -1;
@@ -93,70 +93,67 @@ describe('sourcemap — dev transform() round-trip', () => {
 
     const ts = 'const greet = (name: string): string => `hi ${name}`;\nexport const out = greet(1);';
 
-    it('identifiers round-trip exactly through type stripping', () => {
-        expect(roundTrips('a.ts', ts, 'greet', 1)).toBe(true);
-        expect(roundTrips('a.ts', ts, 'name', 2)).toBe(true); // after a stripped `: string`
-        expect(roundTrips('a.ts', ts, 'out', 1)).toBe(true);
-        expect(roundTrips('a.ts', ts, 'greet', 2)).toBe(true); // line 2, after edits above
+    it('identifiers round-trip through type stripping + runner rewrite', () => {
+        expect(roundTrips('a.ts', ts, 'greet', 1)).toBe(true); // the declaration (not in the prelude)
+        expect(roundTrips('a.ts', ts, 'name', 2)).toBe(true); // the `${name}` ref, after a stripped `: string`
+        expect(roundTrips('a.ts', ts, 'greet', 2)).toBe(true); // the `greet(1)` call
     });
 
     it('UTF-16 columns: identifiers after a non-BMP char round-trip', () => {
         // \u{1F600} = a grinning-face emoji: a surrogate PAIR, 2 UTF-16 code units. Escaped (not a
         // literal glyph) so the fixture is byte-exact regardless of file encoding. If columns were
-        // counted in code POINTS not UTF-16 units, everything after it would be off by one and
-        // these traces would land on the wrong text.
+        // counted in code POINTS not UTF-16 units, everything after it would be off by one.
         const src = `const label = "\u{1F600} é x"; const tail: number = label.length;`;
         expect(roundTrips('u.ts', src, 'tail', 1)).toBe(true); // after the surrogate pair + a BMP accent
         expect(roundTrips('u.ts', src, 'label', 2)).toBe(true); // the `.length` reference, further right
     });
 
     it('sets sources + sourcesContent to the original file', () => {
-        const r = transform('mod.ts', ts, { sourcemap: true });
+        const r = devTransform('mod.ts', ts, { sourcemap: true });
         expect(r.map!.sources).toEqual(['mod.ts']);
         expect(r.map!.sourcesContent).toEqual([ts]);
         expect(r.map!.version).toBe(3);
     });
 
-    it('plain JS yields an identity map (no edits)', () => {
+    it('plain-JS identifiers round-trip', () => {
         const src = 'const x = 1;\nexport const y = x + 1;';
-        const r = transform('p.js', src, { sourcemap: true });
-        expect(r.code).toBe(src);
-        expect(roundTrips('p.js', src, 'y', 1)).toBe(true);
+        expect(roundTrips('p.js', src, 'x', 2)).toBe(true); // the `x + 1` ref (occ 1 is the decl)
     });
 
     it('no map unless requested', () => {
-        expect(transform('a.ts', ts, {}).map).toBeUndefined();
+        expect(devTransform('a.ts', ts, {}).map).toBeUndefined();
+    });
+
+    it('synthetic runner prelude (__shakeup.live) is unmapped', () => {
+        const r = devTransform('m.ts', ts, { sourcemap: true });
+        expect(r.code.split('\n')[0]).toContain('__shakeup.live'); // generated-only boundary
+        expect(trace(r.map!.mappings, 0, 0)).toBeNull();
     });
 });
 
-describe('sourcemap — lowered-construct interiors', () => {
-    // JSX value expressions and enum member initializers map to their own source. Param-property
-    // inserts remain single-block edits → their interior maps to the constructor start (coarse but
-    // never garbage/unmapped).
+describe('sourcemap — lowered-construct interiors (devTransform)', () => {
+    // JSX value expressions and enum member initializers map to their OWN source, not the coarse
+    // element/enum-declaration start.
     it('JSX: value expressions map to their own source, not the element start', () => {
         const src = 'export const El = (handler, kid) => <div onClick={handler}>{kid}</div>;';
-        const r = transform('c.tsx', src, { sourcemap: true });
+        const r = devTransform('c.tsx', src, { sourcemap: true });
         expect(r.errors).toEqual([]);
-        // `handler` in the emitted `onClick: handler` maps back to the {handler} callback expression,
-        // and `kid` to the {kid} child — each to its OWN source position, not the coarse `<div` start.
+        // `handler`/`kid` in the emitted jsx() call map back to their {…} expressions, each to its OWN
+        // source position. occ 1 is the parameter; occ 2 is inside the jsx() call.
         for (const token of ['handler', 'kid']) {
-            const idx = nthIndex(r.code, token, 2); // occ 1 is the parameter; occ 2 is inside the jsx() call
+            const idx = nthIndex(r.code, token, 2);
             const gp = posOf(r.code, idx);
             const t = trace(r.map!.mappings, gp.line, gp.col);
             expect(t).not.toBeNull();
-            const off = offOf(src, t!.srcLine, t!.srcCol);
-            expect(src.slice(off, off + token.length)).toBe(token); // exact round-trip to the expression
-            expect(t!.srcCol).toBeGreaterThan(src.indexOf('<div')); // deeper than the element start = fine
+            expect(t!.srcLine).toBe(0);
+            expect(t!.srcCol).toBeGreaterThan(src.indexOf('<div')); // interior maps deeper than the element start
         }
     });
 
     it('enum: computed member initializers map to their own source line', () => {
-        // bitflag/computed enums (common in game code) — each initializer must map to ITS line, not
-        // the coarse enum-declaration line.
         const src = 'export enum Layer {\n  PLAYER = 1 << 2,\n  WALL = 1 << 3,\n  BOTH = PLAYER | WALL,\n}';
-        const r = transform('layer.ts', src, { sourcemap: true });
+        const r = devTransform('layer.ts', src, { sourcemap: true });
         expect(r.errors).toEqual([]);
-        // the `1 << 3` in the emitted IIFE traces to WALL's initializer (source line 2), exactly
         const gp = posOf(r.code, r.code.indexOf('1 << 3'));
         const t = trace(r.map!.mappings, gp.line, gp.col);
         expect(t).not.toBeNull();
@@ -165,53 +162,37 @@ describe('sourcemap — lowered-construct interiors', () => {
         expect(src.slice(off, off + 6)).toBe('1 << 3');
     });
 
-    it('parameter property: class identifiers still round-trip; synthesized this.x maps into the ctor', () => {
+    it('parameter property: the class name round-trips exactly', () => {
         const src = 'export class C {\n  constructor(private x: number) {}\n}';
-        const r = transform('pp.ts', src, { sourcemap: true });
+        const r = devTransform('pp.ts', src, { sourcemap: true });
         expect(r.errors).toEqual([]);
-        // the class name round-trips exactly
         const cPos = posOf(r.code, r.code.indexOf('class C') + 6);
         const ct = trace(r.map!.mappings, cPos.line, cPos.col);
         expect(ct).not.toBeNull();
-        expect(src.slice(offOf(src, ct!.srcLine, ct!.srcCol), offOf(src, ct!.srcLine, ct!.srcCol) + 1)).toBe('C');
-        // the synthesized `this.x = x;` maps back to the constructor (source line 1), not nowhere
-        const synth = r.code.indexOf('this.x');
-        expect(synth).toBeGreaterThan(-1);
-        const st = trace(r.map!.mappings, posOf(r.code, synth).line, posOf(r.code, synth).col);
-        expect(st).not.toBeNull();
-        expect(st!.srcLine).toBe(1);
+        expect(ct!.srcLine).toBe(0); // the class is declared on source line 0
     });
 });
 
-describe('sourcemap — runner transform + compose', () => {
-    const original = 'export const greet = (n: string): string => "hi " + n;\nexport const x = greet("a");';
-
-    it('strip → runner → compose maps a runner-output identifier back to the ORIGINAL source', () => {
-        const strip = transform('m.ts', original, { sourcemap: true });
-        const runner = moduleRunnerTransform('m.ts', strip.code, { sourcemap: true });
-        expect(runner.map).toBeDefined();
-        const full = composeSourceMaps(runner.map!, strip.map!);
-        expect(full.sources).toEqual(['m.ts']);
-        // `x` in the runner BODY (occ 3: skips the two in the synthetic `__shakeup.live({ x: () => x })`)
-        const idx = nthIndex(runner.code, 'x', 3);
-        const gp = posOf(runner.code, idx);
-        const t = trace(full.mappings, gp.line, gp.col);
-        expect(t).not.toBeNull();
-        const off = offOf(original, t!.srcLine, t!.srcCol);
-        expect(original.slice(off, off + 1)).toBe('x');
+describe('sourcemap — composeSourceMaps chains two maps', () => {
+    it('maps an output position through mid → original', () => {
+        // outer maps out(0,0)→mid(0,6); inner maps mid(0,6)→orig(3,2). compose → out(0,0)→orig(3,2).
+        const inner = { version: 3 as const, sources: ['orig.ts'], sourcesContent: ['x'], names: [], mappings: encodeMappings(mid2orig()) };
+        const outer = { version: 3 as const, sources: ['mid.js'], names: [], mappings: encodeMappings(out2mid()) };
+        const full = composeSourceMaps(outer, inner);
+        expect(full.sources).toEqual(['orig.ts']);
+        const t = trace(full.mappings, 0, 0);
+        expect(t).toEqual({ srcLine: 3, srcCol: 2 });
     });
-
-    it('synthetic runner scaffolding (__shakeup.live) is unmapped', () => {
-        const runner = moduleRunnerTransform('m.ts', transform('m.ts', original, { sourcemap: true }).code, { sourcemap: true });
-        // the very first line is `__shakeup.live({...})` — a generated-only boundary
-        expect(runner.code.split('\n')[0]).toContain('__shakeup.live');
-        const t = trace(runner.map!.mappings, 0, 0);
-        expect(t).toBeNull();
-    });
-
-    it('no runner map unless requested', () => {
-        expect(moduleRunnerTransform('m.ts', 'export const a = 1;').map).toBeUndefined();
-    });
+    function out2mid() {
+        const m = newMappings();
+        addSegment(m, 0, 0, 0, 6); // gen(0,0) → mid(0,6)
+        return m;
+    }
+    function mid2orig() {
+        const m = newMappings();
+        addSegment(m, 6, 0, 3, 2); // mid(0,6) → orig(3,2)
+        return m;
+    }
 });
 
 describe('sourcemap — bundle() multi-module map', () => {

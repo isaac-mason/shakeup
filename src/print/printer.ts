@@ -1,5 +1,5 @@
 import { lineColOf, type Node } from '../ast';
-import type { JSXLower } from '../emit';
+import type { JSXLower } from '../jsx-text';
 import { addLine, addSegment, type Mappings, newMappings } from '../sourcemap';
 
 /** Options controlling how the printer renders. Whitespace and syntactic-form

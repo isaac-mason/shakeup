@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { analyze, createSemantic, moduleRunnerTransform, type Node, parse } from '../src/index.ts';
+import { analyze, createSemantic, type Node, parse } from '../src/index.ts';
 import { assembleRunner, createRunnerCtx, moduleRunnerPass, type RunnerCtx } from '../src/pass/module-runner.ts';
 import { runPass } from '../src/pass/traverse.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
-import { astEqual } from './print-helpers.ts';
 
-function passLower(src: string): { code: string; ctx: RunnerCtx } {
+/** Lower a plain-JS module through the module-runner pass + printer (the dev protocol). */
+function lower(src: string): { code: string; ctx: RunnerCtx } {
     const { program } = parse(src, { ts: false, jsx: false });
     const semantic = createSemantic();
     analyze(semantic, program);
@@ -17,58 +17,157 @@ function passLower(src: string): { code: string; ctx: RunnerCtx } {
     return { code: assembleRunner(ctx, finishPrinter(p)), ctx };
 }
 
-// Every construct the edit-based moduleRunnerTransform handles; the pass must produce the same
-// statements (astEqual after reparse) and the same deps/dynamicDeps/hmr side outputs.
-const CASES = [
-    // imports + refs
-    'import { a } from "./m";\nconsole.log(a);\n',
-    'import a from "./m";\na();\n',
-    'import * as ns from "./m";\nns.x(ns.y);\n',
-    'import { a as b } from "./m";\nconst z = b + 1;\n',
-    'import { "weird-name" as w } from "./m";\nw();\n',
-    'import x from "./m";\nconst o = { x };\n',
-    'import { tag } from "./m";\nconst t = tag`hi ${1}`;\n',
-    'import "./side-effect.js";\nrun();\n',
-    // exports — declarations
-    'export const a = 1, b = 2;\n',
-    'export function f() { return 1; }\n',
-    'export class C {}\n',
-    'export const { x, y: [z] } = obj;\n',
-    // exports — specifiers / re-export / star
-    'const a = 1, b = 2;\nexport { a, b as c };\n',
-    'import { a } from "./m";\nexport { a };\n',
-    'export { x, y as "z-z" } from "./dep";\n',
-    'export * from "./dep";\n',
-    'export * as ns from "./dep";\n',
-    // export default forms
-    'export default function () { return 1; }\n',
-    'export default function named() {}\n',
-    'export default class {}\n',
-    'export default 42;\n',
-    'import { a } from "./m";\nexport default a;\n',
-    // HMR
-    'import.meta.hot.accept();\n',
-    'import.meta.hot.accept((m) => {});\n',
-    'import.meta.hot.accept("./dep", (m) => {});\n',
-    'import.meta.hot.accept(["./a", "./b"], (m) => {});\n',
-    'import.meta.hot.acceptExports(["x"]);\n',
-    // mixed
-    'import { a } from "./a";\nimport { b } from "./b";\nexport const u = a(b);\nconst d = import("./d");\n',
-];
+type Mod = Record<string, unknown>;
 
-describe('module-runner pass — full parity vs edit engine', () => {
-    for (const src of CASES) {
-        it(`matches moduleRunnerTransform: ${JSON.stringify(src)}`, () => {
-            const mine = passLower(src);
-            const edit = moduleRunnerTransform('/m.js', src);
-            const a = parse(mine.code, { ts: false, jsx: false });
-            const b = parse(edit.code, { ts: false, jsx: false });
-            expect(a.errors).toEqual([]);
-            expect(b.errors).toEqual([]);
-            expect(astEqual(a.program, b.program)).toBe(true);
-            expect(mine.ctx.deps).toEqual(edit.deps);
-            expect(mine.ctx.dynamicDeps).toEqual(edit.dynamicDeps);
-            expect(mine.ctx.hmr).toEqual(edit.hmr);
-        });
-    }
+/** Execute lowered runner code against a `__shakeup` runtime stub — independent ground truth
+ *  (behavior), not a diff against the old edit engine. Mirrors tst/pass.jsx-runner.ts. */
+async function run(code: string, modules: Record<string, Mod> = {}): Promise<{ exports: Mod; linked: string[] }> {
+    const exports: Mod = {};
+    const linked: string[] = [];
+    const shakeup = {
+        link: async (spec: string) => {
+            linked.push(spec);
+            return modules[spec] ?? {};
+        },
+        live: (obj: Record<string, () => unknown>) => {
+            for (const k of Object.keys(obj)) Object.defineProperty(exports, k, { get: obj[k], enumerable: true, configurable: true });
+        },
+        meta: { url: 'file:///m.js', env: { MODE: 'test' } },
+        exportAll: (ns: Mod) => {
+            for (const k of Object.keys(ns)) {
+                if (k !== 'default') Object.defineProperty(exports, k, { get: () => ns[k], enumerable: true, configurable: true });
+            }
+        },
+    };
+    // biome-ignore lint/security/noGlobalEval: test harness executing generated runner code
+    const fn = new Function('__shakeup', `return (async () => {\n${code}\n})();`);
+    await fn(shakeup);
+    return { exports, linked };
+}
+
+describe('module-runner pass — imports lower + resolve at runtime', () => {
+    it('named import resolves through the runtime member', async () => {
+        const { exports } = await run(lower('import { a } from "./m";\nexport const r = a;\n').code, { './m': { a: 42 } });
+        expect(exports.r).toBe(42);
+    });
+
+    it('default import', async () => {
+        const { exports } = await run(lower('import f from "./m";\nexport const r = f(3);\n').code, { './m': { default: (n: number) => n * 2 } });
+        expect(exports.r).toBe(6);
+    });
+
+    it('namespace import', async () => {
+        const { exports } = await run(lower('import * as ns from "./m";\nexport const r = ns.x + ns.y;\n').code, { './m': { x: 1, y: 2 } });
+        expect(exports.r).toBe(3);
+    });
+
+    it('aliased import', async () => {
+        const { exports } = await run(lower('import { a as b } from "./m";\nexport const r = b + 1;\n').code, { './m': { a: 10 } });
+        expect(exports.r).toBe(11);
+    });
+
+    it('non-identifier imported name → computed member', async () => {
+        const { exports } = await run(lower('import { "weird-name" as w } from "./m";\nexport const r = w();\n').code, { './m': { 'weird-name': () => 'ok' } });
+        expect(exports.r).toBe('ok');
+    });
+
+    it('shorthand property expands to a member', async () => {
+        const { exports } = await run(lower('import x from "./m";\nexport const r = { x };\n').code, { './m': { default: 'D' } });
+        expect(exports.r).toEqual({ x: 'D' });
+    });
+
+    it('callee this-preservation: `f()` does not bind `this` to the namespace', async () => {
+        const mod = { f: function (this: unknown) { return this === undefined ? 'unbound' : 'bound'; } };
+        const { exports } = await run(lower('import { f } from "./m";\nexport const r = f();\n').code, { './m': mod });
+        expect(exports.r).toBe('unbound');
+    });
+
+    it('side-effect import links but binds nothing', async () => {
+        const { code, ctx } = lower('import "./side.js";\nexport const r = 1;\n');
+        const { exports, linked } = await run(code, {});
+        expect(exports.r).toBe(1);
+        expect(linked).toContain('./side.js');
+        expect(ctx.deps).toEqual(['./side.js']);
+    });
+});
+
+describe('module-runner pass — exports lower to live getters', () => {
+    it('export const (multiple) / function / class', async () => {
+        const { exports } = await run(lower('export const a = 1, b = 2;\nexport function f() { return a; }\nexport class C {}\n').code);
+        expect(exports.a).toBe(1);
+        expect(exports.b).toBe(2);
+        expect((exports.f as () => number)()).toBe(1);
+        expect(typeof exports.C).toBe('function');
+    });
+
+    it('export destructuring binds every name', async () => {
+        const { exports } = await run(lower('const obj = { x: 1, y: [2] };\nexport const { x, y: [z] } = obj;\n').code);
+        expect(exports.x).toBe(1);
+        expect(exports.z).toBe(2);
+    });
+
+    it('export specifiers with rename', async () => {
+        const { exports } = await run(lower('const a = 1, b = 2;\nexport { a, b as c };\n').code);
+        expect(exports.a).toBe(1);
+        expect(exports.c).toBe(2);
+    });
+
+    it('re-export a binding from another module', async () => {
+        const { exports } = await run(lower('export { x, y as "z-z" } from "./dep";\n').code, { './dep': { x: 7, y: 8 } });
+        expect(exports.x).toBe(7);
+        expect(exports['z-z']).toBe(8);
+    });
+
+    it('export * merges the dep namespace', async () => {
+        const { exports } = await run(lower('export * from "./dep";\n').code, { './dep': { a: 1, b: 2 } });
+        expect(exports.a).toBe(1);
+        expect(exports.b).toBe(2);
+    });
+
+    it('export * as namespace', async () => {
+        const dep = { a: 1 };
+        const { exports } = await run(lower('export * as ns from "./dep";\n').code, { './dep': dep });
+        expect(exports.ns).toBe(dep);
+    });
+
+    it('export default — anonymous / named / expression', async () => {
+        expect((await run(lower('export default 42;\n').code)).exports.default).toBe(42);
+        expect(typeof (await run(lower('export default function () {}\n').code)).exports.default).toBe('function');
+        expect(typeof (await run(lower('export default class {}\n').code)).exports.default).toBe('function');
+        const { exports } = await run(lower('import { a } from "./m";\nexport default a;\n').code, { './m': { a: 'x' } });
+        expect(exports.default).toBe('x');
+    });
+});
+
+describe('module-runner pass — intrinsics + HMR (pass-owned outputs)', () => {
+    it('import.meta rewrites to the runtime meta', async () => {
+        const { exports } = await run(lower('export const u = import.meta.url;\n').code);
+        expect(exports.u).toBe('file:///m.js');
+    });
+
+    it('dynamic import rewrites to link, recorded as a dynamic dep', async () => {
+        const { code, ctx } = lower('export const p = import("./d");\n');
+        expect(ctx.dynamicDeps).toEqual(['./d']);
+        const { exports, linked } = await run(code, { './d': { default: 1 } });
+        await exports.p;
+        expect(linked).toContain('./d');
+    });
+
+    it.each([
+        ['import.meta.hot.accept();\n', { selfAccepts: true, acceptedDeps: [] }],
+        ['import.meta.hot.accept((m) => {});\n', { selfAccepts: true, acceptedDeps: [] }],
+        ['import.meta.hot.accept("./dep", (m) => {});\n', { selfAccepts: false, acceptedDeps: ['./dep'] }],
+        ['import.meta.hot.accept(["./a", "./b"], (m) => {});\n', { selfAccepts: false, acceptedDeps: ['./a', './b'] }],
+        ['import.meta.hot.acceptExports(["x"]);\n', { selfAccepts: true, acceptedDeps: [] }],
+    ])('HMR: %s', (src, hmr) => {
+        expect(lower(src).ctx.hmr).toEqual(hmr);
+    });
+
+    it('mixed module: deps + dynamicDeps recorded, exports resolve', async () => {
+        const { code, ctx } = lower('import { a } from "./a";\nimport { b } from "./b";\nexport const u = a + b;\nconst d = import("./d");\n');
+        expect(ctx.deps).toEqual(['./a', './b']);
+        expect(ctx.dynamicDeps).toEqual(['./d']);
+        const { exports } = await run(code, { './a': { a: 2 }, './b': { b: 3 }, './d': {} });
+        expect(exports.u).toBe(5);
+    });
 });

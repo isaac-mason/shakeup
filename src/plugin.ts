@@ -1,7 +1,7 @@
 import type { Semantic } from './analysis/semantic';
 import type { Program } from './ast';
-import { applyEdits, type Edit } from './emit';
 import type { Fs, MaybePromise } from './fs';
+import { applyEdits, type Edit } from './patches';
 import type { SourceMap } from './sourcemap';
 
 /** false = no side effects (droppable if unused); true = default liveness;

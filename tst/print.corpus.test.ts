@@ -2,12 +2,12 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { applyEdits, collectStripEdits, emitModule, type JSXLower, parse } from '../src/index.ts';
+import { type JSXLower, parse } from '../src/index.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 import { astEqual, semanticEqual } from './print-helpers.ts';
 
-/** Fixed runtime locals so the printer and edit engine lower JSX to the SAME calls. */
+/** Fixed runtime locals so the printer lowers JSX to concrete calls. */
 const JSX_LOWER: JSXLower = {
     renameIdent: () => null,
     runtimeName: (k) => ({ jsx: '_jsx', jsxs: '_jsxs', Fragment: '_Fragment', createElement: '_createElement' })[k],
@@ -47,29 +47,61 @@ describe('printer — real corpus (three.core.js, pure JS round-trip)', () => {
     }
 });
 
-describe.skipIf(!existsSync(CRASHCAT_SRC))('printer — real corpus (crashcat TS strip-parity vs edit engine)', () => {
-    const files = walkTs(CRASHCAT_SRC);
+// Strip breadth: the printer must handle the full range of real TS syntax and always emit valid,
+// type-free JS (reparse-as-JS with no errors ⇒ every type node was erased and nothing was left
+// syntactically broken). Curated semantic parity lives in print.test.ts (vs esbuild).
+function stripBreadth(files: string[]): string[] {
+    const failures: string[] = [];
+    for (const file of files) {
+        const src = readFileSync(file, 'utf8');
+        const isx = file.endsWith('.tsx');
+        const p = createPrinter({ minify: false });
+        try {
+            printModule(p, parse(src, { ts: true, jsx: isx }).program);
+        } catch (e) {
+            failures.push(`${file}: printer threw ${(e as Error).message}`);
+            continue;
+        }
+        const reparsed = parse(finishPrinter(p), { ts: false, jsx: false });
+        if (reparsed.errors.length > 0) failures.push(`${file}: stripped output is not valid JS: ${reparsed.errors[0]?.msg}`);
+    }
+    return failures;
+}
 
-    it(`strips ${files.length} TS files identically to the edit engine`, () => {
+describe('printer — self corpus (shakeup src/, TS strip breadth)', () => {
+    const files = walkTs(SELF_SRC);
+    it(`strips ${files.length} of our own TS files to valid JS`, () => {
+        expect(stripBreadth(files).slice(0, 20).join('\n')).toBe('');
+    });
+});
+
+describe.skipIf(!existsSync(CRASHCAT_SRC))('printer — real corpus (crashcat TS strip breadth)', () => {
+    const files = walkTs(CRASHCAT_SRC);
+    it(`strips ${files.length} TS files to valid JS`, () => {
+        expect(stripBreadth(files).slice(0, 20).join('\n')).toBe('');
+    });
+});
+
+describe('printer — JSX corpus (lowers every fixture to valid JS)', () => {
+    const files = readdirSync(JSX_DIR)
+        .filter((f) => f.endsWith('.jsx') || f.endsWith('.tsx'))
+        .map((f) => join(JSX_DIR, f));
+
+    it(`lowers ${files.length} JSX/TSX fixtures — no JSX survives`, () => {
         const failures: string[] = [];
         for (const file of files) {
             const src = readFileSync(file, 'utf8');
-            const program = parse(src, { ts: true, jsx: false }).program;
-            const p = createPrinter({ minify: false });
-            let printed: string;
+            const ts = file.endsWith('.tsx');
+            const p = createPrinter({ minify: false }, { jsx: JSX_LOWER });
             try {
-                printModule(p, program);
-                printed = finishPrinter(p);
+                printModule(p, parse(src, { ts, jsx: true }).program);
             } catch (e) {
-                failures.push(`${file}: threw ${(e as Error).message}`);
+                failures.push(`${file}: printer threw ${(e as Error).message}`);
                 continue;
             }
-            const edit = emitModule(parse(src, { ts: true, jsx: false }).program, src, { stripTypes: true });
-            const a = parse(printed, { ts: false, jsx: false });
-            const b = parse(edit, { ts: false, jsx: false });
-            if (a.errors.length > 0) failures.push(`${file}: printed reparse errors: ${a.errors[0]?.msg}`);
-            else if (b.errors.length === 0 && !astEqual(a.program, b.program))
-                failures.push(`${file}: AST diverged from edit engine`);
+            // Reparse as plain JS (jsx:false): any surviving JSX node would be a parse error.
+            const reparsed = parse(finishPrinter(p), { ts: false, jsx: false });
+            if (reparsed.errors.length > 0) failures.push(`${file}: lowered output not valid JS: ${reparsed.errors[0]?.msg}`);
         }
         expect(failures.slice(0, 20).join('\n')).toBe('');
     });
@@ -144,65 +176,5 @@ describe('printer — pathological JS round-trip (ASI / precedence / paren minim
             }
         }
         expect(failures.join('\n')).toBe('');
-    });
-});
-
-describe('printer — JSX corpus (lowering parity vs edit engine)', () => {
-    const files = readdirSync(JSX_DIR)
-        .filter((f) => f.endsWith('.jsx') || f.endsWith('.tsx'))
-        .map((f) => join(JSX_DIR, f));
-
-    it(`lowers ${files.length} JSX/TSX fixtures identically to the edit engine`, () => {
-        const failures: string[] = [];
-        for (const file of files) {
-            const src = readFileSync(file, 'utf8');
-            const ts = file.endsWith('.tsx');
-            const p = createPrinter({ minify: false }, { jsx: JSX_LOWER });
-            let printed: string;
-            try {
-                printModule(p, parse(src, { ts, jsx: true }).program);
-                printed = finishPrinter(p);
-            } catch (e) {
-                failures.push(`${file}: printer threw ${(e as Error).message}`);
-                continue;
-            }
-            const edited = applyEdits(src, collectStripEdits(parse(src, { ts, jsx: true }).program, src, false, null, JSX_LOWER));
-            const a = parse(printed, { ts: false, jsx: false });
-            const b = parse(edited, { ts: false, jsx: false });
-            if (a.errors.length > 0) failures.push(`${file}: printed reparse errors: ${a.errors[0]?.msg}`);
-            else if (b.errors.length === 0 && !astEqual(a.program, b.program)) failures.push(`${file}: lowering diverged from edit engine`);
-        }
-        expect(failures.slice(0, 20).join('\n')).toBe('');
-    });
-});
-
-describe('printer — self corpus (shakeup src/, TS strip-parity vs edit engine)', () => {
-    const files = walkTs(SELF_SRC);
-
-    it(`strips ${files.length} of our own TS files identically to the edit engine`, () => {
-        const failures: string[] = [];
-        for (const file of files) {
-            const src = readFileSync(file, 'utf8');
-            const isx = file.endsWith('.tsx');
-            const program = parse(src, { ts: true, jsx: isx }).program;
-            const p = createPrinter({ minify: false });
-            let printed: string;
-            try {
-                printModule(p, program);
-                printed = finishPrinter(p);
-            } catch (e) {
-                failures.push(`${file}: threw ${(e as Error).message}`);
-                continue;
-            }
-            const a = parse(printed, { ts: false, jsx: false });
-            if (a.errors.length > 0) {
-                failures.push(`${file}: printed reparse errors: ${a.errors[0]?.msg}`);
-                continue;
-            }
-            const edit = emitModule(parse(src, { ts: true, jsx: isx }).program, src, { stripTypes: true });
-            const b = parse(edit, { ts: false, jsx: false });
-            if (b.errors.length === 0 && !astEqual(a.program, b.program)) failures.push(`${file}: AST diverged from edit engine`);
-        }
-        expect(failures.slice(0, 20).join('\n')).toBe('');
     });
 });
