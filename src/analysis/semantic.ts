@@ -39,7 +39,7 @@ export type Semantic = {
     scopes: ScopeRec[];
     symbols: SymbolRec[];
 
-    nodeSym: Map<Node, number>;
+    // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
     nodeScope: Map<Node, number>;
 
     unresolved: Node[];
@@ -53,7 +53,6 @@ export function createSemantic(): Semantic {
     return {
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
-        nodeSym: new Map(),
         nodeScope: new Map(),
         unresolved: [],
         names: new Map(),
@@ -92,13 +91,13 @@ function declare(state: AnalyseState, identNode: Node, flags: number, ns: number
     const existing = state.sem.bindings.get(key);
     if (existing !== undefined) {
         state.sem.symbols[existing].flags |= flags;
-        state.sem.nodeSym.set(identNode, existing);
+        identNode.sym = existing;
         return existing;
     }
     const id = state.sem.symbols.length;
     state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId });
     state.sem.bindings.set(key, id);
-    state.sem.nodeSym.set(identNode, id);
+    identNode.sym = id;
     return id;
 }
 
@@ -128,7 +127,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
         while (s !== 0) {
             const hit = state.sem.bindings.get(bindingKey(s, ns, nameId));
             if (hit !== undefined) {
-                state.sem.nodeSym.set(identNode, hit);
+                identNode.sym = hit;
                 return;
             }
             s = state.sem.scopes[s].parent;
@@ -141,7 +140,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
                     hit !== undefined &&
                     (state.sem.symbols[hit].flags & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0
                 ) {
-                    state.sem.nodeSym.set(identNode, hit);
+                    identNode.sym = hit;
                     return;
                 }
                 s = state.sem.scopes[s].parent;
@@ -154,7 +153,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
 /**
  * Build scope and symbol tables for `program` into `out` (reset first, mutated in place).
  * Runs a declare pass (scopes + bindings) then a resolve pass that fills
- * `nodeSym` for every referencing Ident. LIMIT: no TDZ or redeclaration
+ * `node.sym` for every referencing Ident. LIMIT: no TDZ or redeclaration
  * diagnostics; labels are not tracked.
  */
 export function analyze(out: Semantic, program: Node): void {
@@ -163,7 +162,6 @@ export function analyze(out: Semantic, program: Node): void {
     out.unresolved.length = 0;
     out.names.clear();
     out.bindings.clear();
-    out.nodeSym.clear();
     out.nodeScope.clear();
 
     const state: AnalyseState = { sem: out, scope: 0 };
@@ -632,14 +630,14 @@ export function declareSyntheticImport(semantic: Semantic, identNode: Node): num
 
     const id = semantic.symbols.length;
     semantic.symbols.push({ scope: ms, decl: identNode, flags: SYM.IMPORT, nameId: 0 });
-    semantic.nodeSym.set(identNode, id);
+    identNode.sym = id;
     return id;
 }
 
 /** Declared name of a symbol (the text of its declaring Ident). */
 export const symbolName = (semantic: Semantic, symbolId: number): string => semantic.symbols[symbolId].decl?.name ?? '';
 
-/** Resolved symbol id for an Ident node (0 = unresolved/global). */
-export const symbolOf = (semantic: Semantic, node: Node): number => semantic.nodeSym.get(node) ?? 0;
+/** Resolved symbol id for an Ident node (0 = unresolved/global). The link lives on the node. */
+export const symbolOf = (_semantic: Semantic, node: Node): number => node.sym;
 /** Scope owned by a scope-bearing node (0 = none). */
 export const scopeOf = (semantic: Semantic, node: Node): number => semantic.nodeScope.get(node) ?? 0;

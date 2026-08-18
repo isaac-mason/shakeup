@@ -365,6 +365,9 @@ export type NodeOf<T extends TypeName> = {
     start: number;
     end: number;
     name: string;
+    /** resolved symbol id for a reference/binding ident (0 = unresolved/global). The node→symbol
+     *  link lives on the node (oxc model) so it survives movement/cloning; `set` clears it. */
+    sym: number;
     data: DataOf<T>;
 };
 
@@ -431,7 +434,7 @@ let idCounter = 0;
 export const allocId = (): number => ++idCounter;
 
 export function node<Id extends NodeType>(type: Id, start: number, end: number, name: string, data: DataForId<Id>): Node {
-    return { id: allocId(), type, start, end, name, data } as Node;
+    return { id: allocId(), type, start, end, name, sym: 0, data } as Node;
 }
 
 /**
@@ -442,9 +445,10 @@ export function node<Id extends NodeType>(type: Id, start: number, end: number, 
  * (`start`/`end`) is kept; `name` is left as-is (unused by most node types).
  */
 export function set<Id extends NodeType>(n: Node, type: Id, data: DataForId<Id>): void {
-    const w = n as { type: number; data: unknown };
+    const w = n as { type: number; data: unknown; sym: number };
     w.type = type;
     w.data = data;
+    w.sym = 0; // a retyped node is a fresh node — it carries no prior symbol association
 }
 
 /** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
@@ -1203,7 +1207,7 @@ export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null)
     }
     const id = n.type;
     const srcData = payload(n);
-    if (srcData === null) return rebuild(id, n.start, n.end, n.name, null);
+    if (srcData === null) return rebuild(id, n.start, n.end, n.name, n.sym, null);
     const fields = FIELDS[id];
     const outData: Record<string, unknown> = { ...srcData };
     for (let i = 0; i < fields.length; i++) {
@@ -1218,9 +1222,9 @@ export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null)
             outData[spec.name] = v == null ? null : cloneNode(v as Node, substitute);
         }
     }
-    return rebuild(id, n.start, n.end, n.name, outData);
+    return rebuild(id, n.start, n.end, n.name, n.sym, outData);
 }
 
-function rebuild(type: number, start: number, end: number, name: string, data: unknown): Node {
-    return { id: allocId(), type, start, end, name, data } as Node;
+function rebuild(type: number, start: number, end: number, name: string, sym: number, data: unknown): Node {
+    return { id: allocId(), type, start, end, name, sym, data } as Node;
 }

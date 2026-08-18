@@ -1621,10 +1621,10 @@ function isNameLike(state: ParserState): boolean {
 
 function ident(state: ParserState, role: number, start: number, end: number): Identifier {
     const h = start === state.tokStart && end === state.tokEnd ? state.tokHash : hashRange(state, start, end);
-    return { id: nextId(state), type: role, start, end, name: intern(state, start, end, h), data: null } as Identifier;
+    return { id: nextId(state), type: role, start, end, name: intern(state, start, end, h), sym: 0, data: null } as Identifier;
 }
 function leafRaw(state: ParserState, flatType: number, start: number, end: number): Node {
-    return { id: nextId(state), type: flatType, start, end, name: sliceFlat(state, start, end), data: null } as Node;
+    return { id: nextId(state), type: flatType, start, end, name: sliceFlat(state, start, end), sym: 0, data: null } as Node;
 }
 /** Parse an identifier token in the given role. `role` picks the leaf type. */
 function parseIdent(state: ParserState, role: number): Identifier {
@@ -1648,7 +1648,7 @@ function parseNameAsIdent(state: ParserState, role: number): Identifier {
     return id;
 }
 function makeMissingIdent(state: ParserState, role: number): Identifier {
-    return { id: nextId(state), type: role, start: 0, end: 0, name: '', data: null } as Identifier;
+    return { id: nextId(state), type: role, start: 0, end: 0, name: '', sym: 0, data: null } as Identifier;
 }
 /** A literal/leaf of the given flat type at the current token span. */
 function leaf(state: ParserState, flatType: number, start: number, end: number): Node {
@@ -2091,6 +2091,7 @@ function parsePrivate(state: ParserState): Node {
         start: state.tokStart,
         end: state.tokEnd,
         name: intern(state, state.tokStart + 1, state.tokEnd, state.tokHash),
+        sym: 0,
         data: null,
     };
     nextToken(state);
@@ -2178,7 +2179,7 @@ function skipJSXTagWs(state: ParserState): void {
 
 /** A JSXIdentifier leaf (data:null, raw name in the name slot). */
 function jsxIdent(state: ParserState, start: number, end: number): Node {
-    return { id: nextId(state), type: N.JSXIdentifier, start, end, name: sliceFlat(state, start, end), data: null } as Node;
+    return { id: nextId(state), type: N.JSXIdentifier, start, end, name: sliceFlat(state, start, end), sym: 0, data: null } as Node;
 }
 
 function parseJSXName(state: ParserState): Node {
@@ -2345,6 +2346,7 @@ function parseJSXChildren(state: ParserState): Node[] {
                 start: textStart,
                 end: state.pos,
                 name: sliceFlat(state, textStart, state.pos),
+                sym: 0,
                 data: null,
             } as Node);
         if (state.pos >= srcLen) {
