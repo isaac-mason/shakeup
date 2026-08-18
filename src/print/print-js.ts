@@ -1031,6 +1031,8 @@ function isErasedStmt(n: Node): boolean {
         case N.TSTypeAliasDeclaration:
             return true;
         case N.FunctionDeclaration:
+            // `declare function`, or a body-less TS overload signature (the implementation carries the body).
+            return (d.declare as boolean) === true || d.body === null;
         case N.ClassDeclaration:
         case N.VariableDeclaration:
         case N.TSModuleDeclaration:
