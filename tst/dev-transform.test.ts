@@ -1,26 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { analyze, createSemantic, type Node, parse } from '../src/index.ts';
-import { assembleRunner, createRunnerCtx, moduleRunnerPass, type RunnerCtx } from '../src/pass/module-runner.ts';
-import { runPass } from '../src/pass/traverse.ts';
-import { printModule } from '../src/print/print-js.ts';
-import { createPrinter, finishPrinter } from '../src/print/printer.ts';
+import { devTransform } from '../src/index.ts';
 
-/** Lower a plain-JS module through the module-runner pass + printer (the dev protocol). */
-function lower(src: string): { code: string; ctx: RunnerCtx } {
-    const { program } = parse(src, { ts: false, jsx: false });
-    const semantic = createSemantic();
-    analyze(semantic, program);
-    const ctx = createRunnerCtx(src, semantic);
-    runPass(program as Node, moduleRunnerPass, ctx);
-    const p = createPrinter({ minify: false });
-    printModule(p, program);
-    return { code: assembleRunner(ctx, finishPrinter(p)), ctx };
-}
+/** Lower a plain-JS module through the dev transform (the `__shakeup.*` runner protocol). */
+const lower = (src: string) => devTransform('/m.js', src);
 
 type Mod = Record<string, unknown>;
 
 /** Execute lowered runner code against a `__shakeup` runtime stub — independent ground truth
- *  (behavior), not a diff against the old edit engine. Mirrors tst/pass.jsx-runner.ts. */
+ *  (behavior), not a diff against any old implementation. */
 async function run(code: string, modules: Record<string, Mod> = {}): Promise<{ exports: Mod; linked: string[] }> {
     const exports: Mod = {};
     const linked: string[] = [];
@@ -45,7 +32,7 @@ async function run(code: string, modules: Record<string, Mod> = {}): Promise<{ e
     return { exports, linked };
 }
 
-describe('module-runner pass — imports lower + resolve at runtime', () => {
+describe('devTransform — imports lower + resolve at runtime', () => {
     it('named import resolves through the runtime member', async () => {
         const { exports } = await run(lower('import { a } from "./m";\nexport const r = a;\n').code, { './m': { a: 42 } });
         expect(exports.r).toBe(42);
@@ -77,21 +64,25 @@ describe('module-runner pass — imports lower + resolve at runtime', () => {
     });
 
     it('callee this-preservation: `f()` does not bind `this` to the namespace', async () => {
-        const mod = { f: function (this: unknown) { return this === undefined ? 'unbound' : 'bound'; } };
+        const mod = {
+            f: function (this: unknown) {
+                return this === undefined ? 'unbound' : 'bound';
+            },
+        };
         const { exports } = await run(lower('import { f } from "./m";\nexport const r = f();\n').code, { './m': mod });
         expect(exports.r).toBe('unbound');
     });
 
     it('side-effect import links but binds nothing', async () => {
-        const { code, ctx } = lower('import "./side.js";\nexport const r = 1;\n');
+        const { code, deps } = lower('import "./side.js";\nexport const r = 1;\n');
         const { exports, linked } = await run(code, {});
         expect(exports.r).toBe(1);
         expect(linked).toContain('./side.js');
-        expect(ctx.deps).toEqual(['./side.js']);
+        expect(deps).toEqual(['./side.js']);
     });
 });
 
-describe('module-runner pass — exports lower to live getters', () => {
+describe('devTransform — exports lower to live getters', () => {
     it('export const (multiple) / function / class', async () => {
         const { exports } = await run(lower('export const a = 1, b = 2;\nexport function f() { return a; }\nexport class C {}\n').code);
         expect(exports.a).toBe(1);
@@ -139,15 +130,15 @@ describe('module-runner pass — exports lower to live getters', () => {
     });
 });
 
-describe('module-runner pass — intrinsics + HMR (pass-owned outputs)', () => {
+describe('devTransform — intrinsics + HMR', () => {
     it('import.meta rewrites to the runtime meta', async () => {
         const { exports } = await run(lower('export const u = import.meta.url;\n').code);
         expect(exports.u).toBe('file:///m.js');
     });
 
     it('dynamic import rewrites to link, recorded as a dynamic dep', async () => {
-        const { code, ctx } = lower('export const p = import("./d");\n');
-        expect(ctx.dynamicDeps).toEqual(['./d']);
+        const { code, dynamicDeps } = lower('export const p = import("./d");\n');
+        expect(dynamicDeps).toEqual(['./d']);
         const { exports, linked } = await run(code, { './d': { default: 1 } });
         await exports.p;
         expect(linked).toContain('./d');
@@ -160,13 +151,13 @@ describe('module-runner pass — intrinsics + HMR (pass-owned outputs)', () => {
         ['import.meta.hot.accept(["./a", "./b"], (m) => {});\n', { selfAccepts: false, acceptedDeps: ['./a', './b'] }],
         ['import.meta.hot.acceptExports(["x"]);\n', { selfAccepts: true, acceptedDeps: [] }],
     ])('HMR: %s', (src, hmr) => {
-        expect(lower(src).ctx.hmr).toEqual(hmr);
+        expect(lower(src).hmr).toEqual(hmr);
     });
 
     it('mixed module: deps + dynamicDeps recorded, exports resolve', async () => {
-        const { code, ctx } = lower('import { a } from "./a";\nimport { b } from "./b";\nexport const u = a + b;\nconst d = import("./d");\n');
-        expect(ctx.deps).toEqual(['./a', './b']);
-        expect(ctx.dynamicDeps).toEqual(['./d']);
+        const { code, deps, dynamicDeps } = lower('import { a } from "./a";\nimport { b } from "./b";\nexport const u = a + b;\nconst d = import("./d");\n');
+        expect(deps).toEqual(['./a', './b']);
+        expect(dynamicDeps).toEqual(['./d']);
         const { exports } = await run(code, { './a': { a: 2 }, './b': { b: 3 }, './d': {} });
         expect(exports.u).toBe(5);
     });

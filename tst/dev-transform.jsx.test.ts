@@ -1,31 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { analyze, createSemantic, type JSXOptions, type Node, parse, resolveJSXOptions, scanJSX } from '../src/index.ts';
-import { assembleRunner, createRunnerCtx, linkRuntime, moduleRunnerPass } from '../src/pass/module-runner.ts';
-import { runPass } from '../src/pass/traverse.ts';
-import { printModule } from '../src/print/print-js.ts';
-import { createPrinter, finishPrinter } from '../src/print/printer.ts';
+import { devTransform, type JSXOptions } from '../src/index.ts';
 
-/** The Branch-A JSX dev path: runner pass rewrites refs (incl. component tags), the printer lowers
- *  JSX, and the runtime is linked + referenced as member text. */
-function devJsx(filename: string, src: string, jsxOptions: JSXOptions = {}): string {
-    const tsx = filename.endsWith('.tsx');
-    const { program } = parse(src, { ts: tsx, jsx: true });
-    const semantic = createSemantic();
-    analyze(semantic, program);
-    const { hasJSX, needsCreateElement } = scanJSX(program);
-    const ctx = createRunnerCtx(src, semantic);
-    runPass(program as Node, moduleRunnerPass, ctx);
-    let jsxLower = null;
-    if (hasJSX) {
-        const { importSource } = resolveJSXOptions(jsxOptions);
-        const rt = linkRuntime(ctx, `${importSource}/jsx-runtime`);
-        const ce = needsCreateElement ? linkRuntime(ctx, importSource) : '';
-        jsxLower = { renameIdent: () => null, runtimeName: (k: string) => (k === 'createElement' ? `${ce}.createElement` : `${rt}.${k}`) };
-    }
-    const p = createPrinter({ minify: false }, { jsx: jsxLower });
-    printModule(p, program);
-    return assembleRunner(ctx, finishPrinter(p));
-}
+/** The dev JSX path is just devTransform on a `.tsx`/`.jsx` module (runner-link rewrites refs incl.
+ *  component tags; the printer lowers JSX; the runtime is linked + referenced as member text). */
+const devJsx = (filename: string, src: string, jsxOptions: JSXOptions = {}): string => devTransform(filename, src, { jsx: jsxOptions }).code;
 
 type El = { t: unknown; p: Record<string, unknown> | null; k: unknown };
 const jsxRuntime = {
@@ -50,7 +28,7 @@ async function runModule(code: string, modules: Record<string, unknown>): Promis
     return out;
 }
 
-describe('JSX dev path (pass + printer) — executes correctly', () => {
+describe('devTransform — JSX executes correctly', () => {
     it('resolves an imported component tag through member access', async () => {
         const src = 'import { Foo } from "./c";\nexport const App = () => <Foo x={1}>hi</Foo>;\n';
         const code = devJsx('/m.tsx', src);
