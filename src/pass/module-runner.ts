@@ -1,5 +1,6 @@
 import { type Semantic, symbolOf } from '../analysis/semantic';
 import { N, type Node, node, type Program, walk } from '../ast';
+import { attrsHaveKeyAfterSpreadEmit } from '../jsx-text';
 import { encodeMappings, joinParts, type Part, type SourceMap } from '../sourcemap';
 import type { Pass } from './traverse';
 
@@ -28,6 +29,11 @@ export type RunnerCtx = {
     exportEntries: string[];
     hmr: RunnerHmr;
     importIdx: number;
+    // Detection folded into this traversal (was 2 standalone walks: scanJSX + collectUnsupported).
+    hasJSX: boolean;
+    needsCreateElement: boolean;
+    /** start offsets of value `namespace` declarations (unsupported — dev errors on these). */
+    unsupported: number[];
 };
 
 /** A local bound to an import: its runtime local + the imported name (`null` = namespace). */
@@ -47,6 +53,9 @@ export function createRunnerCtx(code: string, semantic: Semantic): RunnerCtx {
         exportEntries: [],
         hmr: { selfAccepts: false, acceptedDeps: [] },
         importIdx: 0,
+        hasJSX: false,
+        needsCreateElement: false,
+        unsupported: [],
     };
 }
 
@@ -335,6 +344,17 @@ export const moduleRunnerPass: Pass<RunnerCtx> = {
             }
             case N.TaggedTemplateExpression:
                 if (n.data.tag.type === N.IdentifierReference) ctx.calleeIdents.add(n.data.tag);
+                return undefined;
+            // Detection folded in (no separate scanJSX / collectUnsupported walk):
+            case N.JSXElement:
+            case N.JSXFragment:
+                ctx.hasJSX = true;
+                return undefined;
+            case N.JSXOpeningElement:
+                if (attrsHaveKeyAfterSpreadEmit(n.data.attributes)) ctx.needsCreateElement = true;
+                return undefined;
+            case N.TSModuleDeclaration:
+                if (!n.data.declare) ctx.unsupported.push(n.start); // value namespace
                 return undefined;
             case N.ImportMeta:
                 return shakeupMember('meta', n.start, n.end);

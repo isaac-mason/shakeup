@@ -1,7 +1,7 @@
 import { analyze, createSemantic } from './analysis/semantic';
 import type { Node } from './ast';
 import type { JSXLower } from './jsx-text';
-import { collectUnsupported, type JSXOptions, resolveJSXOptions, scanJSX } from './module-graph';
+import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
 import {
     assembleRunner as buildRunnerCode,
@@ -71,23 +71,25 @@ export function devTransform(filename: string, source: string, options: DevTrans
 
     const { program, errors: parseErrors } = parse(source, { ts, jsx });
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
-    // Only TS can carry the unsupported node (a value `namespace`); JS/JSX can't, so skip the walk.
-    if (ts) collectUnsupported(program, filename, errors);
     if (errors.length > 0) return emptyResult(errors);
 
     const semantic = createSemantic();
     analyze(semantic, program);
-    const scan = jsx ? scanJSX(program) : { hasJSX: false, needsCreateElement: false };
 
+    // One traversal: rewrite + JSX detection + unsupported-namespace detection (folded in — no
+    // separate scanJSX / collectUnsupported walk).
     const ctx = createRunnerCtx(source, semantic);
     runPass(program as Node, moduleRunnerPass, ctx);
+    if (ctx.unsupported.length > 0) {
+        return emptyResult(ctx.unsupported.map((pos) => `${filename}:${pos}: value namespaces are not supported (use ES modules)`));
+    }
 
     // JSX runtime: linked post-pass; the printer's lowering references it as member text.
     let jsxLower: JSXLower | null = null;
-    if (scan.hasJSX) {
+    if (ctx.hasJSX) {
         const { importSource } = resolveJSXOptions(options.jsx);
         const rt = linkRuntime(ctx, `${importSource}/jsx-runtime`);
-        const ce = scan.needsCreateElement ? linkRuntime(ctx, importSource) : '';
+        const ce = ctx.needsCreateElement ? linkRuntime(ctx, importSource) : '';
         jsxLower = {
             renameIdent: () => null,
             runtimeName: (k) => (k === 'createElement' ? `${ce}.createElement` : `${rt}.${k}`),
