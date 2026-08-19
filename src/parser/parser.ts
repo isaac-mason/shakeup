@@ -470,14 +470,19 @@ function parseArgs(state: ParserState): Node[] {
 }
 
 function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): Node {
+    // Fast-exit BEFORE allocating anything: most expressions have no member/call chain,
+    // so a single bit-test returns immediately — no `finish` closure, no call. (Runs for
+    // every expression; the closure + finish() call were pure overhead on the common path.)
+    if (!isMemberCont(state.tok)) {
+        state.chainSawOptional = false;
+        return expr;
+    }
     let sawOptional = false;
     const finish = (e: Node): Node => {
         state.chainSawOptional = sawOptional;
         return sawOptional ? (create.ChainExpression(e.start, e.end, 0, e) as Node) : e;
     };
     for (;;) {
-        // Fast-exit: one bit-test skips the whole cascade for a token that can't continue
-        // a member/call chain (meriyah's `token & member-cont` gate). Runs every expression.
         if (!isMemberCont(state.tok)) return finish(expr);
         if (isP(state, P.DOT)) {
             nextToken(state);

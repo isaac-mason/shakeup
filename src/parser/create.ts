@@ -56,6 +56,13 @@ function accessibilityOf(flags: number): Accessibility {
     const a = (flags >> FL.ACCESS_SHIFT) & 3;
     return a === 1 ? 'public' : a === 2 ? 'private' : a === 3 ? 'protected' : null;
 }
+
+// `kind` lookup tables — module-level so decoding a flags int is an index, not a
+// fresh array allocation on every node build.
+const PROPERTY_KIND = ['init', 'get', 'set'] as const;
+const VAR_DECL_KIND = ['var', 'var', 'let', 'const'] as const;
+const METHOD_KIND = ['method', 'get', 'set', 'constructor'] as const;
+const SIGNATURE_KIND = ['method', 'get', 'set'] as const;
 /** The null-data TS keyword/leaf type ids the `keyword` helper materializes. */
 export type KeywordType =
     | typeof N.TSAnyKeyword
@@ -100,7 +107,7 @@ export const ObjectProperty = (s: number, e: number, flags: number, key: Node, v
     node(N.ObjectProperty, s, e, '', {
         key,
         value,
-        kind: (['init', 'get', 'set'] as const)[(flags >> FL.KIND_SHIFT) & 3],
+        kind: PROPERTY_KIND[(flags >> FL.KIND_SHIFT) & 3],
         computed: (flags & FL.COMPUTED) !== 0,
         shorthand: (flags & FL.SHORTHAND) !== 0,
     });
@@ -227,7 +234,7 @@ export const YieldExpression = (s: number, e: number, flags: number, a: Node | n
 export const VariableDeclaration = (s: number, e: number, flags: number, decls: Node[] | null): Node =>
     node(N.VariableDeclaration, s, e, '', {
         declarations: decls ?? [],
-        kind: (['var', 'var', 'let', 'const'] as const)[flags & VAR_KIND.KIND_MASK],
+        kind: VAR_DECL_KIND[flags & VAR_KIND.KIND_MASK],
         declare: (flags & FL.DECLARE) !== 0,
     });
 export const VariableDeclarator = (s: number, e: number, flags: number, id: Node, ta: Node | null, init: Node | null): Node =>
@@ -243,7 +250,7 @@ export const MethodDefinition = (s: number, e: number, flags: number, key: Node,
     node(N.MethodDefinition, s, e, '', {
         key,
         value,
-        kind: (['method', 'get', 'set', 'constructor'] as const)[(flags >> FL.KIND_SHIFT) & 3],
+        kind: METHOD_KIND[(flags >> FL.KIND_SHIFT) & 3],
         static: (flags & FL.STATIC) !== 0,
         computed: (flags & FL.COMPUTED) !== 0,
         optional: (flags & FL.OPTIONAL) !== 0,
@@ -339,7 +346,7 @@ export const TSMethodSignature = (
         params: params ?? [],
         returnType: rt ?? null,
         optional: (flags & FL.OPTIONAL) !== 0,
-        kind: (['method', 'get', 'set'] as const)[(flags >> FL.KIND_SHIFT) & 3],
+        kind: SIGNATURE_KIND[(flags >> FL.KIND_SHIFT) & 3],
         computed: (flags & FL.COMPUTED) !== 0,
     });
 export const TSIndexSignature = (s: number, e: number, flags: number, param: Node, ta: Node | null): Node =>
