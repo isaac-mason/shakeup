@@ -19,10 +19,10 @@ import {
     C_NL,
     C_WS,
     CHAR,
+    buildLineStarts,
     hashRange,
     intern,
     nextToken,
-    recordNL,
     reScanRegex,
     reScanTemplateContinue,
     sliceFlat,
@@ -78,9 +78,9 @@ type Ref = Node | null;
 /** Fresh parser state for one `parse` call. Every field is initialized here so
  * `state` keeps a single stable hidden class for the whole parse. */
 function createParserState(source: string, options: ParseOptions): ParserState {
-    // Start the per-file buffers small and let them grow on demand (push / internGrow /
-    // recordNL). Most modules are small; oversizing every state (esp. the null-filled stk
-    // and the zeroed interner arrays) was pure per-file allocation. Large files just regrow.
+    // Start the per-file buffers small and let them grow on demand (push / internGrow).
+    // Most modules are small; oversizing every state (esp. the null-filled stk and the
+    // zeroed interner arrays) was pure per-file allocation. Large files just regrow.
     const cap = 1 << 10;
     return {
         src: source,
@@ -99,8 +99,6 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         itHashes: new Int32Array(cap),
         itMask: cap - 1,
         itCount: 0,
-        lineStarts: new Uint32Array(1 << 9),
-        lineCount: 0,
         stk: new Array(1 << 8).fill(null),
         sp: 0,
         speculating: 0,
@@ -194,7 +192,9 @@ function consumeSemi(state: ParserState): void {
     if (!canInsertSemi(state)) raise(state, ParseErrorCode.Expected, "';'");
 }
 
-type LexState = [number, number, number, number, number, number, number, number];
+// No line-table field to save/restore: the line table is built once, deferred, so nothing
+// mutates it during (speculative) parsing.
+type LexState = [number, number, number, number, number, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -203,7 +203,6 @@ const saveState = (state: ParserState): LexState => [
     state.tokFlags,
     state.errors.length,
     state.tokHash,
-    state.lineCount,
 ];
 function restoreState(state: ParserState, s: LexState): void {
     state.pos = s[0];
@@ -213,7 +212,6 @@ function restoreState(state: ParserState, s: LexState): void {
     state.tokFlags = s[4];
     state.errors.length = s[5];
     state.tokHash = s[6];
-    state.lineCount = s[7];
 }
 
 function push(state: ParserState, v: Ref): void {
@@ -226,9 +224,10 @@ function push(state: ParserState, v: Ref): void {
 }
 const DEV = process.env.NODE_ENV !== 'production';
 
-/** Position of the current token as `line:col`, for invariant messages. */
+/** Position of the current token as `line:col`, for invariant messages. The line table
+ * is built deferred (not during lex), so compute it on demand here — dev/error path only. */
 function here(state: ParserState): string {
-    const { line, column } = lineColOf(state.lineStarts.slice(0, state.lineCount), state.tokStart);
+    const { line, column } = lineColOf(buildLineStarts(state.src), state.tokStart);
     return `${line}:${column}`;
 }
 
@@ -619,18 +618,13 @@ function scanJSXName(state: ParserState): [number, number] {
     return [start, pos];
 }
 
-/** Skip whitespace/newlines (recording line starts) inside a JSX tag interior. */
+/** Skip whitespace/newlines inside a JSX tag interior. (Line starts are built deferred.) */
 function skipJSXTagWs(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
     let pos = state.pos;
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
-        if (c === 10) {
-            recordNL(state, pos);
-            pos++;
-            continue;
-        }
         if (c < 128 ? CHAR[c] === C_WS || CHAR[c] === C_NL : c === 0x2028 || c === 0x2029 || c === 0xa0 || c === 0xfeff) {
             pos++;
             continue;
@@ -775,7 +769,6 @@ function parseJSXAttributes(state: ParserState): Node[] {
                 const vs = state.pos;
                 state.pos++;
                 while (state.pos < srcLen && src.charCodeAt(state.pos) !== vc) {
-                    if (src.charCodeAt(state.pos) === 10) recordNL(state, state.pos);
                     state.pos++;
                 }
                 state.pos++;
@@ -807,7 +800,6 @@ function parseJSXChildren(state: ParserState): Node[] {
         while (state.pos < srcLen) {
             const c = src.charCodeAt(state.pos);
             if (c === 60 || c === 123) break;
-            if (c === 10) recordNL(state, state.pos);
             state.pos++;
         }
         if (state.pos > textStart)
@@ -3021,9 +3013,12 @@ function tryParseTypeArgsForCall(state: ParserState): Node | null {
     return null;
 }
 
-/** The parse result: the program, the error list, and the source-free line table
- * for offset->line/col. The source is not retained after the parse. */
-export type ParseResult = { program: Program; errors: ParseError[]; lines: Uint32Array; nodeCount: number };
+/** The parse result: the program, the error list, and the node count. The source is not
+ * retained after the parse. A line table is NOT included — it had no consumers, and building
+ * one eagerly cost a second full pass over the source; the sourcemap path builds its own
+ * (`buildLineTable`, lazy, only when a map is wanted) and diagnostics compute line/col on
+ * demand from byte offsets (`buildLineStarts`). */
+export type ParseResult = { program: Program; errors: ParseError[]; nodeCount: number };
 export type ParseOptions = { ts: boolean; jsx: boolean };
 
 /** Parse `source` into a standalone Program. Source, error sink, intern map and
@@ -3031,7 +3026,6 @@ export type ParseOptions = { ts: boolean; jsx: boolean };
  * `source` after this returns. */
 export function parse(source: string, options: ParseOptions): ParseResult {
     const state = createParserState(source, options);
-    recordNL(state, -1);
     nextToken(state);
     const from = state.sp;
     let lastPos = -1;
@@ -3045,9 +3039,8 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     }
     const body = finishList(state, from);
     const program = create.Program(0, state.srcLen, 0, body) as Program;
-    const lines = state.lineStarts.slice(0, state.lineCount);
     const nodeCount = program.id - state.baseId + 1;
-    return { program, errors: state.errors, lines, nodeCount };
+    return { program, errors: state.errors, nodeCount };
 }
 
 export function parseProgram(source: string, options: ParseOptions): Program {

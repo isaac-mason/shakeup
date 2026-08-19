@@ -51,8 +51,6 @@ export type ParserState = {
     itHashes: Int32Array;
     itMask: number;
     itCount: number;
-    lineStarts: Uint32Array;
-    lineCount: number;
     stk: (Node | null)[];
     sp: number;
     speculating: number;

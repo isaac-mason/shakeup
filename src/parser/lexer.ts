@@ -82,14 +82,21 @@ export function intern(state: ParserState, start: number, end: number, hash: num
     return s;
 }
 
-/** Record a newline AT offset i (line starts at i+1). */
-export function recordNL(state: ParserState, i: number): void {
-    if (state.lineCount >= state.lineStarts.length) {
-        const bigger = new Uint32Array(state.lineStarts.length << 1);
-        bigger.set(state.lineStarts);
-        state.lineStarts = bigger;
+/** Build the line-start table in ONE deferred native scan, decoupled from tokenization
+ * (oxc's model: the tokenizer only tracks a per-token "newline before" boolean for ASI;
+ * line/column for diagnostics is computed later from byte offsets). `lines[i]` = the start
+ * offset of line i+1: line 1 at 0, then the offset after each `\n`. Only `\n` is tracked
+ * (matches the old per-token recorder — CR-only and LS/PS were never in the table).
+ * `indexOf` runs in V8's C++ memchr, far cheaper than a per-char JS branch scattered
+ * through the hot lexer, string, template and comment paths. */
+export function buildLineStarts(src: string): Uint32Array {
+    const starts: number[] = [0];
+    let i = src.indexOf('\n');
+    while (i !== -1) {
+        starts.push(i + 1);
+        i = src.indexOf('\n', i + 1);
     }
-    state.lineStarts[state.lineCount++] = i + 1;
+    return Uint32Array.from(starts);
 }
 
 export const C_WS = 1,
@@ -184,31 +191,28 @@ export function nextToken(state: ParserState): void {
             }
             if (cls === C_NL) {
                 nl = F_NL;
-                if (c === 10) recordNL(state, pos);
                 pos++;
                 continue;
             }
             if (c === 47) {
                 const c1 = src.charCodeAt(pos + 1);
                 if (c1 === 47) {
-                    pos += 2;
-                    while (pos < srcLen && src.charCodeAt(pos) !== 10) pos++;
+                    // Line comment: native scan to the newline, stop AT it so the outer
+                    // loop records the C_NL (sets `nl`) next iteration.
+                    const nlPos = src.indexOf('\n', pos + 2);
+                    pos = nlPos < 0 ? srcLen : nlPos;
                     continue;
                 }
                 if (c1 === 42) {
-                    pos += 2;
-                    while (pos < srcLen) {
-                        const cc = src.charCodeAt(pos);
-                        if (cc === 42 && src.charCodeAt(pos + 1) === 47) {
-                            pos += 2;
-                            break;
-                        }
-                        if (cc === 10) {
-                            nl = F_NL;
-                            recordNL(state, pos);
-                        }
-                        pos++;
-                    }
+                    // Block comment: native scan to `*/`. A comment spanning a line break
+                    // counts as a newline before the next token (ASI), so probe for one `\n`
+                    // in the span — but don't record every newline; the line table is built
+                    // once, deferred. three.core.js is ~46% block-comment bytes.
+                    const end = src.indexOf('*/', pos + 2);
+                    const close = end < 0 ? srcLen : end + 2;
+                    const nlIn = src.indexOf('\n', pos + 2);
+                    if (nlIn !== -1 && nlIn < close) nl = F_NL;
+                    pos = close;
                     continue;
                 }
             }
@@ -271,10 +275,8 @@ export function nextToken(state: ParserState): void {
                 break;
             }
             if (cc === 92) {
-                if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
-                pos += 2;
+                pos += 2; // skip the escaped char (line table is built deferred, not here)
             } else {
-                if (cc === 10) recordNL(state, pos);
                 pos++;
             }
         }
@@ -368,10 +370,8 @@ function scanTemplatePart(state: ParserState): void {
             return;
         }
         if (c === 92) {
-            if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
             pos += 2;
         } else {
-            if (c === 10) recordNL(state, pos);
             pos++;
         }
     }
@@ -394,7 +394,6 @@ export function reScanRegex(state: ParserState): void {
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
         if (c === 92) {
-            if (src.charCodeAt(pos + 1) === 10) recordNL(state, pos + 1);
             pos += 2;
             continue;
         }

@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { parse } from '../src/index.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter, printerPart } from '../src/print/printer.ts';
-import { decodeMappings, encodeMappings } from '../src/sourcemap.ts';
+import { buildLineTable, decodeMappings, encodeMappings } from '../src/sourcemap.ts';
 
 /** Print `src` with sourcemap building on; return generated code + decoded segments. */
 function printWithMap(src: string, minify: boolean) {
-    const { program, lines } = parse(src, { ts: false, jsx: false });
-    const p = createPrinter({ minify }, { srcLines: lines, sourceIdx: 0 });
+    const { program } = parse(src, { ts: false, jsx: false });
+    const p = createPrinter({ minify }, { srcLines: Uint32Array.from(buildLineTable(src)), sourceIdx: 0 });
     printModule(p, program);
     const part = printerPart(p);
     // round-trip through encode/decode to prove the segments serialize cleanly
