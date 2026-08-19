@@ -14,12 +14,12 @@ import * as create from './create.ts';
 import { FL, type KeywordType, OP, VAR_KIND } from './create.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
+    buildLineStarts,
     C_DIG,
     C_ID,
     C_NL,
     C_WS,
     CHAR,
-    buildLineStarts,
     hashRange,
     intern,
     nextToken,
@@ -1687,10 +1687,25 @@ function parseStatement(state: ParserState): Node {
             case K.VAR:
                 return parseVarDecl(state, VAR_KIND.VAR, 0);
             case K.CONST: {
-                const s = saveState(state);
-                nextToken(state);
-                if (state.tsMode && isK(state, K.ENUM)) return parseEnum(state, start, FL.CONST_ENUM);
-                restoreState(state, s);
+                // `const enum` is TS-only and rare; every other `const` is a var decl. Peek one
+                // token with an allocation-free scalar rewind instead of a throwaway saveState
+                // array (this fires on every `const`). Plain JS skips the peek entirely.
+                if (state.tsMode) {
+                    const p = state.pos,
+                        tk = state.tok,
+                        ts0 = state.tokStart,
+                        te = state.tokEnd,
+                        tf = state.tokFlags,
+                        th = state.tokHash;
+                    nextToken(state);
+                    if (isK(state, K.ENUM)) return parseEnum(state, start, FL.CONST_ENUM);
+                    state.pos = p;
+                    state.tok = tk;
+                    state.tokStart = ts0;
+                    state.tokEnd = te;
+                    state.tokFlags = tf;
+                    state.tokHash = th;
+                }
                 return parseVarDecl(state, VAR_KIND.CONST, 0);
             }
             case K.LET: {
@@ -2289,15 +2304,28 @@ function parseTypeAnn(state: ParserState): Node {
             create.keyword(start, state.tokStart, N.TSAnyKeyword) as Node,
         ) as Node;
     }
-    const s = saveState(state);
+    // Type predicate `x is T` / `this is T`: detect the `is` with an allocation-free scalar
+    // rewind (fires on every ident-led annotation, e.g. `: Foo`), and only when the annotation
+    // actually starts with an ident/`this` — object/tuple/paren types skip the peek entirely.
     if (isIdentLike(state) || isK(state, K.THIS)) {
+        const p = state.pos,
+            tk = state.tok,
+            ts0 = state.tokStart,
+            te = state.tokEnd,
+            tf = state.tokFlags,
+            th = state.tokHash;
         nextToken(state);
         if (isK(state, K.IS)) {
             nextToken(state);
             const ty = parseType(state);
             return create.TSTypeAnnotation(start, state.tokStart, 0, ty) as Node;
         }
-        restoreState(state, s);
+        state.pos = p;
+        state.tok = tk;
+        state.tokStart = ts0;
+        state.tokEnd = te;
+        state.tokFlags = tf;
+        state.tokHash = th;
     }
     const ty = parseType(state);
     return create.TSTypeAnnotation(start, ty.end, 0, ty) as Node;
