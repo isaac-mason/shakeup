@@ -173,6 +173,9 @@ const F_LOGICAL = 1 << 14;
 const F_KEYWORD = 1 << 15;
 const F_PUNCT = 1 << 16;
 const F_CONTEXTUAL = 1 << 17;
+// Token can continue a member/call chain (`.` `?.` `[` `(` tagged-template, and in TS
+// `!` / `<`). Lets parseMemberChain fast-exit with one bit-test (meriyah's model).
+const F_MEMBER_CONT = 1 << 18;
 
 // --- per-token metadata spec (mirrors the parser's current tables) -----------
 // [precedence, operator text, isLogical]
@@ -282,6 +285,9 @@ for (const name of Object.keys(ASSIGN) as TokName[]) {
     OP_TEXT[k] = text;
 }
 for (const name of CONTEXTUAL) packed[idOf(name)] |= F_CONTEXTUAL;
+for (const name of ['DOT', 'QDOT', 'LBRACKET', 'LPAREN', 'BANG', 'LT', 'TEMPLATE_FULL', 'TEMPLATE_HEAD'] as TokName[]) {
+    packed[idOf(name)] |= F_MEMBER_CONT;
+}
 
 /**
  * Packed token constants keyed by name — what `state.tok` is set to, and what
@@ -311,5 +317,6 @@ export const isLogical = (tok: number): boolean => (tok & F_LOGICAL) !== 0;
 export const isKeyword = (tok: number): boolean => (tok & F_KEYWORD) !== 0;
 export const isPunct = (tok: number): boolean => (tok & F_PUNCT) !== 0;
 export const isContextual = (tok: number): boolean => (tok & F_CONTEXTUAL) !== 0;
+export const isMemberCont = (tok: number): boolean => (tok & F_MEMBER_CONT) !== 0;
 /** Operator source text (`'+'`, `'==='`, `'in'`, `'&&='`) for a binary/logical/assign token. */
 export const opTextOf = (tok: number): string => OP_TEXT[tok & KIND_MASK];

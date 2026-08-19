@@ -44,7 +44,17 @@ import {
     T_TEMPLATE_FULL,
     T_TEMPLATE_HEAD,
 } from './state.ts';
-import { isAssignOp, isBinaryOp, isContextual, isKeyword, isLogical, isPunct, opTextOf, precedenceOf } from './token.ts';
+import {
+    isAssignOp,
+    isBinaryOp,
+    isContextual,
+    isKeyword,
+    isLogical,
+    isMemberCont,
+    isPunct,
+    opTextOf,
+    precedenceOf,
+} from './token.ts';
 
 // Re-exported so the parser's public surface (via index.ts) still carries ParseError.
 export type { ParseError };
@@ -838,14 +848,11 @@ function parseExpression(state: ParserState, noIn = false): Node {
 
 function parseAssign(state: ParserState, noIn = false): Node {
     if (isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, state.tokStart, 0, null);
-    if (isIdentLike(state) && !isK(state, K.ASYNC)) {
-        const s = saveState(state);
-        if (state.tok === T_IDENT || isContextual(state.tok)) {
-            const idStart = state.tokStart;
-            const maybe = parseIdent(state, R_BIND);
-            if (isP(state, P.ARROW) && (state.tokFlags & F_NL) === 0) return parseArrowAfterSingleParam(state, idStart, maybe, 0);
-            restoreState(state, s);
-        }
+    if (isIdentLike(state) && !isK(state, K.ASYNC) && identArrowAhead(state)) {
+        // `ident =>` confirmed by source peek — parse the identifier once, as the arrow param.
+        const idStart = state.tokStart;
+        const maybe = parseIdent(state, R_BIND);
+        return parseArrowAfterSingleParam(state, idStart, maybe, 0);
     }
     if (isK(state, K.ASYNC) && (state.tokFlags & F_NL) === 0) {
         const s = saveState(state);
@@ -1047,6 +1054,9 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
         return sawOptional ? (m.ChainExpression(e.start, e.end, 0, e) as Node) : e;
     };
     for (;;) {
+        // Fast-exit: one bit-test skips the whole cascade for a token that can't continue
+        // a member/call chain (meriyah's `token & member-cont` gate). Runs every expression.
+        if (!isMemberCont(state.tok)) return finish(expr);
         if (isP(state, P.DOT)) {
             nextToken(state);
             if (state.tok === T_PRIVATE) {
@@ -1757,6 +1767,42 @@ function arrowAheadFromParen(state: ParserState): boolean {
         return ok;
     }
     return false;
+}
+
+/** Peek whether the just-lexed single identifier is an arrow parameter, i.e. `ident =>`,
+ * by scanning source from the identifier's end — no speculation, no throwaway node. A line
+ * terminator before `=>` disqualifies it (the no-LineTerminator rule), matching the old
+ * post-parseIdent `tokFlags & F_NL === 0` check. */
+function identArrowAhead(state: ParserState): boolean {
+    const src = state.src,
+        srcLen = state.srcLen;
+    let p = state.pos;
+    for (;;) {
+        while (p < srcLen) {
+            const c = src.charCodeAt(p);
+            if (c === 32 || c === 9 || c === 11 || c === 12 || c === 0xa0 || c === 0xfeff) {
+                p++;
+                continue;
+            }
+            break;
+        }
+        if (p >= srcLen) return false;
+        const c = src.charCodeAt(p);
+        if (c === 10 || c === 13 || c === 0x2028 || c === 0x2029) return false; // newline → not an arrow
+        if (c === 47 && src.charCodeAt(p + 1) === 47) return false; // line comment ends in a newline
+        if (c === 47 && src.charCodeAt(p + 1) === 42) {
+            p += 2;
+            while (p < srcLen && !(src.charCodeAt(p) === 42 && src.charCodeAt(p + 1) === 47)) {
+                const cc = src.charCodeAt(p);
+                if (cc === 10 || cc === 13 || cc === 0x2028 || cc === 0x2029) return false;
+                p++;
+            }
+            p += 2;
+            continue;
+        }
+        break;
+    }
+    return src.charCodeAt(p) === 61 && src.charCodeAt(p + 1) === 62;
 }
 
 function trySpeculativeArrow(state: ParserState): boolean {
