@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import type { Node } from '../src/ast.ts';
 import { parse } from '../src/parser/index.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
 import { traverse } from '../src/passes/traverse.ts';

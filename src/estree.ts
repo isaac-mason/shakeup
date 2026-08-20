@@ -138,6 +138,8 @@ export const ESTREE_NAME = {
     TSSatisfiesExpression: 'TSSatisfiesExpression',
     TSNonNullExpression: 'TSNonNullExpression',
     TSInstantiationExpression: 'TSInstantiationExpression',
+    TSImportEqualsDeclaration: 'TSImportEqualsDeclaration',
+    TSExternalModuleReference: 'TSExternalModuleReference',
     TSModuleDeclaration: 'TSModuleDeclaration',
     JSXElement: 'JSXElement',
     JSXOpeningElement: 'JSXOpeningElement',
