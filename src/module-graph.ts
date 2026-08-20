@@ -1060,13 +1060,15 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             } else {
                 const parsed = parse(source, { ts: true, jsx });
                 for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
-                collectUnsupported(parsed.program, id, graph.errors);
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
                 hasJSX = parsed.hasJSX;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 traverse(program, semantic, [tsLower]);
+                // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
+                // — the handled ones are now `var`, so this runs AFTER the transform.
+                collectUnsupported(program, id, graph.errors);
                 graph.parseStats.parsed++;
                 graph.changed.add(id);
             }

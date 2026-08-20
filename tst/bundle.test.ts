@@ -121,13 +121,28 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
     const bundleErr = async (src: string): Promise<string[]> =>
         (await bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) })).errors;
 
-    it('value namespaces are rejected with a clear error', async () => {
-        const errs = await bundleErr('export namespace NS { export const v = 42; }');
-        expect(errs.join('\n')).toMatch(/value namespaces are not supported/);
+    it('value namespaces lower and execute (flat)', async () => {
+        const { code } = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'namespace NS { export const v = 42; }\nexport const out = NS.v;' }),
+        });
+        expect(code).not.toMatch(/namespace/);
+        // biome-ignore lint/security/noGlobalEval: test-only
+        expect(new Function(`${code.replace(/export /g, '')}\nreturn out;`)()).toBe(42);
     });
 
-    it('nested value namespaces are rejected', async () => {
-        expect((await bundleErr('namespace A { export namespace B { export const c = 1; } }')).length).toBeGreaterThan(0);
+    it('nested value namespaces lower and execute (N.M.c)', async () => {
+        const { code } = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'namespace A { export namespace B { export const c = 7; } }\nexport const out = A.B.c;' }),
+        });
+        expect(code).not.toMatch(/namespace/);
+        // biome-ignore lint/security/noGlobalEval: test-only
+        expect(new Function(`${code.replace(/export /g, '')}\nreturn out;`)()).toBe(7);
+    });
+
+    it('a namespace with an unhandled member is rejected loudly', async () => {
+        expect((await bundleErr('namespace N { export const { a } = obj; }')).length).toBeGreaterThan(0);
     });
 
     it('declare namespace / declare global still erase cleanly (no error)', async () => {

@@ -52,8 +52,17 @@ describe('devTransform — TS strip (execution + shape)', () => {
             expect(r.errors.join('\n')).toMatch(needle);
             expect(r.code).toBe('');
         };
-        rejects(`namespace N { export const y = 1 }`, /value namespaces/);
+        // Value namespaces (flat + nested) now LOWER (see below). A namespace with an unhandled member
+        // (destructuring export) is still left un-lowered → rejected loudly, not silently miscompiled.
+        rejects(`namespace N { export const { a } = obj }`, /value namespaces/);
         rejects(`@dec class A {}`, /decorators/);
+    });
+
+    it('lowers a simple value namespace to runnable JS', () => {
+        const r = devTransform('t.ts', `namespace N { export const y = 1 }\nexport const z = N.y;`, {});
+        expect(r.errors).toEqual([]);
+        expect(r.code).not.toMatch(/namespace/);
+        expect(r.code).toMatch(/var N =/);
     });
 
     it('allows `declare namespace` (ambient, erased)', () => {
