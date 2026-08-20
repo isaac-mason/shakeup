@@ -3,6 +3,8 @@ import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './a
 import { attrsHaveKeyAfterSpreadEmit, type JSXLower } from './jsx-text';
 import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
+import { tsLower } from './passes/lower-ts';
+import { traverse } from './passes/traverse';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter, printerPart } from './print/printer';
 import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
@@ -129,7 +131,13 @@ function assembleRunnerMapped(ctx: RunnerCtx, filename: string, bodyPart: Part):
     if (ctx.reExportLines.length > 0) parts.push({ code: ctx.reExportLines.join('\n') });
     if (bodyPart.code.trim() !== '') parts.push(bodyPart);
     const joined = joinParts(parts);
-    const map: SourceMap = { version: 3, sources: [filename], sourcesContent: [ctx.code], names: [], mappings: encodeMappings(joined.map) };
+    const map: SourceMap = {
+        version: 3,
+        sources: [filename],
+        sourcesContent: [ctx.code],
+        names: [],
+        mappings: encodeMappings(joined.map),
+    };
     return { code: joined.code, map };
 }
 
@@ -370,9 +378,17 @@ function setMember(n: Node, b: ImportBinding): void {
         return;
     }
     if (isIdentName(b.imported)) {
-        set(n, N.StaticMemberExpression, { object: ident(b.local, n.start), property: identName(b.imported, n.end), optional: false });
+        set(n, N.StaticMemberExpression, {
+            object: ident(b.local, n.start),
+            property: identName(b.imported, n.end),
+            optional: false,
+        });
     } else {
-        set(n, N.ComputedMemberExpression, { object: ident(b.local, n.start), expression: node(N.StringLiteral, n.start, n.end, JSON.stringify(b.imported), null), optional: false });
+        set(n, N.ComputedMemberExpression, {
+            object: ident(b.local, n.start),
+            expression: node(N.StringLiteral, n.start, n.end, JSON.stringify(b.imported), null),
+            optional: false,
+        });
     }
 }
 
@@ -395,7 +411,8 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
                 const first = n.data.arguments[0];
                 if (first === undefined || first.type !== N.StringLiteral) {
                     if (first !== undefined && first.type === N.ArrayExpression) {
-                        for (const el of first.data.elements) if (el !== null && el.type === N.StringLiteral) ctx.hmr.acceptedDeps.push(strVal(ctx.code, el));
+                        for (const el of first.data.elements)
+                            if (el !== null && el.type === N.StringLiteral) ctx.hmr.acceptedDeps.push(strVal(ctx.code, el));
                     } else ctx.hmr.selfAccepts = true;
                 } else ctx.hmr.acceptedDeps.push(strVal(ctx.code, first));
             } else if (hm === 'acceptExports') ctx.hmr.selfAccepts = true;
@@ -416,7 +433,11 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
             if (!n.data.declare) ctx.unsupported.push(n.start); // value namespace
             return;
         case N.ImportMeta:
-            set(n, N.StaticMemberExpression, { object: ident('__shakeup', n.start), property: identName('meta', n.end), optional: false });
+            set(n, N.StaticMemberExpression, {
+                object: ident('__shakeup', n.start),
+                property: identName('meta', n.end),
+                optional: false,
+            });
             return;
         case N.ImportExpression: {
             const d = n.data;
@@ -475,11 +496,16 @@ export function devTransform(filename: string, source: string, options: DevTrans
 
     const semantic = createSemantic();
     analyze(semantic, program);
+    // Transform stage: lower TS constructs (enum → IIFE) to plain JS BEFORE the runner rewrite, so
+    // both the dev and bundle paths lower uniformly through the same passes (not print-time emitEnum).
+    traverse(program, semantic, [tsLower]);
 
     const ctx = createRunnerCtx(source, semantic);
     runnerLink(program, ctx);
     if (ctx.unsupported.length > 0) {
-        return emptyResult(ctx.unsupported.map((pos) => `${filename}:${pos}: value namespaces are not supported (use ES modules)`));
+        return emptyResult(
+            ctx.unsupported.map((pos) => `${filename}:${pos}: value namespaces are not supported (use ES modules)`),
+        );
     }
 
     // JSX runtime: linked post-traversal; the printer's lowering references it as member text.
