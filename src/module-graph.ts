@@ -3,6 +3,8 @@ import { isJSXNode, N, type Node, node, type Program, walk } from './ast';
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import { createNodeResolver, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
+import { tsLower } from './passes/lower-ts';
+import { traverse } from './passes/traverse';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -1064,6 +1066,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = parsed.hasJSX;
                 semantic = createSemantic();
                 analyze(semantic, program);
+                traverse(program, semantic, [tsLower]);
                 graph.parseStats.parsed++;
                 graph.changed.add(id);
             }

@@ -3,7 +3,7 @@
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
 import { N, type Node, node, set, walk } from '../ast.ts';
 import * as create from '../parser/create.ts';
-import { VAR_KIND } from '../parser/create.ts';
+import { FL, VAR_KIND } from '../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the enum site)
@@ -37,22 +37,24 @@ function qualifyMemberRefs(init: Node, priorMembers: Set<string>, enumParam: str
     });
 }
 
-/** Build the lowered `var E; (function(_E){ … })(E || (E = {}))` for one enum. `enumNode` is the
- *  `TSEnumDeclaration`; returns [varDecl, iifeStmt]. Reuses the enum's binding id (and symbol) for
- *  the outer `var`, so downstream deconflict/refs stay wired to the same symbol. */
-function lowerEnum(enumNode: Node, ctx: TransformCtx): [Node, Node] {
+/** Lower one value enum to oxc's single-statement form (`enum.rs`):
+ *  `var E = /*@__PURE__*​/ (function(_E){ _E[_E["A"]=0]="A"; …; return _E; })(E || {})`.
+ *  ONE statement (var-with-IIFE-init) so tree-shaking ties the IIFE to E's liveness via
+ *  declToStatement; the call is marked PURE unless a member initializer is a `new`/call, so a dead
+ *  enum's lowering is dropped. Reuses the enum's binding id (+ symbol) for `var E`. */
+function lowerEnum(enumNode: Node, ctx: TransformCtx): Node {
     const d = enumNode.data as { id: Node; members: Node[] };
     const enumId = d.id;
     const enumSym = (enumId as { sym: number }).sym;
     const enumName = enumId.name;
     const param = ctx.generateUid(enumName); // `_E`
     const pRef = (): Node => idRef(param, 0);
-    const oRef = (): Node => idRef(enumName, enumSym); // outer, carries the enum symbol
 
     const prior = new Set<string>();
     const stmts: Node[] = [];
     let autoNext = 0;
     let autoOk = true;
+    let sideEffect = false; // any member initializer is a `new`/call → the IIFE may have side effects
     for (const m of d.members) {
         if (m.type !== N.TSEnumMember) continue;
         const md = m.data as { id: Node; initializer: Node | null };
@@ -64,6 +66,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx): [Node, Node] {
             stmts.push(exprStmt(assign(computed(pRef(), assign(computed(pRef(), str(keyLit)), num(autoNext))), str(keyLit))));
             autoNext++;
         } else {
+            if (init.type === N.NewExpression || init.type === N.CallExpression) sideEffect = true;
             qualifyMemberRefs(init, prior, param);
             if (init.type === N.StringLiteral) {
                 stmts.push(exprStmt(assign(computed(pRef(), str(keyLit)), init)));
@@ -83,10 +86,8 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx): [Node, Node] {
         if (!autoOk) autoNext = 0; // a non-numeric member resets the auto sequence (matches emitEnum)
         prior.add(key);
     }
+    stmts.push(create.ReturnStatement(S, S, 0, pRef()) as Node); // `return _E;`
 
-    const varDecl = create.VariableDeclaration(S, S, VAR_KIND.VAR, [
-        create.VariableDeclarator(S, S, 0, enumId, null, null) as Node,
-    ]) as Node;
     const fn = create.FunctionExpression(
         S,
         S,
@@ -97,15 +98,13 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx): [Node, Node] {
         null,
         create.BlockStatement(S, S, 0, stmts) as Node,
     ) as Node;
-    const arg = create.LogicalExpression(
-        S,
-        S,
-        '||',
-        oRef(),
-        assign(oRef(), create.ObjectExpression(S, S, 0, []) as Node),
-    ) as Node;
-    const iife = exprStmt(create.CallExpression(S, S, 0, fn, [arg], null) as Node);
-    return [varDecl, iife];
+    // `(fn)(E || {})` — pure unless a member init has side effects (oxc `!has_potential_side_effect`).
+    const arg = create.LogicalExpression(S, S, '||', idRef(enumName, enumSym), create.ObjectExpression(S, S, 0, []) as Node) as Node;
+    const call = create.CallExpression(S, S, sideEffect ? 0 : FL.PURE, fn, [arg], null) as Node;
+    // `var E = <call>` — one statement, tied to the enum symbol E.
+    return create.VariableDeclaration(S, S, VAR_KIND.VAR, [
+        create.VariableDeclarator(S, S, 0, enumId, null, call) as Node,
+    ]) as Node;
 }
 
 const isValueEnum = (n: Node): boolean => n.type === N.TSEnumDeclaration && (n.data as { declare: boolean }).declare !== true;
@@ -117,14 +116,13 @@ export const tsLower: Visitor = {
     name: 'tsLower',
     enter: hookTable({
         [N.TSEnumDeclaration]: (node, ctx) => {
-            if (isValueEnum(node)) ctx.replaceWithMultiple(lowerEnum(node, ctx));
+            if (isValueEnum(node)) ctx.replaceWith(lowerEnum(node, ctx));
         },
         [N.ExportNamedDeclaration]: (node, ctx) => {
             const decl = (node.data as { declaration: Node | null }).declaration;
             if (decl !== null && isValueEnum(decl)) {
-                const [varDecl, iife] = lowerEnum(decl, ctx);
-                const exportVar = create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node;
-                ctx.replaceWithMultiple([exportVar, iife]);
+                const varDecl = lowerEnum(decl, ctx);
+                ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
             }
         },
     }),

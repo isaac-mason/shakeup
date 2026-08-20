@@ -28,8 +28,8 @@ describe('transform stage — enum lowering', () => {
     it('lowers a value enum to a var + IIFE (no TSEnumDeclaration survives)', () => {
         const out = lower('enum E { A, B }');
         expect(out).not.toMatch(/enum/);
-        expect(out).toMatch(/var E;/);
-        expect(out).toMatch(/\(E \|\| \(E = \{\}\)\)/);
+        expect(out).toMatch(/var E =/); // single-statement oxc form: var E = (…)(E || {})
+        expect(out).toMatch(/\(E \|\| \{\}\)/);
     });
 
     it('auto-numbers members and reverse-maps them', () => {
@@ -64,7 +64,7 @@ describe('transform stage — enum lowering', () => {
 
     it('lowers `export enum` to `export var` + IIFE', () => {
         const out = lower('export enum Dir { Up = 1, Down }');
-        expect(out).toMatch(/export var Dir;/);
+        expect(out).toMatch(/export var Dir =/);
         const Dir = evalEnum('export enum Dir { Up = 1, Down }', 'Dir');
         expect(Dir.Up).toBe(1);
         expect(Dir.Down).toBe(2);
@@ -73,7 +73,7 @@ describe('transform stage — enum lowering', () => {
     it('lowers an enum nested in a function body', () => {
         const out = lower('function f() { enum Inner { A, B } return Inner.B; }');
         expect(out).not.toMatch(/enum/);
-        expect(out).toMatch(/var Inner;/);
+        expect(out).toMatch(/var Inner =/);
     });
 
     it('leaves `declare enum` alone (erased elsewhere, not lowered)', () => {
