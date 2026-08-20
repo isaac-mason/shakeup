@@ -94,6 +94,8 @@ export type Module = {
     namedExports: Map<string, NamedExport>;
     starExports: number[];
     execOrder: number;
+    /** Module uses JSX (set by the parser; gates JSX-runtime injection without a detection walk). */
+    hasJSX: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
     sideEffects: ModuleSideEffects;
@@ -148,7 +150,9 @@ export function resolveJSXOptions(jsx: JSXOptions | undefined): { importSource: 
 
 /** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
  * (non-`declare`) namespace has no runtime lowering, so the walk would leave `namespace X {`
- * in the output = broken JS; fail loudly instead. (`declare` namespaces erase fine.) */
+ * in the output = broken JS; fail loudly instead. (`declare` namespaces erase fine.)
+ * TODO(namespace-lowering): replace this rejection with actual value-namespace lowering (SOTA:
+ * oxc typescript/namespace.rs, esbuild tsParseNamespace) — then this walk goes away entirely. */
 export function collectUnsupported(program: Node, id: string, errors: string[]): void {
     walk(program, (n) => {
         if (n.type === N.TSModuleDeclaration && !n.data.declare) {
@@ -653,8 +657,8 @@ export function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement
 }
 
 function injectJSXRuntime(mod: Module, importSource: string): void {
-    const { hasJSX, needsCreateElement } = scanJSX(mod.program);
-    if (!hasJSX) return;
+    if (!mod.hasJSX) return; // parser-set flag — non-JSX modules skip the scanJSX walk entirely
+    const { needsCreateElement } = scanJSX(mod.program);
 
     const runtimeRec = addRecord(mod, `${importSource}/jsx-runtime`, 'static');
     const named = (name: string): number => {
@@ -725,6 +729,7 @@ export type CachedParse = {
     namedImports: Map<number, NamedImport>;
     namedExports: Map<string, NamedExport>;
     starExports: number[];
+    hasJSX: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Stable digest of the module's export surface (named-export keys + `export *`
      *  specifiers). A change here means importers' link/shake/render is stale. */
@@ -1006,6 +1011,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let program: Program;
         let nodeCount: number;
         let semantic: Semantic;
+        let hasJSX: boolean;
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -1018,6 +1024,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             program = signalHit.program;
             nodeCount = signalHit.nodeCount;
             semantic = signalHit.semantic;
+            hasJSX = signalHit.hasJSX;
             sideEffects = signalHit.sideEffects;
             metaVal = signalHit.meta;
             moduleTypeVal = signalHit.moduleType;
@@ -1046,6 +1053,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             reuse = hit !== undefined && hit.srcHash === srcHash;
             if (reuse && hit !== undefined) {
                 ({ program, nodeCount, semantic } = hit);
+                hasJSX = hit.hasJSX;
                 graph.parseStats.reused++;
             } else {
                 const parsed = parse(source, { ts: true, jsx });
@@ -1053,6 +1061,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 collectUnsupported(parsed.program, id, graph.errors);
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
+                hasJSX = parsed.hasJSX;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 graph.parseStats.parsed++;
@@ -1071,6 +1080,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             namedExports: new Map(),
             starExports: [],
             execOrder: -1,
+            hasJSX,
             jsxRuntime: null,
             sideEffects,
             meta: metaVal,
@@ -1117,6 +1127,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 namedImports: mod.namedImports,
                 namedExports: mod.namedExports,
                 starExports: mod.starExports,
+                hasJSX: mod.hasJSX,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
                 source,

@@ -102,6 +102,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         stk: new Array(1 << 8).fill(null),
         sp: 0,
         speculating: 0,
+        sawJSX: false,
         chainSawOptional: false,
         noCondType: false,
     };
@@ -885,6 +886,7 @@ function parseJSXNested(state: ParserState): Node {
 }
 
 function parseJSXRoot(state: ParserState): Node {
+    state.sawJSX = true; // per-module "uses JSX" flag, computed free during parse (esbuild model)
     state.pos = state.tokStart;
     const node = parseJSXNested(state);
     nextToken(state);
@@ -3075,7 +3077,13 @@ function tryParseTypeArgsForCall(state: ParserState): Node | null {
  * one eagerly cost a second full pass over the source; the sourcemap path builds its own
  * (`buildLineTable`, lazy, only when a map is wanted) and diagnostics compute line/col on
  * demand from byte offsets (`buildLineStarts`). */
-export type ParseResult = { program: Program; errors: ParseError[]; nodeCount: number };
+export type ParseResult = {
+    program: Program;
+    errors: ParseError[];
+    nodeCount: number;
+    /** Module uses JSX (set during parse; avoids a JSX-detection walk). */
+    hasJSX: boolean;
+};
 export type ParseOptions = { ts: boolean; jsx: boolean };
 
 /** Parse `source` into a standalone Program. Source, error sink, intern map and
@@ -3097,7 +3105,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     const body = finishList(state, from);
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;
-    return { program, errors: state.errors, nodeCount };
+    return { program, errors: state.errors, nodeCount, hasJSX: state.sawJSX };
 }
 
 export function parseProgram(source: string, options: ParseOptions): Program {

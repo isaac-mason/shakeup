@@ -61,6 +61,10 @@ export type ParserState = {
      * where a trailing `? … : …` binds to the OUTER conditional rather than starting a new one.
      * Public `parseType` clears it; nested bracketed types re-enter through `parseType`. */
     noCondType: boolean;
+    /** Set true when the parser builds any JSX node — a per-module "uses JSX" flag computed for
+     * free during parse (esbuild's `p.jsxRuntimeImports` model), so consumers don't re-walk the AST
+     * just to detect JSX. */
+    sawJSX: boolean;
 };
 
 /** Push a formatted diagnostic (capped, so a runaway parse can't allocate forever). */
