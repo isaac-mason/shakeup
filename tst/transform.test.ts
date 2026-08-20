@@ -52,9 +52,9 @@ describe('devTransform — TS strip (execution + shape)', () => {
             expect(r.errors.join('\n')).toMatch(needle);
             expect(r.code).toBe('');
         };
-        // Value namespaces (flat + nested) now LOWER (see below). A namespace with an unhandled member
-        // (destructuring export) is still left un-lowered → rejected loudly, not silently miscompiled.
-        rejects(`namespace N { export const { a } = obj }`, /value namespaces/);
+        // Value namespaces (flat + nested, incl. destructuring exports) now LOWER (see below). A namespace
+        // with an unhandled member (`export {}` re-export) is still un-lowered → rejected loudly, not miscompiled.
+        rejects(`namespace N { const a = 1; export { a } }`, /value namespaces/);
         rejects(`@dec class A {}`, /decorators/);
     });
 

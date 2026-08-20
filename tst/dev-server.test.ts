@@ -262,8 +262,8 @@ describe('dev server — cache + invalidation', () => {
     });
 
     it('surfaces transform errors through fetchModule', async () => {
-        // A namespace with an unhandled member (destructuring export) is left un-lowered → error surfaces.
-        const { server } = setup({ '/bad.ts': `namespace N { export const { y } = obj; }` });
+        // A namespace with an unhandled member (`export {}` re-export) is left un-lowered → error surfaces.
+        const { server } = setup({ '/bad.ts': `namespace N { const y = 1; export { y }; }` });
         const r = await server.fetchModule('/bad.ts');
         expect(r.errors.length).toBeGreaterThan(0);
         expect(r.errors.join('\n')).toMatch(/value namespaces/);

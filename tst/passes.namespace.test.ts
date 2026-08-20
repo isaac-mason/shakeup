@@ -74,6 +74,35 @@ describe('transform stage — namespace lowering', () => {
         expect(N.M.x).toBe(1);
     });
 
+    it('mirrors destructuring exports (array + object patterns)', () => {
+        const N = evalNs('namespace N { export const [a, b] = [1, 2]; export const { c, d: e } = { c: 3, d: 4 }; }', 'N') as {
+            a: number;
+            b: number;
+            c: number;
+            e: number;
+        };
+        expect([N.a, N.b, N.c, N.e]).toEqual([1, 2, 3, 4]);
+    });
+
+    it('merges reopened namespaces into one object (var-chaining)', () => {
+        const N = evalNs('namespace N { export const a = 1; } namespace N { export const b = 2; }', 'N') as {
+            a: number;
+            b: number;
+        };
+        expect([N.a, N.b]).toEqual([1, 2]);
+    });
+
+    it('erases a type-only namespace entirely (no runtime IIFE)', () => {
+        const out = lower('namespace N { export type T = number; export interface I {} }\nexport const z = 1;');
+        expect(out).not.toMatch(/namespace|function|N\b/);
+        expect(out).toMatch(/z = 1/);
+    });
+
+    it('keeps the value half when a merged namespace is type-only + value', () => {
+        const N = evalNs('namespace N { export type T = number; } namespace N { export const v = 3; }', 'N') as { v: number };
+        expect(N.v).toBe(3);
+    });
+
     it('leaves `declare namespace` alone', () => {
         const { program } = parse('declare namespace D { const x: number }', { ts: true, jsx: false });
         const sem = createSemantic();

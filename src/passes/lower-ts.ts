@@ -29,6 +29,32 @@ const exprStmt = (e: Node): Node => create.ExpressionStatement(S, S, 0, e) as No
 
 const obj = (): Node => create.ObjectExpression(S, S, 0, []) as Node;
 
+/** Visit every binding identifier a pattern introduces (oxc's `BoundNames`), for the `_N.x = x`
+ *  mirrors of a namespace `export const { a } = …` / `export const [a] = …`. Mirrors the shape of
+ *  `declarePattern` in semantic.ts — BindingIdentifier leaves, everything else recurses. */
+function forEachBoundName(pat: Node, fn: (name: string, sym: number) => void): void {
+    switch (pat.type) {
+        case N.BindingIdentifier:
+            fn(pat.name, (pat as { sym: number }).sym);
+            return;
+        case N.ArrayPattern:
+            for (const el of (pat.data as { elements: (Node | null)[] }).elements) if (el !== null) forEachBoundName(el, fn);
+            return;
+        case N.ObjectPattern:
+            for (const p of (pat.data as { properties: Node[] }).properties) forEachBoundName(p, fn);
+            return;
+        case N.ObjectProperty:
+            forEachBoundName((pat.data as { value: Node }).value, fn);
+            return;
+        case N.AssignmentPattern:
+            forEachBoundName((pat.data as { left: Node }).left, fn);
+            return;
+        case N.RestElement:
+            forEachBoundName((pat.data as { argument: Node }).argument, fn);
+            return;
+    }
+}
+
 /** Wrap `bodyStmts` (which reference the param `_X` and end in `return _X;`) in the shared
  *  single-statement IIFE-var form both enum and namespace lower to:
  *  `var X = /*@__PURE__*​/ (function(_X){ …body… })(<init>)`. `init` is `X || {}` at the top level, or
@@ -134,7 +160,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx): Node {
 }
 
 /** Statements a value namespace body member lowers to, or null if the member isn't handled yet
- *  (`export *`, `import =`, destructuring export). `thisParam` is the enclosing namespace's IIFE
+ *  (`export *`, `import =` — the latter isn't parsed at all). `thisParam` is the enclosing namespace's IIFE
  *  param (`_N`): used for the `_N.x = x` mirrors AND as the parent of any nested namespace. */
 function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[] | null {
     const pRef = (): Node => idRef(thisParam, 0);
@@ -144,7 +170,7 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
     // bare (non-exported) nested namespace → a local `var M = (…)(M || {})`, not on `_N`.
     if (isValueNamespace(stmt)) {
         const nested = lowerNamespace(stmt, ctx, null);
-        return nested === null ? null : [nested];
+        return nested === null ? null : nested === ERASE ? [] : [nested];
     }
     // non-exported runtime statements pass through unchanged.
     if (stmt.type !== N.ExportNamedDeclaration) return [stmt];
@@ -155,7 +181,7 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
     // `export namespace M` → nested namespace linked onto `_N.M` (parent = thisParam).
     if (isValueNamespace(decl)) {
         const nested = lowerNamespace(decl, ctx, thisParam);
-        return nested === null ? null : [nested];
+        return nested === null ? null : nested === ERASE ? [] : [nested];
     }
     // `export enum E` → lowered enum (top-level form) + mirror onto `_N`.
     if (isValueEnum(decl)) {
@@ -171,14 +197,14 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
         ];
     }
     // `export const/let/var x = v` → keep the (unexported) decl + mirror each binding onto `_N`.
+    // Destructuring (`export const { a } = …`) mirrors every bound name (oxc's `bound_names`).
     if (decl.type === N.VariableDeclaration) {
         const decls = (decl.data as { declarations: Node[] }).declarations;
         const mirrors: Node[] = [];
-        for (const d of decls) {
-            const pat = (d.data as { id: Node }).id;
-            if (pat.type !== N.BindingIdentifier) return null; // destructuring export — not handled yet
-            mirrors.push(exprStmt(assign(member(pRef(), idName(pat.name)), idRef(pat.name, (pat as { sym: number }).sym))));
-        }
+        for (const d of decls)
+            forEachBoundName((d.data as { id: Node }).id, (name, sym) =>
+                mirrors.push(exprStmt(assign(member(pRef(), idName(name)), idRef(name, sym)))),
+            );
         return [decl, ...mirrors];
     }
     // `export function f`/`class C` → keep the decl + `_N.f = f;`
@@ -190,10 +216,15 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
     return null; // other — not handled yet
 }
 
+/** oxc's three namespace outcomes: a lowered var-decl `Node`, `ERASE` (only type-only members →
+ *  emit no JS, matching oxc's `is_namespace_module` early return), or `null` (a member we can't
+ *  lower → leave the namespace intact for the graph to reject loudly). */
+const ERASE = Symbol('erase');
+
 /** Lower a value namespace to the single-statement IIFE-var form (oxc's model): nested `export
  *  namespace` links onto the parent (`_P.M || (_P.M = {})` via `parentParam`), else top-level
- *  `Foo || {}`. Returns null if any member isn't handled — the caller leaves it for the graph to reject. */
-function lowerNamespace(nsNode: Node, ctx: TransformCtx, parentParam: string | null): Node | null {
+ *  `Foo || {}`. `ERASE` when the body has no runtime members; `null` if any member isn't handled. */
+function lowerNamespace(nsNode: Node, ctx: TransformCtx, parentParam: string | null): Node | null | typeof ERASE {
     const d = nsNode.data as { id: Node; body: Node[] };
     const nsId = d.id;
     const nsName = nsId.name;
@@ -209,6 +240,7 @@ function lowerNamespace(nsNode: Node, ctx: TransformCtx, parentParam: string | n
         for (const s of lowered) body.push(s);
         if (!sideEffect) for (const s of lowered) if (!isPureNsStmt(s)) sideEffect = true;
     }
+    if (body.length === 0) return ERASE; // type-only namespace → emits nothing
     body.push(create.ReturnStatement(S, S, 0, pRef()) as Node);
     return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parentParam);
 }
@@ -252,13 +284,17 @@ export const tsLower: Visitor = {
                 ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
             } else if (decl !== null && isValueNamespace(decl)) {
                 const varDecl = lowerNamespace(decl, ctx, null);
-                if (varDecl !== null) ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
+                if (varDecl === ERASE)
+                    ctx.remove(); // `export namespace N { type … }` → nothing
+                else if (varDecl !== null) ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
             }
         },
         [N.TSModuleDeclaration]: (node, ctx) => {
             if (isValueNamespace(node)) {
                 const varDecl = lowerNamespace(node, ctx, null);
-                if (varDecl !== null) ctx.replaceWith(varDecl);
+                if (varDecl === ERASE)
+                    ctx.remove(); // type-only namespace → nothing
+                else if (varDecl !== null) ctx.replaceWith(varDecl);
             }
         },
     }),

@@ -142,7 +142,7 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
     });
 
     it('a namespace with an unhandled member is rejected loudly', async () => {
-        expect((await bundleErr('namespace N { export const { a } = obj; }')).length).toBeGreaterThan(0);
+        expect((await bundleErr('namespace N { const a = 1; export { a }; }')).length).toBeGreaterThan(0);
     });
 
     it('declare namespace / declare global still erase cleanly (no error)', async () => {
