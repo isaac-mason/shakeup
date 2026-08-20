@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { type Node, TYPE_COUNT, walk } from '../src/ast.ts';
-import { transform, type Visitor } from '../src/passes/traverse.ts';
+import { traverse, type Visitor } from '../src/passes/traverse.ts';
 import { parse } from '../src/parser/index.ts';
 
 /** Reference pre-order node sequence via the plain generic `walk`. */
@@ -25,7 +25,7 @@ function transformSeq(src: string): { ref: number[]; got: number[] } {
     };
     const enter = new Array(TYPE_COUNT).fill(record) as ((n: Node) => void)[];
     const recorder: Visitor = { name: 'record', enter: enter as never, exit: null };
-    transform(program, sem, [recorder]);
+    traverse(program, sem, [recorder]);
     return { ref, got };
 }
 

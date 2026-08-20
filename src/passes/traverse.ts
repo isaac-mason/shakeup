@@ -201,8 +201,8 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
     for (const x of out) list.push(x);
 }
 
-/** Run the ordered `visitors` over `program` in one fused mutable traversal. */
-export function transform(program: Node, semantic: Semantic, visitors: Visitor[]): void {
+/** Run the ordered `visitors` over `program` in one fused mutable traversal (oxc `traverse_mut`). */
+export function traverse(program: Node, semantic: Semantic, visitors: Visitor[]): void {
     const ctx = new Ctx(semantic, visitors);
     ctx.op = OP_NONE;
     fireEnter(program, ctx);

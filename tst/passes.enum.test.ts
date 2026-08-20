@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
-import { transform } from '../src/passes/traverse.ts';
+import { traverse } from '../src/passes/traverse.ts';
 import { parse } from '../src/parser/index.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
@@ -11,7 +11,7 @@ function lower(src: string): string {
     const { program } = parse(src, { ts: true, jsx: false });
     const sem = createSemantic();
     analyze(sem, program);
-    transform(program, sem, [tsLower]);
+    traverse(program, sem, [tsLower]);
     const p = createPrinter({ minify: false });
     printModule(p, program);
     return finishPrinter(p);
@@ -80,7 +80,7 @@ describe('transform stage — enum lowering', () => {
         const { program } = parse('declare enum E { A }', { ts: true, jsx: false });
         const sem = createSemantic();
         analyze(sem, program);
-        transform(program, sem, [tsLower]);
+        traverse(program, sem, [tsLower]);
         // still a TSEnumDeclaration (declare) — the pass must not touch it
         expect(program.data.body[0]?.type).toBeDefined();
         const t = program.data.body[0] as { type: number; data: { declare?: boolean } };
