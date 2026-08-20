@@ -425,6 +425,7 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
                 callee: shakeupMember('link', n.start, n.start),
                 arguments: d.options === null ? [d.source] : [d.source, d.options],
                 optional: false,
+                pure: false,
                 typeArguments: null,
             });
             return;

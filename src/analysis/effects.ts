@@ -65,6 +65,16 @@ export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
             return isPureExpr(node.data.expression, jsxPure);
+        case N.CallExpression: {
+            // A `/*@__PURE__*/`-annotated call (oxc `CallExpression.pure`) is side-effect-free iff
+            // its arguments are. Lowering passes set this on the enum/namespace IIFE.
+            if (node.data.pure !== true) return false;
+            for (const a of node.data.arguments) {
+                const arg = a.type === N.SpreadElement ? a.data.argument : a;
+                if (!isPureExpr(arg, jsxPure)) return false;
+            }
+            return true;
+        }
         case N.JSXElement:
             return jsxPure && jsxElementPure(node, jsxPure);
         case N.JSXFragment:

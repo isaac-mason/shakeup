@@ -26,6 +26,9 @@ export const FL = {
     NAMESPACE: 1 << 11,
     KIND_SHIFT: 12,
     ACCESS_SHIFT: 14,
+    /** `/*@__PURE__*​/`-annotated call/new — the call is side-effect-free if its args are (oxc
+     * `CallExpression.pure`). Set by lowering passes so tree-shaking can drop the result if unused. */
+    PURE: 1 << 16,
 } as const;
 
 export const VAR_KIND = { VAR: 1, LET: 2, CONST: 3, KIND_MASK: 3 } as const;
@@ -123,6 +126,7 @@ export const CallExpression = (
         callee,
         arguments: args ?? [],
         optional: (flags & FL.OPTIONAL) !== 0,
+        pure: (flags & FL.PURE) !== 0,
         typeArguments: typeArgs ?? null,
     });
 export const StaticMemberExpression = (s: number, e: number, flags: number, obj: Node, prop: Node): Node =>

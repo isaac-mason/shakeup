@@ -85,7 +85,7 @@ const DEFS = [
     def('UnaryExpression', { operator: string, prefix: boolean, argument: child }),
     def('UpdateExpression', { operator: string, prefix: boolean, argument: child }),
     def('ConditionalExpression', { test: child, consequent: child, alternate: child }),
-    def('CallExpression', { callee: child, arguments: list(child), optional: boolean, typeArguments: nullable(child) }),
+    def('CallExpression', { callee: child, arguments: list(child), optional: boolean, pure: boolean, typeArguments: nullable(child) }),
     def('NewExpression', { callee: child, arguments: list(child), typeArguments: nullable(child) }),
     def('StaticMemberExpression', { object: child, property: child, optional: boolean }),
     def('ComputedMemberExpression', { object: child, expression: child, optional: boolean }),
