@@ -31,8 +31,9 @@ export type TreeshakeCache = {
     decls: [number, [number, number]][][];
 };
 
-function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]): void {
+function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[], declared: number[]): void {
     const moduleScope = scopeOf(mod.semantic, mod.program);
+    const sem = mod.semantic;
     const pushSym = (sym: number): void => {
         if (sym === 0) return;
         if (mod.namedImports.has(sym)) {
@@ -42,9 +43,18 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
             else if (bind.kind === 'namespace') out.push(packRef(bind.module, NS_MARKER));
             return;
         }
-        if (mod.semantic.symbols[sym].scope === moduleScope) out.push(packRef(mod.idx, sym));
+        if (sem.symbols[sym].scope === moduleScope) out.push(packRef(mod.idx, sym));
     };
-    walkRefIdents(statement, (ident) => pushSym(symbolOf(mod.semantic, ident)));
+    // One scan yields both `referenced_symbols` (uses → `out`) and `declared_symbols` (module-scope
+    // bindings → `declared`), keyed by SymbolRef identity — the rolldown `StmtInfo` model. No spans:
+    // this is robust to synthetic (lowered) nodes, which carry symbols but have no meaningful span.
+    walkRefIdents(statement, (ident) => {
+        const sym = symbolOf(sem, ident);
+        pushSym(sym);
+        if (ident.type === N.BindingIdentifier && sym !== 0 && sem.symbols[sym].scope === moduleScope) {
+            declared.push(packRef(mod.idx, sym));
+        }
+    });
     if (mod.jsxRuntime !== null && statementContainsJSX(statement)) {
         const rt = mod.jsxRuntime;
         pushSym(rt.jsx);
@@ -213,25 +223,16 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
         }
         const list: StatementInfo[] = [];
         const localDecls: [number, [number, number]][] = [];
-        const moduleScope = scopeOf(mod.semantic, mod.program);
-        const spans: [number, number, number][] = [];
-        for (const statement of mod.program.data.body) {
+        const body = mod.program.data.body;
+        for (let idx = 0; idx < body.length; idx++) {
+            const statement = body[idx];
             const refs: number[] = [];
-            collectRefs(mod, linked, statement, refs);
+            const declared: number[] = [];
+            collectRefs(mod, linked, statement, refs, declared);
             list.push({ statement, refs, pure: statementIsPure(mod, statement, jsxPure) });
-            spans.push([statement.start, statement.end, list.length - 1]);
-        }
-        const sem = mod.semantic;
-        for (let sym = 1; sym < sem.symbols.length; sym++) {
-            if (sem.symbols[sym].scope !== moduleScope) continue;
-            const at = sem.symbols[sym].decl!.start;
-            for (const [s, e, idx] of spans) {
-                if (at >= s && at < e) {
-                    const ref = packRef(mod.idx, sym);
-                    declToStatement.set(ref, [mod.idx, idx]);
-                    localDecls.push([ref, [mod.idx, idx]]);
-                    break;
-                }
+            for (const ref of declared) {
+                declToStatement.set(ref, [mod.idx, idx]);
+                localDecls.push([ref, [mod.idx, idx]]);
             }
         }
         const defRef = linked.defaultRefs.get(mod.idx);
