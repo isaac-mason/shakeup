@@ -71,6 +71,18 @@ describe('bundle: executable output', () => {
         expect(mod.kind).toBe('DYNAMIC');
     });
 
+    it('import-equals aliases lower and execute', async () => {
+        const { code } = await build({
+            '/main.ts': ["import { lib } from './lib';", 'import dbl = lib.util.double;', 'export const out = dbl(21);'].join(
+                '\n',
+            ),
+            '/lib.ts': 'export const lib = { util: { double: (x: number) => x * 2 } };',
+        });
+        expect(code).not.toMatch(/\bimport dbl\b|import =/);
+        const mod = await run(code);
+        expect(mod.out).toBe(42);
+    });
+
     it('external imports hoist and dedupe; externals stay imports', async () => {
         const { code } = await build(
             {
@@ -134,7 +146,9 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
     it('nested value namespaces lower and execute (N.M.c)', async () => {
         const { code } = await bundle({
             entry: '/main.ts',
-            fs: createMemoryFs({ '/main.ts': 'namespace A { export namespace B { export const c = 7; } }\nexport const out = A.B.c;' }),
+            fs: createMemoryFs({
+                '/main.ts': 'namespace A { export namespace B { export const c = 7; } }\nexport const out = A.B.c;',
+            }),
         });
         expect(code).not.toMatch(/namespace/);
         // biome-ignore lint/security/noGlobalEval: test-only
@@ -143,6 +157,10 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
 
     it('a namespace with an unhandled member is rejected loudly', async () => {
         expect((await bundleErr('namespace N { const a = 1; export { a }; }')).length).toBeGreaterThan(0);
+    });
+
+    it('import-equals with require() (CommonJS) is rejected loudly', async () => {
+        expect((await bundleErr('import fs = require("fs");\nexport const x = fs;')).join('\n')).toMatch(/require\(\)/);
     });
 
     it('declare namespace / declare global still erase cleanly (no error)', async () => {

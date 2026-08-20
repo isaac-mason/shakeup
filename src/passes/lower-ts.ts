@@ -159,14 +159,41 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx): Node {
     return iifeVarDecl(enumId, enumName, enumSym, param, stmts, sideEffect, null);
 }
 
+/** Convert a value entity name (`A` / `A.B.C`) to the equivalent value expression: an
+ *  IdentifierReference stays as-is; a TSQualifiedName becomes a static member chain. */
+function entityToValue(ref: Node): Node {
+    if (ref.type === N.TSQualifiedName) {
+        const q = ref.data as { left: Node; right: Node };
+        return member(entityToValue(q.left), idName(q.right.name));
+    }
+    return ref; // IdentifierReference — already a value ref
+}
+
+/** `import X = A.B` → `var X = A.B` (reuses the decl's own binding id). Returns null for the
+ *  `import X = require("m")` external form — CommonJS interop is out of scope for an ESM browser
+ *  bundler, so it's left un-lowered to reject loudly. Type-only (`import type X =`) is erased by the
+ *  caller before this. */
+function lowerImportEquals(node: Node): Node | null {
+    const d = node.data as { id: Node; moduleReference: Node };
+    if (d.moduleReference.type === N.TSExternalModuleReference) return null; // require() — reject
+    const init = entityToValue(d.moduleReference);
+    return create.VariableDeclaration(S, S, VAR_KIND.VAR, [create.VariableDeclarator(S, S, 0, d.id, null, init) as Node]) as Node;
+}
+
 /** Statements a value namespace body member lowers to, or null if the member isn't handled yet
- *  (`export *`, `import =` — the latter isn't parsed at all). `thisParam` is the enclosing namespace's IIFE
+ *  (`export *`). `thisParam` is the enclosing namespace's IIFE
  *  param (`_N`): used for the `_N.x = x` mirrors AND as the parent of any nested namespace. */
 function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[] | null {
     const pRef = (): Node => idRef(thisParam, 0);
     // type-only members emit no JS.
     if (stmt.type === N.TSInterfaceDeclaration || stmt.type === N.TSTypeAliasDeclaration) return [];
     if ((stmt.data as { declare?: boolean }).declare === true) return [];
+    // bare (non-exported) `import X = A.B` → `var X = A.B` (no mirror); `import type X =` erased.
+    if (stmt.type === N.TSImportEqualsDeclaration) {
+        if ((stmt.data as { importKind: string }).importKind === 'type') return [];
+        const lowered = lowerImportEquals(stmt);
+        return lowered === null ? null : [lowered];
+    }
     // bare (non-exported) nested namespace → a local `var M = (…)(M || {})`, not on `_N`.
     if (isValueNamespace(stmt)) {
         const nested = lowerNamespace(stmt, ctx, null);
@@ -182,6 +209,14 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
     if (isValueNamespace(decl)) {
         const nested = lowerNamespace(decl, ctx, thisParam);
         return nested === null ? null : nested === ERASE ? [] : [nested];
+    }
+    // `export import X = A.B` → `var X = A.B` + mirror `_N.X = X`; `export import type X =` erased.
+    if (decl.type === N.TSImportEqualsDeclaration) {
+        if ((decl.data as { importKind: string }).importKind === 'type') return [];
+        const lowered = lowerImportEquals(decl);
+        if (lowered === null) return null;
+        const id = (decl.data as { id: Node }).id;
+        return [lowered, exprStmt(assign(member(pRef(), idName(id.name)), idRef(id.name, (id as { sym: number }).sym)))];
     }
     // `export enum E` → lowered enum (top-level form) + mirror onto `_N`.
     if (isValueEnum(decl)) {
@@ -277,11 +312,26 @@ export const tsLower: Visitor = {
         [N.TSEnumDeclaration]: (node, ctx) => {
             if (isValueEnum(node)) ctx.replaceWith(lowerEnum(node, ctx));
         },
+        [N.TSImportEqualsDeclaration]: (node, ctx) => {
+            // `import X = A.B` → `var X = A.B`; `import type X =` erased; `= require()` left to reject.
+            if ((node.data as { importKind: string }).importKind === 'type') ctx.remove();
+            else {
+                const lowered = lowerImportEquals(node);
+                if (lowered !== null) ctx.replaceWith(lowered);
+            }
+        },
         [N.ExportNamedDeclaration]: (node, ctx) => {
             const decl = (node.data as { declaration: Node | null }).declaration;
             if (decl !== null && isValueEnum(decl)) {
                 const varDecl = lowerEnum(decl, ctx);
                 ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
+            } else if (decl !== null && decl.type === N.TSImportEqualsDeclaration) {
+                // `export import X = A.B` → `export var X = A.B`; type-only erased; require() rejects.
+                if ((decl.data as { importKind: string }).importKind === 'type') ctx.remove();
+                else {
+                    const lowered = lowerImportEquals(decl);
+                    if (lowered !== null) ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, lowered, null, null) as Node);
+                }
             } else if (decl !== null && isValueNamespace(decl)) {
                 const varDecl = lowerNamespace(decl, ctx, null);
                 if (varDecl === ERASE)

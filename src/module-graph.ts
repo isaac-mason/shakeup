@@ -161,6 +161,11 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
             errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
             return false;
         }
+        // Only the `import X = require("m")` form survives lowering (entity/type forms are lowered).
+        if (n.type === N.TSImportEqualsDeclaration && n.data.moduleReference.type === N.TSExternalModuleReference) {
+            errors.push(`${id}:${n.start}: import-equals with require() (CommonJS) is not supported (use ES modules)`);
+            return false;
+        }
         return true;
     });
 }

@@ -85,8 +85,8 @@ type RunnerCtx = {
     // Detection folded into this traversal (was 2 standalone walks: scanJSX + collectUnsupported).
     hasJSX: boolean;
     needsCreateElement: boolean;
-    /** start offsets of value `namespace` declarations (unsupported — dev errors on these). */
-    unsupported: number[];
+    /** unsupported constructs (dev errors on these): start offset + reason. */
+    unsupported: { pos: number; msg: string }[];
 };
 
 function createRunnerCtx(code: string, semantic: Semantic): RunnerCtx {
@@ -430,7 +430,16 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
             if (attrsHaveKeyAfterSpreadEmit(n.data.attributes)) ctx.needsCreateElement = true;
             return;
         case N.TSModuleDeclaration:
-            if (!n.data.declare) ctx.unsupported.push(n.start); // value namespace
+            if (!n.data.declare)
+                ctx.unsupported.push({ pos: n.start, msg: 'value namespaces are not supported (use ES modules)' });
+            return;
+        case N.TSImportEqualsDeclaration:
+            // Only the require() form survives lowering (entity/type forms are lowered away).
+            if (n.data.moduleReference.type === N.TSExternalModuleReference)
+                ctx.unsupported.push({
+                    pos: n.start,
+                    msg: 'import-equals with require() (CommonJS) is not supported (use ES modules)',
+                });
             return;
         case N.ImportMeta:
             set(n, N.StaticMemberExpression, {
@@ -503,9 +512,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
     const ctx = createRunnerCtx(source, semantic);
     runnerLink(program, ctx);
     if (ctx.unsupported.length > 0) {
-        return emptyResult(
-            ctx.unsupported.map((pos) => `${filename}:${pos}: value namespaces are not supported (use ES modules)`),
-        );
+        return emptyResult(ctx.unsupported.map(({ pos, msg }) => `${filename}:${pos}: ${msg}`));
     }
 
     // JSX runtime: linked post-traversal; the printer's lowering references it as member text.

@@ -506,6 +506,17 @@ function visit(state: AnalyseState, node: Node | null): void {
             });
             return;
         }
+        case N.TSImportEqualsDeclaration: {
+            const id = node.data.id;
+            // Mirror ImportDeclaration: a value alias binds in the value ns; a `import type X =`
+            // alias binds dual-ns. The entity-name head (`A` in `import X = A.B`) is a value ref so
+            // it resolves + is seen by tree-shaking; `require("m")` carries no ref.
+            if (node.data.importKind === 'type') declareDualNs(state, id, SYM.IMPORT | SYM.TYPE, state.scope);
+            else declare(state, id, SYM.IMPORT, NS_VALUE, state.scope);
+            const ref = node.data.moduleReference;
+            if (ref.type !== N.TSExternalModuleReference) collectEntityName(state, ref, NS_VALUE);
+            return;
+        }
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
             visit(state, node.data.expression);
