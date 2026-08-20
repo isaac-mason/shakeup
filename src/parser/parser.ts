@@ -233,7 +233,14 @@ function here(state: ParserState): string {
 
 /** Materialize [from, sp) into a fresh exact-size packed array (dropping the run).
  * Grammar-guaranteed list: asserts (dev) that no hole slipped through. */
+// Shared frozen empty list. Every no-arg call `f()`, empty `{}` block and absent param/type list
+// finishes a zero-length list (~2k per module on real code). Downstream passes never mutate a
+// node's list array in place — the AST is rebuilt, not spliced — so one shared array is safe;
+// frozen so any accidental in-place mutation throws loudly instead of corrupting siblings.
+const EMPTY_LIST: Node[] = Object.freeze([]) as unknown as Node[];
+
 function finishList(state: ParserState, from: number): Node[] {
+    if (from === state.sp) return EMPTY_LIST;
     const stk = state.stk;
     if (DEV)
         for (let i = from; i < state.sp; i++)
@@ -1709,22 +1716,44 @@ function parseStatement(state: ParserState): Node {
                 return parseVarDecl(state, VAR_KIND.CONST, 0);
             }
             case K.LET: {
-                const s = saveState(state);
+                // `let` may be a declaration (`let x` / `let {…}` / `let […]`) or an identifier in
+                // expression position. One-token peek with allocation-free scalar rewind (no array).
+                const p = state.pos,
+                    tk = state.tok,
+                    ts0 = state.tokStart,
+                    te = state.tokEnd,
+                    tf = state.tokFlags,
+                    th = state.tokHash;
                 nextToken(state);
-                if (isIdentLike(state) || isP(state, P.LBRACE) || isP(state, P.LBRACKET)) {
-                    restoreState(state, s);
-                    return parseVarDecl(state, VAR_KIND.LET, 0);
-                }
-                restoreState(state, s);
+                const isDecl = isIdentLike(state) || isP(state, P.LBRACE) || isP(state, P.LBRACKET);
+                state.pos = p;
+                state.tok = tk;
+                state.tokStart = ts0;
+                state.tokEnd = te;
+                state.tokFlags = tf;
+                state.tokHash = th;
+                if (isDecl) return parseVarDecl(state, VAR_KIND.LET, 0);
                 break;
             }
             case K.FUNCTION:
                 return parseFunction(state, false, true, false);
             case K.ASYNC: {
-                const s = saveState(state);
+                // `async function` is a declaration; a bare `async` is an identifier expression.
+                // Peek for `function` (same line) with a scalar rewind instead of a saveState array.
+                const p = state.pos,
+                    tk = state.tok,
+                    ts0 = state.tokStart,
+                    te = state.tokEnd,
+                    tf = state.tokFlags,
+                    th = state.tokHash;
                 nextToken(state);
                 if (isK(state, K.FUNCTION) && (state.tokFlags & F_NL) === 0) return parseFunction(state, true, true, false);
-                restoreState(state, s);
+                state.pos = p;
+                state.tok = tk;
+                state.tokStart = ts0;
+                state.tokEnd = te;
+                state.tokFlags = tf;
+                state.tokHash = th;
                 break;
             }
             case K.CLASS:
