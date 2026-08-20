@@ -71,6 +71,25 @@ describe('bundle: executable output', () => {
         expect(mod.kind).toBe('DYNAMIC');
     });
 
+    it('enum + namespace lowerings survive minify (synthetic _E/_N uids never collide with mangled names)', async () => {
+        // Mangle renames real symbols (`x`) in the same scope as the synthetic IIFE param `_N`.
+        // `_E`/`_N` are underscore-prefixed — a namespace the mangler never generates into — so they
+        // stay verbatim and can't collide. This pins that invariant.
+        const { code } = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({
+                '/main.ts': [
+                    'export enum E { A, B }',
+                    'namespace N { const x = 5; export const y = x + 1; export namespace M { export const c = 7; } }',
+                    'export const out = [E.B, N.y, N.M.c];',
+                ].join('\n'),
+            }),
+            output: { minify: true },
+        });
+        const mod = await run(code);
+        expect(mod.out).toEqual([1, 6, 7]);
+    });
+
     it('import-equals aliases lower and execute', async () => {
         const { code } = await build({
             '/main.ts': ["import { lib } from './lib';", 'import dbl = lib.util.double;', 'export const out = dbl(21);'].join(
