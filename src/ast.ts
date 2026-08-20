@@ -85,7 +85,13 @@ const DEFS = [
     def('UnaryExpression', { operator: string, prefix: boolean, argument: child }),
     def('UpdateExpression', { operator: string, prefix: boolean, argument: child }),
     def('ConditionalExpression', { test: child, consequent: child, alternate: child }),
-    def('CallExpression', { callee: child, arguments: list(child), optional: boolean, pure: boolean, typeArguments: nullable(child) }),
+    def('CallExpression', {
+        callee: child,
+        arguments: list(child),
+        optional: boolean,
+        pure: boolean,
+        typeArguments: nullable(child),
+    }),
     def('NewExpression', { callee: child, arguments: list(child), typeArguments: nullable(child) }),
     def('StaticMemberExpression', { object: child, property: child, optional: boolean }),
     def('ComputedMemberExpression', { object: child, expression: child, optional: boolean }),
@@ -318,6 +324,11 @@ const DEFS = [
     // Ids are append-only, so new node types go at the end. An expression, so it
     // sits outside the isTypeOnlyNode / isJSXNode id ranges.
     def('TSInstantiationExpression', { expression: child, typeArguments: child }),
+    // `import X = A.B` / `import X = require("m")`. A value declaration (creates a runtime binding
+    // unless `importKind === 'type'`), so it sits OUTSIDE the isTypeOnlyNode id range. `moduleReference`
+    // is a value entity name (IdentifierReference / TSQualifiedName) or a TSExternalModuleReference.
+    def('TSImportEqualsDeclaration', { id: child, moduleReference: child, importKind: scalar<'value' | 'type'>() }),
+    def('TSExternalModuleReference', { expression: child }),
 ] as const;
 
 type Defs = typeof DEFS;
@@ -325,7 +336,9 @@ type DefOf<T extends TypeName> = Extract<Defs[number], { name: T }>;
 
 // Payload fields are mutable: the AST is the mutable IR (passes rewrite nodes in place). `-readonly`
 // strips the readonly the `as const` DEFS would otherwise propagate.
-type PayloadOf<D extends NodeDef> = D extends null ? null : { -readonly [K in keyof D]: D[K] extends Schema ? Infer<D[K]> : never } & {};
+type PayloadOf<D extends NodeDef> = D extends null
+    ? null
+    : { -readonly [K in keyof D]: D[K] extends Schema ? Infer<D[K]> : never } & {};
 
 export type TypeName = Defs[number]['name'];
 
@@ -1128,6 +1141,13 @@ export function walk(n: Node, enter: (n: Node) => boolean | void): void {
         case N.TSInstantiationExpression:
             if (d.expression != null) walk(d.expression as Node, enter);
             if (d.typeArguments != null) walk(d.typeArguments as Node, enter);
+            break;
+        case N.TSImportEqualsDeclaration:
+            if (d.id != null) walk(d.id as Node, enter);
+            if (d.moduleReference != null) walk(d.moduleReference as Node, enter);
+            break;
+        case N.TSExternalModuleReference:
+            if (d.expression != null) walk(d.expression as Node, enter);
             break;
         case N.TSModuleDeclaration:
             if (d.id != null) walk(d.id as Node, enter);

@@ -167,6 +167,8 @@ const ID_SNAPSHOT: Record<string, number> = {
     JSXText: 148,
     // appended post-migration (append-only; existing ids above stay byte-identical)
     TSInstantiationExpression: 149,
+    TSImportEqualsDeclaration: 150,
+    TSExternalModuleReference: 151,
 };
 
 describe('DEFS-derived numeric ids match the frozen pre-migration snapshot', () => {

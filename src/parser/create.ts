@@ -424,6 +424,15 @@ export const TSModuleDeclaration = (s: number, e: number, flags: number, id: Nod
         namespace: (flags & FL.NAMESPACE) !== 0,
     });
 
+export const TSImportEqualsDeclaration = (s: number, e: number, flags: number, id: Node, moduleReference: Node): Node =>
+    node(N.TSImportEqualsDeclaration, s, e, '', {
+        id,
+        moduleReference,
+        importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value',
+    });
+export const TSExternalModuleReference = (s: number, e: number, _f: number, expression: Node): Node =>
+    node(N.TSExternalModuleReference, s, e, '', { expression });
+
 export const Program = (s: number, e: number, _f: number, body: Node[]): Node => node(N.Program, s, e, '', { body });
 export const TemplateLiteral = (s: number, e: number, _f: number, quasis: Node[], expressions: Node[]): Node =>
     node(N.TemplateLiteral, s, e, '', { quasis, expressions });

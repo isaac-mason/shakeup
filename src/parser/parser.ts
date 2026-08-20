@@ -2120,6 +2120,8 @@ function parseImport(state: ParserState): Node {
     }
     if (isIdentLike(state)) {
         const local = parseIdent(state, R_BIND);
+        // `import X = …` — TS import-equals, not an ESM default import.
+        if (isP(state, P.EQ)) return finishImportEquals(state, start, flags, local);
         push(state, create.ImportDefaultSpecifier(local.start, local.end, 0, local) as Node);
         eatP(state, P.COMMA);
     }
@@ -2165,6 +2167,49 @@ function parseImport(state: ParserState): Node {
         finishList(state, from),
         source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
     ) as Node;
+}
+
+/** A value entity name (`A` / `A.B.C`) as an IdentifierReference head + chained TSQualifiedName —
+ *  the import-equals module reference and the same shape as a type-position `typeName`. */
+function parseEntityNameRef(state: ParserState): Node {
+    const s = state.tokStart;
+    let name: Node = parseNameAsIdent(state, R_REF) as Node;
+    while (isP(state, P.DOT)) {
+        nextToken(state);
+        const r = parseNameAsIdent(state, R_NAME);
+        name = create.TSQualifiedName(s, r.end, 0, name, r) as Node;
+    }
+    return name;
+}
+
+/** `import X = <module reference>` — TS import-equals. Called with the leading id already parsed and
+ *  the current token at `=`. The reference is `require("m")` (external) or an entity name `A.B`. */
+function finishImportEquals(state: ParserState, start: number, flags: number, id: Identifier): Node {
+    nextToken(state); // consume '='
+    let moduleRef: Node;
+    if (isIdentLike(state) && state.src.slice(state.tokStart, state.tokEnd) === 'require') {
+        const rs = state.tokStart;
+        const save = saveState(state);
+        nextToken(state);
+        if (isP(state, P.LPAREN)) {
+            nextToken(state);
+            const expr =
+                (state.tok as number) === T_STR
+                    ? leaf(state, N.StringLiteral, state.tokStart, state.tokEnd)
+                    : leaf(state, N.StringLiteral, state.tokStart, state.tokStart);
+            if ((state.tok as number) === T_STR) nextToken(state);
+            else raise(state, ParseErrorCode.ExpectedModuleSpecifier);
+            expectP(state, P.RPAREN, "')'");
+            moduleRef = create.TSExternalModuleReference(rs, state.tokStart, 0, expr) as Node;
+        } else {
+            restoreState(state, save);
+            moduleRef = parseEntityNameRef(state);
+        }
+    } else {
+        moduleRef = parseEntityNameRef(state);
+    }
+    consumeSemi(state);
+    return create.TSImportEqualsDeclaration(start, state.tokStart, flags, id as Node, moduleRef) as Node;
 }
 
 function parseExport(state: ParserState): Node {
