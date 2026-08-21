@@ -101,7 +101,8 @@ describe('printer — JSX corpus (lowers every fixture to valid JS)', () => {
                 const { program } = parse(src, { ts, jsx: true });
                 const sem = createSemantic();
                 analyze(sem, program);
-                traverse(program, sem, [makeJsxLower('react', true)]);
+                traverse(program, sem, [tsLower, makeJsxLower('react', true)]);
+                traverse(program, sem, [tsStrip]);
                 printModule(p, program);
             } catch (e) {
                 failures.push(`${file}: printer threw ${(e as Error).message}`);

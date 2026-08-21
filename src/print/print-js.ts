@@ -85,10 +85,6 @@ function leadingSign(n: Node): string {
         case N.TaggedTemplateExpression:
             return leadingSign(data(n).tag as Node);
         case N.ChainExpression:
-        case N.TSNonNullExpression:
-        case N.TSAsExpression:
-        case N.TSSatisfiesExpression:
-        case N.TSInstantiationExpression:
             return leadingSign(data(n).expression as Node);
         default:
             return '';
@@ -105,8 +101,6 @@ function newCalleeHasCall(n: Node): boolean {
         case N.ComputedMemberExpression:
             return newCalleeHasCall(data(n).object as Node);
         case N.ChainExpression:
-        case N.TSNonNullExpression:
-        case N.TSInstantiationExpression:
             return newCalleeHasCall(data(n).expression as Node);
         default:
             return false;
@@ -646,86 +640,6 @@ function emitClass(p: Printer, n: Node): void {
     write(p, '}');
 }
 
-// ---------------------------------------------------------------------------
-// TS enum lowering — the runtime IIFE, ported from emit.ts `lowerEnum`
-// (`src/emit.ts:179`). Member initializers print through `printExpr`; a bare
-// reference to an earlier member shadows the outer scope, so it is rewritten to
-// `EnumName.member` via a scoped `nameOf` override.
-// ---------------------------------------------------------------------------
-
-function emitEnum(p: Printer, n: Node): void {
-    const d = data(n);
-    const name = p.nameOf(d.id as Node);
-    write(p, 'var');
-    space(p);
-    write(p, name);
-    semi(p);
-    softSpace(p);
-    write(p, '(function(');
-    write(p, name);
-    write(p, ')');
-    softSpace(p);
-    write(p, '{');
-    p.indent++;
-
-    const prior = new Set<string>();
-    const savedNameOf = p.nameOf;
-    const shadow = (id: Node): string =>
-        id.type === N.IdentifierReference && prior.has(id.name) ? `${name}.${id.name}` : savedNameOf(id);
-    let autoNext = 0;
-    let autoOk = true;
-
-    for (const m of d.members as Node[]) {
-        if (m.type !== N.TSEnumMember) continue;
-        const md = data(m);
-        const memId = md.id as Node;
-        const key = memId.type === N.StringLiteral ? memId.name.slice(1, -1) : memId.name;
-        const keyLit = JSON.stringify(key);
-        const init = md.initializer as Node | null;
-        softNewline(p);
-
-        if (init === null) {
-            if (!autoOk) {
-                autoNext = 0;
-                autoOk = true;
-            }
-            write(p, `${name}[${name}[${keyLit}]=${autoNext}]=${keyLit};`);
-            autoNext++;
-            prior.add(key);
-            continue;
-        }
-
-        p.nameOf = shadow;
-        if (init.type === N.StringLiteral) {
-            write(p, `${name}[${keyLit}]=`);
-            printExpr(p, init, Prec.Assign);
-            write(p, ';');
-            autoOk = false;
-        } else {
-            write(p, `${name}[${name}[${keyLit}]=`);
-            printExpr(p, init, Prec.Assign);
-            write(p, `]=${keyLit};`);
-            if (init.type === N.NumericLiteral) {
-                const v = Number(init.name);
-                if (Number.isFinite(v)) {
-                    autoNext = v + 1;
-                    autoOk = true;
-                } else autoOk = false;
-            } else autoOk = false;
-        }
-        p.nameOf = savedNameOf;
-        prior.add(key);
-    }
-
-    p.indent--;
-    softNewline(p);
-    write(p, '})(');
-    write(p, name);
-    write(p, '||(');
-    write(p, name);
-    write(p, '={}));');
-}
-
 // Statements (minimal set to host expressions; PR2 adds import/export, TS, JSX)
 
 function exprStmtNeedsParens(n: Node): boolean {
@@ -844,9 +758,7 @@ function emitImportDeclaration(p: Printer, n: Node): void {
     const d = data(n);
     // In a bundle, every import is hoisted to chunk-level wiring — drop the statement.
     if (p.linkModule) return;
-    // `import type { … }` — the whole import is erased in strip mode.
-    if (d.importKind === 'type') return;
-    const specs = d.specifiers as Node[];
+    const specs = d.specifiers as Node[]; // tsStrip already removed type-only imports + specifiers
     if (specs.length === 0) {
         // Side-effect import: `import 'x';`
         write(p, 'import');
@@ -857,10 +769,7 @@ function emitImportDeclaration(p: Printer, n: Node): void {
     }
     const def = specs.find((s) => s.type === N.ImportDefaultSpecifier);
     const ns = specs.find((s) => s.type === N.ImportNamespaceSpecifier);
-    // `import { a, type b }` — drop the type-only specifiers.
-    const named = specs.filter((s) => s.type === N.ImportSpecifier && data(s).importKind !== 'type');
-    // Everything that survived stripping was type-only → erase the statement.
-    if (!def && !ns && named.length === 0) return;
+    const named = specs.filter((s) => s.type === N.ImportSpecifier);
     write(p, 'import');
     space(p);
     let wrote = false;
@@ -894,17 +803,10 @@ function emitImportDeclaration(p: Printer, n: Node): void {
     semi(p);
 }
 
-/** `interface`/`type`/`declare`d declarations carry no runtime code. */
-const isTypeOnlyDeclaration = (decl: Node): boolean =>
-    decl.type === N.TSInterfaceDeclaration || decl.type === N.TSTypeAliasDeclaration || (data(decl).declare as boolean) === true;
-
 function emitExportNamed(p: Printer, n: Node): void {
     const d = data(n);
-    // `export type { … }` / `export type X = …` — erased in strip mode.
-    if (d.exportKind === 'type') return;
-    const decl = d.declaration as Node | null;
+    const decl = d.declaration as Node | null; // tsStrip already erased type-only exports + specifiers
     if (decl) {
-        if (isTypeOnlyDeclaration(decl)) return;
         // Link mode: keep the declaration, drop the `export` keyword (the binding is
         // re-exported by the chunk's own export line).
         if (!p.linkModule) {
@@ -916,8 +818,7 @@ function emitExportNamed(p: Printer, n: Node): void {
     }
     // Bare re-export (`export { a, b }`) — resolved at chunk level in link mode.
     if (p.linkModule) return;
-    // `export { a, type b }` — drop the type-only specifiers; erase if none remain.
-    const specs = (d.specifiers as Node[]).filter((s) => data(s).exportKind !== 'type');
+    const specs = d.specifiers as Node[];
     const source = d.source as Node | null;
     if (specs.length === 0 && !source) return;
     write(p, 'export');
@@ -932,35 +833,9 @@ function emitExportNamed(p: Printer, n: Node): void {
     semi(p);
 }
 
-/** A whole statement erased in strip mode: type declarations, `declare` ambients, and
- *  type-only imports/exports (mirrors emit.ts `isErasableStatement`, `src/emit.ts:629`). */
-function isErasedStmt(n: Node): boolean {
-    const d = data(n);
-    switch (n.type) {
-        case N.TSInterfaceDeclaration:
-        case N.TSTypeAliasDeclaration:
-            return true;
-        case N.FunctionDeclaration:
-            // `declare function`, or a body-less TS overload signature (the implementation carries the body).
-            return (d.declare as boolean) === true || d.body === null;
-        case N.ClassDeclaration:
-        case N.VariableDeclaration:
-        case N.TSModuleDeclaration:
-        case N.TSEnumDeclaration:
-            return (d.declare as boolean) === true;
-        case N.ImportDeclaration:
-            return d.importKind === 'type';
-        case N.ExportNamedDeclaration:
-            return d.exportKind === 'type';
-        default:
-            return false;
-    }
-}
-
 /** In link mode a statement can vanish entirely (dropped import, bare re-export) — detecting
  *  that up front lets the top-level loop skip its separator so no blank line is left behind. */
 function emitsNothing(p: Printer, n: Node): boolean {
-    if (isErasedStmt(n)) return true;
     if (!p.linkModule) return false;
     if (n.type === N.ImportDeclaration || n.type === N.ExportAllDeclaration) return true;
     if (n.type === N.ExportNamedDeclaration) return (data(n).declaration as Node | null) === null;
@@ -968,7 +843,6 @@ function emitsNothing(p: Printer, n: Node): boolean {
 }
 
 export function printStmt(p: Printer, n: Node): void {
-    if (isErasedStmt(n)) return;
     mark(p, n);
     const d = data(n);
     switch (n.type) {
@@ -1183,9 +1057,6 @@ export function printStmt(p: Printer, n: Node): void {
             semi(p);
             return;
         }
-        case N.TSEnumDeclaration:
-            emitEnum(p, n);
-            return;
         case N.TryStatement: {
             write(p, 'try');
             printClause(p, d.block as Node, true);
