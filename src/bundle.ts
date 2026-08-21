@@ -301,45 +301,35 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
 
 /** True if the module has at least one live statement containing JSX (so its
  * injected runtime import is genuinely needed). `live === null` = no shaking. */
-function moduleHasLiveJSX(mod: Module, live: Set<number> | null): boolean {
-    for (const statement of mod.program.data.body) {
-        if (live !== null && !live.has(statement.id)) continue;
-        let found = false;
-        walk(statement, (n) => {
-            if (n.type === N.JSXElement || n.type === N.JSXFragment) found = true;
-        });
-        if (found) return true;
-    }
-    return false;
-}
-
-/** Remove injected-runtime external locals that no live JSX demands, unless an
- * AUTHORED import shares the same (specifier, name) — those stay. */
-function pruneUnusedRuntimeExternals(graph: Graph, linked: Linked): void {
-    const authored = new Set<string>();
+/** Drop an external import's emitted local when it is side-effect-free AND no live statement
+ *  references it — rolldown's model: an external binding is emitted iff it's referenced (in
+ *  `reference_needed_symbols` = treeshake's `liveRefs`) OR its module is side-effectful. The injected
+ *  jsx runtime is the only side-effect-free external shakeup produces; authored externals default to
+ *  side-effectful, so they're kept. Symbol liveness, not a JSX-specific AST walk. */
+function pruneUnusedExternals(graph: Graph, linked: Linked, liveRefs: Set<number>): void {
+    // packRefs of injected-runtime bindings — the side-effect-free externals.
+    const sideEffectFree = new Set<number>();
     for (const mod of graph.modules) {
-        const injected = mod.jsxRuntime;
-        const injectedSyms =
-            injected === null ? null : new Set([injected.jsx, injected.jsxs, injected.Fragment, injected.createElement]);
+        const rt = mod.jsxRuntime;
+        if (rt === null) continue;
+        for (const sym of [rt.jsx, rt.jsxs, rt.Fragment, rt.createElement])
+            if (sym !== 0) sideEffectFree.add(packRef(mod.idx, sym));
+    }
+    // An external (specifier,name) key is kept iff SOME importer needs it (referenced OR side-effectful);
+    // drop keys whose every importer is a dead side-effect-free binding.
+    const kept = new Set<string>();
+    const candidates = new Set<string>();
+    for (const mod of graph.modules) {
         for (const [sym, imp] of mod.namedImports) {
-            if (injectedSyms !== null && injectedSyms.has(sym)) continue;
-            const rec = mod.importRecords[imp.rec];
-            if (rec.external) authored.add(externalKey(rec.specifier, imp.name));
-        }
-    }
-    for (const mod of graph.modules) {
-        const injected = mod.jsxRuntime;
-        if (injected === null) continue;
-        for (const sym of [injected.jsx, injected.jsxs, injected.Fragment, injected.createElement]) {
-            if (sym === 0) continue;
-            const imp = mod.namedImports.get(sym);
-            if (imp === undefined) continue;
             const rec = mod.importRecords[imp.rec];
             if (!rec.external) continue;
             const key = externalKey(rec.specifier, imp.name);
-            if (!authored.has(key)) linked.externalLocals.delete(key);
+            const ref = packRef(mod.idx, sym);
+            if (!sideEffectFree.has(ref) || liveRefs.has(ref)) kept.add(key);
+            else candidates.add(key);
         }
     }
+    for (const key of candidates) if (!kept.has(key)) linked.externalLocals.delete(key);
 }
 
 function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): string[] {
@@ -475,12 +465,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, mangle);
     Timer.end(timer, 'chunk');
 
-    let anyLiveJSX = false;
-    for (const mod of graph.modules) {
-        const live = shaken === null ? null : shaken.live[mod.idx];
-        if (mod.jsxRuntime !== null && moduleHasLiveJSX(mod, live)) anyLiveJSX = true;
-    }
-    if (!anyLiveJSX) pruneUnusedRuntimeExternals(graph, linked);
+    // Drop unused side-effect-free externals (the injected jsx runtime) via symbol liveness.
+    if (shaken !== null) pruneUnusedExternals(graph, linked, shaken.liveRefs);
 
     // Normalize output naming/hashing/sourcemap config. `sourcemap` (top-level) is a
     // deprecated alias for `output.sourcemap`. Reject `file:` for a multi-chunk build.

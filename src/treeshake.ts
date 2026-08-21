@@ -2,7 +2,7 @@ import { isPureStatement } from './analysis/effects';
 import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
-import { N, type Node, walk } from './ast';
+import { N, type Node } from './ast';
 import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './module-graph';
 
 export type TreeshakeResult = {
@@ -17,6 +17,10 @@ export type TreeshakeResult = {
      *  used and that have no side effects. Not rooted, not promoted to a chunk; their `import()`
      *  sites are rewritten to `Promise.resolve({})`. Consumed by chunk-graph and the emit. */
     deadDynamic: Set<number>;
+    /** Every `packRef` referenced by a live statement (rolldown's `reference_needed_symbols`). An
+     *  external import binding is needed iff its ref is here — lets us drop unused side-effect-free
+     *  externals (e.g. the injected jsx runtime) via symbol liveness, not a JSX-specific AST walk. */
+    liveRefs: Set<number>;
 };
 
 export type StatementInfo = {
@@ -41,6 +45,9 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
             if (bind === undefined) return;
             if (bind.kind === 'found') out.push(bind.ref);
             else if (bind.kind === 'namespace') out.push(packRef(bind.module, NS_MARKER));
+            // An external ref roots no internal statement, but recording it lets `liveRefs` gate
+            // external-import emission (drop an unused side-effect-free external).
+            else if (bind.kind === 'external') out.push(packRef(mod.idx, sym));
             return;
         }
         if (sem.symbols[sym].scope === moduleScope) out.push(packRef(mod.idx, sym));
@@ -55,21 +62,8 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
             declared.push(packRef(mod.idx, sym));
         }
     });
-    if (mod.jsxRuntime !== null && statementContainsJSX(statement)) {
-        const rt = mod.jsxRuntime;
-        pushSym(rt.jsx);
-        pushSym(rt.jsxs);
-        pushSym(rt.Fragment);
-        if (rt.createElement !== 0) pushSym(rt.createElement);
-    }
-}
-
-function statementContainsJSX(statement: Node): boolean {
-    let found = false;
-    walk(statement, (n) => {
-        if (n.type === N.JSXElement || n.type === N.JSXFragment) found = true;
-    });
-    return found;
+    // (JSX runtime refs are collected normally now — jsxLower lowers JSX to `jsx(...)` calls before
+    // treeshake, so their callee IdentifierReferences are ordinary refs. No JSX-specific walk.)
 }
 
 function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolean {
@@ -344,5 +338,5 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped, nsUsage, deadDynamic };
+    return { live, dropped, nsUsage, deadDynamic, liveRefs };
 }

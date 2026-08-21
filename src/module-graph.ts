@@ -1,8 +1,9 @@
-import { analyze, createSemantic, declareSyntheticImport, type Semantic, scopeOf, symbolOf } from './analysis/semantic';
-import { isJSXNode, N, type Node, node, type Program, walk } from './ast';
+import { analyze, createSemantic, type Semantic, scopeOf, symbolOf } from './analysis/semantic';
+import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import { createNodeResolver, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
+import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { traverse } from './passes/traverse';
 import {
@@ -667,32 +668,6 @@ export function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement
     return { hasJSX, needsCreateElement };
 }
 
-function injectJSXRuntime(mod: Module, importSource: string): void {
-    if (!mod.hasJSX) return; // parser-set flag — non-JSX modules skip the scanJSX walk entirely
-    const { needsCreateElement } = scanJSX(mod.program);
-
-    const runtimeRec = addRecord(mod, `${importSource}/jsx-runtime`, 'static');
-    const named = (name: string): number => {
-        const local = node(N.BindingIdentifier, 0, 0, name, null);
-        const sym = declareSyntheticImport(mod.semantic, local);
-        mod.namedImports.set(sym, { rec: runtimeRec, name });
-        return sym;
-    };
-    const jsx = named('jsx');
-    const jsxs = named('jsxs');
-    const Fragment = named('Fragment');
-
-    let createElement = 0;
-    if (needsCreateElement) {
-        const rootRec = addRecord(mod, importSource, 'static');
-        const local = node(N.BindingIdentifier, 0, 0, 'createElement', null);
-        createElement = declareSyntheticImport(mod.semantic, local);
-        mod.namedImports.set(createElement, { rec: rootRec, name: 'createElement' });
-    }
-
-    mod.jsxRuntime = { jsx, jsxs, Fragment, createElement };
-}
-
 /** Project a live {@link Module} into the plugin-facing {@link ModuleInfo}. Reads the graph
  *  as it's being built, so `importers` may be partial when called from `moduleParsed`. */
 export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
@@ -1029,6 +1004,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let reuse: boolean;
         let hit: CachedParse | undefined;
         let srcHash = 0;
+        let jsxRt: JSXRuntime | null = null; // captured by jsxLower (non-reuse); → mod.jsxRuntime
 
         if (signalHit !== undefined) {
             source = signalHit.source;
@@ -1074,7 +1050,15 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = parsed.hasJSX;
                 semantic = createSemantic();
                 analyze(semantic, program);
-                traverse(program, semantic, [tsLower]);
+                // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
+                // real `import {…} from "…/jsx-runtime"` scanned as a normal record. Its minted runtime
+                // symbols are captured into `jsxRt` → mod.jsxRuntime (for the runtime-import prune).
+                const passes = [tsLower];
+                if (jsx && hasJSX) {
+                    jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
+                    passes.push(makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt));
+                }
+                traverse(program, semantic, passes);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 collectUnsupported(program, id, graph.errors);
@@ -1122,8 +1106,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.starExports = c.starExports;
             mod.jsxRuntime = c.jsxRuntime;
         } else {
-            extractRecords(mod);
-            if (jsx) injectJSXRuntime(mod, jsxOptions.importSource);
+            extractRecords(mod); // scans the jsxLower-injected import as a normal record
+            mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its
             // importers stale (rspack AffectType). A brand-new module affects nothing pre-existing.

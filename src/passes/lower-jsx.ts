@@ -26,20 +26,26 @@ const jd = (n: Node): Record<string, Node | (Node | null)[] | string> => n.data 
 
 /** Per-module runtime-import state: each JSX runtime name (`jsx`/`jsxs`/`Fragment`/`createElement`) is
  *  minted on first use and remembered so Program-exit can inject one import per source. */
+/** The minted runtime-import symbol ids (0 = not used). Filled by the pass; the bundle caller copies
+ *  it onto `mod.jsxRuntime` so the runtime-import prune knows which symbols are the injected runtime. */
+export type JsxRuntimeSyms = { jsx: number; jsxs: number; Fragment: number; createElement: number };
+
 type Runtime = {
     semantic: Semantic;
     importSource: string;
     pure: boolean;
     minted: Map<string, Node>; // name → the specifier's local BindingIdentifier (carries the sym)
+    out: JsxRuntimeSyms;
 };
 
 /** A reference to a runtime callee, minting its import symbol on first use. */
-function runtimeRef(rt: Runtime, name: string): Node {
+function runtimeRef(rt: Runtime, name: keyof JsxRuntimeSyms): Node {
     let local = rt.minted.get(name);
     if (local === undefined) {
         local = node(N.BindingIdentifier, S, S, name, null);
         declareSyntheticImport(rt.semantic, local); // sets local.sym (SYM.IMPORT, module scope)
         rt.minted.set(name, local);
+        rt.out[name] = (local as { sym: number }).sym;
     }
     const ref = node(N.IdentifierReference, S, S, name, null);
     (ref as { sym: number }).sym = (local as { sym: number }).sym;
@@ -174,8 +180,8 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
 
 /** The JSX lowering pass — a factory holding per-module runtime-import state. Lowers on EXIT (so nested
  *  children are already runtime calls) and injects the runtime import(s) on Program exit. */
-export function makeJsxLower(importSource: string, pure: boolean): Visitor {
-    const rt: Runtime = { semantic: null as unknown as Semantic, importSource, pure, minted: new Map() };
+export function makeJsxLower(importSource: string, pure: boolean, out: JsxRuntimeSyms): Visitor {
+    const rt: Runtime = { semantic: null as unknown as Semantic, importSource, pure, minted: new Map(), out };
     return {
         name: 'jsxLower',
         enter: null,

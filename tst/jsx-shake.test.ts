@@ -44,7 +44,8 @@ describe('G-JSX-5: shake interplay', () => {
         `);
         expect(code).toContain('marker-live');
         expect(code).toMatch(/jsx\(/);
-        expect(code).toContain('$$frag');
+        // Fragment is NOT imported for `<Foo/>` (lazy minting, matching oxc) → its shim export shakes.
+        expect(code).not.toContain('$$frag');
     });
 
     it('keeps a JSX statement with an EFFECTFUL attribute expression', async () => {
