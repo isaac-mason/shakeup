@@ -143,7 +143,9 @@ function assembleRunnerMapped(ctx: RunnerCtx, filename: string, bodyPart: Part):
 
 const IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 const isIdentName = (s: string): boolean => IDENT_RE.test(s);
-const strVal = (src: string, n: Node): string => src.slice(n.start + 1, n.end - 1);
+// Real StringLiterals slice from source; synthetic transform-injected nodes (collapsed span) carry
+// the quoted value in `name` — fall back so injected imports (jsxLower runtime) link like any other.
+const strVal = (src: string, n: Node): string => (n.end > n.start ? src.slice(n.start + 1, n.end - 1) : n.name.slice(1, -1));
 
 function claim(ctx: RunnerCtx, base: string): string {
     let name = base;

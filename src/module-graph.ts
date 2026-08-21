@@ -491,7 +491,11 @@ function addRecord(mod: Module, specifier: string, kind: ImportRecordKind): numb
 }
 
 /** The inner value of a string literal node (quotes stripped), read from source. */
-const strValue = (source: string, node: Node): string => source.slice(node.start + 1, node.end - 1);
+// Real StringLiterals slice their value from source (perf: no stored copy). Synthetic nodes injected
+// by a transform pass (e.g. jsxLower's runtime import) have a collapsed span but carry the quoted
+// value in `name` — fall back to that so injected imports scan like any other.
+const strValue = (source: string, node: Node): string =>
+    node.end > node.start ? source.slice(node.start + 1, node.end - 1) : node.name.slice(1, -1);
 
 /** Extract import/export records from the module's top-level statements. */
 function extractRecords(mod: Module): void {
