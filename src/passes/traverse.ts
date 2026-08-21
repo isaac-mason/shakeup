@@ -72,6 +72,10 @@ class Ctx {
     op = OP_NONE;
     opNode: Node | null = null;
     opNodes: Node[] | null = null;
+    /** The scope enclosing the node currently being visited (oxc `TraverseCtx.current_scope_id`).
+     *  Tracked across the child-descent (see {@link descend}) so lowering passes can parent a
+     *  synthesized scope (`createScope`) to the correct lexical scope. */
+    currentScope = 0;
     constructor(semantic: Semantic, visitors: Visitor[]) {
         this.semantic = semantic;
         this.visitors = visitors;
@@ -126,6 +130,20 @@ function fireExit(node: Node, ctx: Ctx): void {
     }
 }
 
+/** Walk `node`'s children, tracking `ctx.currentScope` across the descent: if `node` owns a scope
+ *  (`nodeScope`), children see it as their enclosing scope; restored on the way out. */
+function descend(node: Node, ctx: Ctx): void {
+    const s = ctx.semantic.nodeScope.get(node);
+    if (s === undefined) {
+        WALKERS[node.type](node, ctx, visitSingle, visitList);
+        return;
+    }
+    const prev = ctx.currentScope;
+    ctx.currentScope = s;
+    WALKERS[node.type](node, ctx, visitSingle, visitList);
+    ctx.currentScope = prev;
+}
+
 /** Visit a single-child slot; returns the (possibly replaced) node to write back. */
 function visitSingle(node: Node, ctx: Ctx): Node {
     ctx.op = OP_NONE;
@@ -135,7 +153,7 @@ function visitSingle(node: Node, ctx: Ctx): Node {
         cur = ctx.opNode as Node;
         ctx.op = OP_NONE;
     } else if (ctx.op !== OP_NONE) throw new Error('remove()/replaceWithMultiple() not allowed in a single-child slot');
-    WALKERS[cur.type](cur, ctx, visitSingle, visitList);
+    descend(cur, ctx);
     ctx.op = OP_NONE;
     fireExit(cur, ctx);
     if (ctx.op === OP_REPLACE) {
@@ -175,7 +193,7 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
             ctx.op = OP_NONE;
             changed = true;
         }
-        WALKERS[cur.type](cur, ctx, visitSingle, visitList);
+        descend(cur, ctx);
         ctx.op = OP_NONE;
         fireExit(cur, ctx);
         if (ctx.op === OP_REMOVE) {
@@ -207,7 +225,7 @@ export function traverse(program: Node, semantic: Semantic, visitors: Visitor[])
     ctx.op = OP_NONE;
     fireEnter(program, ctx);
     ctx.op = OP_NONE;
-    WALKERS[program.type](program, ctx, visitSingle, visitList);
+    descend(program, ctx);
     ctx.op = OP_NONE;
     fireExit(program, ctx);
 }

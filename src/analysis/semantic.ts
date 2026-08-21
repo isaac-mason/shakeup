@@ -563,6 +563,28 @@ export function declareSyntheticImport(semantic: Semantic, identNode: Node): num
     return id;
 }
 
+/** Register a fresh lexical scope (e.g. a lowering pass synthesizing an IIFE), parented to
+ *  `parent`. Returns the new scope id. Mirrors analyze's `newScope` but for post-analysis
+ *  transform passes; the owning node is not tracked (mangle reads scopes by parent/symbol, not
+ *  `nodeScope`). */
+export function createScope(semantic: Semantic, parent: number, flags: number): number {
+    const id = semantic.scopes.length;
+    semantic.scopes.push({ parent, flags, node: null });
+    return id;
+}
+
+/** Declare a local binding into an already-analyzed module's semantic at `scope` (e.g. an IIFE
+ *  param a lowering pass mints via `generateUid`). Appends a symbol record, associates the decl
+ *  node, and returns the new SymbolId — the general-scope counterpart to
+ *  {@link declareSyntheticImport}. Because the symbol lives in a non-module scope, deconflict
+ *  leaves it and `mangleNestedScopes` renames it like any nested local. */
+export function declareLocal(semantic: Semantic, declNode: Node, scope: number, flags: number): number {
+    const id = semantic.symbols.length;
+    semantic.symbols.push({ scope, decl: declNode, flags, nameId: 0 });
+    declNode.sym = id;
+    return id;
+}
+
 /** Declared name of a symbol (the text of its declaring Ident). */
 export const symbolName = (semantic: Semantic, symbolId: number): string => semantic.symbols[symbolId].decl?.name ?? '';
 

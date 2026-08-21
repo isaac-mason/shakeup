@@ -71,10 +71,10 @@ describe('bundle: executable output', () => {
         expect(mod.kind).toBe('DYNAMIC');
     });
 
-    it('enum + namespace lowerings survive minify (synthetic _E/_N uids never collide with mangled names)', async () => {
-        // Mangle renames real symbols (`x`) in the same scope as the synthetic IIFE param `_N`.
-        // `_E`/`_N` are underscore-prefixed — a namespace the mangler never generates into — so they
-        // stay verbatim and can't collide. This pins that invariant.
+    it('enum + namespace IIFE params are real uids: mangle to 1 char, no collisions', async () => {
+        // `generateUid` mints REAL symbols (oxc's `generate_uid`), so the enum/namespace IIFE params
+        // `_E`/`_N`/`_M` deconflict + mangle like any nested local instead of staying verbatim.
+        // A namespace param joins the body's own scope, so it can't collide with the body vars.
         const { code } = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs({
@@ -86,6 +86,8 @@ describe('bundle: executable output', () => {
             }),
             output: { minify: true },
         });
+        // The verbatim underscore names are gone — they mangled to short base54 names.
+        expect(code).not.toMatch(/_E\b|_N\b|_M\b/);
         const mod = await run(code);
         expect(mod.out).toEqual([1, 6, 7]);
     });

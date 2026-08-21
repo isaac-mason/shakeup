@@ -2,12 +2,27 @@
 // print-time `emitEnum` (print-js.ts) to a mutation pass that emits real AST. Namespace lowering and
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
 import { isPureExpr } from '../analysis/effects.ts';
+import { createScope, declareLocal, SCOPE, SYM, scopeOf } from '../analysis/semantic.ts';
 import { N, type Node, node, set, walk } from '../ast.ts';
 import * as create from '../parser/create.ts';
 import { FL, VAR_KIND } from '../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the enum site)
+
+/** A minted IIFE param: its reserved name plus the real SymbolId it binds to, so every reference
+ *  carries `sym` and `mangleNestedScopes` can shorten it (oxc's `generate_uid` returns a bound id).
+ *  `scope` is the fresh FUNCTION scope it lives in — the enclosing scope for the IIFE body's own
+ *  nested enums/namespaces. */
+type Uid = { name: string; sym: number; scope: number };
+
+/** Mint a real IIFE-param binding for a lowering pass into `scope`: reserve a `_base` name and
+ *  declare it as a PARAM symbol there, so every reference carries a real sym. */
+function mintParam(base: string, scope: number, ctx: TransformCtx): Uid {
+    const name = ctx.generateUid(base);
+    const sym = declareLocal(ctx.semantic, bindId(name, 0), scope, SYM.PARAM);
+    return { name, sym, scope };
+}
 
 const idRef = (name: string, sym: number): Node => {
     const n = node(N.IdentifierReference, S, S, name, null);
@@ -64,10 +79,10 @@ function iifeVarDecl(
     id: Node,
     name: string,
     sym: number,
-    param: string,
+    param: Uid,
     bodyStmts: Node[],
     sideEffect: boolean,
-    parentParam: string | null,
+    parent: Uid | null,
 ): Node {
     const fn = create.FunctionExpression(
         S,
@@ -75,20 +90,20 @@ function iifeVarDecl(
         0,
         null,
         null,
-        [create.FormalParameter(S, S, 0, bindId(param, 0), null, null) as Node],
+        [create.FormalParameter(S, S, 0, bindId(param.name, param.sym), null, null) as Node],
         null,
         create.BlockStatement(S, S, 0, bodyStmts) as Node,
     ) as Node;
     const arg =
-        parentParam === null
+        parent === null
             ? (create.LogicalExpression(S, S, '||', idRef(name, sym), obj()) as Node)
             : // nested: `_P.X || (_P.X = {})`
               (create.LogicalExpression(
                   S,
                   S,
                   '||',
-                  member(idRef(parentParam, 0), idName(name)),
-                  assign(member(idRef(parentParam, 0), idName(name)), obj()),
+                  member(idRef(parent.name, parent.sym), idName(name)),
+                  assign(member(idRef(parent.name, parent.sym), idName(name)), obj()),
               ) as Node);
     const call = create.CallExpression(S, S, sideEffect ? 0 : FL.PURE, fn, [arg], null) as Node;
     return create.VariableDeclaration(S, S, VAR_KIND.VAR, [create.VariableDeclarator(S, S, 0, id, null, call) as Node]) as Node;
@@ -96,10 +111,14 @@ function iifeVarDecl(
 
 /** Qualify references to a prior enum member inside an initializer: `A` → `_E.A` (in place via
  *  `set`, mirroring `emitEnum`'s shadow rewrite). `enumParam` is the IIFE param name (`_E`). */
-function qualifyMemberRefs(init: Node, priorMembers: Set<string>, enumParam: string): void {
+function qualifyMemberRefs(init: Node, priorMembers: Set<string>, enumParam: Uid): void {
     walk(init, (n) => {
         if (n.type === N.IdentifierReference && priorMembers.has(n.name)) {
-            set(n, N.StaticMemberExpression, { object: idRef(enumParam, 0), property: idName(n.name), optional: false });
+            set(n, N.StaticMemberExpression, {
+                object: idRef(enumParam.name, enumParam.sym),
+                property: idName(n.name),
+                optional: false,
+            });
             return false; // don't descend into the rewritten member
         }
         return true;
@@ -111,13 +130,15 @@ function qualifyMemberRefs(init: Node, priorMembers: Set<string>, enumParam: str
  *  ONE statement (var-with-IIFE-init) so tree-shaking ties the IIFE to E's liveness via
  *  declToStatement; the call is marked PURE unless a member initializer is a `new`/call, so a dead
  *  enum's lowering is dropped. Reuses the enum's binding id (+ symbol) for `var E`. */
-function lowerEnum(enumNode: Node, ctx: TransformCtx): Node {
+function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
     const d = enumNode.data as { id: Node; members: Node[] };
     const enumId = d.id;
     const enumSym = (enumId as { sym: number }).sym;
     const enumName = enumId.name;
-    const param = ctx.generateUid(enumName); // `_E`
-    const pRef = (): Node => idRef(param, 0);
+    // An enum has no body bindings (members are string keys), so the IIFE param gets a fresh
+    // FUNCTION scope under the enclosing lexical scope.
+    const param = mintParam(enumName, createScope(ctx.semantic, enclosing, SCOPE.FUNCTION), ctx); // `_E`
+    const pRef = (): Node => idRef(param.name, param.sym);
 
     const prior = new Set<string>();
     const stmts: Node[] = [];
@@ -183,8 +204,8 @@ function lowerImportEquals(node: Node): Node | null {
 /** Statements a value namespace body member lowers to, or null if the member isn't handled yet
  *  (`export *`). `thisParam` is the enclosing namespace's IIFE
  *  param (`_N`): used for the `_N.x = x` mirrors AND as the parent of any nested namespace. */
-function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[] | null {
-    const pRef = (): Node => idRef(thisParam, 0);
+function lowerNsMember(stmt: Node, thisParam: Uid, ctx: TransformCtx): Node[] | null {
+    const pRef = (): Node => idRef(thisParam.name, thisParam.sym);
     // type-only members emit no JS.
     if (stmt.type === N.TSInterfaceDeclaration || stmt.type === N.TSTypeAliasDeclaration) return [];
     if ((stmt.data as { declare?: boolean }).declare === true) return [];
@@ -220,7 +241,7 @@ function lowerNsMember(stmt: Node, thisParam: string, ctx: TransformCtx): Node[]
     }
     // `export enum E` → lowered enum (top-level form) + mirror onto `_N`.
     if (isValueEnum(decl)) {
-        const varDecl = lowerEnum(decl, ctx);
+        const varDecl = lowerEnum(decl, ctx, thisParam.scope);
         return [
             varDecl,
             exprStmt(
@@ -259,13 +280,15 @@ const ERASE = Symbol('erase');
 /** Lower a value namespace to the single-statement IIFE-var form (oxc's model): nested `export
  *  namespace` links onto the parent (`_P.M || (_P.M = {})` via `parentParam`), else top-level
  *  `Foo || {}`. `ERASE` when the body has no runtime members; `null` if any member isn't handled. */
-function lowerNamespace(nsNode: Node, ctx: TransformCtx, parentParam: string | null): Node | null | typeof ERASE {
+function lowerNamespace(nsNode: Node, ctx: TransformCtx, parent: Uid | null): Node | null | typeof ERASE {
     const d = nsNode.data as { id: Node; body: Node[] };
     const nsId = d.id;
     const nsName = nsId.name;
     if (nsId.type !== N.BindingIdentifier) return null; // string-named `module "x"` — not handled
-    const param = ctx.generateUid(nsName);
-    const pRef = (): Node => idRef(param, 0);
+    // The IIFE param joins the namespace's OWN analyzed scope (already parented + holding the body
+    // vars), so the mangler sees param and body bindings together and never collides them.
+    const param = mintParam(nsName, scopeOf(ctx.semantic, nsNode), ctx);
+    const pRef = (): Node => idRef(param.name, param.sym);
 
     const body: Node[] = [];
     let sideEffect = false;
@@ -277,7 +300,7 @@ function lowerNamespace(nsNode: Node, ctx: TransformCtx, parentParam: string | n
     }
     if (body.length === 0) return ERASE; // type-only namespace → emits nothing
     body.push(create.ReturnStatement(S, S, 0, pRef()) as Node);
-    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parentParam);
+    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parent);
 }
 
 /** A lowered namespace body statement with no side effects (declarations + member mirrors of pure
@@ -310,7 +333,7 @@ export const tsLower: Visitor = {
     name: 'tsLower',
     enter: hookTable({
         [N.TSEnumDeclaration]: (node, ctx) => {
-            if (isValueEnum(node)) ctx.replaceWith(lowerEnum(node, ctx));
+            if (isValueEnum(node)) ctx.replaceWith(lowerEnum(node, ctx, ctx.currentScope));
         },
         [N.TSImportEqualsDeclaration]: (node, ctx) => {
             // `import X = A.B` → `var X = A.B`; `import type X =` erased; `= require()` left to reject.
@@ -323,7 +346,7 @@ export const tsLower: Visitor = {
         [N.ExportNamedDeclaration]: (node, ctx) => {
             const decl = (node.data as { declaration: Node | null }).declaration;
             if (decl !== null && isValueEnum(decl)) {
-                const varDecl = lowerEnum(decl, ctx);
+                const varDecl = lowerEnum(decl, ctx, ctx.currentScope);
                 ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, varDecl, null, null) as Node);
             } else if (decl !== null && decl.type === N.TSImportEqualsDeclaration) {
                 // `export import X = A.B` → `export var X = A.B`; type-only erased; require() rejects.
