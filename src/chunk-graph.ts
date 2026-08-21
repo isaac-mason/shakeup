@@ -1,6 +1,6 @@
 import { deconflictChunk, mangleNestedScopes } from './deconflict';
 import { type Graph, type ImportBind, type Linked, packRef, refMod, refSym } from './graph-types';
-import { finalNameOf, reprName } from './module-graph';
+import { finalNameOf, reprName } from './link';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
 export type CrossImport = { imported: string; local: string };

@@ -8,6 +8,7 @@ export * from './fs';
 export * from './watch';
 export * from './graph-types';
 export * from './module-graph';
+export * from './link';
 export * from './deconflict';
 export * from './treeshake';
 export * from './plugin';
