@@ -2,16 +2,13 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { type JSXLower, parse } from '../src/index.ts';
+import { analyze, createSemantic } from '../src/analysis/semantic.ts';
+import { parse } from '../src/index.ts';
+import { makeJsxLower } from '../src/passes/lower-jsx.ts';
+import { traverse } from '../src/passes/traverse.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 import { astEqual, semanticEqual } from './print-helpers.ts';
-
-/** Fixed runtime locals so the printer lowers JSX to concrete calls. */
-const JSX_LOWER: JSXLower = {
-    renameIdent: () => null,
-    runtimeName: (k) => ({ jsx: '_jsx', jsxs: '_jsxs', Fragment: '_Fragment', createElement: '_createElement' })[k],
-};
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');
@@ -92,9 +89,13 @@ describe('printer — JSX corpus (lowers every fixture to valid JS)', () => {
         for (const file of files) {
             const src = readFileSync(file, 'utf8');
             const ts = file.endsWith('.tsx');
-            const p = createPrinter({ minify: false }, { jsx: JSX_LOWER });
+            const p = createPrinter({ minify: false });
             try {
-                printModule(p, parse(src, { ts, jsx: true }).program);
+                const { program } = parse(src, { ts, jsx: true });
+                const sem = createSemantic();
+                analyze(sem, program);
+                traverse(program, sem, [makeJsxLower('react', true)]);
+                printModule(p, program);
             } catch (e) {
                 failures.push(`${file}: printer threw ${(e as Error).message}`);
                 continue;
@@ -168,10 +169,14 @@ describe('printer — pathological JS round-trip (ASI / precedence / paren minim
                     continue;
                 }
                 const reparsed = parse(printed, { ts: false, jsx: false });
-                if (reparsed.errors.length > 0) failures.push(`minify:${minify} reparse errors on ${JSON.stringify(src)} → ${JSON.stringify(printed)}: ${reparsed.errors[0]?.msg}`);
+                if (reparsed.errors.length > 0)
+                    failures.push(
+                        `minify:${minify} reparse errors on ${JSON.stringify(src)} → ${JSON.stringify(printed)}: ${reparsed.errors[0]?.msg}`,
+                    );
                 else {
                     const eq = minify ? semanticEqual : astEqual;
-                    if (!eq(original.program, reparsed.program)) failures.push(`minify:${minify} diverged on ${JSON.stringify(src)} → ${JSON.stringify(printed)}`);
+                    if (!eq(original.program, reparsed.program))
+                        failures.push(`minify:${minify} diverged on ${JSON.stringify(src)} → ${JSON.stringify(printed)}`);
                 }
             }
         }

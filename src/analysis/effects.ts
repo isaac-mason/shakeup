@@ -75,52 +75,12 @@ export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
             }
             return true;
         }
-        case N.JSXElement:
-            return jsxPure && jsxElementPure(node, jsxPure);
-        case N.JSXFragment:
-            return jsxPure && jsxChildrenPure(node.data.children, jsxPure);
+        // JSX is lowered to `jsx(...)` calls before any effect analysis runs (jsxLower, transform
+        // stage), so JSXElement/JSXFragment never reach here — their purity is the CallExpression's,
+        // judged by standard side-effect rules (oxc/rolldown default; no bespoke JSX-spread optimism).
         default:
             return false;
     }
-}
-
-function jsxElementPure(node: Node & { type: typeof N.JSXElement }, jsxPure: boolean): boolean {
-    const opening = node.data.openingElement as Node & { type: typeof N.JSXOpeningElement };
-    for (const a of opening.data.attributes) {
-        if (a.type === N.JSXSpreadAttribute) {
-            if (!isPureExpr(a.data.argument, jsxPure)) return false;
-        } else if (a.type === N.JSXAttribute) {
-            const v = a.data.value;
-            if (v !== null && !jsxAttrValuePure(v, jsxPure)) return false;
-        }
-    }
-    return jsxChildrenPure(node.data.children, jsxPure);
-}
-
-function jsxAttrValuePure(value: Node, jsxPure: boolean): boolean {
-    if (value.type === N.StringLiteral) return true;
-    if (value.type === N.JSXExpressionContainer) {
-        const e = value.data.expression;
-        return e.type === N.JSXEmptyExpression || isPureExpr(e, jsxPure);
-    }
-    if (value.type === N.JSXElement || value.type === N.JSXFragment) return isPureExpr(value, jsxPure);
-    return isPureExpr(value, jsxPure);
-}
-
-function jsxChildrenPure(children: Node[], jsxPure: boolean): boolean {
-    for (const child of children) {
-        if (child.type === N.JSXText) continue;
-        if (child.type === N.JSXExpressionContainer) {
-            const e = child.data.expression;
-            if (e.type === N.JSXEmptyExpression) continue;
-            if (!isPureExpr(e, jsxPure)) return false;
-        } else if (child.type === N.JSXSpreadChild) {
-            if (!isPureExpr(child.data.expression, jsxPure)) return false;
-        } else if (child.type === N.JSXElement || child.type === N.JSXFragment) {
-            if (!isPureExpr(child, jsxPure)) return false;
-        }
-    }
-    return true;
 }
 
 /** True if evaluating a class declaration/expression runs static side effects (static blocks, impure static/computed keys). */

@@ -1,6 +1,5 @@
 import { N, type Node, TYPE_NAME } from '../ast.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
-import { emitJSX } from './print-jsx.ts';
 import { dropTrailingSemi, mark, type Printer, parens, semi, softNewline, softSpace, space, write } from './printer.ts';
 
 // Loose view of a node's payload — the printer reads fields positionally per arm.
@@ -39,9 +38,6 @@ function precOf(n: Node): Prec {
         case N.PrivateFieldExpression:
         case N.TaggedTemplateExpression:
         case N.ChainExpression:
-        // JSX lowers to a `jsx(...)`/`createElement(...)` call.
-        case N.JSXElement:
-        case N.JSXFragment:
             return Prec.Call;
         // TS wrappers are erased in strip mode — take the precedence of the inner expression
         // so the stripped node parenthesises exactly as the expression it leaves behind.
@@ -575,10 +571,6 @@ function emitExpr(p: Printer, n: Node): void {
         }
         case N.ClassExpression:
             emitClass(p, n);
-            return;
-        case N.JSXElement:
-        case N.JSXFragment:
-            emitJSX(p, n);
             return;
         // TS type assertions / non-null / instantiation are erased: emit only the inner
         // expression (its precedence was adopted by `precOf`, so wrapping is already correct).

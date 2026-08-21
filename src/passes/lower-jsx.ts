@@ -180,7 +180,11 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
 
 /** The JSX lowering pass — a factory holding per-module runtime-import state. Lowers on EXIT (so nested
  *  children are already runtime calls) and injects the runtime import(s) on Program exit. */
-export function makeJsxLower(importSource: string, pure: boolean, out: JsxRuntimeSyms): Visitor {
+export function makeJsxLower(
+    importSource: string,
+    pure: boolean,
+    out: JsxRuntimeSyms = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 },
+): Visitor {
     const rt: Runtime = { semantic: null as unknown as Semantic, importSource, pure, minted: new Map(), out };
     return {
         name: 'jsxLower',

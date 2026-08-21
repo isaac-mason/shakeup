@@ -6,14 +6,6 @@ import { N, type Node } from './ast.ts';
  * spread predicates. Pure string/node helpers, no emit state.
  */
 
-/** JSX lowering hooks the printer supplies. `runtimeName` maps a runtime kind to its call text
- *  (member access into the linked runtime); `renameIdent` maps a component identifier to a rename
- *  (or null to keep). */
-export type JSXLower = {
-    runtimeName: (kind: 'jsx' | 'jsxs' | 'Fragment' | 'createElement') => string;
-    renameIdent: (idNode: Node) => string | null;
-};
-
 const JSX_NAMED_ENTITIES: Record<string, string> = {
     amp: '&',
     lt: '<',

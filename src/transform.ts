@@ -509,7 +509,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
     const passes = [tsLower];
     if (jsx) {
         const { importSource, pure } = resolveJSXOptions(options.jsx);
-        passes.push(makeJsxLower(importSource, pure, { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 }));
+        passes.push(makeJsxLower(importSource, pure));
     }
     traverse(program, semantic, passes);
 
@@ -523,7 +523,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
     // JSX is already lowered to calls, so the printer needs no JSX hook.
     const p = createPrinter(
         { minify: false },
-        { jsx: null, srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
+        { srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
     );
     printModule(p, program);
 

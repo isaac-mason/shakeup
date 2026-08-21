@@ -1,5 +1,4 @@
 import { lineColOf, type Node } from '../ast';
-import type { JSXLower } from '../jsx-text';
 import { addLine, addSegment, type Mappings, newMappings } from '../sourcemap';
 
 /** Options controlling how the printer renders. Whitespace and syntactic-form
@@ -22,9 +21,6 @@ export type PrinterConfig = {
     srcLines?: Uint32Array;
     /** Index of this module's source in the chunk's `sources` array. */
     sourceIdx?: number;
-    /** JSX runtime + rename hooks. null/absent ⇒ JSX nodes are unsupported (a strip-only
-     *  path never reaches them; a JSX module must supply this). */
-    jsx?: JSXLower | null;
     /** Bundle "link mode": drop import statements, unwrap `export <decl>` to `<decl>`, and
      *  rewrite anonymous `export default` to `const <defaultName()> =`. Off ⇒ module-faithful. */
     linkModule?: boolean;
@@ -48,8 +44,6 @@ export type Printer = {
     indent: number;
     /** Rename resolver for identifiers. */
     nameOf: NameResolver;
-    /** JSX runtime + rename hooks (null when the module has no JSX). */
-    jsx: JSXLower | null;
     /** Bundle link mode (see {@link PrinterConfig.linkModule}). */
     linkModule: boolean;
     defaultName: (() => string) | null;
@@ -70,7 +64,6 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         opts,
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
-        jsx: cfg.jsx ?? null,
         linkModule: cfg.linkModule ?? false,
         defaultName: cfg.defaultName ?? null,
         live: cfg.live ?? null,

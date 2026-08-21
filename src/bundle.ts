@@ -2,7 +2,6 @@ import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { basenameOf, dirnameOf, relativePath } from './fs';
-import type { JSXLower } from './jsx-text';
 import {
     buildGraph,
     externalKey,
@@ -10,7 +9,6 @@ import {
     type Graph,
     type GraphOptions,
     type ImportBind,
-    type JSXRuntime,
     type Linked,
     linkGraph,
     type Module,
@@ -175,17 +173,6 @@ function renameOf(ctx: EmitCtx, identNode: Node): string | null {
     }
     const renamed = ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym));
     return renamed ?? null;
-}
-
-/** Final output name for a module-local SymbolId (import-bound or renamed). */
-function finalNameOfSymbol(ctx: EmitCtx, sym: number): string | null {
-    const imp = ctx.mod.namedImports.get(sym);
-    if (imp !== undefined) {
-        const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
-        if (bind === undefined) return null;
-        return nameOfBind(ctx.linked, bind, ctx.chunk);
-    }
-    return ctx.linked.finalNames.get(packRef(ctx.mod.idx, sym)) ?? null;
 }
 
 /** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
@@ -631,17 +618,6 @@ function renderChunk(
             }
         }
         const live = shaken === null ? null : shaken.live[idx];
-        const jsxCtx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
-        const jsxLower: JSXLower | null =
-            mod.jsxRuntime === null
-                ? null
-                : {
-                      renameIdent: (idNode: Node): string | null => renameOf(jsxCtx, idNode),
-                      runtimeName: (kind: keyof JSXRuntime): string => {
-                          const sym = mod.jsxRuntime![kind];
-                          return finalNameOfSymbol(jsxCtx, sym) ?? kind;
-                      },
-                  };
         // Index this module will occupy in `mapSources` if it emits anything.
         const srcIdx = mapSources.length;
         let out: string;
@@ -657,7 +633,6 @@ function renderChunk(
                 { minify: naming.minify },
                 {
                     nameOf: (idNode: Node) => renameOf(ctx, idNode) ?? idNode.name,
-                    jsx: jsxLower,
                     linkModule: true,
                     defaultName: () => {
                         const ref = linked.defaultRefs.get(mod.idx);
