@@ -134,6 +134,59 @@ function unwrapAssertions(n: Node): Node {
     return e;
 }
 
+/** Clear TS type-annotation fields (and TS-only modifiers) so the post-transform AST is genuinely
+ *  plain JS — oxc `annotations.rs`. The printer already ignores these; clearing them is for consumers
+ *  of the plain AST (compilecat). Done on ENTER, so the traverse also skips descending into the (now
+ *  null/empty) type subtrees. */
+function clearTypes(n: Node): void {
+    const d = n.data as Record<string, unknown>;
+    switch (n.type) {
+        case N.VariableDeclarator:
+            d.typeAnnotation = null;
+            d.definite = false;
+            break;
+        case N.PropertyDefinition:
+            d.typeAnnotation = null;
+            d.optional = false;
+            d.definite = false;
+            d.readonly = false;
+            d.abstract = false;
+            d.accessibility = null;
+            break;
+        case N.FormalParameter:
+            d.typeAnnotation = null;
+            d.optional = false;
+            d.readonly = false;
+            d.accessibility = null;
+            break;
+        case N.RestElement:
+            d.typeAnnotation = null;
+            break;
+        case N.MethodDefinition:
+            d.optional = false;
+            d.abstract = false;
+            d.accessibility = null;
+            break;
+        case N.FunctionDeclaration:
+        case N.FunctionExpression:
+        case N.ArrowFunctionExpression:
+            d.typeParameters = null;
+            d.returnType = null;
+            break;
+        case N.ClassDeclaration:
+        case N.ClassExpression:
+            d.typeParameters = null;
+            d.superTypeArguments = null;
+            d.implements = [];
+            d.abstract = false;
+            break;
+        case N.CallExpression:
+        case N.NewExpression:
+            d.typeArguments = null;
+            break;
+    }
+}
+
 /** The TS type-strip pass. */
 export const tsStrip: Visitor = {
     name: 'tsStrip',
@@ -148,13 +201,24 @@ export const tsStrip: Visitor = {
         [N.TSTypeAliasDeclaration]: (_n, ctx) => ctx.remove(),
         [N.FunctionDeclaration]: (n, ctx) => {
             if (isErasedStmt(n)) ctx.remove();
+            else clearTypes(n);
         },
         [N.ClassDeclaration]: (n, ctx) => {
             if (isErasedStmt(n)) ctx.remove();
+            else clearTypes(n);
         },
         [N.VariableDeclaration]: (n, ctx) => {
             if (isErasedStmt(n)) ctx.remove();
         },
+        // Pure type-field clearing (A1b — plain-JS AST).
+        [N.VariableDeclarator]: (n) => clearTypes(n),
+        [N.FormalParameter]: (n) => clearTypes(n),
+        [N.RestElement]: (n) => clearTypes(n),
+        [N.FunctionExpression]: (n) => clearTypes(n),
+        [N.ArrowFunctionExpression]: (n) => clearTypes(n),
+        [N.ClassExpression]: (n) => clearTypes(n),
+        [N.CallExpression]: (n) => clearTypes(n),
+        [N.NewExpression]: (n) => clearTypes(n),
         // `declare enum`/`declare namespace` — tsLower only lowers the VALUE forms, so the declare
         // (ambient) ones reach here and erase.
         [N.TSEnumDeclaration]: (n, ctx) => {
@@ -177,9 +241,11 @@ export const tsStrip: Visitor = {
                 return;
             }
             if ((n.data as { kind: string }).kind === 'constructor') lowerParamProps(n);
+            clearTypes(n);
         },
         [N.PropertyDefinition]: (n, ctx) => {
             if (isErasedClassMember(n)) ctx.remove();
+            else clearTypes(n);
         },
     }),
     exit: null,
