@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { createMemoryFs } from '../src/fs.ts';
-import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
+import { buildGraph, deconflictWholeBundle, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
 
 const build = async (files: Record<string, string>, external: string[] = []) => {
     const graph = await buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });
     expect(graph.errors).toEqual([]);
     const linked = linkGraph(graph);
+    deconflictWholeBundle(graph, linked); // this test asserts on final (deconflicted) names
     return { graph, linked };
 };
 

@@ -422,7 +422,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // assigns names in fresh per-chunk scopes. For a single chunk this reproduces the
     // whole-bundle names byte-for-byte (same order, same taken seeding).
     Timer.start(timer, 'link');
-    const linked = linkGraph(graph, { deconflict: false });
+    const linked = linkGraph(graph); // Link binds+sorts only; per-chunk deconflict runs in buildChunkGraph
     Timer.end(timer, 'link');
     if (linked.errors.length > 0) {
         return {

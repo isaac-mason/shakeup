@@ -1604,16 +1604,18 @@ export function mangleNestedScopes(graph: Graph, linked: Linked, chunkModules: n
     }
 }
 
-function deconflict(ctx: LinkCtx): void {
-    deconflictChunk(ctx.graph, ctx.linked, ctx.linked.order, null, []);
+/** Whole-bundle deconflict — treat the entire graph as one lexical scope. The bundle path does NOT
+ *  use this (it deconflicts per-chunk in {@link deconflictChunk} via buildChunkGraph); it's for
+ *  single-scope callers/tests. Generate-stage naming — kept out of {@link linkGraph} so Link binds+
+ *  sorts and names nothing (rolldown `link_stage` does no naming). */
+export function deconflictWholeBundle(graph: Graph, linked: Linked): void {
+    deconflictChunk(graph, linked, linked.order, null, []);
 }
 
-/** Bind imports/exports across `graph`, order modules, and deconflict names into a {@link Linked}.
- *  `opts.deconflict` (default true) runs a whole-bundle deconflict — pass `false` to run a fresh
- *  per-chunk deconflict from {@link deconflictChunk} instead (each chunk is its own lexical
- *  scope). When skipped, `namespaceOf` holds BASE names (`_ns`) so the per-chunk pass can claim
- *  them. */
-export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked {
+/** LINK stage (rolldown `link_stage`): bind imports/exports across `graph` + order modules into a
+ *  {@link Linked}. **Metadata only — no AST mutation, no naming.** Deconfliction (a generate-stage
+ *  concern) runs per-chunk in buildChunkGraph; single-scope callers run {@link deconflictWholeBundle}. */
+export function linkGraph(graph: Graph): Linked {
     const linked: Linked = {
         graph,
         order: sortModules(graph),
@@ -1670,7 +1672,6 @@ export function linkGraph(graph: Graph, opts?: { deconflict?: boolean }): Linked
         }
     }
 
-    if (opts?.deconflict !== false) deconflict(ctx);
     return linked;
 }
 
