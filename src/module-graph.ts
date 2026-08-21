@@ -5,6 +5,7 @@ import { createNodeResolver, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
+import { tsStrip } from './passes/strip-ts';
 import { traverse } from './passes/traverse';
 import {
     type CustomPluginOptions,
@@ -1059,6 +1060,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     passes.push(makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt));
                 }
                 traverse(program, semantic, passes);
+                // 2nd traverse: strip residual TS types (assertions, type-only stmts/members, param
+                // properties) after value lowering. Separate traverse so tsStrip never races tsLower's
+                // replaceWith on a shared node (see ts-strip-pass-plan.md).
+                traverse(program, semantic, [tsStrip]);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 collectUnsupported(program, id, graph.errors);

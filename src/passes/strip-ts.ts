@@ -91,7 +91,8 @@ function lowerParamProps(ctor: Node): void {
     if (assigns.length === 0) return;
     const stmts = (body.data as { body: Node[] }).body;
     const at = stmts.length > 0 && isSuperCall(stmts[0]) ? 1 : 0;
-    stmts.splice(at, 0, ...assigns);
+    // Build a fresh array — an empty body is the shared frozen EMPTY_LIST (can't splice in place).
+    (body.data as { body: Node[] }).body = [...stmts.slice(0, at), ...assigns, ...stmts.slice(at)];
 }
 
 /** Drop type-only specifiers from an import/export; returns true if the whole statement should be

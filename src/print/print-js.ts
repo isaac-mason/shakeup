@@ -589,63 +589,6 @@ function emitExpr(p: Printer, n: Node): void {
 // Classes (declaration + expression share one body emitter)
 // ---------------------------------------------------------------------------
 
-/** A class-body member that is TS-only (index signature, overload/`declare` with no body)
- *  is erased in strip mode, exactly as the edit engine blanks it. */
-function isErasedClassMember(n: Node): boolean {
-    if (n.type === N.TSIndexSignature) return true;
-    if (n.type === N.MethodDefinition && (data(n).value as Node) && data(data(n).value as Node).body === null) return true;
-    if (n.type === N.PropertyDefinition && (data(n).declare as boolean)) return true;
-    return false;
-}
-
-/** True if `n` is a `super(...)` statement — parameter-property assignments must follow it. */
-function isSuperCallStmt(n: Node): boolean {
-    if (n.type !== N.ExpressionStatement) return false;
-    const e = data(n).expression as Node;
-    return e.type === N.CallExpression && (data(e).callee as Node).type === N.Super;
-}
-
-/** Binding nodes of a constructor's TS parameter properties (`constructor(private x)`), in order. */
-function constructorParamProps(value: Node): Node[] {
-    const out: Node[] = [];
-    if (value.type !== N.FunctionExpression) return out;
-    for (const par of data(value).params as Node[]) {
-        if (par.type !== N.FormalParameter) continue;
-        const pd = data(par);
-        if (pd.accessibility === null && !(pd.readonly as boolean)) continue;
-        const pat = pd.pattern as Node;
-        if (pat.type === N.BindingIdentifier) out.push(pat); // TS forbids destructuring param props
-    }
-    return out;
-}
-
-/** Emit a constructor body with `this.x = x;` synthesized for each parameter property, after a
- *  leading `super(...)` (touching `this` before super is illegal). The field name is the original
- *  param name; the RHS is the (possibly renamed) parameter binding. Ported from emit.ts. */
-function emitConstructorBody(p: Printer, body: Node, props: Node[]): void {
-    write(p, '{');
-    const stmts = body.type === N.BlockStatement ? (data(body).body as Node[]) : [];
-    let i = 0;
-    p.indent++;
-    if (stmts.length > 0 && isSuperCallStmt(stmts[0])) {
-        softNewline(p);
-        printStmt(p, stmts[0]);
-        i = 1;
-    }
-    for (const pat of props) {
-        softNewline(p);
-        write(p, `this.${pat.name} = ${p.nameOf(pat)};`);
-    }
-    for (; i < stmts.length; i++) {
-        softNewline(p);
-        printStmt(p, stmts[i]);
-    }
-    dropTrailingSemi(p);
-    p.indent--;
-    softNewline(p);
-    write(p, '}');
-}
-
 function emitClassMember(p: Printer, n: Node): void {
     const d = data(n);
     if (n.type === N.StaticBlock) {
@@ -684,15 +627,6 @@ function emitClassMember(p: Printer, n: Node): void {
     }
     if (vd.generator as boolean) write(p, '*');
     emitPropertyKey(p, d.key as Node, d.computed as boolean);
-    if (kind === 'constructor') {
-        const props = constructorParamProps(value);
-        if (props.length > 0) {
-            emitParams(p, vd.params as Node[]);
-            softSpace(p);
-            emitConstructorBody(p, vd.body as Node, props);
-            return;
-        }
-    }
     emitFunctionTail(p, vd);
 }
 
@@ -713,7 +647,7 @@ function emitClass(p: Printer, n: Node): void {
     }
     softSpace(p);
     write(p, '{');
-    const members = (d.body as Node[]).filter((m) => !isErasedClassMember(m));
+    const members = d.body as Node[]; // tsStrip already removed TS-only members
     if (members.length === 0) {
         write(p, '}');
         return;

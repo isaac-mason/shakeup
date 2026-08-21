@@ -4,6 +4,7 @@ import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
+import { tsStrip } from './passes/strip-ts';
 import { traverse } from './passes/traverse';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter, printerPart } from './print/printer';
@@ -498,6 +499,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
         passes.push(makeJsxLower(importSource, pure));
     }
     traverse(program, semantic, passes);
+    traverse(program, semantic, [tsStrip]); // strip residual TS types (2nd traverse — see plan)
 
     const ctx = createRunnerCtx(source, semantic);
     runnerLink(program, ctx);
