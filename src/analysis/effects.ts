@@ -2,9 +2,8 @@ import { N, type Node } from '../ast.ts';
 
 /**
  * Conservatively true if evaluating this expression has no observable side effects.
- * `jsxPure` selects whether a JSX element/fragment is treated as side-effect-free.
  */
-export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
+export function isPureExpr(node: Node | null): boolean {
     if (node === null) return true;
     switch (node.type) {
         case N.BindingIdentifier:
@@ -24,16 +23,16 @@ export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
         case N.FunctionExpression:
             return true;
         case N.ClassExpression:
-            return node.data.superClass === null && !classHasStaticEffects(node, jsxPure);
+            return node.data.superClass === null && !classHasStaticEffects(node);
         case N.TemplateLiteral: {
-            for (const e of node.data.expressions) if (!isPureExpr(e, jsxPure)) return false;
+            for (const e of node.data.expressions) if (!isPureExpr(e)) return false;
             return true;
         }
         case N.ArrayExpression: {
             for (const el of node.data.elements) {
                 if (el === null) continue;
                 if (el.type === N.SpreadElement) return false;
-                if (!isPureExpr(el, jsxPure)) return false;
+                if (!isPureExpr(el)) return false;
             }
             return true;
         }
@@ -41,37 +40,33 @@ export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
             for (const p of node.data.properties) {
                 if (p.type === N.SpreadElement) return false;
                 if (p.type !== N.ObjectProperty) continue;
-                if (p.data.computed && !isPureExpr(p.data.key, jsxPure)) return false;
-                if (p.data.kind === 'init' && !isPureExpr(p.data.value, jsxPure)) return false;
+                if (p.data.computed && !isPureExpr(p.data.key)) return false;
+                if (p.data.kind === 'init' && !isPureExpr(p.data.value)) return false;
             }
             return true;
         }
         case N.UnaryExpression:
-            return node.data.operator !== 'delete' && isPureExpr(node.data.argument, jsxPure);
+            return node.data.operator !== 'delete' && isPureExpr(node.data.argument);
         case N.BinaryExpression:
-            return isPureExpr(node.data.left, jsxPure) && isPureExpr(node.data.right, jsxPure);
+            return isPureExpr(node.data.left) && isPureExpr(node.data.right);
         case N.LogicalExpression:
-            return isPureExpr(node.data.left, jsxPure) && isPureExpr(node.data.right, jsxPure);
+            return isPureExpr(node.data.left) && isPureExpr(node.data.right);
         case N.ConditionalExpression:
-            return (
-                isPureExpr(node.data.test, jsxPure) &&
-                isPureExpr(node.data.consequent, jsxPure) &&
-                isPureExpr(node.data.alternate, jsxPure)
-            );
+            return isPureExpr(node.data.test) && isPureExpr(node.data.consequent) && isPureExpr(node.data.alternate);
         case N.SequenceExpression: {
-            for (const e of node.data.expressions) if (!isPureExpr(e, jsxPure)) return false;
+            for (const e of node.data.expressions) if (!isPureExpr(e)) return false;
             return true;
         }
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
-            return isPureExpr(node.data.expression, jsxPure);
+            return isPureExpr(node.data.expression);
         case N.CallExpression: {
             // A `/*@__PURE__*/`-annotated call (oxc `CallExpression.pure`) is side-effect-free iff
             // its arguments are. Lowering passes set this on the enum/namespace IIFE.
             if (node.data.pure !== true) return false;
             for (const a of node.data.arguments) {
                 const arg = a.type === N.SpreadElement ? a.data.argument : a;
-                if (!isPureExpr(arg, jsxPure)) return false;
+                if (!isPureExpr(arg)) return false;
             }
             return true;
         }
@@ -84,13 +79,13 @@ export function isPureExpr(node: Node | null, jsxPure: boolean): boolean {
 }
 
 /** True if evaluating a class declaration/expression runs static side effects (static blocks, impure static/computed keys). */
-export function classHasStaticEffects(classNode: Node, jsxPure: boolean): boolean {
+export function classHasStaticEffects(classNode: Node): boolean {
     if (classNode.type !== N.ClassDeclaration && classNode.type !== N.ClassExpression) return false;
     for (const m of classNode.data.body) {
         if (m.type === N.StaticBlock) return true;
-        if (m.type === N.PropertyDefinition && m.data.static && !isPureExpr(m.data.value, jsxPure)) return true;
+        if (m.type === N.PropertyDefinition && m.data.static && !isPureExpr(m.data.value)) return true;
         if ((m.type === N.MethodDefinition || m.type === N.PropertyDefinition) && m.data.computed) {
-            if (!isPureExpr(m.data.key, jsxPure)) return true;
+            if (!isPureExpr(m.data.key)) return true;
         }
     }
     return false;
@@ -101,7 +96,7 @@ export function classHasStaticEffects(classNode: Node, jsxPure: boolean): boolea
  * effects. Declarations count as pure (liveness is the caller's policy);
  * ImportDecl is pure here since import side-effect policy is a graph concern.
  */
-export function isPureStatement(stmt: Node, jsxPure: boolean): boolean {
+export function isPureStatement(stmt: Node): boolean {
     switch (stmt.type) {
         case N.FunctionDeclaration:
         case N.TSInterfaceDeclaration:
@@ -113,22 +108,22 @@ export function isPureStatement(stmt: Node, jsxPure: boolean): boolean {
         case N.TSEnumDeclaration:
             return true;
         case N.ClassDeclaration:
-            return stmt.data.superClass === null && !classHasStaticEffects(stmt, jsxPure);
+            return stmt.data.superClass === null && !classHasStaticEffects(stmt);
         case N.VariableDeclaration: {
             for (const d of stmt.data.declarations) {
-                if (d.type === N.VariableDeclarator && !isPureExpr(d.data.init, jsxPure)) return false;
+                if (d.type === N.VariableDeclarator && !isPureExpr(d.data.init)) return false;
             }
             return true;
         }
         case N.ExportNamedDeclaration: {
             const decl = stmt.data.declaration;
-            return decl === null ? true : isPureStatement(decl, jsxPure);
+            return decl === null ? true : isPureStatement(decl);
         }
         case N.ExportDefaultDeclaration: {
             const decl = stmt.data.declaration;
             if (decl.type === N.FunctionDeclaration) return true;
-            if (decl.type === N.ClassDeclaration) return isPureStatement(decl, jsxPure);
-            return isPureExpr(decl, jsxPure);
+            if (decl.type === N.ClassDeclaration) return isPureStatement(decl);
+            return isPureExpr(decl);
         }
         default:
             return false;

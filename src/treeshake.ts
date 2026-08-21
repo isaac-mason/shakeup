@@ -66,7 +66,7 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
     // treeshake, so their callee IdentifierReferences are ordinary refs. No JSX-specific walk.)
 }
 
-function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolean {
+function statementIsPure(mod: Module, statement: Node): boolean {
     if (statement.type === N.ImportDeclaration) {
         if (statement.data.specifiers.length > 0) return true;
         const source = statement.data.source;
@@ -75,7 +75,7 @@ function statementIsPure(mod: Module, statement: Node, jsxPure: boolean): boolea
         const rec = mod.importRecords.find((r) => r.specifier === spec);
         return !(rec?.external ?? false);
     }
-    return isPureStatement(statement, jsxPure);
+    return isPureStatement(statement);
 }
 
 /** pseudo-symbol id marking "the whole namespace of this module" */
@@ -178,7 +178,7 @@ function computeDeadDynamic(graph: Graph, dynUsage: Map<number, { escapes: boole
 }
 
 /** Compute statement-level liveness over the linked graph, rooted at the entry's exports and every effectful statement. */
-export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?: TreeshakeCache): TreeshakeResult {
+export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache): TreeshakeResult {
     const dynUsage = computeDynamicUsage(graph);
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
     const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic);
@@ -223,7 +223,7 @@ export function treeshake(graph: Graph, linked: Linked, jsxPure: boolean, cache?
             const refs: number[] = [];
             const declared: number[] = [];
             collectRefs(mod, linked, statement, refs, declared);
-            list.push({ statement, refs, pure: statementIsPure(mod, statement, jsxPure) });
+            list.push({ statement, refs, pure: statementIsPure(mod, statement) });
             for (const ref of declared) {
                 declToStatement.set(ref, [mod.idx, idx]);
                 localDecls.push([ref, [mod.idx, idx]]);

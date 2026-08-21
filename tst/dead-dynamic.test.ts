@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { buildGraph, linkGraph, resolveJSXOptions } from '../src/module-graph.ts';
+import { buildGraph, linkGraph } from '../src/module-graph.ts';
 import type { Plugin } from '../src/plugin.ts';
 import { treeshake } from '../src/treeshake.ts';
 
@@ -31,7 +31,7 @@ describe('dead pure dynamic-import elimination', () => {
         const lazy = graph.modules[graph.byId.get('/lazy.ts')!];
         lazy.sideEffects = false;
         const linked = linkGraph(graph);
-        const shaken = treeshake(graph, linked, resolveJSXOptions(undefined).pure);
+        const shaken = treeshake(graph, linked);
         expect(shaken.deadDynamic.has(lazy.idx)).toBe(true);
     });
 

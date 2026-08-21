@@ -1,7 +1,7 @@
-import { type Node, type Program, N, isIdentifier, cloneNode, walkChildren } from '../src/ast.ts';
-import { parse } from '../src/parser';
-import { analyze, createSemantic, symbolOf, type Semantic } from '../src/analysis/semantic.ts';
 import { isPureExpr } from '../src/analysis/effects.ts';
+import { analyze, createSemantic, type Semantic, symbolOf } from '../src/analysis/semantic.ts';
+import { cloneNode, isIdentifier, N, type Node, type Program, walkChildren } from '../src/ast.ts';
+import { parse } from '../src/parser';
 
 const source = [
     'export function madd(a, b, c) { return a * b + c; }',
@@ -20,7 +20,10 @@ function inlineDirectCalls(program: Program, sem: Semantic): number {
         if (only.type !== N.ReturnStatement || only.data.argument === null) continue;
         const params: Node[] = [];
         for (const p of stmt.data.params) {
-            if (p.type !== N.FormalParameter || p.data.pattern.type !== N.BindingIdentifier) { params.length = 0; break; }
+            if (p.type !== N.FormalParameter || p.data.pattern.type !== N.BindingIdentifier) {
+                params.length = 0;
+                break;
+            }
             params.push(p.data.pattern);
         }
         if (params.length !== stmt.data.params.length || params.length === 0) continue;
@@ -38,7 +41,7 @@ function inlineDirectCalls(program: Program, sem: Semantic): number {
             const fn = inlinable.get(symbolOf(sem, child.data.callee));
             if (fn === undefined) return;
             const args = child.data.arguments;
-            for (const a of args) if (!isPureExpr(a, true)) return;
+            for (const a of args) if (!isPureExpr(a)) return;
             if (args.length !== fn.params.length) return;
             const paramSyms = fn.params.map((p) => symbolOf(sem, p));
             const inlined = cloneNode(fn.returnExpr, (n) => {
@@ -75,9 +78,7 @@ function print(n: Node): string {
         case N.ExportNamedDeclaration:
             return n.data.declaration !== null ? `export ${print(n.data.declaration)}` : '<export>';
         case N.FunctionDeclaration: {
-            const params = n.data.params
-                .map((p) => (p.type === N.FormalParameter ? print(p.data.pattern) : '?'))
-                .join(', ');
+            const params = n.data.params.map((p) => (p.type === N.FormalParameter ? print(p.data.pattern) : '?')).join(', ');
             const body = n.data.body;
             const stmts = body !== null && body.type === N.BlockStatement ? body.data.body.map(print).join(' ') : '';
             return `function ${n.data.id === null ? '' : print(n.data.id)}(${params}) { ${stmts} }`;

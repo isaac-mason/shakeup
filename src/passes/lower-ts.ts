@@ -287,14 +287,14 @@ function isPureNsStmt(stmt: Node): boolean {
     if (stmt.type === N.VariableDeclaration) {
         for (const dc of (stmt.data as { declarations: Node[] }).declarations) {
             const init = (dc.data as { init: Node | null }).init;
-            if (init !== null && !isPureExpr(init, false)) return false;
+            if (init !== null && !isPureExpr(init)) return false;
         }
         return true;
     }
     // mirror `_Foo.x = <local ident>` is pure (assign to the local object).
     if (stmt.type === N.ExpressionStatement) {
         const e = (stmt.data as { expression: Node }).expression;
-        if (e.type === N.AssignmentExpression) return isPureExpr((e.data as { right: Node }).right, false);
+        if (e.type === N.AssignmentExpression) return isPureExpr((e.data as { right: Node }).right);
     }
     return false;
 }

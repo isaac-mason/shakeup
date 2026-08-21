@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { buildGraph, linkGraph, resolveJSXOptions } from '../src/module-graph.ts';
+import { buildGraph, linkGraph } from '../src/module-graph.ts';
 import type { ModuleSideEffects } from '../src/plugin.ts';
 import { treeshake } from '../src/treeshake.ts';
 
@@ -178,8 +178,7 @@ describe('tree shaking — module-level side-effect gate (unit seam)', () => {
         const effect = graph.modules[graph.byId.get('/effect.ts')!];
         effect.sideEffects = effectSideEffects;
         const linked = linkGraph(graph);
-        const jsxPure = resolveJSXOptions(undefined).pure;
-        const shaken = treeshake(graph, linked, jsxPure);
+        const shaken = treeshake(graph, linked);
         return { graph, shaken, effectIdx: effect.idx };
     };
 

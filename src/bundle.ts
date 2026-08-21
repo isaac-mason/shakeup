@@ -16,7 +16,6 @@ import {
     type ParseStats,
     packRef,
     resolveEmittedFileName,
-    resolveJSXOptions,
     toModuleInfo,
 } from './module-graph';
 import {
@@ -439,10 +438,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
-    const jsxPure = resolveJSXOptions(options.jsx).pure;
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
     Timer.start(timer, 'treeshake');
-    const shaken = options.treeshake === false ? null : treeshake(graph, linked, jsxPure, options.treeshakeCache);
+    const shaken = options.treeshake === false ? null : treeshake(graph, linked, options.treeshakeCache);
     Timer.end(timer, 'treeshake');
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
