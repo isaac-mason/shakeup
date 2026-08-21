@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
 import { linkGraph } from '../src/link.ts';
-import { buildGraph } from '../src/module-graph.ts';
+import { buildGraph } from '../src/scan.ts';
 import type { Plugin } from '../src/plugin.ts';
 import { treeshake } from '../src/treeshake.ts';
 

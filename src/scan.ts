@@ -1,12 +1,16 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
-import {
-    type CachedParse, type Graph, type ImportRecordKind, type JSXRuntime,
-    type Module, NAME_DEFAULT, NAME_NAMESPACE,
-} from './graph-types';
 import type { Fs, MaybePromise } from './fs';
+import {
+    type CachedParse,
+    type Graph,
+    type ImportRecordKind,
+    type JSXRuntime,
+    type Module,
+    NAME_DEFAULT,
+    NAME_NAMESPACE,
+} from './graph-types';
 import { EMPTY_MODULE_ID } from './node-resolve';
-import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve';
 import { parse } from './parser';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
@@ -28,15 +32,7 @@ import {
     runResolveId,
     runTransform,
 } from './plugin';
-
-
-
-
-
-
-
-
-
+import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve';
 
 /** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
  * (non-`declare`) namespace has no runtime lowering, so the walk would leave `namespace X {`
@@ -397,8 +393,6 @@ function hashSource(s: string): number {
     return h >>> 0;
 }
 
-
-
 /** Digest a module's export surface (rspack `AffectType` input): the set of names it
  *  exports plus its `export *` targets. Body-only edits leave this unchanged. */
 function exportSignature(mod: Module): string {
@@ -442,7 +436,6 @@ function computeAffected(graph: Graph, changedExports: Set<string>): Set<string>
     }
     return affected;
 }
-
 
 /** Memoize `exists`/`realpath` for the duration of ONE build. Within a single build the
  *  filesystem is fixed, so a path's existence and its realpath are constant — and module

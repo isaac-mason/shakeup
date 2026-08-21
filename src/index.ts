@@ -8,7 +8,7 @@ export * from './fs';
 export * from './watch';
 export * from './graph-types';
 export * from './resolve';
-export * from './module-graph';
+export * from './scan';
 export * from './link';
 export * from './deconflict';
 export * from './treeshake';

@@ -8,13 +8,11 @@ import {
     type ImportBind,
     type Linked,
     type Module,
-    packRef,
     type ParseCache,
     type ParseStats,
+    packRef,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
-import { buildGraph, resolveEmittedFileName, toModuleInfo } from './module-graph';
-import type { GraphOptions } from './resolve';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,
@@ -33,6 +31,8 @@ import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
+import type { GraphOptions } from './resolve';
+import { buildGraph, resolveEmittedFileName, toModuleInfo } from './scan';
 import {
     buildLineTable,
     encodeMappings,

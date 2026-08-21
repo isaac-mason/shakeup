@@ -1,8 +1,9 @@
 // graph-types.ts — shared bundler data model + SymbolRef refs (rolldown `types/`). LEAF module:
 // depends only on ast/semantic/plugin/fs types, imported by every stage (scan/link/deconflict/
 // treeshake/chunk-graph/bundle). No stage logic here.
-import type { Node, Program } from './ast';
+
 import type { Semantic } from './analysis/semantic';
+import type { Node, Program } from './ast';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
 
 /** Imported name for `import * as ns` / `export * as ns`. */

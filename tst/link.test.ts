@@ -3,7 +3,7 @@ import { deconflictWholeBundle } from '../src/deconflict.ts';
 import { createMemoryFs } from '../src/fs.ts';
 import { packRef, refMod } from '../src/graph-types.ts';
 import { finalNameOf, linkGraph } from '../src/link.ts';
-import { buildGraph } from '../src/module-graph.ts';
+import { buildGraph } from '../src/scan.ts';
 
 const build = async (files: Record<string, string>, external: string[] = []) => {
     const graph = await buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });
