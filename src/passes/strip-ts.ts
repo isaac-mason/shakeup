@@ -122,15 +122,27 @@ const isTypeOnlyDecl = (decl: Node): boolean =>
     decl.type === N.TSTypeAliasDeclaration ||
     (decl.data as { declare?: boolean }).declare === true;
 
+const isAssertion = (t: number): boolean =>
+    t === N.TSAsExpression || t === N.TSSatisfiesExpression || t === N.TSNonNullExpression || t === N.TSInstantiationExpression;
+
+/** Peel ALL nested type-assertion layers (`(a as T)!`, `a as B as C`) in one step — the traverse
+ *  doesn't re-fire `enter` on a `replaceWith` replacement, so a single-layer unwrap would leave a
+ *  nested assertion behind (→ printer sees a `TSAsExpression`). */
+function unwrapAssertions(n: Node): Node {
+    let e = n;
+    while (isAssertion(e.type)) e = (e.data as { expression: Node }).expression;
+    return e;
+}
+
 /** The TS type-strip pass. */
 export const tsStrip: Visitor = {
     name: 'tsStrip',
     enter: hookTable({
-        // Type-assertion / non-null / instantiation wrappers → the inner expression.
-        [N.TSAsExpression]: (n, ctx) => ctx.replaceWith((n.data as { expression: Node }).expression),
-        [N.TSSatisfiesExpression]: (n, ctx) => ctx.replaceWith((n.data as { expression: Node }).expression),
-        [N.TSNonNullExpression]: (n, ctx) => ctx.replaceWith((n.data as { expression: Node }).expression),
-        [N.TSInstantiationExpression]: (n, ctx) => ctx.replaceWith((n.data as { expression: Node }).expression),
+        // Type-assertion / non-null / instantiation wrappers → the inner expression (all layers).
+        [N.TSAsExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
+        [N.TSSatisfiesExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
+        [N.TSNonNullExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
+        [N.TSInstantiationExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         // Type-only statements → removed.
         [N.TSInterfaceDeclaration]: (_n, ctx) => ctx.remove(),
         [N.TSTypeAliasDeclaration]: (_n, ctx) => ctx.remove(),
@@ -142,6 +154,14 @@ export const tsStrip: Visitor = {
         },
         [N.VariableDeclaration]: (n, ctx) => {
             if (isErasedStmt(n)) ctx.remove();
+        },
+        // `declare enum`/`declare namespace` — tsLower only lowers the VALUE forms, so the declare
+        // (ambient) ones reach here and erase.
+        [N.TSEnumDeclaration]: (n, ctx) => {
+            if ((n.data as { declare: boolean }).declare === true) ctx.remove();
+        },
+        [N.TSModuleDeclaration]: (n, ctx) => {
+            if ((n.data as { declare: boolean }).declare === true) ctx.remove();
         },
         [N.ImportDeclaration]: (n, ctx) => {
             if (stripImport(n)) ctx.remove();

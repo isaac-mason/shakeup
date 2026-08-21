@@ -1,9 +1,24 @@
 import esbuild from 'esbuild';
 import { describe, expect, it } from 'vitest';
+import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parse } from '../src/index.ts';
+import { tsLower } from '../src/passes/lower-ts.ts';
+import { tsStrip } from '../src/passes/strip-ts.ts';
+import { traverse } from '../src/passes/traverse.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 import { astEqual, semanticEqual } from './print-helpers.ts';
+
+/** Run the TS transform passes (value lowering + type strip) as dev/bundle do, so the printer only
+ *  ever sees plain JS. Mirrors the real pipeline. */
+function stripProgram(src: string): ReturnType<typeof parse>['program'] {
+    const { program } = parse(src, { ts: true, jsx: false });
+    const sem = createSemantic();
+    analyze(sem, program);
+    traverse(program, sem, [tsLower]);
+    traverse(program, sem, [tsStrip]);
+    return program;
+}
 
 function roundTrip(src: string, minify: boolean): { printed: string; equal: boolean } {
     const original = parse(src, { ts: false, jsx: false }).program;
@@ -21,7 +36,7 @@ function roundTrip(src: string, minify: boolean): { printed: string; equal: bool
  *  output must be structurally identical to esbuild's, both re-parsed as JS. Anchors the printer's
  *  strip to a production reference, not to our old edit engine. */
 async function stripParity(src: string): Promise<{ printed: string; ref: string; equal: boolean }> {
-    const program = parse(src, { ts: true, jsx: false }).program;
+    const program = stripProgram(src);
     const p = createPrinter({ minify: false });
     printModule(p, program);
     const printed = finishPrinter(p);

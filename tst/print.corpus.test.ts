@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parse } from '../src/index.ts';
 import { makeJsxLower } from '../src/passes/lower-jsx.ts';
+import { tsLower } from '../src/passes/lower-ts.ts';
+import { tsStrip } from '../src/passes/strip-ts.ts';
 import { traverse } from '../src/passes/traverse.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
@@ -54,7 +56,12 @@ function stripBreadth(files: string[]): string[] {
         const isx = file.endsWith('.tsx');
         const p = createPrinter({ minify: false });
         try {
-            printModule(p, parse(src, { ts: true, jsx: isx }).program);
+            const { program } = parse(src, { ts: true, jsx: isx });
+            const sem = createSemantic();
+            analyze(sem, program);
+            traverse(program, sem, isx ? [tsLower, makeJsxLower('react', true)] : [tsLower]);
+            traverse(program, sem, [tsStrip]);
+            printModule(p, program);
         } catch (e) {
             failures.push(`${file}: printer threw ${(e as Error).message}`);
             continue;

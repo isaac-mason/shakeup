@@ -39,14 +39,6 @@ function precOf(n: Node): Prec {
         case N.TaggedTemplateExpression:
         case N.ChainExpression:
             return Prec.Call;
-        // TS wrappers are erased in strip mode — take the precedence of the inner expression
-        // so the stripped node parenthesises exactly as the expression it leaves behind.
-        case N.TSAsExpression:
-        case N.TSSatisfiesExpression:
-            return precOf(data(n).expression as Node);
-        case N.TSNonNullExpression:
-        case N.TSInstantiationExpression:
-            return precOf(data(n).expression as Node);
         default:
             return Prec.Primary;
     }
@@ -571,14 +563,6 @@ function emitExpr(p: Printer, n: Node): void {
         }
         case N.ClassExpression:
             emitClass(p, n);
-            return;
-        // TS type assertions / non-null / instantiation are erased: emit only the inner
-        // expression (its precedence was adopted by `precOf`, so wrapping is already correct).
-        case N.TSAsExpression:
-        case N.TSSatisfiesExpression:
-        case N.TSNonNullExpression:
-        case N.TSInstantiationExpression:
-            emitExpr(p, d.expression as Node);
             return;
         default:
             throw new Error(`printer: unsupported expression node ${TYPE_NAME[n.type] ?? n.type}`);
