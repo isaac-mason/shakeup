@@ -6,6 +6,7 @@ export * from './jsx-text';
 export * from './sourcemap';
 export * from './fs';
 export * from './watch';
+export * from './graph-types';
 export * from './module-graph';
 export * from './deconflict';
 export * from './treeshake';

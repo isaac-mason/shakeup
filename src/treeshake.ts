@@ -3,7 +3,7 @@ import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from './analysis/ns
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node } from './ast';
-import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './module-graph';
+import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 
 export type TreeshakeResult = {
     live: Set<number>[];

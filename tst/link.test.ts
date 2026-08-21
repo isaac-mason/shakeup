@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { deconflictWholeBundle } from '../src/deconflict.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { buildGraph, finalNameOf, linkGraph, packRef, refMod } from '../src/module-graph.ts';
+import { packRef, refMod } from '../src/graph-types.ts';
+import { buildGraph, finalNameOf, linkGraph } from '../src/module-graph.ts';
 
 const build = async (files: Record<string, string>, external: string[] = []) => {
     const graph = await buildGraph({ entry: '/main.ts', fs: createMemoryFs(files), external });

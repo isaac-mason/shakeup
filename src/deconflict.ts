@@ -4,7 +4,7 @@
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
 import { scopeOf } from './analysis/semantic';
-import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './module-graph';
+import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types';
 
 const RESERVED = new Set([
     'break',

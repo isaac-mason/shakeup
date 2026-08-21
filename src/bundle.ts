@@ -3,21 +3,16 @@ import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { basenameOf, dirnameOf, relativePath } from './fs';
 import {
-    buildGraph,
     externalKey,
-    finalNameOf,
     type Graph,
-    type GraphOptions,
     type ImportBind,
     type Linked,
-    linkGraph,
     type Module,
+    packRef,
     type ParseCache,
     type ParseStats,
-    packRef,
-    resolveEmittedFileName,
-    toModuleInfo,
-} from './module-graph';
+} from './graph-types';
+import { buildGraph, finalNameOf, type GraphOptions, linkGraph, resolveEmittedFileName, toModuleInfo } from './module-graph';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import type { Graph } from '../src/module-graph.ts';
+import type { Graph } from '../src/graph-types.ts';
 
 const recordOf = (graph: Graph, id: string, specifier: string) => {
     const idx = graph.byId.get(id);
