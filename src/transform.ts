@@ -1,8 +1,9 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
 import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './ast';
-import { attrsHaveKeyAfterSpreadEmit, type JSXLower } from './jsx-text';
+import { attrsHaveKeyAfterSpreadEmit } from './jsx-text';
 import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
+import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { traverse } from './passes/traverse';
 import { printModule } from './print/print-js';
@@ -173,11 +174,6 @@ function linkForText(ctx: RunnerCtx, spec: string): string {
     const local = claim(ctx, `_${ctx.importIdx++}`);
     ctx.importLines.push(`const ${local} = await __shakeup.link('${spec}');`);
     return local;
-}
-/** Link an injected runtime module (e.g. `react/jsx-runtime`) post-traversal: claims a `_N` local,
- *  records the `link` prelude + dep, returns the local. */
-function linkRuntime(ctx: RunnerCtx, spec: string): string {
-    return linkForText(ctx, spec);
 }
 
 function collectBindingNames(pattern: Node, out: string[]): void {
@@ -507,9 +503,15 @@ export function devTransform(filename: string, source: string, options: DevTrans
 
     const semantic = createSemantic();
     analyze(semantic, program);
-    // Transform stage: lower TS constructs (enum → IIFE) to plain JS BEFORE the runner rewrite, so
-    // both the dev and bundle paths lower uniformly through the same passes (not print-time emitEnum).
-    traverse(program, semantic, [tsLower]);
+    // Transform stage: lower TS (enum/namespace) AND JSX to plain JS BEFORE the runner rewrite, so dev
+    // and bundle lower through the same passes. jsxLower injects a real `import {…} from "…/jsx-runtime"`
+    // that runnerLink then links like any import (its `_jsx` refs become `_N.jsx` member access).
+    const passes = [tsLower];
+    if (jsx) {
+        const { importSource, pure } = resolveJSXOptions(options.jsx);
+        passes.push(makeJsxLower(importSource, pure, { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 }));
+    }
+    traverse(program, semantic, passes);
 
     const ctx = createRunnerCtx(source, semantic);
     runnerLink(program, ctx);
@@ -517,22 +519,11 @@ export function devTransform(filename: string, source: string, options: DevTrans
         return emptyResult(ctx.unsupported.map(({ pos, msg }) => `${filename}:${pos}: ${msg}`));
     }
 
-    // JSX runtime: linked post-traversal; the printer's lowering references it as member text.
-    let jsxLower: JSXLower | null = null;
-    if (ctx.hasJSX) {
-        const { importSource } = resolveJSXOptions(options.jsx);
-        const rt = linkRuntime(ctx, `${importSource}/jsx-runtime`);
-        const ce = ctx.needsCreateElement ? linkRuntime(ctx, importSource) : '';
-        jsxLower = {
-            renameIdent: () => null,
-            runtimeName: (k) => (k === 'createElement' ? `${ce}.createElement` : `${rt}.${k}`),
-        };
-    }
-
     const wantMap = options.sourcemap ?? false;
+    // JSX is already lowered to calls, so the printer needs no JSX hook.
     const p = createPrinter(
         { minify: false },
-        { jsx: jsxLower, srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
+        { jsx: null, srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
     );
     printModule(p, program);
 
