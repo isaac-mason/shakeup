@@ -7,6 +7,7 @@ export * from './sourcemap';
 export * from './fs';
 export * from './watch';
 export * from './module-graph';
+export * from './deconflict';
 export * from './treeshake';
 export * from './plugin';
 export * from './plugins/json';
