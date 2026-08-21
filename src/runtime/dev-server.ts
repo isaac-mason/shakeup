@@ -1,9 +1,7 @@
-import { analyze, createSemantic } from './analysis/semantic.ts';
-import type { HmrUpdate } from './environment.ts';
-import type { Fs } from './fs.ts';
-import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from './resolve.ts';
-import { EMPTY_MODULE_ID } from './node-resolve.ts';
-import { parse } from './parser';
+import { analyze, createSemantic } from '../analysis/semantic.ts';
+import type { Fs } from '../fs.ts';
+import { EMPTY_MODULE_ID } from '../node-resolve.ts';
+import { parse } from '../parser';
 import {
     compilePipeline,
     type ModuleInfo,
@@ -15,9 +13,11 @@ import {
     runModuleParsed,
     runResolveId,
     runTransform,
-} from './plugin.ts';
-import type { SourceMap } from './sourcemap.ts';
-import { devTransform, type HmrInfo } from './transform.ts';
+} from '../plugin.ts';
+import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
+import type { SourceMap } from '../sourcemap.ts';
+import { devTransform, type HmrInfo } from '../transform.ts';
+import type { HmrUpdate } from './environment.ts';
 
 /** Resolution result: a module id to evaluate through the graph, or an external
  *  specifier the runner native-imports. */
@@ -334,7 +334,14 @@ export function createDevServer(options: DevServerOptions): DevServer {
         const known = graph.get(id);
         if (known !== undefined && known.hash !== 0 && known.errors.length === 0) {
             perf.cacheHits++;
-            return { code: known.code, map: known.map, deps: known.deps, dynamicDeps: known.dynamicDeps, hmr: known.hmr, errors: [] };
+            return {
+                code: known.code,
+                map: known.map,
+                deps: known.deps,
+                dynamicDeps: known.dynamicDeps,
+                hmr: known.hmr,
+                errors: [],
+            };
         }
 
         const tIo = performance.now();
@@ -342,7 +349,8 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
-            (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ?? (await fs.read(id));
+            (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ??
+            (await fs.read(id));
         perf.ioMs += performance.now() - tIo;
         if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
 

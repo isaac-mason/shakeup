@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
-import { createDevServer } from '../src/dev-server.ts';
+import { createDevServer } from '../src/runtime/dev-server.ts';
 import { createMemoryFs, type Fs } from '../src/fs.ts';
-import { createModuleRunner } from '../src/module-runner.ts';
+import { createModuleRunner } from '../src/runtime/module-runner.ts';
 import { css } from '../src/plugins/css.ts';
 
 const FILES = {

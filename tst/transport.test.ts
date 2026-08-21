@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDevServer } from '../src/dev-server.ts';
+import { createDevServer } from '../src/runtime/dev-server.ts';
 import type { Fs } from '../src/fs.ts';
-import { attachEnvironment, connectEnvironment, createEnvironmentBridge, type TransportFrame } from '../src/transport.ts';
+import { attachEnvironment, connectEnvironment, createEnvironmentBridge, type TransportFrame } from '../src/runtime/transport.ts';
 
 /** Wire an environment to the dev server over an in-process frame transport (the
  *  same protocol a MessagePort would carry between realms). */

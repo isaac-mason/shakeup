@@ -1,7 +1,7 @@
+import type { HmrInfo } from '../transform.ts';
 import type { FetchResult } from './dev-server.ts';
 import type { ImportMetaInit, ModuleEvaluator, ModuleRunner, ResolveId } from './module-runner.ts';
 import { createModuleRunner } from './module-runner.ts';
-import type { HmrInfo } from './transform.ts';
 
 const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
 

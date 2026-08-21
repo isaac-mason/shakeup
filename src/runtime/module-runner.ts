@@ -1,4 +1,4 @@
-import type { SourceMap } from './sourcemap.ts';
+import type { SourceMap } from '../sourcemap.ts';
 
 /** Resolve a specifier (as written) from an importer to a module id, or mark it
  *  external (native-imported, not evaluated through the graph). */
