@@ -1,9 +1,9 @@
 import { N, type Node } from './ast.ts';
 
 /**
- * JSX text/name utilities shared by the printer's JSX lowering (`print/print-jsx.ts`): entity
- * decoding, whitespace normalization, attribute-key rendering, and the static-children / key-after-
- * spread predicates. Pure string/node helpers, no emit state.
+ * JSX text/name utilities used by the JSX lowering pass (`passes/lower-jsx.ts`): entity decoding,
+ * whitespace normalization, attribute-key rendering, and the static-children predicate. Pure
+ * string/node helpers, no emit state.
  */
 
 const JSX_NAMED_ENTITIES: Record<string, string> = {
@@ -79,17 +79,4 @@ export function attrKeyText(name: Node): string {
 export function childrenAreStatic(childTexts: string[]): boolean {
     if (childTexts.length > 1) return true;
     return childTexts.length === 1 && childTexts[0].startsWith('...');
-}
-
-/** true when a `key` attribute appears AFTER a spread — forcing the classic `createElement` form. */
-export function attrsHaveKeyAfterSpreadEmit(attrs: Node[]): boolean {
-    let sawSpread = false;
-    for (const a of attrs) {
-        if (a.type === N.JSXSpreadAttribute) sawSpread = true;
-        else if (a.type === N.JSXAttribute) {
-            const name = a.data.name;
-            if (sawSpread && name.type === N.JSXIdentifier && name.name === 'key') return true;
-        }
-    }
-    return false;
 }

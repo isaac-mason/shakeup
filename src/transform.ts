@@ -1,6 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
 import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './ast';
-import { attrsHaveKeyAfterSpreadEmit } from './jsx-text';
 import { type JSXOptions, resolveJSXOptions } from './module-graph';
 import { parse } from './parser';
 import { makeJsxLower } from './passes/lower-jsx';
@@ -83,9 +82,6 @@ type RunnerCtx = {
     exportEntries: string[];
     hmr: HmrInfo;
     importIdx: number;
-    // Detection folded into this traversal (was 2 standalone walks: scanJSX + collectUnsupported).
-    hasJSX: boolean;
-    needsCreateElement: boolean;
     /** unsupported constructs (dev errors on these): start offset + reason. */
     unsupported: { pos: number; msg: string }[];
 };
@@ -104,8 +100,6 @@ function createRunnerCtx(code: string, semantic: Semantic): RunnerCtx {
         exportEntries: [],
         hmr: { selfAccepts: false, acceptedDeps: [] },
         importIdx: 0,
-        hasJSX: false,
-        needsCreateElement: false,
         unsupported: [],
     };
 }
@@ -418,14 +412,6 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
         }
         case N.TaggedTemplateExpression:
             if (n.data.tag.type === N.IdentifierReference) ctx.calleeIdents.add(n.data.tag);
-            return;
-        // Detection folded in (no separate scanJSX / collectUnsupported walk):
-        case N.JSXElement:
-        case N.JSXFragment:
-            ctx.hasJSX = true;
-            return;
-        case N.JSXOpeningElement:
-            if (attrsHaveKeyAfterSpreadEmit(n.data.attributes)) ctx.needsCreateElement = true;
             return;
         case N.TSModuleDeclaration:
             if (!n.data.declare)
