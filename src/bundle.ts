@@ -13,7 +13,8 @@ import {
     type ParseStats,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
-import { buildGraph, type GraphOptions, resolveEmittedFileName, toModuleInfo } from './module-graph';
+import { buildGraph, resolveEmittedFileName, toModuleInfo } from './module-graph';
+import type { GraphOptions } from './resolve';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,

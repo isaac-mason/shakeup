@@ -1,6 +1,6 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
 import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './ast';
-import { type JSXOptions, resolveJSXOptions } from './module-graph';
+import { type JSXOptions, resolveJSXOptions } from './resolve';
 import { parse } from './parser';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';

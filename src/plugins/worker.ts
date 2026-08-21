@@ -1,5 +1,5 @@
 import { bundle } from '../bundle';
-import type { JSXOptions } from '../module-graph';
+import type { JSXOptions } from '../resolve';
 import type { Plugin } from '../plugin';
 
 /** Virtual-id prefixes for a resolved `?worker` entry — inline (blob) vs chunk (emitted file). */
