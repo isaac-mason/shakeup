@@ -1,7 +1,7 @@
 import { symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { basenameOf, dirnameOf, relativePath } from './fs';
+import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
 import {
     externalKey,
     type Graph,
@@ -282,6 +282,27 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     return map;
 }
 
+/** Generate-stage asset emit (rolldown finalizes assets in generate, not scan): read each resolved
+ *  `new-url` asset's bytes, content-hash them into an output fileName, register it in `graph.emitted`,
+ *  and record `assetFileName` for the `new URL(…, import.meta.url)` rewrite. Scan only resolved the
+ *  path. A read failure goes to `graph.errors` (surfaced by the caller's post-buildGraph error gate). */
+async function emitAssets(graph: Graph, fs: Fs): Promise<void> {
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.kind !== 'new-url' || rec.assetPath === undefined) continue;
+            const bytes = await fs.read(rec.assetPath);
+            if (bytes === null) {
+                graph.errors.push(`cannot load asset '${rec.specifier}' from '${mod.id}'`);
+                continue;
+            }
+            const name = rec.assetPath.slice(rec.assetPath.lastIndexOf('/') + 1);
+            const fileName = resolveEmittedFileName({ type: 'asset', name, source: bytes });
+            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, bytes);
+            rec.assetFileName = fileName;
+        }
+    }
+}
+
 /** Drop an external import's emitted local when it is side-effect-free AND no live statement
  *  references it — rolldown's model: an external binding is emitted iff it's referenced (in
  *  `reference_needed_symbols` = treeshake's `liveRefs`) OR its module is side-effectful. An external
@@ -402,6 +423,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     const timer = options.timer ?? Timer.init(true);
     Timer.start(timer, 'graph');
     graph = await buildGraph(options, pipeline);
+    // Generate-stage asset emit: read + content-hash resolved `new-url` assets (scan only resolved
+    // their paths). Before the error gate so an asset load failure surfaces like a scan error.
+    await emitAssets(graph, options.fs);
     Timer.end(timer, 'graph');
     if (graph.errors.length > 0 || graph.entries.length === 0) {
         return {

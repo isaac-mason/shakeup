@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
+import { buildGraph } from '../src/scan.ts';
 
 const build = async (files: Record<string, string>) => {
     const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });
@@ -58,5 +59,19 @@ describe('new URL(…, import.meta.url) asset scanning', () => {
             '/logo.png': PNG,
         });
         expect(result.assets ?? []).toHaveLength(0);
+    });
+
+    it('scan resolves the asset path but does NOT emit it — read/hash is the generate stage', async () => {
+        const graph = await buildGraph({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const logo = new URL("./logo.png", import.meta.url);', '/logo.png': PNG }),
+            external: [],
+        });
+        const rec = graph.modules.flatMap((m) => m.importRecords).find((r) => r.kind === 'new-url');
+        // Scan resolved the path…
+        expect(rec?.assetPath).toBe('/logo.png');
+        // …but did not read/hash/emit — that's the generate-stage `emitAssets` pass (bundle).
+        expect(rec?.assetFileName).toBeUndefined();
+        expect(graph.emitted.size).toBe(0);
     });
 });

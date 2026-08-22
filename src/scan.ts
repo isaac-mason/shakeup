@@ -818,22 +818,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             });
         }
         for (const rec of mod.importRecords) {
-            // `new URL('./x', import.meta.url)` asset: resolve to a real file, read + emit its bytes
-            // as a content-hashed output, and record the emitted fileName for the specifier rewrite.
-            // It is NOT a JS module — no parse, no chunk, no graph edge.
+            // `new URL('./x', import.meta.url)` asset: SCAN only resolves the target to a real path
+            // (resolution is scan's job); the generate-stage `emitAssets` pass reads + content-hashes
+            // + emits it. It is NOT a JS module — no parse, no chunk, no graph edge.
             if (rec.kind === 'new-url') {
                 const hit = await resolveFn(rec.specifier, id, { isEntry: false, kind: 'import-statement' });
                 if (typeof hit !== 'string') continue; // unresolved → leave the `new URL(...)` verbatim
-                const assetPath = normalizedResolve.symlinks ? ((await fs.realpath?.(hit)) ?? hit) : hit;
-                const bytes = await fs.read(assetPath);
-                if (bytes === null) {
-                    graph.errors.push(`cannot load asset '${rec.specifier}' from '${id}'`);
-                    continue;
-                }
-                const name = assetPath.slice(assetPath.lastIndexOf('/') + 1);
-                const fileName = resolveEmittedFileName({ type: 'asset', name, source: bytes });
-                if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, bytes);
-                rec.assetFileName = fileName;
+                rec.assetPath = normalizedResolve.symlinks ? ((await fs.realpath?.(hit)) ?? hit) : hit;
                 continue;
             }
             if (isExternal(options, rec.specifier) || pluginExternals.has(rec.specifier)) {

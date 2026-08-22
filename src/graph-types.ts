@@ -35,9 +35,13 @@ export type ImportRecord = {
      *  specifier is also imported statically (so `kind` is `static`). Drives export-map seeding
      *  for the `import()` → `Promise.resolve(ns)` emit without re-walking the AST at link time. */
     hasDynamicLiteral: boolean;
+    /** For a `new-url` asset edge: the resolved real path of the asset, set by SCAN (resolution is
+     *  scan's job). Undefined = unresolved (the `new URL(...)` is left verbatim). The generate-stage
+     *  `emitAssets` pass reads + content-hashes this into {@link assetFileName}. */
+    assetPath?: string;
     /** For a `new-url` asset edge: the content-hashed output fileName the asset was emitted as
-     *  (per-build, not cached). The emit rewrites the `new URL('…', import.meta.url)` specifier to
-     *  this. Undefined until the asset resolves + emits; unset means unresolved (left verbatim). */
+     *  (per-build, not cached). Set by the generate-stage `emitAssets` pass (bundle.ts) from
+     *  {@link assetPath}; the emit rewrites the `new URL('…', import.meta.url)` specifier to this. */
     assetFileName?: string;
 };
 
