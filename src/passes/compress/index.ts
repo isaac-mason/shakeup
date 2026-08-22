@@ -18,25 +18,34 @@ import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
+import { deadCode } from './dead-code.ts';
 import { dropDebugger } from './drop-debugger.ts';
+import { foldConstants } from './fold-constants.ts';
 
-/** The enabled compress passes, in application order. New passes (dead-code, fold-constants, …)
- *  register here; the fixed-point loop re-runs the whole set until nothing changes. */
-const PASSES: Visitor[] = [dropDebugger, substituteAlternateSyntax];
+/** Passes run to a FIXED POINT — they compose productively (fold turns `1<2`→`true`, dead-code then
+ *  collapses `if(true)`), keeping booleans in their CANONICAL `true`/`false` form so fold-constants
+ *  can reason about them. */
+const LOOP_PASSES: Visitor[] = [dropDebugger, deadCode, foldConstants];
+
+/** Passes run ONCE, after the loop settles — final byte-shaving substitutions that must NOT re-enter
+ *  the loop. `substituteAlternateSyntax` (`true`→`!0`) is the canonical example: inside the loop it
+ *  would ping-pong forever against fold-constants (`!0`→`true`), so it runs last, once. */
+const FINAL_PASSES: Visitor[] = [substituteAlternateSyntax];
 
 /** Safety cap on the fixed-point loop (terser uses a similar bound) — a pass pair that oscillates
  *  never hangs the build. */
 const MAX_ITERS = 8;
 
-/** Run the compress passes over `program` to a fixed point. Returns a FRESH {@link Semantic}
- *  rebuilt from the compressed AST when anything changed (the caller swaps it in so all downstream
- *  sym-id lookups stay consistent), or `null` when the program was already minimal. */
+/** Run the compress passes over `program` (loop to a fixed point, then the one-shot final pass).
+ *  Returns a FRESH {@link Semantic} rebuilt from the compressed AST when anything changed (the caller
+ *  swaps it in so all downstream sym-id lookups stay consistent), or `null` when nothing changed. */
 export function runCompress(program: Node, semantic: Semantic): Semantic | null {
     let any = false;
     for (let i = 0; i < MAX_ITERS; i++) {
-        if (!traverse(program, semantic, PASSES)) break;
+        if (!traverse(program, semantic, LOOP_PASSES)) break;
         any = true;
     }
+    if (traverse(program, semantic, FINAL_PASSES)) any = true;
     if (!any) return null;
     const fresh = createSemantic();
     analyze(fresh, program);
