@@ -17,11 +17,12 @@
 import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
+import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { dropDebugger } from './drop-debugger.ts';
 
 /** The enabled compress passes, in application order. New passes (dead-code, fold-constants, …)
  *  register here; the fixed-point loop re-runs the whole set until nothing changes. */
-const PASSES: Visitor[] = [dropDebugger];
+const PASSES: Visitor[] = [dropDebugger, substituteAlternateSyntax];
 
 /** Safety cap on the fixed-point loop (terser uses a similar bound) — a pass pair that oscillates
  *  never hangs the build. */
