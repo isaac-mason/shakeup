@@ -1,6 +1,6 @@
-// join-vars + sequences (terser `join_vars` + `sequences`): two adjacency-only statement-list
-// rewrites that collapse runs of trivially-mergeable statements into one, shrinking output without
-// touching evaluation order.
+// join-vars + sequences + statement-fusion (terser `join_vars`/`sequences`, oxc
+// `minimize_statements`): adjacency-only statement-list rewrites that collapse runs of trivially-
+// mergeable statements into one, shrinking output without touching evaluation order.
 //
 //   1. JOIN-VARS — a run of consecutive `VariableDeclaration`s of the SAME `kind` (`var`+`var`,
 //      `let`+`let`, `const`+`const`), with NOTHING between them, merges its declarators into the
@@ -9,6 +9,14 @@
 //   2. SEQUENCES — a run of consecutive `ExpressionStatement`s folds into one `ExpressionStatement`
 //      wrapping a `SequenceExpression`: `a(); b(); c();` → `a(),b(),c();`. Comma-operator order is
 //      the source order, so effects are preserved.
+//   3. FUSION (oxc `minimize_statements.rs`) — a run of `ExpressionStatement`s IMMEDIATELY followed
+//      by a control statement that carries an expression folds those statements INTO that expression
+//      via a leading `SequenceExpression`, all in source (comma) order:
+//        - `a(); b(); return x;`  → `return (a(), b(), x);`      (`:121-142,229-248`)
+//        - `a(); b(); throw x;`   → `throw (a(), b(), x);`       (same shape)
+//        - `a(); if (t) …`        → `if ((a(), t)) …`            (`:815-822`)
+//      Comma order = source order, so the folded effects run in exactly the same sequence and the
+//      control transfer still happens after all of them — identical observable behavior.
 //
 // LANDMINES / conservative bails:
 //   - Only ADJACENT SAME-KIND declarations join. `var` then `let` is NOT mergeable (different kind);
@@ -18,20 +26,29 @@
 //   - This AST has no `directive` node — a "use strict" prologue is an `ExpressionStatement` whose
 //     expression is a `StringLiteral`. Folding one into a comma sequence would demote it from a
 //     directive to an ordinary string expression (silently dropping strict mode), so we treat a
-//     string-literal expression statement as UN-foldable and let it break the run.
-//   - SEQUENCES only ever fold `ExpressionStatement`s (never a declaration, control-flow, or any
-//     other statement). Since we produce a statement-level sequence, no extra parens are needed; the
-//     printer parenthesizes sub-expressions (e.g. a nested sequence / assignment) as required.
+//     string-literal expression statement as UN-foldable: it never folds into a sequence NOR into a
+//     following return/throw/if — it breaks any preceding run.
+//   - FUSION only ever folds `ExpressionStatement`s (never a declaration, control-flow, or any other
+//     statement) into the control statement — the same conservative rule as SEQUENCES. A bare
+//     `return;` has NO argument to fold into, so we SKIP fusing into it (v1 leaves `a(); return;`
+//     as-is rather than rewriting to `return a();`). `throw` always carries an argument.
+//   - We build real `SequenceExpression` nodes; the printer parenthesizes the return/throw argument
+//     and the if-test when they are a sequence. When the sole preceding statement is ITSELF a comma
+//     sequence (the SEQUENCES pass ran first and merged `a();b();` → `a(),b();`), we splice its
+//     elements in so we get one flat `(a(), b(), x)` rather than a nested `((a(), b()), x)`.
 //   - We rebuild the list into a fresh array and assign (dead-code's pattern) — never splice a
 //     possibly-frozen shared array in place.
 import { N, type Node, node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
-// Narrow views for the two data shapes we read off already-`.type`-checked nodes (the codebase's
+// Narrow views for the data shapes we read off already-`.type`-checked nodes (the codebase's
 // `(node.data as {…})` idiom — sound because each access is guarded by a matching type check).
 type VarDeclData = { declarations: Node[]; kind: 'var' | 'let' | 'const'; declare: boolean };
 type ExprStmtData = { expression: Node };
+type SeqData = { expressions: Node[] };
+type ArgData = { argument: Node | null };
+type IfData = { test: Node };
 
 /** A string-literal expression statement is (potentially) a directive prologue in this AST, which has
  *  no dedicated directive node. Folding it into a comma sequence would strip its directive meaning, so
@@ -69,6 +86,50 @@ function mergeExprRun(body: Node[], i: number, j: number): Node {
     return create.ExpressionStatement(first.start, last.end, 0, seq);
 }
 
+/** A statement foldable into a following control statement (return/throw/if) is exactly a non-directive
+ *  `ExpressionStatement` — the same conservative rule the SEQUENCES fold uses. Declarations, nested
+ *  control-flow, and "use strict"-style directives are never folded. */
+function isFusableExpr(stmt: Node): boolean {
+    return stmt.type === N.ExpressionStatement && !isDirectiveLike(stmt);
+}
+
+/** Collect the expressions of `body[i..j)` (all fusable expression statements) plus a trailing `tail`
+ *  expression, flattening any statement that is already a `SequenceExpression` so the result is a single
+ *  flat comma list `(e0, e1, …, tail)` in source order — never a nested `((e0, e1), tail)`. */
+function collectFusedExprs(body: Node[], i: number, j: number, tail: Node): Node[] {
+    const exprs: Node[] = [];
+    for (let k = i; k < j; k++) {
+        const e = (body[k].data as ExprStmtData).expression;
+        if (e.type === N.SequenceExpression) exprs.push(...(e.data as SeqData).expressions);
+        else exprs.push(e);
+    }
+    if (tail.type === N.SequenceExpression) exprs.push(...(tail.data as SeqData).expressions);
+    else exprs.push(tail);
+    return exprs;
+}
+
+/** Fuse a run `body[i..j)` of fusable expression statements into the argument of the return/throw
+ *  statement `ctrl` (which MUST have an argument): `a(); b(); return x;` → `return (a(), b(), x);`.
+ *  Span covers the first folded statement → the control statement. */
+function fuseIntoArg(body: Node[], i: number, j: number, ctrl: Node): Node {
+    const first = body[i];
+    const arg = (ctrl.data as ArgData).argument as Node;
+    const seq = create.SequenceExpression(first.start, ctrl.end, 0, collectFusedExprs(body, i, j, arg));
+    return ctrl.type === N.ReturnStatement
+        ? create.ReturnStatement(first.start, ctrl.end, 0, seq)
+        : create.ThrowStatement(first.start, ctrl.end, 0, seq);
+}
+
+/** Fuse a run `body[i..j)` of fusable expression statements into the test of the if statement `ctrl`:
+ *  `a(); if (t) …` → `if ((a(), t)) …`. Consequent/alternate are carried over untouched. Span covers
+ *  the first folded statement → the if statement. */
+function fuseIntoIf(body: Node[], i: number, j: number, ctrl: Node): Node {
+    const first = body[i];
+    const data = ctrl.data as IfData & { consequent: Node; alternate: Node | null };
+    const seq = create.SequenceExpression(first.start, ctrl.end, 0, collectFusedExprs(body, i, j, data.test));
+    return create.IfStatement(first.start, ctrl.end, 0, seq, data.consequent, data.alternate);
+}
+
 /** Two adjacent statements join under join-vars iff both are `VariableDeclaration`s of the SAME kind.
  *  (`declare` doesn't matter for mergeability — it's a TS-only flag; adjacent same-kind decls always
  *  share it in practice, and we carry the first's forward.) */
@@ -101,10 +162,27 @@ function rewriteList(body: Node[]): boolean {
                 continue;
             }
         }
-        // SEQUENCES: extend a run of foldable (non-directive) expression statements.
-        if (stmt.type === N.ExpressionStatement && !isDirectiveLike(stmt)) {
+        // Extend a run of foldable (non-directive) expression statements once, then decide how it ends:
+        // FUSION into a following control statement takes priority, else SEQUENCES folds a run of ≥2.
+        if (isFusableExpr(stmt)) {
             let j = i + 1;
-            while (j < body.length && body[j].type === N.ExpressionStatement && !isDirectiveLike(body[j])) j++;
+            while (j < body.length && isFusableExpr(body[j])) j++;
+            const next = j < body.length ? body[j] : null;
+            // FUSION #1 — expr(s) → return/throw with an argument: fold into the argument.
+            if (next && (next.type === N.ReturnStatement || next.type === N.ThrowStatement) && (next.data as ArgData).argument) {
+                out.push(fuseIntoArg(body, i, j, next));
+                changed = true;
+                i = j + 1; // consume the run AND the control statement
+                continue;
+            }
+            // FUSION #2 — expr(s) → if-test: fold into the test.
+            if (next && next.type === N.IfStatement) {
+                out.push(fuseIntoIf(body, i, j, next));
+                changed = true;
+                i = j + 1;
+                continue;
+            }
+            // SEQUENCES: no fusable control target follows — fold a run of ≥2 into one comma sequence.
             if (j - i >= 2) {
                 out.push(mergeExprRun(body, i, j));
                 changed = true;
