@@ -16,7 +16,17 @@
 //    exactly is a minefield; we skip it wholesale.
 //  - Unary: `-`/`+`/`~` on a numeric literal; `!` on a boolean/number/string/null literal; `typeof`
 //    on any recognised literal → its type string. All gated by the same round-trip check.
-//  - Anything touching an identifier, member, call, template, regexp, or BigInt literal bails.
+//  - `typeof <object/array/function/arrow/regexp literal>` → `"object"`/`"function"` — the type is
+//    statically known WITHOUT evaluating the argument, but ONLY when that literal is side-effect-free
+//    (`isPureExpr`): `typeof {a:foo()}` must NOT fold, since that would drop the `foo()` call.
+//  - `.length` on a string literal (`"abc".length`→`3`) or on a PURE array literal (`[a,b].length`→`2`;
+//    a `[...x]` spread or any side-effecting element bails via `isPureExpr` — spread makes the length
+//    unknown, an impure element must not be dropped). Static member only (`.length`), never `?.`.
+//  - `str[i]` — an in-range non-negative INTEGER index into a string literal (`"abc"[0]`→`"a"`). Array
+//    index is deliberately NOT folded (an element is an arbitrary expression; skipped for v1).
+//  - Anything touching an identifier, call, template, or BigInt literal bails; member/regexp fold only
+//    in the exact static shapes above.
+import { isPureExpr } from '../../analysis/effects.ts';
 import { N, type Node, set } from '../../ast.ts';
 import { hookTable, type Visitor } from '../traverse.ts';
 
@@ -92,13 +102,62 @@ function boolCoerce(n: Node): boolean | null {
     return null;
 }
 
-// `typeof <literal>` → the type string, for the literal kinds we recognise.
+// `typeof <literal>` → the type string, for argument shapes whose type is statically known WITHOUT
+// evaluating anything. Primitive literals are always safe. Object/array/function/arrow/regexp
+// literals have a statically-known `typeof`, but `typeof <expr>` still evaluates `<expr>` for its
+// side effects before discarding the value — folding to a bare string would DROP those effects (e.g.
+// `typeof {a: foo()}` must keep the `foo()` call). So the compound-literal cases fold ONLY when the
+// argument is side-effect-free (`isPureExpr`, which also rejects a spread inside array/object).
 function typeofOf(n: Node): string | null {
     if (isNum(n)) return 'number';
     if (isStr(n)) return 'string';
     if (isBool(n)) return 'boolean';
     if (isNull(n)) return 'object'; // `typeof null === "object"`
+    if (n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression) return isPureExpr(n) ? 'function' : null;
+    if (n.type === N.ArrayExpression || n.type === N.ObjectExpression || n.type === N.RegExpLiteral)
+        return isPureExpr(n) ? 'object' : null;
     return null;
+}
+
+// --- member folding (`.length` / string index) -------------------------------------------------
+// The STATIC length of the object of a `.length` access, or null (bail). A string literal contributes
+// its decoded code-unit length; a PURE array literal (no spread, no side-effecting element — the
+// `isPureExpr` guard covers both) contributes its element count. Impure array bails: dropping it
+// would drop its elements' side effects. Non-integer / >2^53 lengths never arise here (JSON-decoded
+// string length and array element count are always small exact integers).
+function lengthOf(obj: Node): number | null {
+    if (isStr(obj)) {
+        const v = strValue(obj);
+        return v === null ? null : v.length;
+    }
+    if (obj.type === N.ArrayExpression) {
+        return isPureExpr(obj) ? obj.data.elements.length : null;
+    }
+    return null;
+}
+
+// Fold `obj.property` (static member, non-optional) when it is `<literal>.length`.
+function foldStaticMember(n: Node): boolean {
+    const d = n.data as { object: Node; property: Node; optional: boolean };
+    if (d.optional) return false; // `x?.length` — object may be null/undefined; not statically known
+    if (d.property.type !== N.IdentifierName || d.property.name !== 'length') return false;
+    const len = lengthOf(d.object);
+    return len === null ? false : toNum(n, len);
+}
+
+// Fold `obj[index]` (computed member, non-optional) when it is an in-range integer index into a
+// string literal → the single-character string. Array indexing is intentionally NOT folded (an
+// element is an arbitrary expression, and even a literal element is deferred to a later version).
+function foldComputedMember(n: Node): boolean {
+    const d = n.data as { object: Node; expression: Node; optional: boolean };
+    if (d.optional) return false;
+    if (!isStr(d.object) || !isNum(d.expression)) return false;
+    const s = strValue(d.object);
+    const i = numValue(d.expression);
+    if (s === null || i === null) return false;
+    if (!Number.isInteger(i) || i < 0 || i >= s.length) return false; // out-of-range / non-integer → `undefined`, bail
+    toStr(n, s[i]);
+    return true;
 }
 
 // --- binary numeric folding --------------------------------------------------------------------
@@ -220,6 +279,12 @@ export const foldConstants: Visitor = {
         },
         [N.UnaryExpression]: (node, ctx) => {
             if (foldUnary(node)) ctx.replaceWith(node);
+        },
+        [N.StaticMemberExpression]: (node, ctx) => {
+            if (foldStaticMember(node)) ctx.replaceWith(node);
+        },
+        [N.ComputedMemberExpression]: (node, ctx) => {
+            if (foldComputedMember(node)) ctx.replaceWith(node);
         },
     }),
 };
