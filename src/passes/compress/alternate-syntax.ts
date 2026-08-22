@@ -1,17 +1,31 @@
 // B-substitute — substitute alternate (shorter) syntax for equivalent values (esbuild `minifySyntax`,
-// terser `substitute_alternate_syntax`). Fewer bytes, and the substitutions gzip well:
+// terser / oxc `substitute_alternate_syntax`). Fewer bytes, and the substitutions gzip well:
 //   • `true`  → `!0`      (boolean keyword literals — never shadowable, always safe)
 //   • `false` → `!1`
 //   • `undefined` → `void 0`  (ONLY the GLOBAL `undefined`; a locally-shadowed `undefined`, or one
 //     used as a property key/name, is left alone)
+//   • `new Object()` → `{}` ; `new Array()` → `[]`   (global, ZERO args only — `new Array(5)` differs)
+//   • `Boolean(x)` → `!!x`   (global `Boolean`, exactly one non-spread argument)
+//   • `new Error(…)` → `Error(…)`   (global error constructors are `new`-optional; drop the `new`)
+//   • `return undefined;` / `return void 0;` → `return;`   (drop a redundant `undefined` argument)
 //
-// All three yield a `UnaryExpression` whose argument is a `NumericLiteral`. Because we build a real
-// UnaryExpression, the printer's precedence machinery parenthesizes it wherever a unary can't appear
-// bare (`(void 0).x`, `new (void 0)`, …), so the substitution is behavior-preserving in every context.
+// The first three yield a `UnaryExpression` whose argument is a `NumericLiteral`. Because we build a
+// real UnaryExpression, the printer's precedence machinery parenthesizes it wherever a unary can't
+// appear bare (`(void 0).x`, `new (void 0)`, …), so the substitution is behavior-preserving in every
+// context. The constructor/call rewrites likewise build real nodes, so the printer handles context.
+//
+// SHADOW SAFETY: every substitution that NAMES a global (`Object`/`Array`/`Boolean`/`Error`…) only
+// fires when the callee is an IdentifierReference whose `sym === 0` — unresolved, i.e. the true
+// global. A local `let Object = …` (nonzero sym) resolves to that binding and is left untouched. This
+// is the same `sym === 0` test the `undefined` case already relies on.
+//
+// PLACEMENT: this pass runs in FINAL_PASSES — once, after the fixed-point loop settles — so these
+// byte-shaving swaps never re-enter the loop and can't oscillate against fold-constants (`!0`→`true`).
 //
 // SKIPPED for v1: `Infinity` → `1/0` (a BinaryExpression at multiplicative precedence — not always a
 // clean swap in context; deferred, low payoff).
 import { N, type Node, node } from '../../ast.ts';
+import * as create from '../../parser/create.ts';
 import { OP, UnaryExpression } from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -27,6 +41,33 @@ const voidZero = (n: Node): Node => UnaryExpression(n.start, n.end, OP.VOID, num
 /** Is `n` an IdentifierReference to the GLOBAL `undefined`? `sym === 0` = unresolved/global, so a
  *  shadowed `let undefined = …` (nonzero sym) is correctly excluded. */
 const isGlobalUndefined = (n: Node): boolean => n.type === N.IdentifierReference && n.name === 'undefined' && n.sym === 0;
+
+/** Is `callee` an IdentifierReference to the GLOBAL binding named `name`? `sym === 0` = unresolved,
+ *  i.e. not shadowed by any local `let name = …`. Conservative: only the true global qualifies. */
+const isGlobalRef = (callee: Node, name: string): boolean =>
+    callee.type === N.IdentifierReference && callee.name === name && callee.sym === 0;
+
+/** `undefined` OR `void 0` — either spelling of the JS `undefined` value. A `return`ed one is
+ *  redundant (already-substituted `void 0` refs, or hand-written `void 0`, both count). */
+const isUndefinedValue = (n: Node): boolean =>
+    isGlobalUndefined(n) ||
+    (n.type === N.UnaryExpression &&
+        (n.data as { operator: string; argument: Node }).operator === 'void' &&
+        (n.data as { argument: Node }).argument.type === N.NumericLiteral);
+
+/** Error constructors that produce an identical result whether called or constructed — `Error(x)` and
+ *  `new Error(x)` create the same instance, so the `new` is pure byte overhead. (ES spec: each of
+ *  these ordinary constructors creates an instance whether invoked with or without `new`.) */
+const ERROR_CTORS = new Set([
+    'Error',
+    'TypeError',
+    'RangeError',
+    'ReferenceError',
+    'SyntaxError',
+    'EvalError',
+    'URIError',
+    'AggregateError',
+]);
 
 export const substituteAlternateSyntax: Visitor = {
     name: 'substituteAlternateSyntax',
@@ -55,6 +96,48 @@ export const substituteAlternateSyntax: Visitor = {
                 d.shorthand = false;
                 d.value = voidZero(d.value);
             }
+        },
+        // `new Object()` → `{}`, `new Array()` → `[]` (global, ZERO args), and `new <Error>(…)` →
+        // `<Error>(…)` (drop the `new` from a `new`-optional error constructor). Each names a global,
+        // so `isGlobalRef` gates on the unresolved (unshadowed) binding.
+        [N.NewExpression]: (n, ctx: TransformCtx) => {
+            const d = n.data as { callee: Node; arguments: Node[]; typeArguments: Node | null };
+            const args = d.arguments;
+            // `new Object()`/`new Array()` → `{}`/`[]` — ONLY with zero args. `new Array(5)` builds a
+            // length-5 array (NOT `[]`), and `new Object(x)` boxes/returns `x`, so ANY argument bails.
+            if (args.length === 0) {
+                if (isGlobalRef(d.callee, 'Object')) {
+                    ctx.replaceWith(create.ObjectExpression(n.start, n.end, 0, []));
+                    return;
+                }
+                if (isGlobalRef(d.callee, 'Array')) {
+                    ctx.replaceWith(create.ArrayExpression(n.start, n.end, 0, []));
+                    return;
+                }
+            }
+            // `new Error(…)` → `Error(…)`: same instance without `new`. Args (incl. spreads) carry over
+            // verbatim into the call, so no arity reasoning is needed here.
+            if (d.callee.type === N.IdentifierReference && d.callee.sym === 0 && ERROR_CTORS.has(d.callee.name)) {
+                ctx.replaceWith(create.CallExpression(n.start, n.end, 0, d.callee, args, d.typeArguments));
+            }
+        },
+        // `Boolean(x)` → `!!x` (global `Boolean`, EXACTLY one non-spread argument). `Boolean(a, b)`
+        // ignores `b`, but we conservatively bail on any arity ≠ 1; a spread `Boolean(...xs)` has
+        // unknown arity, so it bails too; and an optional call `Boolean?.(x)` is left alone.
+        [N.CallExpression]: (n, ctx: TransformCtx) => {
+            const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
+            if (d.optional || d.arguments.length !== 1 || !isGlobalRef(d.callee, 'Boolean')) return;
+            const arg = d.arguments[0];
+            if (arg.type === N.SpreadElement) return;
+            // `!!x` — inner `!` then outer `!`; the printer parenthesizes the argument as needed.
+            ctx.replaceWith(UnaryExpression(n.start, n.end, OP.NOT, UnaryExpression(arg.start, arg.end, OP.NOT, arg)));
+        },
+        // `return undefined;` / `return void 0;` → `return;` — a ReturnStatement whose argument is the
+        // undefined value yields the same completion value with the argument dropped. (An implicit
+        // `return;` is already argument-less, so there is nothing to do in that case.)
+        [N.ReturnStatement]: (n, _ctx: TransformCtx) => {
+            const d = n.data as { argument: Node | null };
+            if (d.argument !== null && isUndefinedValue(d.argument)) d.argument = null;
         },
     }),
     exit: null,
