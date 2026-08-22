@@ -41,13 +41,21 @@ const MAX_ITERS = 8;
  *  swaps it in so all downstream sym-id lookups stay consistent), or `null` when nothing changed. */
 export function runCompress(program: Node, semantic: Semantic): Semantic | null {
     let any = false;
+    let cur = semantic;
+    const refresh = (): void => {
+        cur = createSemantic();
+        analyze(cur, program);
+    };
     for (let i = 0; i < MAX_ITERS; i++) {
-        if (!traverse(program, semantic, LOOP_PASSES)) break;
+        if (!traverse(program, cur, LOOP_PASSES)) break;
         any = true;
+        // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
+        // reference counts after this round's removals — the loop usually settles in 1–2 rounds.
+        refresh();
     }
-    if (traverse(program, semantic, FINAL_PASSES)) any = true;
-    if (!any) return null;
-    const fresh = createSemantic();
-    analyze(fresh, program);
-    return fresh;
+    if (traverse(program, cur, FINAL_PASSES)) {
+        any = true;
+        refresh();
+    }
+    return any ? cur : null;
 }
