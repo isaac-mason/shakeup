@@ -1,12 +1,15 @@
-// B-cond — minimize-conditions (terser `conditionals`, esbuild if→expr): rewrite an `if` whose
-// branches are single simple statements into the shorter expression/ternary form, preserving
-// evaluation order and short-circuit semantics EXACTLY. A missed rewrite costs bytes; a wrong one is
-// a miscompile, so every shape is matched precisely and everything else bails.
+// B-cond — minimize-conditions (terser `conditionals`, esbuild if→expr, oxc `minimize_if_statement`):
+// rewrite an `if` whose branches are single simple statements into the shorter expression/ternary
+// form, preserving evaluation order and short-circuit semantics EXACTLY. A missed rewrite costs
+// bytes; a wrong one is a miscompile, so every shape is matched precisely and everything else bails.
 //
-// THE THREE REWRITES (v1, deliberately narrow):
+// THE REWRITES (deliberately narrow):
 //   1. `if (a) b();`            (no else, consequent a single ExpressionStatement)
 //        → `a && b();`          (ExpressionStatement wrapping `a && b()`). Short-circuit `&&` runs
 //                                `b()` iff `a` is truthy — identical to the guarded `if`.
+//      NEGATED TEST: `if (!a) b();` → `a || b();` — we DROP the `!` and flip `&&`→`||` over the
+//      un-negated operand (oxc `minimize_if_statement.rs:22-27`). `a || b()` runs `b()` iff `a` is
+//      falsy, exactly `if (!a)`. Fewer bytes than `!a && b()`.
 //   2. `if (a) b(); else c();`  (BOTH branches a single ExpressionStatement)
 //        → `a ? b() : c();`     (ExpressionStatement wrapping a ConditionalExpression). Same taken
 //                                branch, same single evaluation of `a`.
@@ -14,18 +17,29 @@
 //        → `return a ? x : y;`  (one ReturnStatement over a ternary). Same value, same order.
 //      Also `if (a) return x; return y;` (else-less, immediately followed by a `return <arg>` in the
 //      SAME statement list) folds into `return a ? x : y;`, consuming the trailing return.
+//   4. `if (a) {}` / `if (a);`  (empty consequent — empty block or empty statement — and NO else)
+//        → `a;`                 (ExpressionStatement wrapping the test, run for its side effects).
+//                                The test `a` MUST still be evaluated (that's the only observable
+//                                effect left), so we keep it (oxc `minimize_if_statement.rs:43-50`).
+//   5. `if (a) {} else b();`    (empty consequent AND an else that is a single ExpressionStatement)
+//        → `a || b();`          (ExpressionStatement wrapping `a || b()`). The empty consequent means
+//                                the truthy branch does nothing, so `b()` runs iff `a` is falsy —
+//                                exactly `a || b()`, with `a` evaluated once (`:51-63`).
 //
 // LANDMINES / conservative bails (a bail is always correct):
 //   - Branches must be EXACTLY the single simple statement shapes above. A single-statement
 //     `BlockStatement` (`{ b(); }`) is unwrapped and accepted; a block with 0 or >1 statements, or
 //     any declaration (`var`/`let`/`const`/`function`/`class`), bails — those change scope/semantics.
+//     (The empty-consequent rewrites 4/5 are the ONE place an empty block is welcome, not a bail.)
 //   - `return;` (no argument) bails from rewrite 3: `a ? undefined : y` is NOT `return;` semantics
 //     when mixed, and building a ternary over a missing arg is meaningless.
 //   - `else if` chains bail unless the terminal `else` is itself a simple single statement (which the
 //     unwrap naturally handles — an `else if` is an IfStatement, not one of the accepted shapes, so
 //     it bails). We never restructure a chain.
+//   - The empty-consequent rewrites NEVER drop the test — `a` is evaluated for side effects even
+//     when the body is empty; dropping it would be a miscompile if `a` is impure.
 //   - Real nodes are built (never hand-formatted text) so the printer's precedence machinery adds
-//     exactly the parens it needs: `(a, b) && c()`, `a ? b : (c, d)`, etc.
+//     exactly the parens it needs: `(a, b) && c()`, `a ? b : (c, d)`, `(a, b) || c()`, etc.
 import { N, type Node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -35,6 +49,23 @@ type ExprStmtData = { expression: Node };
 type ReturnData = { argument: Node | null };
 type BlockData = { body: Node[] };
 type SwitchCaseData = { consequent: Node[] };
+type UnaryData = { operator: string; prefix: boolean; argument: Node };
+
+/** Is `branch` an empty consequent — an empty `BlockStatement` (`{}`) or a bare `EmptyStatement`
+ *  (`;`)? These carry no runtime effect, so an `if` with such a consequent reduces to just its test
+ *  (rewrite 4) or a `test || else` (rewrite 5). A non-empty block or any statement is NOT empty. */
+function isEmptyBranch(branch: Node): boolean {
+    if (branch.type === N.EmptyStatement) return true;
+    return branch.type === N.BlockStatement && (branch.data as BlockData).body.length === 0;
+}
+
+/** If `test` is a logical negation `!x` (a prefix `!` UnaryExpression), return the un-negated operand
+ *  `x`; otherwise `null`. Used to turn `if (!a) …` into the flipped `||` form over `a`. */
+function negatedOperand(test: Node): Node | null {
+    if (test.type !== N.UnaryExpression) return null;
+    const d = test.data as UnaryData;
+    return d.operator === '!' ? d.argument : null;
+}
 
 /** Unwrap a branch to the single statement it actually runs: a bare statement is itself; a
  *  `BlockStatement` with exactly one statement is that statement. Anything else (empty block,
@@ -61,16 +92,42 @@ function asReturnArg(branch: Node): Node | null {
     return (s.data as ReturnData).argument; // null for `return;` → caller bails
 }
 
+/** Rewrite an `if` with an EMPTY consequent (rewrites 4 & 5), or `null` if the consequent isn't empty.
+ *   - no else:  `if (a) {}` / `if (a);` → `a;` (the test as an ExpressionStatement, for side effects).
+ *   - with else: `if (a) {} else b();` → `a || b();` (`b()` runs iff `a` is falsy). The else must be a
+ *     single ExpressionStatement, else we bail. The test is NEVER dropped — `a` is still evaluated. */
+function ifEmptyConsequent(n: Node): Node | null {
+    const d = n.data as IfData;
+    if (!isEmptyBranch(d.consequent)) return null;
+    if (d.alternate === null) {
+        // `if (a) {}` → `a;` — keep the test for its side effects.
+        return create.ExpressionStatement(n.start, n.end, 0, d.test);
+    }
+    // `if (a) {} else b();` → `a || b();`
+    const alt = asExprStmt(d.alternate);
+    if (alt === null) return null;
+    const logical = create.LogicalExpression(n.start, n.end, '||', d.test, alt);
+    return create.ExpressionStatement(n.start, n.end, 0, logical);
+}
+
 /** Rewrite `if (test) <exprStmt> else <exprStmt>` → `test ? c : a`, or `if (test) <exprStmt>` (no
  *  else) → `test && c`, wrapped in an ExpressionStatement. Returns the replacement or `null` to bail.
- *  Both-branch-return folding is handled separately (needs the statement list for the else-less form). */
+ *  Both-branch-return folding is handled separately (needs the statement list for the else-less form).
+ *
+ *  NEGATED-TEST flip (no-else only): if the test is `!x`, emit `x || c` — drop the `!` and flip the
+ *  operator (oxc). `x || c` runs `c` iff `x` is falsy, exactly `if (!x) c`. We don't apply this to the
+ *  else form (it'd need branch-swapping, and the ternary is already minimal). */
 function ifToExprStmt(n: Node): Node | null {
     const d = n.data as IfData;
     const cons = asExprStmt(d.consequent);
     if (cons === null) return null;
     if (d.alternate === null) {
-        // `if (a) b();` → `a && b();`
-        const logical = create.LogicalExpression(n.start, n.end, '&&', d.test, cons);
+        const neg = negatedOperand(d.test);
+        // `if (!a) b();` → `a || b();`   ·   `if (a) b();` → `a && b();`
+        const logical =
+            neg !== null
+                ? create.LogicalExpression(n.start, n.end, '||', neg, cons)
+                : create.LogicalExpression(n.start, n.end, '&&', d.test, cons);
         return create.ExpressionStatement(n.start, n.end, 0, logical);
     }
     // `if (a) b(); else c();` → `a ? b() : c();`
@@ -138,10 +195,16 @@ export const minimizeConditions: Visitor = {
             if (foldIfReturnFollow((n.data as SwitchCaseData).consequent)) ctx.changed = true;
         },
         [N.IfStatement]: (n, ctx) => {
-            // Prefer the return-both rewrite (shortest) when it applies, else the expr/ternary form.
+            // Prefer the return-both rewrite (shortest) when it applies; then the empty-consequent
+            // reduction (`if (a) {}` → `a;` / `a || b()`); else the expr/ternary form.
             const asReturn = ifReturnBoth(n);
             if (asReturn !== null) {
                 ctx.replaceWith(asReturn);
+                return;
+            }
+            const asEmpty = ifEmptyConsequent(n);
+            if (asEmpty !== null) {
+                ctx.replaceWith(asEmpty);
                 return;
             }
             const asExpr = ifToExprStmt(n);
