@@ -120,6 +120,11 @@ export type Graph = {
     /** Module ids (re)parsed this build (cache miss) — a superset of `affected`'s seed that
      *  also includes body-only edits and new modules. `changed ∪ affected` = render-dirty. */
     changed: Set<string>;
+    /** Per-external-specifier side-effect flag (rolldown `moduleSideEffects`): `false` marks an
+     *  external as side-effect-free, so an unreferenced import of it is dropped entirely. Absent =
+     *  the default (side-effectful → always emitted). Set by a plugin `resolveId` returning
+     *  `moduleSideEffects: false`, and for the injected `<src>/jsx-runtime`. */
+    externalSideEffects: Map<string, boolean>;
 };
 
 /** A module's parse/analyze/extract result — everything derived purely from its

@@ -505,12 +505,17 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
         changed: new Set(),
+        externalSideEffects: new Map(),
     };
     const cache = options.cache;
     const fs = memoBuildFs(options.fs);
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
+    // The injected automatic JSX runtime is side-effect-free (conventionally pure), so an unused
+    // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
+    // jsx-runtime special-case (see pruneUnusedExternals).
+    graph.externalSideEffects.set(`${jsxOptions.importSource}/jsx-runtime`, false);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
     // `symlinks:false` disables the realpath deref below (config form only).
@@ -555,6 +560,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (partial.external !== undefined && partial.external !== false) {
                 // true | 'absolute' | 'relative' → external. Treated alike (keep verbatim).
                 pluginExternals.add(specifier);
+                // A plugin may declare the external side-effect-free (rolldown `moduleSideEffects`),
+                // letting an unreferenced import of it drop entirely.
+                if (partial.moduleSideEffects === false) graph.externalSideEffects.set(specifier, false);
                 return false;
             }
             mergeOptions(pendingFor(partial.id), partial);

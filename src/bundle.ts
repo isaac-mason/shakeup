@@ -282,21 +282,20 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     return map;
 }
 
-/** True if the module has at least one live statement containing JSX (so its
- * injected runtime import is genuinely needed). `live === null` = no shaking. */
 /** Drop an external import's emitted local when it is side-effect-free AND no live statement
  *  references it — rolldown's model: an external binding is emitted iff it's referenced (in
- *  `reference_needed_symbols` = treeshake's `liveRefs`) OR its module is side-effectful. The injected
- *  jsx runtime is the only side-effect-free external shakeup produces; authored externals default to
+ *  `reference_needed_symbols` = treeshake's `liveRefs`) OR its module is side-effectful. An external
+ *  is side-effect-free per `graph.externalSideEffects` (rolldown `moduleSideEffects`: the injected
+ *  `<src>/jsx-runtime`, plus anything a plugin declares); authored externals default to
  *  side-effectful, so they're kept. Symbol liveness, not a JSX-specific AST walk. */
 function pruneUnusedExternals(graph: Graph, linked: Linked, liveRefs: Set<number>): void {
-    // packRefs of injected-runtime bindings — the side-effect-free externals.
-    const sideEffectFree = new Set<number>();
+    // Injected runtime symbols are side-effect-free even when their specifier isn't module-level
+    // marked — notably `createElement`, imported from the bare (side-effectful) importSource.
+    const runtimeSyms = new Set<number>();
     for (const mod of graph.modules) {
         const rt = mod.jsxRuntime;
         if (rt === null) continue;
-        for (const sym of [rt.jsx, rt.jsxs, rt.Fragment, rt.createElement])
-            if (sym !== 0) sideEffectFree.add(packRef(mod.idx, sym));
+        for (const sym of [rt.jsx, rt.jsxs, rt.Fragment, rt.createElement]) if (sym !== 0) runtimeSyms.add(packRef(mod.idx, sym));
     }
     // An external (specifier,name) key is kept iff SOME importer needs it (referenced OR side-effectful);
     // drop keys whose every importer is a dead side-effect-free binding.
@@ -308,7 +307,8 @@ function pruneUnusedExternals(graph: Graph, linked: Linked, liveRefs: Set<number
             if (!rec.external) continue;
             const key = externalKey(rec.specifier, imp.name);
             const ref = packRef(mod.idx, sym);
-            if (!sideEffectFree.has(ref) || liveRefs.has(ref)) kept.add(key);
+            const sideEffectFree = graph.externalSideEffects.get(rec.specifier) === false || runtimeSyms.has(ref);
+            if (!sideEffectFree || liveRefs.has(ref)) kept.add(key);
             else candidates.add(key);
         }
     }

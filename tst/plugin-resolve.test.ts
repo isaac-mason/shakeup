@@ -19,7 +19,9 @@ describe('plugin resolve/load contract (R1)', () => {
             resolveId: (_ctx, spec) => (spec === 'virtual:config' ? { id: '\0virtual:config', moduleSideEffects: false } : null),
             load: (_ctx, id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
+        const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
+            virtual,
+        ]);
         const mod = await run(code);
         expect(mod.v).toBe('9.9.9');
     });
@@ -29,9 +31,10 @@ describe('plugin resolve/load contract (R1)', () => {
             name: 'externalize',
             resolveId: (_ctx, spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
         };
-        const { code } = await build({ '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" }, [
-            externalize,
-        ]);
+        const { code } = await build(
+            { '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" },
+            [externalize],
+        );
         expect(code).toContain("from 'lib-esque'");
     });
 
@@ -64,6 +67,31 @@ describe('plugin resolve/load contract (R1)', () => {
         expect(kept.code).toContain('__EFFECT_MARKER__');
     });
 
+    it('external moduleSideEffects: false drops an unreferenced external import (B1)', async () => {
+        // A plugin marks one external side-effect-free and another (default) side-effectful. Both
+        // are imported but never referenced. The pure one's import is dropped entirely; the
+        // side-effectful one is kept — the general form of the jsx-runtime prune.
+        const plugin: Plugin = {
+            name: 'ext-side-effects',
+            resolveId: (_ctx, spec) =>
+                spec === 'clean-lib'
+                    ? { id: 'clean-lib', external: true, moduleSideEffects: false }
+                    : spec === 'sfx-lib'
+                      ? { id: 'sfx-lib', external: true }
+                      : null,
+        };
+        const { code } = await build(
+            {
+                '/main.ts': ["import { a } from 'clean-lib';", "import { b } from 'sfx-lib';", 'export const out = 1;'].join(
+                    '\n',
+                ),
+            },
+            [plugin],
+        );
+        expect(code).not.toContain('clean-lib'); // side-effect-free + unreferenced → gone
+        expect(code).toContain('sfx-lib'); // default side-effectful → kept
+    });
+
     it("moduleSideEffects: 'no-treeshake' keeps every statement", async () => {
         const files = {
             '/main.ts': "import { used } from './lib.ts';\nexport const out = used;",
@@ -93,9 +121,10 @@ describe('plugin resolve/load contract (R1)', () => {
                 final = ctx.getModuleInfo('/lib.ts')?.moduleSideEffects;
             },
         };
-        await build({ '/main.ts': "import { used } from './lib.ts';\nexport const out = used;", '/lib.ts': 'export const used = 1;' }, [
-            layered,
-        ]);
+        await build(
+            { '/main.ts': "import { used } from './lib.ts';\nexport const out = used;", '/lib.ts': 'export const used = 1;' },
+            [layered],
+        );
         expect(final).toBe(false);
     });
 
