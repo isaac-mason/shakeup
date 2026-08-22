@@ -20,13 +20,15 @@ import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { deadCode } from './dead-code.ts';
 import { dropDebugger } from './drop-debugger.ts';
+import { dropUnused } from './drop-unused.ts';
 import { foldConstants } from './fold-constants.ts';
+import { joinVars } from './join-vars.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
 
 /** Passes run to a FIXED POINT — they compose productively (fold turns `1<2`→`true`, dead-code then
  *  collapses `if(true)`), keeping booleans in their CANONICAL `true`/`false` form so fold-constants
  *  can reason about them. */
-const LOOP_PASSES: Visitor[] = [dropDebugger, deadCode, foldConstants, minimizeConditions];
+const LOOP_PASSES: Visitor[] = [dropDebugger, deadCode, foldConstants, minimizeConditions, joinVars, dropUnused];
 
 /** Passes run ONCE, after the loop settles — final byte-shaving substitutions that must NOT re-enter
  *  the loop. `substituteAlternateSyntax` (`true`→`!0`) is the canonical example: inside the loop it

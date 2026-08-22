@@ -112,7 +112,10 @@ describe('minimize-conditions (compress)', () => {
     });
 
     // ---- ADVERSARIAL: multi-statement / declaration branches are NOT collapsed ----------------
-    it('does NOT collapse a multi-statement branch', async () => {
+    it('composes with join-vars: a two-expr branch is sequence-merged then collapsed to `a && (…)`', async () => {
+        // minimize-conditions alone bails on a multi-statement branch, but join-vars first folds the
+        // two `order.push` calls into one comma sequence, so the branch becomes a single statement
+        // and DOES collapse — an emergent, behavior-preserving improvement from pass composition.
         const src = [
             'const order = [];',
             'function go(cond) { if (cond) { order.push(1); order.push(2); } }',
@@ -120,9 +123,9 @@ describe('minimize-conditions (compress)', () => {
             'export const order2 = order;',
         ].join('\n');
         const { compressed, q } = await parity(src, ['order2']);
-        expect(q.order2).toStrictEqual([1, 2]);
-        expect(compressed).toMatch(/\bif\b/); // the if survives untouched
-        expect(compressed).not.toMatch(/&&/);
+        expect(q.order2).toStrictEqual([1, 2]); // order preserved: pushes only when cond truthy
+        expect(compressed).toMatch(/&&/); // collapsed via the sequence-merged branch
+        expect(compressed).not.toMatch(/\bif\s*\(cond\)/);
     });
 
     it('does NOT collapse a branch containing a let/const declaration', async () => {
@@ -139,9 +142,10 @@ describe('minimize-conditions (compress)', () => {
         expect(compressed).toMatch(/\bif\b/);
     });
 
-    it('does NOT collapse a single-statement branch that is a `let` declaration', async () => {
-        // `if (cond) let z = ...` is not valid, so wrap in a block with exactly one decl statement:
-        // unwrapping yields a VariableDeclaration, which is NOT an ExpressionStatement/return → bail.
+    it('composes with drop-unused: an unused-const branch becomes a bare call then collapses', async () => {
+        // The `const z` is never referenced, so drop-unused rewrites `const z = order.push("c")` to the
+        // bare `order.push("c")` (keeping the impure effect); the branch is now a single expression
+        // statement and minimize-conditions collapses it to `cond && order.push("c")`. Behavior-preserving.
         const src = [
             'const order = [];',
             'function go(cond) { if (cond) { const z = order.push("c"); } }',
@@ -149,9 +153,9 @@ describe('minimize-conditions (compress)', () => {
             'export const order2 = order;',
         ].join('\n');
         const { compressed, q } = await parity(src, ['order2']);
-        expect(q.order2).toStrictEqual(['c']);
-        expect(compressed).toMatch(/\bif\b/);
-        expect(compressed).not.toMatch(/&&/);
+        expect(q.order2).toStrictEqual(['c']); // the push still ran (effect preserved), only when cond
+        expect(compressed).toMatch(/&&/);
+        expect(compressed).not.toMatch(/\bif\s*\(cond\)/);
     });
 
     it('does NOT collapse `if (a) return x; return;` (bare trailing return)', async () => {
