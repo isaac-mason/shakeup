@@ -110,7 +110,9 @@ describe('fold-constants (compress)', () => {
     });
 
     it('does NOT fold anything involving an identifier', async () => {
-        const { compressed, out } = await parity('const x = 2; export const out = x + 3;');
+        // A PARAMETER `x` (not a constant — constant-propagation can't inline it) keeps `x + 3` a
+        // live add, isolating fold-constants' "don't fold a non-literal operand" behavior.
+        const { compressed, out } = await parity('export function f(x) { return x + 3; }\nexport const out = f(2);');
         expect(out).toBe(5);
         expect(compressed).toMatch(/x\s*\+\s*3|x\+3/); // the `x + 3` survives (x is not a literal)
     });

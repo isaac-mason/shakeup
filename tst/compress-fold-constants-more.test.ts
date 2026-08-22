@@ -60,7 +60,8 @@ describe('fold-constants — typeof over literals / literal-constructors', () =>
 
     // ---- ADVERSARIAL: must NOT fold ------------------------------------------------------------
     it('does NOT fold typeof <identifier> (not statically known)', async () => {
-        const { compressed } = await parity('const x = 1; export const out = typeof x;', 'number');
+        // A parameter isn't a constant, so constant-propagation can't inline it — `typeof x` stays.
+        const { compressed } = await parity('export function f(x) { return typeof x; }\nexport const out = f(1);', 'number');
         expect(compressed).toMatch(/typeof/); // survives
     });
 
@@ -139,7 +140,8 @@ describe('fold-constants — .length on string / array literals', () => {
     });
 
     it('does NOT fold x.length for an identifier object', async () => {
-        const { compressed } = await parity('const s = "abcd"; export const out = s.length;', 4);
+        // Parameter (non-constant) so `s.length` stays a live member access, not a folded literal.
+        const { compressed } = await parity('export function f(s) { return s.length; }\nexport const out = f("abcd");', 4);
         expect(compressed).toMatch(/\.length/);
     });
 

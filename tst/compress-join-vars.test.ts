@@ -55,22 +55,22 @@ describe('join-vars + sequences (compress)', () => {
     });
 
     it('merges consecutive let declarations, and separately const declarations', async () => {
+        // Non-literal inits (param-derived) so constant-propagation leaves the bindings for join-vars.
         const src = `
-            export function f() {
-                let a = 1;
-                let b = 2;
-                const c = 3;
-                const d = 4;
+            export function f(x) {
+                let a = x + 1;
+                let b = x + 2;
+                const c = x + 3;
+                const d = x + 4;
                 return a + b + c + d;
             }
-            export const out = f();`;
+            export const out = f(10);`;
         const { code, min } = await both(src);
-        expect(min.out).toBe(10);
+        expect(min.out).toBe(50);
         // The two lets fuse to one, the two consts fuse to one.
         expect(code.match(/\blet /g) ?? []).toHaveLength(1);
-        // The two lets fuse into one declaration; the two consts fuse into one declaration.
-        expect(code).toMatch(/let a = 1, b = 2/);
-        expect(code).toMatch(/const c = 3, d = 4/);
+        expect(code).toMatch(/let a = x \+ 1, b = x \+ 2/);
+        expect(code).toMatch(/const c = x \+ 3, d = x \+ 4/);
     });
 
     it('folds consecutive expression statements into one comma sequence', async () => {
@@ -114,21 +114,22 @@ describe('join-vars + sequences (compress)', () => {
 
     // ADVERSARIAL: `var` then `let` are DIFFERENT kinds → must NOT merge into one declaration.
     it('does NOT merge a var declaration with an adjacent let declaration', async () => {
+        // Non-literal inits so constant-propagation leaves both bindings for the (non-)merge check.
         const src = `
-            export function f() {
-                var a = 1;
-                let b = 2;
+            export function f(x) {
+                var a = x + 1;
+                let b = x + 2;
                 return a + b;
             }
-            export const out = f();`;
+            export const out = f(10);`;
         const { code, min } = await both(src);
-        expect(min.out).toBe(3);
+        expect(min.out).toBe(23);
         // Both keywords must remain — no cross-kind fusion.
         expect(code).toMatch(/\bvar /);
         expect(code).toMatch(/\blet /);
         // The var run and the let run are each a single declarator (not fused across kinds).
-        expect(code).not.toMatch(/var a = 1, b = 2/);
-        expect(code).not.toMatch(/let a = 1, b = 2/);
+        expect(code).not.toMatch(/var a = .* b =/);
+        expect(code).not.toMatch(/let a = .* b =/);
     });
 
     // ADVERSARIAL: a non-expression statement between two expression statements breaks the sequence run.

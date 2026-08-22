@@ -145,7 +145,9 @@ describe('convert-to-dotted-properties (compress)', () => {
     });
 
     it('a[dynamicVar] (non-literal computed key) is NOT converted', async () => {
-        const src = ['const o = { k: 4 };', 'const key = "k";', 'export const out = o[key];'].join('\n');
+        // A parameter key (not a constant) stays genuinely dynamic — constant-propagation can't turn
+        // it into a string literal, so dotted-properties correctly leaves `o[key]` computed.
+        const src = ['export function f(o, key) { return o[key]; }', 'export const out = f({ k: 4 }, "k");'].join('\n');
         const code = await assertParity(src);
         expect(code).toContain('[key]');
         expect((await run(code)).out).toBe(4);

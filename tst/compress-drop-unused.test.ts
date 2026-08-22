@@ -73,15 +73,17 @@ describe('drop-unused (compress)', () => {
     });
 
     it('KEEPS a USED local binding', async () => {
+        // Non-literal init (param-derived) so constant-propagation doesn't inline it away — this
+        // isolates drop-unused's "don't remove a referenced binding" behavior.
         const src = `
-            export function f() {
-                const used = 10;
+            export function f(x) {
+                const used = x * 2;
                 return used + 5;   // referenced → must stay
             }
-            export const out = f();`;
+            export const out = f(5);`;
         const { compressed, out } = await parity(src, 15);
         expect(out).toBe(15);
-        expect(compressed).toMatch(/used|10/); // the binding (or its value) is preserved
+        expect(compressed).toMatch(/used/); // the referenced binding is preserved
     });
 
     it('KEEPS an EXPORTED (module-scope) binding even if it looks unused (treeshake owns it)', async () => {
@@ -128,16 +130,17 @@ describe('drop-unused (compress)', () => {
     });
 
     it('KEEPS a binding used only inside a NESTED function/closure', async () => {
+        // Non-literal init so constant-propagation leaves it — isolates the closure-capture case.
         const src = `
-            export function f() {
-                const captured = 99;               // referenced only by the closure below
+            export function f(x) {
+                const captured = x + 98;           // referenced only by the closure below
                 const g = () => captured + 1;
                 return g;
             }
-            export const out = f()();`;
+            export const out = f(1)();`;
         const { compressed, out } = await parity(src, 100);
         expect(out).toBe(100);
-        expect(compressed).toMatch(/captured|99/); // the captured binding survives
+        expect(compressed).toMatch(/captured/); // the captured binding survives
     });
 
     it('treats a self-referencing init (`const x = x`) as used and BAILS', async () => {

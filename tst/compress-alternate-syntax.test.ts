@@ -59,11 +59,11 @@ describe('substitute-alternate-syntax (compress)', () => {
 
     // ── ADVERSARIAL ──────────────────────────────────────────────────────────────────────────────
     it('a locally-shadowed `undefined` is NOT substituted', async () => {
-        // Legal non-strict nested rebind. The inner `undefined` resolves to the local `let`, so it must
-        // print its real value (42), never `void 0`.
-        const src = ['function f() {', '  let undefined = 42;', '  return undefined;', '}', 'export const out = f();'].join('\n');
+        // Legal non-strict nested rebind. A param-derived (non-literal) init so constant-propagation
+        // leaves it — the inner `undefined` resolves to the local, must print its name not `void 0`.
+        const src = ['function f(x) {', '  let undefined = x;', '  return undefined;', '}', 'export const out = f(42);'].join('\n');
         const code = await assertParity(src);
-        // The shadowed reference survives as the name `undefined` (bound to 42), not `void 0`.
+        // The shadowed reference survives as the name `undefined` (bound to x), not `void 0`.
         expect(code).toMatch(/\bundefined\b/);
         expect((await run(code)).out).toBe(42);
     });

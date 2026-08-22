@@ -45,6 +45,25 @@ import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type IfData = { test: Node; consequent: Node; alternate: Node | null };
+
+/** True if `test` is a compile-time constant (literal, or `!<literal>`) — dead-code owns these
+ *  (it eliminates the dead branch). minimize-conditions leaves them alone to avoid stranding a
+ *  `false && …` the branch-elimination can no longer reach. Mirrors dead-code's `constTruthiness`. */
+function isConstantTest(test: Node): boolean {
+    switch (test.type) {
+        case N.BooleanLiteral:
+        case N.NumericLiteral:
+        case N.StringLiteral:
+        case N.NullLiteral:
+            return true;
+        case N.UnaryExpression:
+            return (
+                (test.data as { operator: string }).operator === '!' && isConstantTest((test.data as { argument: Node }).argument)
+            );
+        default:
+            return false;
+    }
+}
 type ExprStmtData = { expression: Node };
 type ReturnData = { argument: Node | null };
 type BlockData = { body: Node[] };
@@ -194,7 +213,14 @@ export const minimizeConditions: Visitor = {
         [N.SwitchCase]: (n, ctx) => {
             if (foldIfReturnFollow((n.data as SwitchCaseData).consequent)) ctx.changed = true;
         },
+    }),
+    // The `if`-shape rewrites run on EXIT — after the test's children are visited, so a constProp
+    // inline of the test (`if (DEBUG)` → `if (false)`) has already happened and the constant-test
+    // guard can defer it to dead-code (rather than converting `if (false){…}` → a stranded `false && …`).
+    exit: hookTable({
         [N.IfStatement]: (n, ctx) => {
+            // A CONSTANT test belongs to dead-code (it eliminates the whole dead branch); leave it.
+            if (isConstantTest((n.data as IfData).test)) return;
             // Prefer the return-both rewrite (shortest) when it applies; then the empty-consequent
             // reduction (`if (a) {}` → `a;` / `a || b()`); else the expr/ternary form.
             const asReturn = ifReturnBoth(n);
@@ -211,5 +237,4 @@ export const minimizeConditions: Visitor = {
             if (asExpr !== null) ctx.replaceWith(asExpr);
         },
     }),
-    exit: null,
 };

@@ -1,6 +1,15 @@
 import { N, type Node } from '../ast.ts';
 
 /**
+ * Whether evaluating this expression MAY have an observable side effect (oxc's
+ * `may_have_side_effects`). The complement of {@link isPureExpr}; named for intent at
+ * movement/compress call sites (a movable expression must not have side effects). Coarser than
+ * oxc's contextual version (no `/*@__PURE__*​/` property-read policy beyond what isPureExpr honors),
+ * which only ever makes it MORE conservative — safe for movement.
+ */
+export const mayHaveSideEffects = (node: Node | null): boolean => !isPureExpr(node);
+
+/**
  * Conservatively true if evaluating this expression has no observable side effects.
  */
 export function isPureExpr(node: Node | null): boolean {

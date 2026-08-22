@@ -18,6 +18,7 @@ import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
+import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
 import { dropDebugger } from './drop-debugger.ts';
@@ -31,6 +32,7 @@ import { minimizeConditions } from './minimize-conditions.ts';
  *  can reason about them. */
 const LOOP_PASSES: Visitor[] = [
     dropDebugger,
+    constProp,
     deadCode,
     foldConstants,
     minimizeConditions,
