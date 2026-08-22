@@ -162,4 +162,28 @@ describe('dead-code elimination (compress)', () => {
         expect(code).not.toMatch(/\bclass C\b/);
         expect((await run(code)).out).toBe('clean');
     });
+
+    // --- unreachable-tail hoisting (oxc-alignment regression) -----------------------------------
+    it('keeps a hoisted `function` in the unreachable tail (used before the terminator)', async () => {
+        // `g` is DECLARED after `return` but hoists to the top of f, so `g()` in the return works.
+        // A naive tail-truncation would drop `function g` → `g()` becomes a ReferenceError.
+        const src = ['export function f() { return g() + 1; function g() { return 41; } }', 'export const out = f();'].join('\n');
+        const code = await build(src);
+        expect((await run(code)).out).toBe(42); // hoisted function preserved
+    });
+
+    it('keeps a hoisted `var` in the unreachable tail (assigned before the terminator)', async () => {
+        // `var x` hoists; `x = 5` (before the return) assigns to the hoisted local. Dropping `var x`
+        // would make `x = 5` an assignment to an undeclared binding → ReferenceError in module/strict.
+        const src = ['export function f() { x = 5; return x; var x; }', 'export const out = f();'].join('\n');
+        const code = await build(src);
+        expect((await run(code)).out).toBe(5); // hoisted var preserved
+    });
+
+    it('still drops a NON-hoisting unreachable tail', async () => {
+        const src = ['export function f() { return 7; globalThis.__DEAD__ = 1; }', 'export const out = f();'].join('\n');
+        const code = await build(src);
+        expect(code).not.toMatch(/__DEAD__/); // dead tail dropped
+        expect((await run(code)).out).toBe(7);
+    });
 });

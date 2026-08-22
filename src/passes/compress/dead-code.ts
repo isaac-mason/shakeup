@@ -139,8 +139,8 @@ function collapseIf(stmt: Node): Node[] | null {
 function rewriteList(body: Node[]): boolean {
     let changed = false;
     const out: Node[] = [];
-    let truncated = false;
-    for (const stmt of body) {
+    for (let i = 0; i < body.length; i++) {
+        const stmt = body[i];
         const collapsed = collapseIf(stmt);
         if (collapsed !== null) {
             for (const s of collapsed) out.push(s);
@@ -148,31 +148,28 @@ function rewriteList(body: Node[]): boolean {
         } else {
             out.push(stmt);
         }
-        // Everything after a terminator in this list is unreachable — stop scanning.
+        // Everything after a terminator in this list is unreachable — drop it. BUT a hoisted
+        // `var`/`function` in that tail still takes effect regardless of position (hoisting), so
+        // dropping it would change semantics (e.g. a `function g` used before the terminator, or a
+        // `var x` assigned earlier). If the tail hoists anything, KEEP it (conservative bail, same
+        // guard collapseIf uses); oxc instead harvests initializer-less var stubs — a future win.
         const last = out.length > 0 ? out[out.length - 1] : null;
         if (last !== null && isTerminator(last)) {
-            truncated = true;
+            const tail = body.slice(i + 1);
+            if (tail.length > 0) {
+                if (anyHoisted(tail)) {
+                    for (const s of tail) out.push(s); // hoisting hazard → keep the unreachable tail
+                } else {
+                    changed = true; // dead tail dropped
+                }
+            }
             break;
         }
-    }
-    // If we broke early on a terminator and there were more source statements, that's a real change.
-    if (truncated) {
-        const consumed = out.length > 0 ? countConsumed(body, out) : 0;
-        if (consumed < body.length) changed = true;
     }
     if (!changed) return false;
     body.length = 0;
     for (const s of out) body.push(s);
     return true;
-}
-
-/** How many leading `body` statements the produced `out` accounts for — i.e. the index just past the
- *  terminator we stopped on — so we can tell whether a truncation actually dropped tail statements. */
-function countConsumed(body: Node[], out: Node[]): number {
-    // The terminator we stopped on is the last of `out`; find it in `body`.
-    const term = out[out.length - 1];
-    const idx = body.indexOf(term);
-    return idx === -1 ? out.length : idx + 1;
 }
 
 /** A statement-list container hook: run {@link rewriteList} over its list field, marking the ctx
