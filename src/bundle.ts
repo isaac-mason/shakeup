@@ -26,6 +26,7 @@ import {
     replacePlaceholders,
     replacePlaceholdersWithDefaultAndGetContainedPlaceholders,
     replaceSinglePlaceholder,
+    resolveMinify,
 } from './output-options';
 import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
@@ -422,7 +423,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // buildStart is driven inside buildGraph (full graph-backed ctx for ctx.resolve).
     const timer = options.timer ?? Timer.init(true);
     Timer.start(timer, 'graph');
-    graph = await buildGraph(options, pipeline);
+    // Compress (minify P4) is a scan-stage transform — thread it in so the parse cache stays
+    // compress-aware. `resolveMinify` also drives mangle (below) so the two never drift.
+    graph = await buildGraph({ ...options, compress: resolveMinify(options.output?.minify).compress }, pipeline);
     // Generate-stage asset emit: read + content-hash resolved `new-url` assets (scan only resolved
     // their paths). Before the error gate so an asset load failure surfaces like a scan error.
     await emitAssets(graph, options.fs);
@@ -467,8 +470,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
-    const mangle = options.output?.minify === true;
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, mangle);
+    const min = resolveMinify(options.output?.minify);
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, min.mangle);
     Timer.end(timer, 'chunk');
 
     // Drop unused side-effect-free externals (the injected jsx runtime) via symbol liveness.

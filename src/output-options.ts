@@ -43,8 +43,35 @@ export type OutputOptionsNaming = {
     sourcemapIgnoreList?: SourcemapIgnoreList;
     keepNames?: boolean; // not implemented — needs printer/name-preservation
     topLevelVar?: boolean; // not implemented — needs module-init wrapping
-    minify?: boolean; // whitespace + syntactic minification via the print-from-AST backend
+    /** `true` = full minify (whitespace + mangle + compress). The object form opts into each
+     *  sub-stage independently (esbuild's `minifyWhitespace`/`minifyIdentifiers`/`minifySyntax`):
+     *  each field defaults to `false`, so `{ compress: true }` runs ONLY the compress passes. */
+    minify?: boolean | MinifyOptions;
 };
+
+/** Per-stage minify toggles (esbuild model). Each defaults to false in the object form. */
+export type MinifyOptions = {
+    /** Elide readability whitespace + syntactic-form shortening in the printer. */
+    whitespace?: boolean;
+    /** Rename bindings to short base54 names (deconflict/mangle). */
+    mangle?: boolean;
+    /** AST compress passes (dead-code, fold-constants, …) — the P4 pipeline. */
+    compress?: boolean;
+};
+
+/** Fully-resolved minify sub-stage flags. */
+export type ResolvedMinify = { whitespace: boolean; mangle: boolean; compress: boolean };
+
+/** Resolve the `minify` option: `true` = all stages on; an object opts into each stage (default
+ *  false per field); falsy = all off. Resolved once and threaded so whitespace/mangle/compress
+ *  never drift apart. */
+export function resolveMinify(minify: boolean | MinifyOptions | undefined): ResolvedMinify {
+    if (minify === true) return { whitespace: true, mangle: true, compress: true };
+    if (minify !== null && typeof minify === 'object') {
+        return { whitespace: minify.whitespace === true, mangle: minify.mangle === true, compress: minify.compress === true };
+    }
+    return { whitespace: false, mangle: false, compress: false };
+}
 
 /** Fully-resolved output naming config with defaults applied. */
 export type NormalizedOutputNaming = {
@@ -255,7 +282,7 @@ export function normalizeOutputOptions(
         sourcemap: sm,
         sourcemapExcludeSources: o.sourcemapExcludeSources ?? false,
         sourcemapIgnoreList: ignore,
-        minify: o.minify ?? false,
+        minify: resolveMinify(o.minify).whitespace, // printer whitespace/syntactic gate
     };
 }
 

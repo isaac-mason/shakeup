@@ -12,6 +12,7 @@ import {
 } from './graph-types';
 import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
+import { runCompress } from './passes/compress';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
@@ -512,6 +513,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
+    const compress = options.compress === true; // minify P4 — part of the parse-cache key below
     // The injected automatic JSX runtime is side-effect-free (conventionally pure), so an unused
     // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
     // jsx-runtime special-case (see pruneUnusedExternals).
@@ -704,7 +706,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
             srcHash = hashSource(source);
             hit = cache?.get(id);
-            reuse = hit !== undefined && hit.srcHash === srcHash;
+            reuse = hit !== undefined && hit.srcHash === srcHash && hit.compress === compress;
             if (reuse && hit !== undefined) {
                 ({ program, nodeCount, semantic } = hit);
                 hasJSX = hit.hasJSX;
@@ -733,6 +735,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 collectUnsupported(program, id, graph.errors);
+                // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
+                // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
+                // and the (compress-aware) cache stores the already-compressed AST.
+                if (compress) {
+                    const refreshed = runCompress(program, semantic);
+                    if (refreshed !== null) semantic = refreshed;
+                }
                 graph.parseStats.parsed++;
                 graph.changed.add(id);
             }
@@ -785,6 +794,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (hit !== undefined && hit.exportSig !== exportSig) changedExports.add(id);
             cache?.set(id, {
                 srcHash,
+                compress,
                 program,
                 nodeCount,
                 semantic,

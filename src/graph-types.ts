@@ -136,6 +136,9 @@ export type Graph = {
  *  Per-build state (indices, resolved deps, importers, exec order) is NOT cached. */
 export type CachedParse = {
     srcHash: number;
+    /** Whether compress passes were applied when this AST was produced — part of the cache key, so
+     *  a `minify` toggle across builds re-parses instead of reusing a wrongly-(un)compressed AST. */
+    compress: boolean;
     program: Program;
     nodeCount: number;
     semantic: Semantic;

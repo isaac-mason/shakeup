@@ -121,6 +121,10 @@ export type GraphOptions = CommonOptions & {
     incremental?: { changed: Set<string> };
     /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
+    /** Run the AST compress passes (minify P4) during scan. A transform concern (syntactic
+     *  lowering), so it lives in scan and the parse-cache key includes it. Set by `bundle()` from
+     *  `output.minify`; default false. */
+    compress?: boolean;
 };
 
 /** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target. Runs

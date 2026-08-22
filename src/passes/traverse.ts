@@ -81,19 +81,24 @@ class Ctx {
         this.visitors = visitors;
         this.used = new Set(semantic.names.keys());
     }
+    /** Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point. */
+    changed = false;
     /** Replace the current node in its slot. */
     replaceWith(node: Node): void {
         this.op = OP_REPLACE;
         this.opNode = node;
+        this.changed = true;
     }
     /** Replace the current statement with several (list slots only). */
     replaceWithMultiple(nodes: Node[]): void {
         this.op = OP_MULTI;
         this.opNodes = nodes;
+        this.changed = true;
     }
     /** Remove the current statement (list slots only). */
     remove(): void {
         this.op = OP_REMOVE;
+        this.changed = true;
     }
     /** Mint a unique binding name `_base`/`_base2`/… (Babel/oxc), reserving it against the module's
      *  name set so later deconfliction never re-issues it. */
@@ -219,8 +224,10 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
     for (const x of out) list.push(x);
 }
 
-/** Run the ordered `visitors` over `program` in one fused mutable traversal (oxc `traverse_mut`). */
-export function traverse(program: Node, semantic: Semantic, visitors: Visitor[]): void {
+/** Run the ordered `visitors` over `program` in one fused mutable traversal (oxc `traverse_mut`).
+ *  Returns whether any visitor mutated the tree (replace/remove/multi) — a compress driver loops on
+ *  this to reach a fixed point. */
+export function traverse(program: Node, semantic: Semantic, visitors: Visitor[]): boolean {
     const ctx = new Ctx(semantic, visitors);
     ctx.op = OP_NONE;
     fireEnter(program, ctx);
@@ -228,4 +235,5 @@ export function traverse(program: Node, semantic: Semantic, visitors: Visitor[])
     descend(program, ctx);
     ctx.op = OP_NONE;
     fireExit(program, ctx);
+    return ctx.changed;
 }
