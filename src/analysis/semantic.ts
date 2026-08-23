@@ -48,6 +48,27 @@ export type Semantic = {
     bindings: Map<number, number>;
 };
 
+/**
+ * Resolve `name` in the VALUE namespace starting at `scope` and walking to the root, returning the
+ * symbol it binds to, or 0 when nothing binds it (a global / unresolved reference).
+ *
+ * Used for hygiene checks when code MOVES between scopes: an inliner must confirm that a free
+ * variable in a callee body still resolves to the same binding at the call site, or splicing the body
+ * there would silently re-bind it.
+ */
+export function lookupValue(sem: Semantic, scope: number, name: string): number {
+    const nameId = sem.names.get(name);
+    if (nameId === undefined) return 0;
+    let s = scope;
+    for (;;) {
+        const hit = sem.bindings.get(bindingKey(s, NS_VALUE, nameId));
+        if (hit !== undefined) return hit;
+        const p = s <= 0 ? 0 : sem.scopes[s].parent;
+        if (s === 0 || p === s) return 0;
+        s = p;
+    }
+}
+
 /** Allocate an empty {@link Semantic}; reuse it across analyze() calls to keep warm capacity. */
 export function createSemantic(): Semantic {
     return {

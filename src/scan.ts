@@ -13,6 +13,7 @@ import {
 import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
+import { inlineFunctions } from './passes/optimize/inline-functions';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
@@ -741,6 +742,14 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
                 // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
                 // and the (compress-aware) cache stores the already-compressed AST.
+                // Opt tier (directive-gated) runs BEFORE compress: inlining EXPANDS code, and the
+                // compress fixed point is what cleans the result up — folding the substituted
+                // arguments and dropping the now-unreferenced declaration. This is the same ordering
+                // compilecat's `run_all` uses (inline first, then the simplify loop).
+                if (inlineFunctions(program, semantic, source)) {
+                    semantic = createSemantic();
+                    analyze(semantic, program);
+                }
                 if (compress !== false) {
                     const refreshed = runCompress(program, semantic, compress);
                     if (refreshed !== null) semantic = refreshed;
