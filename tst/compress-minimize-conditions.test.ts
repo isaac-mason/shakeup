@@ -129,18 +129,19 @@ describe('minimize-conditions (compress)', () => {
     });
 
     it('does NOT collapse a branch containing a let/const declaration', async () => {
-        // `z` is read TWICE so single-use inline leaves it; the block then keeps 3 statements (incl a
-        // `let`), so minimize-conditions bails — isolating its "don't collapse a decl branch" rule.
+        // `z` is read TWICE (inline/drop-unused leave it) in EFFECTFUL statements (remove-unused-expr
+        // keeps them; join-vars fuses them into one sequence). The block then keeps a `let` + a
+        // statement — never a single simple statement — so minimize-conditions bails. This is the
+        // genuinely-irreducible branch that isolates its "don't collapse a decl branch" rule.
         const src = [
             'const order = [];',
-            'function go(cond) { if (cond) { let z = order.push("z"); void z; void z; } }',
+            'function go(cond) { if (cond) { const z = order.push("z"); order.push(z + 10); order.push(z + 20); } }',
             'go(true); go(false);',
             'export const order2 = order;',
         ].join('\n');
         const { compressed, q } = await parity(src, ['order2']);
-        expect(q.order2).toStrictEqual(['z']);
-        // A multi-statement block with a `let` never collapses — it stays an `if`.
-        expect(compressed).toMatch(/\bif\b/);
+        expect(q.order2).toStrictEqual(['z', 11, 21]);
+        expect(compressed).toMatch(/\bif\b/); // a `let`-containing block never collapses
     });
 
     it('composes with drop-unused: an unused-const branch becomes a bare call then collapses', async () => {

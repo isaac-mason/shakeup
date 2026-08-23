@@ -27,6 +27,7 @@ import { foldConstants } from './fold-constants.ts';
 import { inline } from './inline.ts';
 import { joinVars } from './join-vars.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
+import { removeUnusedExpr } from './remove-unused-expr.ts';
 
 /** Passes run to a FIXED POINT — they compose productively (fold turns `1<2`→`true`, dead-code then
  *  collapses `if(true)`), keeping booleans in their CANONICAL `true`/`false` form so fold-constants
@@ -39,6 +40,7 @@ const LOOP_PASSES: Visitor[] = [
     minimizeConditions,
     convertToDottedProperties,
     inline,
+    removeUnusedExpr,
     joinVars,
     dropUnused,
 ];
