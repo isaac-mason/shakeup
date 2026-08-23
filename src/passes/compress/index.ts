@@ -60,6 +60,13 @@ const LOOP_PASSES: Visitor[] = [
  *  would ping-pong forever against fold-constants (`!0`→`true`), so it runs last, once. */
 const FINAL_PASSES: Visitor[] = [substituteAlternateSyntax];
 
+// A SECOND final traversal, run after `FINAL_PASSES` completes. `substituteAlternateSyntax` rewrites
+// `const` → `let`, which turns declaration runs that were previously unmergeable (a `let` run split by
+// a `const` run) into one mergeable run — a real byte win. It must be its own traversal: `traverse`
+// applies every visitor in ONE walk, and `joinVars` rewrites a statement LIST on the way down, before
+// descent reaches the child declarations whose `kind` the substitution is about to change.
+const POST_FINAL_PASSES: Visitor[] = [joinVars];
+
 /** Safety cap on the fixed-point loop (terser uses a similar bound) — a pass pair that oscillates
  *  never hangs the build. */
 const MAX_ITERS = 8;
@@ -82,6 +89,10 @@ export function runCompress(program: Node, semantic: Semantic): Semantic | null 
         refresh();
     }
     if (traverse(program, cur, FINAL_PASSES)) {
+        any = true;
+        refresh();
+    }
+    if (traverse(program, cur, POST_FINAL_PASSES)) {
         any = true;
         refresh();
     }

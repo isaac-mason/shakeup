@@ -13,10 +13,20 @@ const build = async (src: string, minify: boolean | { compress?: boolean; mangle
 /** Build twice — compress-on and compress-off — and assert identical runtime values for every
  *  exported key. Every conversion case funnels through here so a syntactic swap is never asserted
  *  without proving it preserved behavior. */
+/** Exported values, with functions reduced to a name/arity token. `run` imports a `data:` URL and
+ *  Node caches those by URL, so when the two builds happened to be byte-identical both imports
+ *  returned the SAME module instance and the comparison was trivially true. Once compress changes
+ *  anything the instances differ, and comparing exported FUNCTIONS by object identity would always
+ *  fail — that is an artifact of two module instances, not a behavior difference. Compare shape. */
+const shape = (m: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(
+        Object.entries(m).map(([k, v]) => [k, typeof v === 'function' ? `[fn ${v.name}/${v.length}]` : v]),
+    );
+
 const assertParity = async (src: string) => {
     const on = await build(src, { compress: true });
     const off = await build(src, false);
-    expect(await run(on)).toEqual(await run(off));
+    expect(shape(await run(on))).toEqual(shape(await run(off)));
     return on;
 };
 

@@ -73,6 +73,13 @@ function numResultRaw(v: number): string | null {
 function toNum(n: Node, v: number): boolean {
     const raw = numResultRaw(v);
     if (raw === null) return false;
+    // SIZE GUARD (oxc parity): never fold into a literal LONGER than the source it replaces. `1 / 6`
+    // folds to `.16666666666666666` — 17 bytes in place of 3 — so constant-folding was actively
+    // GROWING math-heavy code. Verified against oxc: it emits `1/6`, `2/3`, `100/3` and `.1+.2`
+    // unfolded, while still folding non-expansive cases like `2*3` → `6`. Only applied when the node
+    // carries a real source span; synthesized nodes (start === end) always fold.
+    const span = n.end - n.start;
+    if (span > 0 && raw.length > span) return false;
     set(n, N.NumericLiteral, null);
     (n as { name: string }).name = raw;
     return true;

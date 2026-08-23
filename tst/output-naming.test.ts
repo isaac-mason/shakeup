@@ -294,7 +294,7 @@ describe('output — exports mode & stubs', () => {
         expect(r.errors).toEqual([]);
         const code = r.chunks[0].code;
         expect(code).not.toContain('\n    '); // no indentation
-        expect(code).toMatch(/const \w+=1/); // whitespace stripped; local mangled
+        expect(code).toMatch(/let \w+=1/); // whitespace stripped; local mangled; const→let
         expect(code).toContain(' as x'); // public export name preserved via alias
     });
 

@@ -36,7 +36,7 @@ describe('single-use inline (movement kernel)', () => {
         const code = await parity(
             'export function f(o) { const x = o.a.b; return x + 1; }\nexport const out = f({ a: { b: 7 } });',
         );
-        expect(code).not.toMatch(/\bconst x\b/); // binding gone, init moved into the use
+        expect(code).not.toMatch(/\b(?:const|let) x\b/); // binding gone, init moved into the use
     });
 
     it('inlines an array-literal and an arrow', async () => {
@@ -103,7 +103,7 @@ describe('single-use inline (movement kernel)', () => {
         ].join('\n');
         const code = await parity(src);
         expect((await run(code)).out).toBe(5);
-        expect(code).toMatch(/\bconst x\b/); // NOT inlined (module has eval)
+        expect(code).toMatch(/\blet x\b/); // NOT inlined (module has eval)
     });
 
     it('does NOT inline a multi-read binding', async () => {
@@ -130,6 +130,7 @@ describe('single-use inline (movement kernel)', () => {
 
     it('does not fire without compress', async () => {
         const code = await build('export function f(o) { const x = o.a; return x; }\nexport const out = f({ a: 5 });', false);
+        // No compress → no inlining AND no `const` → `let` substitution; the source form survives.
         expect(code).toMatch(/\bconst x\b/);
     });
 });

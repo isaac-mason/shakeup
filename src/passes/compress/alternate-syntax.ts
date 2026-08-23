@@ -69,9 +69,63 @@ const ERROR_CTORS = new Set([
     'AggregateError',
 ]);
 
+/** The shortest source text that parses back to EXACTLY the same numeric value, or `null` to leave the
+ *  literal alone. Mirrors what oxc's codegen does when minifying (`0xffffffff` → `4294967295`,
+ *  `0.5` → `.5`, `1000000` → `1e6`). Every candidate is verified by re-parsing, so a rewrite can never
+ *  change the value; ties prefer plain decimal, which is what oxc emits.
+ *
+ *  Skipped: BigInt (a different node type), and anything that looks like a LEGACY OCTAL (`017`), whose
+ *  value depends on sloppy-vs-strict mode and which `Number()` would misread as decimal. */
+function shortestNumber(raw: string): string | null {
+    if (/^0[0-9]/.test(raw)) return null; // legacy octal — never touch
+    const value = Number(raw.replace(/_/g, ''));
+    if (!Number.isFinite(value) || value < 0) return null;
+
+    const cands: string[] = [];
+    const dec = String(value);
+    cands.push(dec);
+    if (dec.startsWith('0.')) cands.push(dec.slice(1)); // 0.5 → .5
+    // Exponential, normalized: `1e+6` → `1e6`, `1.5e-7` → `1.5e-7`.
+    const exp = value.toExponential().replace('e+', 'e').replace(/^(\d)(?:\.0+)?e/, '$1e');
+    cands.push(exp);
+    if (Number.isInteger(value) && value <= Number.MAX_SAFE_INTEGER) cands.push('0x' + value.toString(16));
+
+    // Plain decimal wins on a LENGTH TIE (what oxc emits): `0xffffffff` and `4294967295` are both 10
+    // chars, and oxc prints the decimal. Other candidates must be strictly shorter to displace it.
+    let best = raw;
+    if (dec.length <= best.length && Number(dec) === value) best = dec;
+    for (const c of cands) {
+        // Re-parse guard: only accept a candidate that is genuinely the same value AND shorter.
+        if (c.length < best.length && Number(c) === value) best = c;
+    }
+    return best === raw ? null : best;
+}
+
 export const substituteAlternateSyntax: Visitor = {
     name: 'substituteAlternateSyntax',
     enter: hookTable({
+        // `const x = …` → `let x = …`. Two bytes per declaration, and `const` is pervasive in modern
+        // source, so this is one of the largest single wins in the pass. `let` and `const` share
+        // block scoping, TDZ, and per-iteration binding (`for (const x of …)` ≡ `for (let x of …)`);
+        // the ONLY semantic difference is that assigning to a `const` throws a TypeError, which valid
+        // code never does. Safe HERE specifically because this is a FINAL pass: const-prop and inline
+        // read `kind === 'const'` for immutability during the fixed-point loop, which has already
+        // settled. (oxc / terser / esbuild all do this.)
+        [N.VariableDeclaration]: (n, ctx: TransformCtx) => {
+            const d = n.data as { kind: string };
+            if (d.kind === 'const') {
+                d.kind = 'let';
+                ctx.changed = true;
+            }
+        },
+        // Numeric literals → their shortest exact source form (see `shortestNumber`).
+        [N.NumericLiteral]: (n, ctx: TransformCtx) => {
+            const short = shortestNumber(n.name);
+            if (short !== null) {
+                n.name = short;
+                ctx.changed = true;
+            }
+        },
         // `true`/`false` are keyword literals — never a binding name, so substitution is
         // unconditionally safe. The BooleanLiteral node carries its text in `name`.
         [N.BooleanLiteral]: (n, ctx: TransformCtx) => {
@@ -126,6 +180,28 @@ export const substituteAlternateSyntax: Visitor = {
         // unknown arity, so it bails too; and an optional call `Boolean?.(x)` is left alone.
         [N.CallExpression]: (n, ctx: TransformCtx) => {
             const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
+            // `Math.pow(a, b)` → `a ** b` (oxc `replace_known_methods`; terser/esbuild do the same).
+            // Gated on the GLOBAL `Math` (`sym === 0`), a non-optional `.pow`, and exactly two plain
+            // arguments. The printer already parenthesises a unary/lower-precedence left operand
+            // (`(-2) ** 2`) and honours right-associativity, so the swap is safe in every context.
+            // CAVEAT (matches oxc/terser/esbuild): for BigInt operands the two differ — `Math.pow`
+            // coerces with ToNumber and throws, while `**` is defined for BigInt. Code relying on
+            // `Math.pow` THROWING for a BigInt is already broken, so this follows the established
+            // minifier behaviour rather than adding an unprovable type guard.
+            if (!d.optional && d.arguments.length === 2 && d.callee.type === N.StaticMemberExpression) {
+                const m = d.callee.data as { object: Node; property: Node; optional: boolean };
+                const [base, exp] = d.arguments;
+                if (
+                    !m.optional &&
+                    m.property.name === 'pow' &&
+                    isGlobalRef(m.object, 'Math') &&
+                    base.type !== N.SpreadElement &&
+                    exp.type !== N.SpreadElement
+                ) {
+                    ctx.replaceWith(create.BinaryExpression(n.start, n.end, '**', base, exp));
+                    return;
+                }
+            }
             if (d.optional || d.arguments.length !== 1 || !isGlobalRef(d.callee, 'Boolean')) return;
             const arg = d.arguments[0];
             if (arg.type === N.SpreadElement) return;

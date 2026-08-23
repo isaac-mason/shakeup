@@ -73,11 +73,14 @@ describe('fold-constants (compress)', () => {
         expect((await parity('export const out = typeof null;')).out).toBe('object');
     });
 
-    it('folds the exact double for 0.1 + 0.2 (round-trips) and preserves the value', async () => {
+    it('does NOT fold 0.1 + 0.2 — the exact double is LONGER than the source (oxc parity)', async () => {
         const { compressed, out } = await parity('export const out = 0.1 + 0.2;');
         expect(out).toBe(0.30000000000000004);
-        // The emitted literal is the exact shortest round-tripping repr, not `0.3`.
-        expect(compressed).toMatch(/0\.30000000000000004/);
+        // Folding is only ever a size win when the literal is no longer than what it replaces. Here it
+        // would emit `.30000000000000004` (19 bytes) for `.1+.2` (5). Verified against oxc, which also
+        // leaves `.1+.2`, `1/6` and `100/3` unfolded while still folding `2*3` → `6`.
+        expect(compressed).not.toMatch(/30000000000000004/);
+        expect(compressed).toMatch(/\.1\s*\+\s*\.2/);
     });
 
     // ---- ADVERSARIAL: must NOT fold to a wrong value (parity is the real guard) ---------------

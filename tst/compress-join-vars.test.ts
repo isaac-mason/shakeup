@@ -54,7 +54,7 @@ describe('join-vars + sequences (compress)', () => {
         expect(code.match(/\bvar /g) ?? []).toHaveLength(1);
     });
 
-    it('merges consecutive let declarations, and separately const declarations', async () => {
+    it('merges a consecutive declaration run — const becomes let, so all four fuse', async () => {
         // Non-literal inits (param-derived) so constant-propagation leaves the bindings for join-vars.
         const src = `
             export function f(x) {
@@ -67,10 +67,10 @@ describe('join-vars + sequences (compress)', () => {
             export const out = f(10);`;
         const { code, min } = await both(src);
         expect(min.out).toBe(50);
-        // The two lets fuse to one, the two consts fuse to one.
-        expect(code.match(/\blet /g) ?? []).toHaveLength(1);
-        expect(code).toMatch(/let a = x \+ 1, b = x \+ 2/);
-        expect(code).toMatch(/const c = x \+ 3, d = x \+ 4/);
+        // `substituteAlternateSyntax` rewrites `const` → `let` in the final pass, so the two runs
+        // become one mergeable run and the POST-final `joinVars` fuses all four declarators.
+        expect(code).toMatch(/let a = x \+ 1, b = x \+ 2, c = x \+ 3, d = x \+ 4/);
+        expect(code).not.toMatch(/\bconst\b/);
     });
 
     it('folds consecutive expression statements into one comma sequence', async () => {

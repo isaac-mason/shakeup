@@ -193,6 +193,20 @@ function minimizeConditional(n: Node): Node | null {
         return create.SequenceExpression(n.start, n.end, 0, [test, consequent]);
     }
 
+    // 7. NEGATED-EQUALITY TEST (oxc :98-112): `a !== b ? X : Y` → `a === b ? Y : X`, likewise
+    //    `!=` → `==`. Dropping the `!` saves a byte and the swapped arms make it exactly equivalent.
+    //    Last, so the arm-shape rewrites above still take precedence; monotonic (the new test is an
+    //    equality op, so this never fires twice). Relational operators are NOT flipped — `!(a < b)`
+    //    is not `a >= b` when either side is NaN.
+    if (test.type === N.BinaryExpression) {
+        const t = test.data as { operator: string; left: Node; right: Node };
+        const flipped = t.operator === '!==' ? '===' : t.operator === '!=' ? '==' : null;
+        if (flipped !== null) {
+            const eq = create.BinaryExpression(test.start, test.end, flipped, t.left, t.right);
+            return create.ConditionalExpression(n.start, n.end, 0, eq, alternate, consequent);
+        }
+    }
+
     return null;
 }
 
