@@ -158,14 +158,18 @@ export type CachedParse = {
     sideEffects: ModuleSideEffects;
     meta: CustomPluginOptions;
     moduleType: ModuleType;
-    /** Producer modules whose SOURCE this cached AST depends on, as `[moduleId, srcHash]`.
+    /** Files whose content influenced this module's transformed output, as `[moduleId, srcHash]`.
      *
      *  A cached AST is normally a pure function of its own source — that is what makes `srcHash` a
-     *  sufficient cache key. Cross-module passes (constant propagation, `@inline` from another module)
-     *  break that: they bake a value read from ANOTHER module into this one. Recording the producers
-     *  and the source hash each had at the time restores a sufficient key. Written after link, by the
-     *  passes that create the dependency; absent for the overwhelming majority of modules. */
-    crossDeps?: [string, number][];
+     *  sufficient cache key. A cross-module pass (`@inline` from another module) breaks that: it bakes
+     *  a value read from ANOTHER module into this one. Recording the producers and the source hash
+     *  each had at the time restores a sufficient key.
+     *
+     *  Same mechanism and name as Rollup's `transformDependencies` (`rollup/src/utils/transform.ts`
+     *  records them from `this.addWatchFile`; `rollup/src/watch/watch.ts:179` invalidates the modules
+     *  that listed a changed file). Ours is recorded after link rather than during a transform hook,
+     *  but the meaning is identical. Absent for the overwhelming majority of modules. */
+    transformDependencies?: [string, number][];
 };
 
 /** Persistent per-module cache for incremental rebuilds (id → parsed artifacts). */

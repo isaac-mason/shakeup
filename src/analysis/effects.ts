@@ -17,11 +17,29 @@ export const mayHaveSideEffects = (node: Node | null): boolean => !isPureExpr(no
  *  invariant), and the printer can then re-emit `/*@__PURE__*​/` for SOURCE annotations only — an
  *  inferred verdict is an internal signal, and emitting a marker for every inferred-pure call would
  *  add bytes to the output that were never in the input. */
-const INFERRED_PURE = new WeakSet<object>();
+let INFERRED_PURE = new WeakSet<object>();
 
 /** Record that `node` (a CallExpression) is provably side-effect-free. */
 export const markInferredPure = (node: Node): void => {
     INFERRED_PURE.add(node);
+};
+
+/**
+ * Drop every inferred-purity verdict. MUST be called once at the start of each build.
+ *
+ * The verdicts are derived from OTHER modules (a callee's body decides whether a call is pure), and
+ * the table only ever grows — so without this a stamp outlives the fact that justified it. Cached
+ * modules keep the SAME node objects across rebuilds, so a call marked pure in one build stays marked
+ * even after the callee gains a side effect: the next build simply declines to re-stamp it, while the
+ * old stamp still says "pure" and DCE drops a call that now has effects.
+ *
+ * Clearing is the whole fix, and it is cheap because purity is fully re-derived every build anyway
+ * (`stampPureCalls` per module, `stampPureCallsGraph` across the graph). That keeps purity OUT of the
+ * cached-cross-module-state category entirely — unlike `@inline`, which bakes a body into a cached AST
+ * and therefore needs `transformDependencies`.
+ */
+export const resetInferredPure = (): void => {
+    INFERRED_PURE = new WeakSet<object>();
 };
 
 export function isPureExpr(node: Node | null): boolean {

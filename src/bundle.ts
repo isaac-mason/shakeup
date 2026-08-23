@@ -45,6 +45,7 @@ import {
     type SourceMap,
     trimMappings,
 } from './sourcemap';
+import { resetInferredPure } from './analysis/effects';
 import { stampPureCallsGraph } from './analysis/purity';
 import { analyze, createSemantic } from './analysis/semantic';
 import { runCompress } from './passes/compress';
@@ -422,6 +423,10 @@ function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | nu
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
 export async function bundle(options: BundleOptions): Promise<BundleResult> {
+    // Purity verdicts are derived from other modules and are re-derived in full every build; clear
+    // last build's before anything reads them, or a cached module's call node keeps a stamp whose
+    // justification has since changed. See `resetInferredPure`.
+    resetInferredPure();
     const pipeline = compilePipeline(options.plugins ?? []);
     const warningsOut: string[] = [];
     // Full PluginCtx for the bundle-level hooks (buildStart/renderChunk/buildEnd).
@@ -460,7 +465,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
     //
     // A module that received a cross-module substitution has its producers recorded on its cache entry
-    // (`crossDeps`). Evicting it here, rather than validating after the fact, means it is simply parsed
+    // (`transformDependencies`). Evicting it here, rather than validating after the fact, means it is simply parsed
     // fresh by scan and lands in `graph.changed` like any source-changed module — so `affected`, the
     // render cache, `[hash]` propagation and sourcemap indices all follow with NO special-casing. This
     // is the same shape as a Rollup/Vite plugin calling `addWatchFile`: the plugin only declares the
@@ -480,8 +485,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             return h;
         };
         for (const [id, entry] of [...options.cache]) {
-            if (entry.crossDeps === undefined) continue;
-            for (const [pid, phash] of entry.crossDeps) {
+            if (entry.transformDependencies === undefined) continue;
+            for (const [pid, phash] of entry.transformDependencies) {
                 if ((await rawHash(pid)) !== phash) {
                     options.cache.delete(id);
                     break;
@@ -540,11 +545,12 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         };
         // consumer module idx → the producer modules whose SOURCE its AST now depends on.
         const touched = inlineCrossModule(graph.modules, resolveImport);
-        // NOT WIRED — see the roadmap. `passes/compress/cross-module-constants.ts` is complete and the
-        // cache dependency tracking it needed (B0, above) is now in place, but enabling it ripples
-        // further than the cache: making one module's OUTPUT depend on another's SOURCE also disturbs
-        // the affected-set, the render cache, `[hash]` propagation and sourcemap source indices, all of
-        // which assume cross-module influence travels only through the EXPORT SURFACE.
+        // Cross-module constant propagation (`passes/compress/cross-module-constants.ts`) is written
+        // but NOT wired — see the roadmap. Being ungated, it would make almost every importer a cache
+        // dependent; keeping it out means the only cross-module derived state in the system comes from
+        // a DIRECTIVE the author opted into. If it is ever wanted, rolldown's shape is the model:
+        // `optimization.inlineConst: boolean | { mode: 'all' | 'smart' }` — an OPTION, not a directive.
+        void compressMode;
         for (const [idx, producers] of touched) {
             const mod = graph.modules[idx];
             // A cross-module substitution makes this module's AST depend on ANOTHER module's source —
@@ -565,7 +571,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                     const src = await options.fs.read(pid);
                     deps.push([pid, src === null ? -1 : hashSource(src)]);
                 }
-                entry.crossDeps = deps;
+                entry.transformDependencies = deps;
             }
             const fresh = createSemantic();
             analyze(fresh, mod.program);
