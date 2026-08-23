@@ -712,7 +712,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = hit.hasJSX;
                 graph.parseStats.reused++;
             } else {
-                const parsed = parse(source, { ts: true, jsx });
+                // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
+                // TS-mode parsing there is both wrong (rejects valid JS the TS grammar disallows) and
+                // slower (needless type/generic speculation).
+                const parsed = parse(source, { ts: moduleTypeVal === 'ts' || moduleTypeVal === 'tsx', jsx });
                 for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
