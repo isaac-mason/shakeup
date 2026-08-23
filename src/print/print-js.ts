@@ -477,7 +477,13 @@ function emitExpr(p: Printer, n: Node): void {
             } else {
                 printExpr(p, callee, Prec.New);
             }
-            emitArgs(p, d.arguments as Node[]);
+            // `new X()` → `new X` under minify: an empty argument list is redundant. Safe in every
+            // context because `getPrec` already reports a 0-argument `new` as `Prec.New` (below
+            // `Prec.Call`), so the precedence machinery parenthesises it wherever the bare form would
+            // re-associate — `(new X).y` for a member access, `(new X)()` as a callee.
+            const args = d.arguments as Node[];
+            if (p.opts.minify && args.length === 0) return;
+            emitArgs(p, args);
             return;
         }
         case N.ImportExpression: {
