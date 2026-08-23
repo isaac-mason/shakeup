@@ -112,7 +112,15 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
          *  symbol's liveness includes uses in OTHER modules of the chunk. */
         const refToUnified = (ref: number): number => {
             const map = symMap[refMod(ref)];
-            return map === undefined ? 0 : map[refSym(ref)]; // producer outside this chunk → skip
+            if (map === undefined) return 0; // producer outside this chunk → skip
+            // A SYNTHETIC ref (link.ts `syntheticRef`) — the binding minted for `export default <expr>`,
+            // whose id is allocated PAST the producer's real symbol table (`nextSynthetic[mod]++`) and
+            // whose name lives in `linked.syntheticNames`, not `semantic.symbols`. `symMap` is sized to
+            // the real table, so the lookup is legitimately out of range. Skip it: the name deconflict
+            // already assigned stands, and the mangler leaves it alone. Without this the chunk mangler
+            // crashed on `refScopes[undefined]` for any chunk containing a module whose default export
+            // is a bare expression (three.js ships ~200 of these as `.glsl.js` shader chunks).
+            return map[refSym(ref)] ?? 0;
         };
         const resolve = (localSym: number): number => {
             if (!mod.namedImports.has(localSym)) return ym[localSym];
