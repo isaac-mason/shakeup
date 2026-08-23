@@ -435,3 +435,79 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
     };
     return traverse(program, semantic, [visitor]);
 }
+
+// ── Cross-module `@inline` ──────────────────────────────────────────────────────────────────────
+//
+// A call to an `@inline` function IMPORTED from another module. compilecat implements this by
+// re-reading the donor file as a plugin; shakeup does not need to — after `link` the donor is already
+// parsed, analysed and bound, so the donor body is simply there to be read.
+//
+// THE CROSS-MODULE HYGIENE PROBLEM, and the v1 answer: a free variable in the donor body refers to a
+// binding in the DONOR's module scope, which generally does not exist in the consumer — splicing the
+// body across the boundary would produce a dangling reference. compilecat solves the general case by
+// dragging the donor's dependencies along with it. Here we take the sound subset: a donor is eligible
+// only when every free variable is a GLOBAL (unresolved in the donor), and each of those still
+// resolves to a global at the call site. That covers the self-contained helper — the shape `@inline`
+// is written for — and refuses everything else rather than emitting a broken reference.
+
+/** Candidates exported by one module, keyed by the symbol they are bound to in THAT module. */
+export function moduleInlineCandidates(program: Node, source: string): Map<number, Candidate> {
+    const spans = directiveSpans(source, program, DIRECTIVE.INLINE);
+    if (spans.size === 0) return new Map();
+    return collectCandidates(program, spans).direct;
+}
+
+/** True when every free variable of `cand` is a global in the donor — the only shape that can move
+ *  between modules without carrying its dependencies. */
+const freeVarsAllGlobal = (cand: Candidate): boolean => {
+    for (const sym of cand.free.values()) if (sym !== 0) return false;
+    return true;
+};
+
+/**
+ * Inline calls to `@inline` functions imported from another module, across the whole graph.
+ * Returns the set of module indices whose AST changed (their semantic must be rebuilt, and compress
+ * re-run so the expansion is cleaned up).
+ */
+export function inlineCrossModule(
+    modules: readonly { program: Node; semantic: Semantic; source: string; namedImports: ReadonlyMap<number, unknown> }[],
+    resolveImport: (moduleIdx: number, sym: number) => { mod: number; sym: number } | null,
+): Set<number> {
+    // Donor candidates per module, built lazily — most modules annotate nothing.
+    const donorCache = new Map<number, Map<number, Candidate>>();
+    const donorsOf = (idx: number): Map<number, Candidate> => {
+        let c = donorCache.get(idx);
+        if (c === undefined) {
+            c = moduleInlineCandidates(modules[idx].program, modules[idx].source);
+            donorCache.set(idx, c);
+        }
+        return c;
+    };
+
+    const changed = new Set<number>();
+    for (let idx = 0; idx < modules.length; idx++) {
+        const mod = modules[idx];
+        const visitor: Visitor = {
+            name: 'inlineCrossModule',
+            enter: null,
+            exit: hookTable({
+                [N.CallExpression]: (n: Node, ctx: TransformCtx) => {
+                    const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
+                    if (d.optional || d.callee.type !== N.IdentifierReference) return;
+                    const localSym = (d.callee as { sym: number }).sym;
+                    if (localSym <= 0 || !mod.namedImports.has(localSym)) return; // only imported callees
+                    const target = resolveImport(idx, localSym);
+                    if (target === null || target.mod === idx) return;
+                    const cand = donorsOf(target.mod).get(target.sym);
+                    if (cand === undefined || !freeVarsAllGlobal(cand)) return;
+                    // Argument gates are the same as the local case; hygiene reduces to "each free
+                    // name is still a global here", which `callIsInlinable` checks via `lookupValue`.
+                    if (!callIsInlinable(cand, d.arguments, ctx.currentScope, mod.semantic)) return;
+                    ctx.replaceWith(substitute(cand, d.arguments));
+                },
+            }),
+        };
+        if (traverse(mod.program, mod.semantic, [visitor])) changed.add(idx);
+    }
+    return changed;
+}

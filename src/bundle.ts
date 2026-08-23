@@ -11,6 +11,8 @@ import {
     type ParseCache,
     type ParseStats,
     packRef,
+    refMod,
+    refSym,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
 import {
@@ -44,6 +46,9 @@ import {
     trimMappings,
 } from './sourcemap';
 import { stampPureCallsGraph } from './analysis/purity';
+import { analyze, createSemantic } from './analysis/semantic';
+import { runCompress } from './passes/compress';
+import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
@@ -489,6 +494,29 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
+    // Cross-module `@inline`: the donor module is already parsed and bound by now, so an imported
+    // annotated helper can be inlined natively — no plugin re-read of the donor file. Runs BEFORE
+    // purity and treeshake so both see the expanded code; each touched module is then re-analysed and
+    // re-compressed, since scan's compress ran before the graph existed.
+    {
+        const compressMode = resolveMinify(options.output?.minify).compress;
+        const touched = inlineCrossModule(graph.modules, (idx, sym) => {
+            const bind = linked.binds.get(packRef(idx, sym));
+            if (bind === undefined || bind.kind !== 'found') return null;
+            return { mod: refMod(bind.ref), sym: refSym(bind.ref) };
+        });
+        for (const idx of touched) {
+            const mod = graph.modules[idx];
+            const fresh = createSemantic();
+            analyze(fresh, mod.program);
+            mod.semantic = fresh;
+            if (compressMode !== false) {
+                const refreshed = runCompress(mod.program, mod.semantic, compressMode);
+                if (refreshed !== null) mod.semantic = refreshed;
+            }
+        }
+    }
+
     // Cross-module purity BEFORE treeshake: proving an imported helper side-effect-free lets
     // `isPureStatement` (and so treeshake) drop a discarded call to it. The per-module pass inside
     // `runCompress` cannot see across module boundaries — scan analyses each module before link binds
