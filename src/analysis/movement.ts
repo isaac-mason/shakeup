@@ -155,6 +155,17 @@ export type SubstResult = 'done' | 'barrier' | 'inert';
  *  tally. NOTE: this assumes the declaration is IMMEDIATELY BEFORE the use statement (empty gap), so
  *  the replacement only moves LATER within one straight-line statement — which keeps it clear of TDZ
  *  (no suspension can appear in the gap; await/yield inside the use are barriers anyway). */
+/** Whether `node`'s subtree reads `sym`. Used to tell "an unmodelled construct that happens to sit in
+ *  the way" from "an unmodelled construct the target is buried in". */
+function containsSym(node: Node, sym: number): boolean {
+    if (node.type === N.IdentifierReference) return node.sym === sym;
+    let found = false;
+    walkChildren(node, (c) => {
+        if (!found && containsSym(c, sym)) found = true;
+    });
+    return found;
+}
+
 export function substituteSingleUse(
     owner: Node,
     field: string,
@@ -248,9 +259,14 @@ export function substituteSingleUse(
                 if (r !== 'inert') return r;
                 return arr(d.arguments as Node[]);
             }
-            // Interference / suspension / anything not proven safe → BARRIER (never a wrong move).
+            // Anything not modelled above. A FREE replacement (no effects, reads only immutable
+            // symbols) is position-independent, so it may pass ANY construct — the only reason to stop
+            // is that the target sits INSIDE one we cannot descend into safely, which `containsSym`
+            // decides. Declaring `inert` when the target is elsewhere is what lets an init cross e.g.
+            // the assignments in `return (a = 1, b = 2, v)`, the shape a folded statement gap takes.
+            // A non-free replacement still barriers: passability cannot be proven here.
             default:
-                return 'barrier';
+                return replFree && !containsSym(node, searchSym) ? 'inert' : 'barrier';
         }
     };
     // Walk a child array in order (call args, sequence, array/template elements).

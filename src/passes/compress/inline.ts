@@ -5,13 +5,30 @@
 // transform — it moves code across a statement boundary — and the first client of the reusable
 // movement kernel (`substituteSingleUse`, analysis/movement.ts) that CSE / dead-store will also use.
 //
-// SAFETY (conservative v1): only the ADJACENT decl→use case (empty gap, so the init only moves LATER
-// within one straight-line statement — clear of TDZ). The kernel walks the use expression in
-// evaluation order and refuses to cross interference or push an impure init into a conditional
-// branch; anything it can't prove safe is a barrier (no inline). Additional hard bails: `var`
-// (hoisting), multi-declarator decls, exported/observable bindings (a bare `const` in a body is
-// never an export), any binding with ≠1 read or any write, and — module-wide — the presence of
-// `eval`/`with` (dynamic name resolution could observe the removed binding).
+// SAFETY. The kernel walks the use expression in evaluation order and refuses to cross interference
+// or push an impure init into a conditional branch; anything it can't prove safe is a barrier (no
+// inline). Hard bails: `var` (hoisting), multi-declarator decls, exported/observable bindings (a bare
+// `const` in a body is never an export), any binding with ≠1 read or any write, and — module-wide —
+// the presence of `eval`/`with` (dynamic name resolution could observe the removed binding).
+//
+// GAP (compilecat `inline_variables` path 1, `single_use_safe`): the use need NOT be the immediately
+// following statement. When it is further down the same statement list, the init must cross the
+// intervening statements, which needs two things beyond the adjacent case:
+//   1. the init is FREELY MOVABLE — no side effects AND reads only immutable symbols (`movement.ts`'s
+//      own term), so its value and effects are position-independent;
+//   2. nothing in the gap ASSIGNS a symbol the init reads.
+// (2) is not implied by (1), and this is the trap: `tallyRefs` treats a BindingIdentifier as "neither
+// a read nor a value-write", so a declarator's own initialization is invisible to the write tally and
+// `var p = 5` reports ZERO writes — `readsMutableSymbol` would call `p` immutable. Without the gap
+// check, `const v = p + 1; var p = 5; use(v)` would move `p + 1` PAST the assignment and read 5 where
+// the original read `undefined`. So the gap is scanned for assignments, updates AND declarator inits.
+// Same root cause as the guard in `alias-inline.ts`; both are noted there.
+//
+// Only SIBLING statements are considered. A read nested inside a block, loop body or closure lands in
+// a statement shape `substituteInUse` does not accept, so it is refused structurally — which is also
+// why no scope-hygiene check is needed: the kernel's `default: 'barrier'` never descends into a
+// construct that could introduce a shadowing binding.
+// TDZ is never a concern: the init only ever moves LATER.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
 import { type RefCounts, readsMutableSymbol, substituteSingleUse, tallyRefs } from '../../analysis/movement.ts';
 import { N, type Node, walkChildren } from '../../ast.ts';
@@ -90,15 +107,96 @@ function substituteInUse(
     }
 }
 
-/** Process one statement list: for each `decl; use` adjacent pair where `decl` is an inlinable
- *  single-use binding, move the init into the use and drop the decl. */
+/** Whether `n`'s subtree reads `sym` — used to locate the statement holding the binding's sole read. */
+function readsSym(n: Node, sym: number): boolean {
+    if (n.type === N.IdentifierReference) return (n as { sym: number }).sym === sym;
+    let found = false;
+    walkChildren(n, (c) => {
+        if (!found && readsSym(c, sym)) found = true;
+    });
+    return found;
+}
+
+/** Symbols `init` reads. Empty ⇒ nothing in a gap can disturb it. */
+function readSyms(init: Node): Set<number> {
+    const out = new Set<number>();
+    const visit = (n: Node): void => {
+        if (n.type === N.IdentifierReference) {
+            out.add((n as { sym: number }).sym);
+            return;
+        }
+        walkChildren(n, visit);
+    };
+    visit(init);
+    return out;
+}
+
+/** Whether `stmt` gives a new value to any symbol in `syms`. Covers assignment targets, `++`/`--`
+ *  AND declarator initializations — the last because a declarator's init is NOT a write in the ref
+ *  tally, which is exactly the `var p = 5` hole described at the top of this file. */
+function assignsAny(stmt: Node, syms: Set<number>): boolean {
+    let hit = false;
+    const targets = (n: Node): void => {
+        if (hit) return;
+        if (n.type === N.IdentifierReference || n.type === N.BindingIdentifier) {
+            if (syms.has((n as { sym: number }).sym)) hit = true;
+            return;
+        }
+        walkChildren(n, targets);
+    };
+    const visit = (n: Node): void => {
+        if (hit) return;
+        switch (n.type) {
+            case N.AssignmentExpression:
+                targets((n.data as { left: Node }).left);
+                break;
+            case N.UpdateExpression:
+                targets((n.data as { argument: Node }).argument);
+                break;
+            case N.VariableDeclarator:
+                if ((n.data as { init: Node | null }).init !== null) targets((n.data as { id: Node }).id);
+                break;
+            default:
+                break;
+        }
+        walkChildren(n, visit);
+    };
+    visit(stmt);
+    return hit;
+}
+
+/** Process one statement list: for each inlinable single-use binding, move its init into the sibling
+ *  statement holding the sole read and drop the decl. The use may be any later sibling, not just the
+ *  next one — see the GAP note at the top of this file for what crossing statements requires. */
 function inlineBody(body: Node[], refs: Map<number, RefCounts>): boolean {
     let changed = false;
-    for (let i = 1; i < body.length; i++) {
-        const cand = candidate(body[i - 1], refs);
+    for (let i = 0; i < body.length - 1; i++) {
+        const cand = candidate(body[i], refs);
         if (cand === null) continue;
-        if (substituteInUse(body[i], cand.sym, cand.init, cand.impure, cand.fragile, refs)) {
-            body.splice(i - 1, 1); // drop the now-dead declaration (its init moved into the use)
+
+        // Locate the sole read. The binding has exactly one (checked in `candidate`), so the first
+        // sibling that mentions it is the use statement.
+        let use = -1;
+        for (let k = i + 1; k < body.length; k++) {
+            if (readsSym(body[k], cand.sym)) {
+                use = k;
+                break;
+            }
+        }
+        if (use < 0) continue;
+
+        if (use > i + 1) {
+            // Crossing statements: the init must be position-independent, and nothing in the gap may
+            // reassign what it reads.
+            if (cand.impure || cand.fragile) continue;
+            const reads = readSyms(cand.init);
+            let disturbed = false;
+            for (let k = i + 1; k < use && !disturbed; k++) if (assignsAny(body[k], reads)) disturbed = true;
+            if (disturbed) continue;
+        }
+
+        if (substituteInUse(body[use], cand.sym, cand.init, cand.impure, cand.fragile, refs)) {
+            body.splice(i, 1); // drop the now-dead declaration (its init moved into the use)
             i--; // re-examine from the shifted position
             changed = true;
         }
