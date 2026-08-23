@@ -112,9 +112,26 @@ const fnHook = (n: Node, ctx: TransformCtx) => {
     if (trimTrailingReturn(n)) ctx.changed = true;
 };
 
+/** Flatten nested sequences: `a, (b, c)` → `a, b, c`. Sequences associate left and yield their LAST
+ *  operand, so splicing a nested sequence's operands into the parent changes neither evaluation order
+ *  nor the result — but it drops the parentheses the printer must otherwise emit around an inner
+ *  sequence (a sequence operand binds tighter than `Prec.Sequence`). */
+function flattenSequence(n: Node, ctx: TransformCtx): void {
+    const d = n.data as { expressions: Node[] };
+    if (!d.expressions.some((e) => e.type === N.SequenceExpression)) return;
+    const flat: Node[] = [];
+    for (const e of d.expressions) {
+        if (e.type === N.SequenceExpression) flat.push(...(e.data as { expressions: Node[] }).expressions);
+        else flat.push(e);
+    }
+    d.expressions = flat;
+    ctx.changed = true;
+}
+
 export const normalize: Visitor = {
     name: 'normalize',
     enter: hookTable({
+        [N.SequenceExpression]: flattenSequence,
         [N.WhileStatement]: (n, ctx: TransformCtx) => {
             const d = n.data as { test: Node; body: Node };
             ctx.replaceWith(create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body) as Node);
