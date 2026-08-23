@@ -73,16 +73,16 @@ describe('drop-unused (compress)', () => {
     });
 
     it('KEEPS a USED local binding', async () => {
-        // Non-literal init (param-derived) so constant-propagation doesn't inline it away — this
-        // isolates drop-unused's "don't remove a referenced binding" behavior.
+        // Non-literal init + TWO reads so neither constant-propagation nor single-use inline removes
+        // it — isolates drop-unused's "don't remove a referenced binding" behavior.
         const src = `
             export function f(x) {
                 const used = x * 2;
-                return used + 5;   // referenced → must stay
+                return used + used;   // referenced (twice) → must stay
             }
             export const out = f(5);`;
-        const { compressed, out } = await parity(src, 15);
-        expect(out).toBe(15);
+        const { compressed, out } = await parity(src, 20);
+        expect(out).toBe(20);
         expect(compressed).toMatch(/used/); // the referenced binding is preserved
     });
 

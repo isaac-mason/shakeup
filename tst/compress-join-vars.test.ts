@@ -114,16 +114,17 @@ describe('join-vars + sequences (compress)', () => {
 
     // ADVERSARIAL: `var` then `let` are DIFFERENT kinds → must NOT merge into one declaration.
     it('does NOT merge a var declaration with an adjacent let declaration', async () => {
-        // Non-literal inits so constant-propagation leaves both bindings for the (non-)merge check.
+        // Non-literal inits + a multi-read `let` so neither constant-propagation nor single-use
+        // inline removes them, leaving the var/let (non-)merge for join-vars to decide.
         const src = `
             export function f(x) {
                 var a = x + 1;
                 let b = x + 2;
-                return a + b;
+                return a + b + b;
             }
             export const out = f(10);`;
         const { code, min } = await both(src);
-        expect(min.out).toBe(23);
+        expect(min.out).toBe(35);
         // Both keywords must remain — no cross-kind fusion.
         expect(code).toMatch(/\bvar /);
         expect(code).toMatch(/\blet /);

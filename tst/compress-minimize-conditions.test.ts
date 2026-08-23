@@ -129,16 +129,17 @@ describe('minimize-conditions (compress)', () => {
     });
 
     it('does NOT collapse a branch containing a let/const declaration', async () => {
+        // `z` is read TWICE so single-use inline leaves it; the block then keeps 3 statements (incl a
+        // `let`), so minimize-conditions bails — isolating its "don't collapse a decl branch" rule.
         const src = [
             'const order = [];',
-            'function go(cond) { if (cond) { let z = order.push("z"); void z; } }',
+            'function go(cond) { if (cond) { let z = order.push("z"); void z; void z; } }',
             'go(true); go(false);',
             'export const order2 = order;',
         ].join('\n');
         const { compressed, q } = await parity(src, ['order2']);
         expect(q.order2).toStrictEqual(['z']);
-        // A single-statement block would unwrap, but this block has TWO statements incl a `let`,
-        // so it stays an `if`.
+        // A multi-statement block with a `let` never collapses — it stays an `if`.
         expect(compressed).toMatch(/\bif\b/);
     });
 

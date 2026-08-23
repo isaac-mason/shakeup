@@ -61,7 +61,8 @@ describe('substitute-alternate-syntax (compress)', () => {
     it('a locally-shadowed `undefined` is NOT substituted', async () => {
         // Legal non-strict nested rebind. A param-derived (non-literal) init so constant-propagation
         // leaves it — the inner `undefined` resolves to the local, must print its name not `void 0`.
-        const src = ['function f(x) {', '  let undefined = x;', '  return undefined;', '}', 'export const out = f(42);'].join('\n');
+        // Two reads so single-use inline leaves it — isolates alternate-syntax's shadow check.
+        const src = ['function f(x) {', '  let undefined = x;', '  return undefined + undefined;', '}', 'export const out = f(21);'].join('\n');
         const code = await assertParity(src);
         // The shadowed reference survives as the name `undefined` (bound to x), not `void 0`.
         expect(code).toMatch(/\bundefined\b/);

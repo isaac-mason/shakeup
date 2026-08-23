@@ -24,6 +24,7 @@ import { deadCode } from './dead-code.ts';
 import { dropDebugger } from './drop-debugger.ts';
 import { dropUnused } from './drop-unused.ts';
 import { foldConstants } from './fold-constants.ts';
+import { inline } from './inline.ts';
 import { joinVars } from './join-vars.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
 
@@ -37,6 +38,7 @@ const LOOP_PASSES: Visitor[] = [
     foldConstants,
     minimizeConditions,
     convertToDottedProperties,
+    inline,
     joinVars,
     dropUnused,
 ];
