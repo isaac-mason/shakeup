@@ -446,8 +446,16 @@ export const SpreadElement = (s: number, e: number, _f: number, argument: Node):
     node(N.SpreadElement, s, e, '', { argument });
 export const ConditionalExpression = (s: number, e: number, _f: number, test: Node, consequent: Node, alternate: Node): Node =>
     node(N.ConditionalExpression, s, e, '', { test, consequent, alternate });
-export const NewExpression = (s: number, e: number, _f: number, callee: Node, args: Node[] | null, typeArgs: Node | null): Node =>
-    node(N.NewExpression, s, e, '', { callee, arguments: args ?? [], typeArguments: typeArgs ?? null });
+export const NewExpression = (s: number, e: number, f: number, callee: Node, args: Node[] | null, typeArgs: Node | null): Node =>
+    // `pure` mirrors CallExpression: `/*@__PURE__*​/ new X()` is the most common annotation shape in
+    // real libraries, so a `new` has to be able to carry the marker. Every NewExpression gets the
+    // field, so the data shape stays monomorphic.
+    node(N.NewExpression, s, e, '', {
+        callee,
+        arguments: args ?? [],
+        typeArguments: typeArgs ?? null,
+        pure: (f & FL.PURE) !== 0,
+    });
 export const SequenceExpression = (s: number, e: number, _f: number, expressions: Node[]): Node =>
     node(N.SequenceExpression, s, e, '', { expressions });
 export const AwaitExpression = (s: number, e: number, _f: number, argument: Node): Node =>

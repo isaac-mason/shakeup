@@ -92,7 +92,7 @@ const DEFS = [
         pure: boolean,
         typeArguments: nullable(child),
     }),
-    def('NewExpression', { callee: child, arguments: list(child), typeArguments: nullable(child) }),
+    def('NewExpression', { callee: child, arguments: list(child), pure: boolean, typeArguments: nullable(child) }),
     def('StaticMemberExpression', { object: child, property: child, optional: boolean }),
     def('ComputedMemberExpression', { object: child, expression: child, optional: boolean }),
     def('PrivateFieldExpression', { object: child, field: child, optional: boolean }),

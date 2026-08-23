@@ -181,6 +181,7 @@ export function nextToken(state: ParserState): void {
         srcLen = state.srcLen;
     let pos = state.pos;
     let nl = 0;
+    let sawPure = false;
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
         if (c < 128) {
@@ -212,6 +213,13 @@ export function nextToken(state: ParserState): void {
                     const close = end < 0 ? srcLen : end + 2;
                     const nlIn = src.indexOf('\n', pos + 2);
                     if (nlIn !== -1 && nlIn < close) nl = F_NL;
+                    // `/*@__PURE__*​/` / `/*#__PURE__*​/` annotation probe. Ordered to stay off the hot
+                    // path: virtually every comment fails on the FIRST character comparison, and the
+                    // string compare only runs for one that actually opens with `@`/`#`.
+                    let a = pos + 2;
+                    if (src.charCodeAt(a) === 32) a++;
+                    const ac = src.charCodeAt(a);
+                    if ((ac === 64 || ac === 35) && src.startsWith('__PURE__', a + 1)) sawPure = true;
                     pos = close;
                     continue;
                 }
@@ -229,6 +237,7 @@ export function nextToken(state: ParserState): void {
         }
         break;
     }
+    if (sawPure) state.pureAt = pos;
     state.tokFlags = nl;
     state.tokStart = pos;
     if (pos >= srcLen) {

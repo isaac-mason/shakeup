@@ -77,6 +77,20 @@ type Ref = Node | null;
 
 /** Fresh parser state for one `parse` call. Every field is initialized here so
  * `state` keeps a single stable hidden class for the whole parse. */
+/** `FL.PURE` when a `/*@__PURE__*​/` annotation immediately precedes the expression starting at
+ *  `start` (the whitespace skipper records that position in `state.pureAt`), else 0.
+ *
+ *  The annotation is CONSUMED on the first match. In `/*@__PURE__*​/ new Matrix3().set(…)` both the
+ *  inner `new` and the outer `.set()` call begin at the same offset, so without consuming it the one
+ *  annotation would mark two nodes — printing two markers and failing to round-trip. Nodes are built
+ *  innermost-first, so the `new` claims it: that matches the convention (esbuild/rollup) that the
+ *  marker applies to the call it immediately precedes. */
+function pureFlag(state: ParserState, start: number): number {
+    if (state.pureAt !== start) return 0;
+    state.pureAt = -1;
+    return FL.PURE;
+}
+
 function createParserState(source: string, options: ParseOptions): ParserState {
     // Start the per-file buffers small and let them grow on demand (push / internGrow).
     // Most modules are small; oversizing every state (esp. the null-filled stk and the
@@ -90,6 +104,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokStart: 0,
         tokEnd: 0,
         tokFlags: 0,
+        pureAt: -1,
         tokHash: 0,
         tsMode: options.ts,
         jsxMode: options.jsx,
@@ -456,7 +471,7 @@ function parseNew(state: ParserState): Node {
         args = parseArgs(state);
         end = state.tokStart;
     }
-    const nw = create.NewExpression(start, end, 0, callee, args, typeArgs) as Node;
+    const nw = create.NewExpression(start, end, pureFlag(state, start), callee, args, typeArgs) as Node;
     return parseMemberChain(state, nw, true);
 }
 
@@ -506,7 +521,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             if (isP(state, P.LPAREN)) {
                 if (!allowCall) return finish(expr);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL, expr, args, null) as Node;
+                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL | pureFlag(state, expr.start), expr, args, null) as Node;
             } else if (isP(state, P.LBRACKET)) {
                 nextToken(state);
                 const prop = parseExpression(state);
@@ -526,7 +541,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             expr = create.ComputedMemberExpression(expr.start, state.tokStart, 0, expr, prop) as Node;
         } else if (allowCall && isP(state, P.LPAREN)) {
             const args = parseArgs(state);
-            expr = create.CallExpression(expr.start, state.tokStart, 0, expr, args, null) as Node;
+            expr = create.CallExpression(expr.start, state.tokStart, pureFlag(state, expr.start), expr, args, null) as Node;
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
             if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
             const quasi = parseTemplate(state);
@@ -539,7 +554,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             if (t === null) return finish(expr);
             if (isP(state, P.LPAREN)) {
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, 0, expr, args, t) as Node;
+                expr = create.CallExpression(expr.start, state.tokStart, pureFlag(state, expr.start), expr, args, t) as Node;
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
                 if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
                 const quasi = parseTemplate(state);

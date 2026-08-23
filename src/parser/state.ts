@@ -42,6 +42,9 @@ export type ParserState = {
     tokStart: number;
     tokEnd: number;
     tokFlags: number;
+    /** Source position of the token immediately after a `/*@__PURE__*​/` (or `#__PURE__`) annotation,
+     *  or -1. A call/new whose span STARTS here is the annotated one. Set by the whitespace skipper. */
+    pureAt: number;
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;

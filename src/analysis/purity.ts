@@ -24,6 +24,7 @@
 // common case — helpers declared and called in the same file — and, for a scope-hoisted bundle, the
 // bundle IS one module.
 import { N, type Node, walk } from '../ast.ts';
+import { markInferredPure } from './effects.ts';
 import { type Graph, type Linked, packRef } from '../graph-types.ts';
 
 /** A call to `Math.<anything>()` on the GLOBAL `Math` (unresolved binding). The Math methods are
@@ -241,7 +242,7 @@ function stamp(program: Node, summaries: Map<number, Summary>, key: (sym: number
         if (sym <= 0) return;
         const k = key(sym);
         if (k !== null && summaries.get(k)?.impure === false) {
-            d.pure = true;
+            markInferredPure(n);
             stamped = true;
         }
     });

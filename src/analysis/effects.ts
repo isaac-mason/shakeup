@@ -12,6 +12,18 @@ export const mayHaveSideEffects = (node: Node | null): boolean => !isPureExpr(no
 /**
  * Conservatively true if evaluating this expression has no observable side effects.
  */
+/** Calls the interprocedural analysis PROVED side-effect-free. Kept in a side table rather than on
+ *  `CallExpression.pure` for two reasons: the node data shape stays monomorphic (a parser-perf
+ *  invariant), and the printer can then re-emit `/*@__PURE__*​/` for SOURCE annotations only — an
+ *  inferred verdict is an internal signal, and emitting a marker for every inferred-pure call would
+ *  add bytes to the output that were never in the input. */
+const INFERRED_PURE = new WeakSet<object>();
+
+/** Record that `node` (a CallExpression) is provably side-effect-free. */
+export const markInferredPure = (node: Node): void => {
+    INFERRED_PURE.add(node);
+};
+
 export function isPureExpr(node: Node | null): boolean {
     if (node === null) return true;
     switch (node.type) {
@@ -69,10 +81,20 @@ export function isPureExpr(node: Node | null): boolean {
         case N.TSAsExpression:
         case N.TSSatisfiesExpression:
             return isPureExpr(node.data.expression);
+        case N.NewExpression: {
+            // An annotated `new` is side-effect-free exactly when its arguments are — same rule the
+            // annotated CallExpression case uses below. Unannotated construction stays impure.
+            if (node.data.pure !== true) return false;
+            for (const arg of node.data.arguments as Node[]) {
+                if (arg.type === N.SpreadElement) return false;
+                if (!isPureExpr(arg)) return false;
+            }
+            return true;
+        }
         case N.CallExpression: {
             // A `/*@__PURE__*/`-annotated call (oxc `CallExpression.pure`) is side-effect-free iff
             // its arguments are. Lowering passes set this on the enum/namespace IIFE.
-            if (node.data.pure !== true) return false;
+            if (node.data.pure !== true && !INFERRED_PURE.has(node)) return false;
             for (const a of node.data.arguments) {
                 const arg = a.type === N.SpreadElement ? a.data.argument : a;
                 if (!isPureExpr(arg)) return false;

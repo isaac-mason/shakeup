@@ -41,6 +41,11 @@ export function canon(x: unknown): unknown {
     if (isNode(x)) {
         if (x.type === N.EmptyStatement) return EMPTY;
         const out: Rec = { type: x.type, name: x.name, data: canon(x.data) };
+        // `/*@__PURE__*​/` is intentionally NOT re-emitted under minify (oxc drops all 214 of
+        // three.core.js's annotations too), so the flag legitimately differs after a minified
+        // round-trip. It carries no behaviour of its own — it only licenses removals this build has
+        // already made — so canonicalising it away keeps the comparison about printer fidelity.
+        if (out.data !== null && typeof out.data === 'object') delete (out.data as Rec).pure;
         if (KEYED.has(x.type)) {
             const d = x.data as Rec;
             if (d.computed === false) (out.data as Rec).key = keyToken(d.key as Node);
