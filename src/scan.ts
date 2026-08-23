@@ -742,6 +742,15 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // strip erases them; the table is handed to the optimizer below.
                 const shapes = captureShapes(program);
                 traverse(program, semantic, [tsStrip]);
+                // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
+                // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
+                // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
+                // about — measured: 7 scopes recorded vs 8 in the tree, and 2 scope-owning nodes with
+                // no `nodeScope` entry. Left stale, `ctx.currentScope` is wrong inside those regions
+                // and anything resolving names against it (inline's hygiene check, block-flatten's
+                // collision check, SROA's target scope) silently works from bad data.
+                semantic = createSemantic();
+                analyze(semantic, program);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 collectUnsupported(program, id, graph.errors);

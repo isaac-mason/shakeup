@@ -46,6 +46,7 @@ export type Semantic = {
 
     names: Map<string, number>;
     bindings: Map<number, number>;
+
 };
 
 /**

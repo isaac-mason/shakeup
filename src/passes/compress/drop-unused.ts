@@ -29,8 +29,8 @@
 // side effects), any module-scope or exported binding, any binding with ≥1 use, function/class
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
-import { walkRefIdents } from '../../analysis/refs.ts';
 import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
+import { walkRefIdents } from '../../analysis/refs.ts';
 import { N, type Node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -43,7 +43,13 @@ let SEM: Semantic | null = null;
 
 /** Tally, per SymbolId, how many `IdentifierReference` nodes resolve to it across the whole module.
  *  Declarations are `BindingIdentifier` nodes (a distinct type) and are intentionally excluded, so a
- *  binding with no *reference* uses lands at 0 here even though its declaration ident exists. */
+ *  binding with no *reference* uses lands at 0 here even though its declaration ident exists.
+ *
+ *  MEASURED, do not "optimize" this away: `analyze` can supply the same tally for free, but its
+ *  snapshot is stale by any pass that ran EARLIER in the same traversal (several remove references
+ *  before this pass sees them). Using it over-counts, which is safe but keeps bindings — worth
+ *  +2,782 bytes on three.core.js in `dce` mode, for no measurable time saving. Freshness here is
+ *  worth more than the walk costs. */
 function countUses(program: Node): Map<number, number> {
     const uses = new Map<number, number>();
     walkRefIdents(program, (ident) => {
