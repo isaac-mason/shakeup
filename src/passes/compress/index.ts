@@ -18,6 +18,7 @@ import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
+import { booleanContext } from './boolean-context.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
@@ -26,7 +27,10 @@ import { dropUnused } from './drop-unused.ts';
 import { foldConstants } from './fold-constants.ts';
 import { inline } from './inline.ts';
 import { joinVars } from './join-vars.ts';
+import { minimizeConditionalExpr } from './minimize-conditional.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
+import { minimizeNot } from './minimize-not.ts';
+import { minimizeLogical } from './minimize-logical.ts';
 import { removeUnusedExpr } from './remove-unused-expr.ts';
 
 /** Passes run to a FIXED POINT — they compose productively (fold turns `1<2`→`true`, dead-code then
@@ -38,6 +42,10 @@ const LOOP_PASSES: Visitor[] = [
     deadCode,
     foldConstants,
     minimizeConditions,
+    minimizeNot,
+    minimizeConditionalExpr,
+    minimizeLogical,
+    booleanContext,
     convertToDottedProperties,
     inline,
     removeUnusedExpr,
