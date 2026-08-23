@@ -1,4 +1,5 @@
-import { deconflictChunk, mangleNestedScopes } from './deconflict';
+import { deconflictChunk } from './deconflict';
+import { mangleChunkScopes } from './mangle/chunk';
 import { type Graph, type ImportBind, type Linked, packRef, refMod, refSym } from './graph-types';
 import { finalNameOf, reprName } from './link';
 
@@ -522,7 +523,7 @@ function wireAndDeconflict(
     // complete — including cross-chunk import locals claimed above — so no local shadows a
     // chunk-top name it references.
     if (mangle) {
-        for (let c = 0; c < chunks.length; c++) mangleNestedScopes(graph, linked, chunks[c].modules, chunkTaken[c]);
+        for (let c = 0; c < chunks.length; c++) mangleChunkScopes(graph, linked, chunks[c].modules, chunkTaken[c]);
     }
 }
 
