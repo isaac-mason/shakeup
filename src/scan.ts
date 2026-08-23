@@ -14,6 +14,7 @@ import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
 import { inlineFunctions } from './passes/optimize/inline-functions';
+import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
@@ -749,6 +750,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // compilecat's `run_all` uses (inline first, then the simplify loop).
                 let expanded = inlineFunctions(program, semantic, source);
                 if (unrollLoops(program, semantic, source)) expanded = true;
+                if (scalarReplaceAggregates(program, semantic, source)) expanded = true;
                 if (expanded) {
                     semantic = createSemantic();
                     analyze(semantic, program);
