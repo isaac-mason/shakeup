@@ -60,3 +60,25 @@ describe('inferred purity does not survive a build', () => {
         expect(warm.code).toContain('__hit'); // the new side effect survives
     });
 });
+
+// The cross-module stamp's only consumer is treeshake: compress runs per-module during scan, before
+// the graph exists, so an IMPORTED callee's purity can only be acted on after link.
+describe('cross-module purity reaches treeshake', () => {
+    const build = (libBody: string) => {
+        const files: Record<string, string> = {
+            '/lib.js': `export function eff() { ${libBody} return 1; }`,
+            '/entry.js': 'import { eff } from "./lib.js";\neff();\nexport const out = 1;',
+        };
+        return createBuildContext({ entry: '/entry.js', fs: mutableFs(files), external: [] }).rebuild();
+    };
+
+    it('drops a discarded call to an imported pure function, and the now-unreferenced callee', async () => {
+        const { code } = await build('');
+        expect(code).not.toContain('eff');
+    });
+
+    it('keeps it when the imported callee has an effect', async () => {
+        const { code } = await build('globalThis.__hit = 1;');
+        expect(code).toContain('eff()');
+    });
+});

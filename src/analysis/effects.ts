@@ -156,6 +156,14 @@ export function isPureStatement(stmt: Node): boolean {
             return true;
         case N.TSEnumDeclaration:
             return true;
+        // A discarded expression is droppable when it has no effects. This is the ONLY consumer of
+        // the CROSS-MODULE purity stamp (`stampPureCallsGraph`): the module-local stamp is consumed by
+        // compress during scan, but that runs before the graph is linked, so an imported callee's
+        // purity can only ever be acted on here, in treeshake. Without this case an ExpressionStatement
+        // fell to `default: return false` and every cross-module verdict was discarded unread.
+        // Matches Rollup/rolldown, which drop `pureFn();` when the callee's body is effect-free.
+        case N.ExpressionStatement:
+            return isPureExpr(stmt.data.expression);
         case N.ClassDeclaration:
             return stmt.data.superClass === null && !classHasStaticEffects(stmt);
         case N.VariableDeclaration: {
