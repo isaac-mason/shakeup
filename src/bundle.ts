@@ -35,7 +35,7 @@ import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
 import type { GraphOptions } from './resolve';
-import { buildGraph, resolveEmittedFileName, toModuleInfo } from './scan';
+import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan';
 import {
     buildLineTable,
     encodeMappings,
@@ -456,7 +456,40 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     Timer.start(timer, 'graph');
     // Compress (minify P4) is a scan-stage transform — thread it in so the parse cache stays
     // compress-aware. `resolveMinify` also drives mangle (below) so the two never drift.
-    graph = await buildGraph({ ...options, compress: resolveMinify(options.output?.minify).compress }, pipeline);
+    const compressForScan = resolveMinify(options.output?.minify).compress;
+    // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
+    //
+    // A module that received a cross-module substitution has its producers recorded on its cache entry
+    // (`crossDeps`). Evicting it here, rather than validating after the fact, means it is simply parsed
+    // fresh by scan and lands in `graph.changed` like any source-changed module — so `affected`, the
+    // render cache, `[hash]` propagation and sourcemap indices all follow with NO special-casing. This
+    // is the same shape as a Rollup/Vite plugin calling `addWatchFile`: the plugin only declares the
+    // edge, and the host's ordinary "this module changed" path does the rest.
+    //
+    // Hashes are taken over the RAW file so both sides of the comparison are available without running
+    // the load/transform pipeline; a producer that cannot be read (virtual module, deleted) compares
+    // unequal and conservatively invalidates.
+    if (options.cache !== undefined && options.cache.size > 0) {
+        const seen = new Map<string, number>();
+        const rawHash = async (id: string): Promise<number> => {
+            const memo = seen.get(id);
+            if (memo !== undefined) return memo;
+            const src = await options.fs.read(id);
+            const h = src === null ? -1 : hashSource(src);
+            seen.set(id, h);
+            return h;
+        };
+        for (const [id, entry] of [...options.cache]) {
+            if (entry.crossDeps === undefined) continue;
+            for (const [pid, phash] of entry.crossDeps) {
+                if ((await rawHash(pid)) !== phash) {
+                    options.cache.delete(id);
+                    break;
+                }
+            }
+        }
+    }
+    graph = await buildGraph({ ...options, compress: compressForScan }, pipeline);
     // Generate-stage asset emit: read + content-hash resolved `new-url` assets (scan only resolved
     // their paths). Before the error gate so an asset load failure surfaces like a scan error.
     await emitAssets(graph, options.fs);
@@ -507,11 +540,11 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         };
         // consumer module idx → the producer modules whose SOURCE its AST now depends on.
         const touched = inlineCrossModule(graph.modules, resolveImport);
-        // NOT WIRED YET: cross-module constant propagation
-        // (`passes/compress/cross-module-constants.ts`) is written and tested in isolation, but
-        // enabling it needs the parse cache to track CROSS-MODULE dependencies first — see the
-        // roadmap. Wiring it without that makes a consumer's cached AST depend on a producer's
-        // source with nothing to invalidate it.
+        // NOT WIRED — see the roadmap. `passes/compress/cross-module-constants.ts` is complete and the
+        // cache dependency tracking it needed (B0, above) is now in place, but enabling it ripples
+        // further than the cache: making one module's OUTPUT depend on another's SOURCE also disturbs
+        // the affected-set, the render cache, `[hash]` propagation and sourcemap source indices, all of
+        // which assume cross-module influence travels only through the EXPORT SURFACE.
         for (const [idx, producers] of touched) {
             const mod = graph.modules[idx];
             // A cross-module substitution makes this module's AST depend on ANOTHER module's source —
@@ -519,10 +552,21 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             // the consumer holding a stale inlined value (its cached AST already has the old constant
             // baked in). Evict it so the next build re-parses from source, and mark it changed so this
             // build re-renders it. Conservative: only modules that actually received a substitution.
-            // KNOWN GAP (see roadmap): this module's AST now depends on `producers`' SOURCE, which
-            // the parse cache does not model — editing a donor leaves a consumer holding a stale
-            // inlined body. Evicting unconditionally would be correct but re-parses every build.
-            void producers;
+            // This module's AST now depends on `producers`' SOURCE. Record that on its cache entry
+            // so a later build can tell whether the cached (already-substituted) AST is still valid;
+            // `srcHash` alone is no longer a sufficient key for it.
+            const entry = options.cache?.get(mod.id);
+            if (entry !== undefined) {
+                const deps: [string, number][] = [];
+                for (const p of producers) {
+                    const pid = graph.modules[p].id;
+                    // RAW-file hash, matching what the pre-scan check re-computes; an unreadable
+                    // producer records -1 so the consumer is always invalidated (conservative).
+                    const src = await options.fs.read(pid);
+                    deps.push([pid, src === null ? -1 : hashSource(src)]);
+                }
+                entry.crossDeps = deps;
+            }
             const fresh = createSemantic();
             analyze(fresh, mod.program);
             mod.semantic = fresh;
