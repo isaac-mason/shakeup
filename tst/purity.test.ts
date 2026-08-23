@@ -62,6 +62,35 @@ describe('interprocedural purity', () => {
         expect((await run(code)).out).toBe(1); // the throw still happened
     });
 
+    it('summarises a `const`-bound arrow, not just a function declaration', async () => {
+        const src = ['const add = (a, b) => a + b;', 'add(1, 2);', 'export const out = add(3, 4);'].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(7);
+        expect(code).not.toMatch(/add\(1\s*,\s*2\)/); // the discarded call is gone
+    });
+
+    it('treats a LOCAL accumulator as pure (writes invisible to the caller)', async () => {
+        const src = [
+            'function sum(n) { let s = 0; for (let i = 0; i < n; i++) s += i; return s; }',
+            'sum(3);',
+            'export const out = sum(4);',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(6);
+        expect(code).not.toMatch(/sum\(3\)/); // the discarded call is gone
+    });
+
+    it('does NOT treat a write to an OUTER binding as local', async () => {
+        const src = [
+            'let seen = 0;',
+            'function touch(n) { let local = n; seen = local; return local; }', // writes a closure var
+            'touch(5);',
+            'export const out = seen;',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(5); // the discarded call still ran
+    });
+
     it('allows Math.* while keeping the surrounding rules', async () => {
         const src = ['function mag(a) { return Math.abs(a); }', 'mag(-3);', 'export const out = mag(-5);'].join('\n');
         const code = await parity(src);

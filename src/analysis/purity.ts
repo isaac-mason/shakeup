@@ -24,6 +24,7 @@
 // common case — helpers declared and called in the same file — and, for a scope-hoisted bundle, the
 // bundle IS one module.
 import { N, type Node, walk } from '../ast.ts';
+import { type Graph, type Linked, packRef } from '../graph-types.ts';
 
 /** A call to `Math.<anything>()` on the GLOBAL `Math` (unresolved binding). The Math methods are
  *  specified as pure numeric functions; like every other minifier we assume the global is not
@@ -44,19 +45,56 @@ const isFunctionNode = (n: Node): boolean =>
 
 type Summary = { impure: boolean; callees: Set<number> };
 
+/** Every symbol BOUND inside `fn` — parameters and local declarations. Writing to one of these is
+ *  unobservable from outside the call, so it must not poison the summary; without this, any function
+ *  with an accumulator (`let s = 0; … s += x`) would be classed impure and nothing numeric would ever
+ *  be provably pure. Nested functions are skipped: their own bindings are not this function's locals
+ *  (missing a nested declaration's name only costs precision, never soundness). */
+function collectLocals(fn: Node): Set<number> {
+    const locals = new Set<number>();
+    walk(fn, (n) => {
+        if (n !== fn && isFunctionNode(n)) return false;
+        if (n.type === N.BindingIdentifier) {
+            const sym = (n as { sym: number }).sym ?? 0;
+            if (sym > 0) locals.add(sym);
+        }
+        return;
+    });
+    return locals;
+}
+
+/** A write target that is a plain reference to one of `locals`. */
+function isLocalTarget(target: Node, locals: Set<number>): boolean {
+    if (target.type !== N.IdentifierReference && target.type !== N.BindingIdentifier) return false;
+    const sym = (target as { sym: number }).sym ?? 0;
+    return sym > 0 && locals.has(sym);
+}
+
 /** Walk one function body, WITHOUT descending into nested functions (they carry their own summary —
  *  merely *defining* one has no effect). Records local impurity and the locally-resolvable callees. */
-function summarize(fn: Node): Summary {
+function summarize(fn: Node, resolve: (sym: number) => number | null): Summary {
     const s: Summary = { impure: false, callees: new Set() };
     const body = bodyOf(fn);
     if (body === null) return { impure: true, callees: s.callees };
+    const locals = collectLocals(fn);
     walk(body, (n) => {
         if (s.impure) return false;
         if (n !== body && isFunctionNode(n)) return false; // nested function: its own summary
         switch (n.type) {
-            // Anything that can write, throw, or run unknown code.
-            case N.AssignmentExpression:
-            case N.UpdateExpression:
+            // Writing to a LOCAL is invisible to the caller; anything else is a real effect.
+            case N.AssignmentExpression: {
+                const d = n.data as { left: Node };
+                if (isLocalTarget(d.left, locals)) return; // keep walking: the RHS is still checked
+                s.impure = true;
+                return false;
+            }
+            case N.UpdateExpression: {
+                const d = n.data as { argument: Node };
+                if (isLocalTarget(d.argument, locals)) return false;
+                s.impure = true;
+                return false;
+            }
+            // Anything that can throw or run unknown code.
             case N.ThrowStatement:
             case N.NewExpression:
             case N.AwaitExpression:
@@ -81,7 +119,12 @@ function summarize(fn: Node): Summary {
                     return false;
                 }
                 if (d.callee.type === N.IdentifierReference && d.callee.sym > 0) {
-                    s.callees.add(d.callee.sym);
+                    const key = resolve(d.callee.sym);
+                    if (key === null) {
+                        s.impure = true; // resolves outside the analysed set (e.g. an external import)
+                        return false;
+                    }
+                    s.callees.add(key);
                     return; // arguments are visited by the outer walk
                 }
                 s.impure = true; // unresolved / computed callee — unknown code
@@ -129,24 +172,40 @@ function boundSymbol(n: Node): number {
     return 0;
 }
 
-/**
- * Stamp `pure` on every call to a provably side-effect-free, locally-declared function.
- * Returns whether anything was stamped.
- */
-export function stampPureCalls(program: Node): boolean {
-    // ── 1. Per-function summaries, keyed by the symbol the function is bound to ──
-    const summaries = new Map<number, Summary>();
-    walk(program, (n) => {
-        if (!isFunctionNode(n)) return;
-        const sym = boundSymbol(n);
-        if (sym === 0) return;
-        // A symbol declared twice (or reassigned) is not a stable target — drop it from consideration.
-        if (summaries.has(sym)) summaries.set(sym, { impure: true, callees: new Set() });
-        else summaries.set(sym, summarize(n));
-    });
-    if (summaries.size === 0) return false;
+/** Record one function under `sym`, degrading to impure if the symbol is bound more than once. */
+function record(summaries: Map<number, Summary>, k: number, fn: Node, resolve: (sym: number) => number | null): void {
+    if (summaries.has(k)) summaries.set(k, { impure: true, callees: new Set() });
+    else summaries.set(k, summarize(fn, resolve));
+}
 
-    // Any callee we have no summary for is unknown code → poisons its caller.
+/** Collect summaries for every bound function in `program`, keyed by `key(sym)`. */
+function collect(program: Node, summaries: Map<number, Summary>, key: (sym: number) => number, resolve: (sym: number) => number | null): void {
+    walk(program, (n) => {
+        // `function f() {}` — the name is bound by the declaration itself.
+        if (isFunctionNode(n)) {
+            const sym = boundSymbol(n);
+            if (sym !== 0) record(summaries, key(sym), n, resolve);
+            return;
+        }
+        // `const f = () => {}` / `const f = function () {}` — by far the more common shape in modern
+        // source, and invisible from the function node itself. Restricted to `const`: a `let`/`var`
+        // holding a function can be reassigned, which would invalidate the summary. (This runs before
+        // `substituteAlternateSyntax` rewrites `const` → `let`, so the kind is still intact.)
+        if (n.type !== N.VariableDeclaration) return;
+        const vd = n.data as { kind: string; declarations: Node[] };
+        if (vd.kind !== 'const') return;
+        for (const decl of vd.declarations) {
+            const d = decl.data as { id: Node; init: Node | null };
+            if (d.init === null || !isFunctionNode(d.init)) continue;
+            if (d.id.type !== N.BindingIdentifier) continue;
+            const sym = (d.id as { sym: number }).sym ?? 0;
+            if (sym > 0) record(summaries, key(sym), d.init, resolve);
+        }
+    });
+}
+
+/** Propagate impurity callee→caller to a fixed point, poisoning anything that calls out of the set. */
+function solve(summaries: Map<number, Summary>): void {
     for (const s of summaries.values()) {
         for (const c of s.callees) {
             if (!summaries.has(c)) {
@@ -155,8 +214,6 @@ export function stampPureCalls(program: Node): boolean {
             }
         }
     }
-
-    // ── 2. Fixpoint: impurity propagates from callee to caller ──
     for (let changed = true; changed; ) {
         changed = false;
         for (const s of summaries.values()) {
@@ -170,8 +227,10 @@ export function stampPureCalls(program: Node): boolean {
             }
         }
     }
+}
 
-    // ── 3. Stamp calls to the survivors ──
+/** Stamp `pure` on calls in `program` whose callee resolves to a proven-pure summary. */
+function stamp(program: Node, summaries: Map<number, Summary>, key: (sym: number) => number | null): boolean {
     let stamped = false;
     walk(program, (n) => {
         if (n.type !== N.CallExpression) return;
@@ -180,10 +239,64 @@ export function stampPureCalls(program: Node): boolean {
         if (d.callee.type !== N.IdentifierReference) return;
         const sym = (d.callee as { sym: number }).sym;
         if (sym <= 0) return;
-        if (summaries.get(sym)?.impure === false) {
+        const k = key(sym);
+        if (k !== null && summaries.get(k)?.impure === false) {
             d.pure = true;
             stamped = true;
         }
     });
+    return stamped;
+}
+
+/**
+ * Stamp `pure` on every call to a provably side-effect-free, locally-declared function.
+ * Returns whether anything was stamped.
+ */
+export function stampPureCalls(program: Node): boolean {
+    const summaries = new Map<number, Summary>();
+    const id = (sym: number): number => sym;
+    collect(program, summaries, id, id);
+    if (summaries.size === 0) return false;
+
+    solve(summaries);
+    return stamp(program, summaries, id);
+}
+
+/**
+ * Cross-module purity over the whole linked graph, stamping calls in EVERY module.
+ *
+ * Runs between link and treeshake, which is the point where it pays: `treeshake` roots any top-level
+ * statement `isPureStatement` rejects, and that in turn consults `CallExpression.pure`. So proving an
+ * IMPORTED helper pure lets treeshake drop a discarded call to it — something the per-module pass in
+ * `runCompress` cannot see, because scan analyses each module before any of them are bound together.
+ *
+ * A callee that leaves the analysed set (an external package, a namespace import, an unresolved bind)
+ * is treated as unknown code and poisons its caller, exactly like an unresolved local callee.
+ */
+export function stampPureCallsGraph(graph: Graph, linked: Linked): boolean {
+    /** Local symbol → a graph-wide key, following an import to the symbol that actually defines it. */
+    const resolveIn =
+        (idx: number) =>
+        (sym: number): number | null => {
+            if (!graph.modules[idx].namedImports.has(sym)) return packRef(idx, sym);
+            const bind = linked.binds.get(packRef(idx, sym));
+            return bind !== undefined && bind.kind === 'found' ? bind.ref : null;
+        };
+
+    const summaries = new Map<number, Summary>();
+    for (let idx = 0; idx < graph.modules.length; idx++) {
+        const mod = graph.modules[idx];
+        if (mod.program === null) continue;
+        collect(mod.program, summaries, (sym) => packRef(idx, sym), resolveIn(idx));
+    }
+    if (summaries.size === 0) return false;
+    solve(summaries);
+
+    let stamped = false;
+    for (let idx = 0; idx < graph.modules.length; idx++) {
+        const mod = graph.modules[idx];
+        if (mod.program === null) continue;
+        if (stamp(mod.program, summaries, resolveIn(idx))) stamped = true;
+    }
     return stamped;
 }

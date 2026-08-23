@@ -43,6 +43,7 @@ import {
     type SourceMap,
     trimMappings,
 } from './sourcemap';
+import { stampPureCallsGraph } from './analysis/purity';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
@@ -488,6 +489,11 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
+    // Cross-module purity BEFORE treeshake: proving an imported helper side-effect-free lets
+    // `isPureStatement` (and so treeshake) drop a discarded call to it. The per-module pass inside
+    // `runCompress` cannot see across module boundaries — scan analyses each module before link binds
+    // them together — so this is the point where the interprocedural answer becomes available.
+    stampPureCallsGraph(graph, linked);
     Timer.start(timer, 'treeshake');
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, options.treeshakeCache);
     Timer.end(timer, 'treeshake');

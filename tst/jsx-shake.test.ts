@@ -70,16 +70,45 @@ describe('G-JSX-5: shake interplay', () => {
         expect(code).not.toContain('$$frag');
     });
 
-    it('pure:false keeps unused JSX (treated as effectful)', async () => {
+    it('pure:false defers to standard detection — which now PROVES this in-graph shim pure', async () => {
         const { code } = await build(
             `
             function Foo() { return 'foo'; }
-            const KEPT_BECAUSE_IMPURE = <Foo className="marker-impure" />;
+            const DROPPED_BECAUSE_PROVABLY_PURE = <Foo className="marker-impure" />;
             export const kept = 1;
         `,
             { pure: false },
         );
-        expect(code).toContain('marker-impure');
+        // `pure: false` means "don't ANNOTATE the call; let standard side-effect detection judge it".
+        // Interprocedural purity now judges it: this shim's `jsx` only calls `el`, which allocates an
+        // object literal, so an unused element really is dead and treeshake drops it. The option still
+        // protects a factory that is NOT provably pure — see the two cases below.
+        expect(code).not.toContain('marker-impure');
+    });
+
+    it('pure:false KEEPS unused JSX when the factory is genuinely impure', async () => {
+        const impureShim = `
+            export let calls = 0;
+            export function jsx(t, p, k) { calls++; return { t, p, k }; }
+            export const jsxs = jsx;
+            export const Fragment = { $$frag: true };
+        `;
+        const files = { '/main.tsx': `
+            function Foo() { return 'foo'; }
+            const KEPT_BECAUSE_IMPURE = <Foo className="marker-impure" />;
+            export const kept = 1;
+        `, '/react/jsx-runtime.ts': impureShim, '/react.ts': impureShim };
+        const r = await bundle({
+            entry: '/main.tsx',
+            fs: createMemoryFs(files),
+            external: [],
+            resolve,
+            jsx: { pure: false },
+        });
+        expect(r.errors).toEqual([]);
+        // `jsx` mutates a module-level binding, so the analysis refuses to stamp it and the element
+        // must survive — the guarantee the option exists for.
+        expect(r.code).toContain('marker-impure');
     });
 
     it('EXTERNAL runtime: fully-shaken JSX drops the injected import; live keeps it', async () => {
