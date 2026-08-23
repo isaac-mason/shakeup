@@ -195,11 +195,11 @@ describe('drop-unused (compress)', () => {
         expect(q.log).toEqual(['x']); // deadImpure's effect ran; deadPure/deadVar/closed did nothing
     });
 
-    it('does not fire without compress (plain build keeps the unused binding)', async () => {
+    it('does not fire when compress is explicitly disabled (plain build keeps the unused binding)', async () => {
         const src = `
             export function f() { const unusedPure = 1; return 'x'; }
             export const out = f();`;
-        const code = await build(src, false);
+        const code = await build(src, { compress: false });
         expect(code).toMatch(/unusedPure/);
         expect((await run(code)).out).toBe('x');
     });

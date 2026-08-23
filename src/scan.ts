@@ -513,7 +513,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
-    const compress = options.compress === true; // minify P4 — part of the parse-cache key below
+    const compress = options.compress ?? false; // minify P4 — a MODE ('full'|'dce'|false); part of the parse-cache key below
     // The injected automatic JSX runtime is side-effect-free (conventionally pure), so an unused
     // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
     // jsx-runtime special-case (see pruneUnusedExternals).
@@ -741,8 +741,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
                 // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
                 // and the (compress-aware) cache stores the already-compressed AST.
-                if (compress) {
-                    const refreshed = runCompress(program, semantic);
+                if (compress !== false) {
+                    const refreshed = runCompress(program, semantic, compress);
                     if (refreshed !== null) semantic = refreshed;
                 }
                 graph.parseStats.parsed++;

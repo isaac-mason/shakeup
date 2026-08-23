@@ -109,8 +109,8 @@ describe('constant propagation (compress)', () => {
         expect((await run(code)).out).toBe(7);
     });
 
-    it('does not fire without compress', async () => {
-        const code = await build('const K = 5;\nexport const out = K + 1;', false);
+    it('does not fire when compress is explicitly disabled', async () => {
+        const code = await build('const K = 5;\nexport const out = K + 1;', { compress: false });
         expect(code).toMatch(/\bK\b/);
         expect((await run(code)).out).toBe(6);
     });

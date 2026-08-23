@@ -5,6 +5,7 @@
 import type { Semantic } from './analysis/semantic';
 import type { Node, Program } from './ast';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
+import type { CompressMode } from './passes/compress';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';
@@ -138,7 +139,7 @@ export type CachedParse = {
     srcHash: number;
     /** Whether compress passes were applied when this AST was produced — part of the cache key, so
      *  a `minify` toggle across builds re-parses instead of reusing a wrongly-(un)compressed AST. */
-    compress: boolean;
+    compress: CompressMode | false;
     program: Program;
     nodeCount: number;
     semantic: Semantic;

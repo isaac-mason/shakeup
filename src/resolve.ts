@@ -2,6 +2,7 @@ import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import type { ParseCache } from './graph-types';
 import { createNodeResolver } from './node-resolve';
 import type { Plugin } from './plugin';
+import type { CompressMode } from './passes/compress';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
  * automatic runtime only. */
@@ -124,7 +125,7 @@ export type GraphOptions = CommonOptions & {
     /** Run the AST compress passes (minify P4) during scan. A transform concern (syntactic
      *  lowering), so it lives in scan and the parse-cache key includes it. Set by `bundle()` from
      *  `output.minify`; default false. */
-    compress?: boolean;
+    compress?: CompressMode | false;
 };
 
 /** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target. Runs

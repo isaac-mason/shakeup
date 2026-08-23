@@ -1,4 +1,5 @@
 import { type GetHash, type HashCharacters, hasherByType } from './util/hash';
+import type { CompressMode } from './passes/compress';
 
 /** Slim `PreRenderedChunk` passed to filename functions. */
 export type PreRenderedChunk = {
@@ -56,21 +57,37 @@ export type MinifyOptions = {
     /** Rename bindings to short base54 names (deconflict/mangle). */
     mangle?: boolean;
     /** AST compress passes (dead-code, fold-constants, …) — the P4 pipeline. */
-    compress?: boolean;
+    compress?: boolean | 'dce';
 };
 
 /** Fully-resolved minify sub-stage flags. */
-export type ResolvedMinify = { whitespace: boolean; mangle: boolean; compress: boolean };
+/** `compress` is a MODE, not a flag: `'full'` runs every pass, `'dce'` runs only the passes that
+ *  change which code EXISTS (removals + the folds they need), and `false` runs none. See
+ *  `CompressMode` in `passes/compress` — the split is oxc's `CompressionMode`, and it is what allows
+ *  optimisation to behave identically in dev and in a bundle while only the cosmetic tier differs. */
+export type ResolvedMinify = { whitespace: boolean; mangle: boolean; compress: CompressMode | false };
 
 /** Resolve the `minify` option: `true` = all stages on; an object opts into each stage (default
  *  false per field); falsy = all off. Resolved once and threaded so whitespace/mangle/compress
  *  never drift apart. */
 export function resolveMinify(minify: boolean | MinifyOptions | undefined): ResolvedMinify {
-    if (minify === true) return { whitespace: true, mangle: true, compress: true };
+    if (minify === true) return { whitespace: true, mangle: true, compress: 'full' };
     if (minify !== null && typeof minify === 'object') {
-        return { whitespace: minify.whitespace === true, mangle: minify.mangle === true, compress: minify.compress === true };
+        return {
+            whitespace: minify.whitespace === true,
+            mangle: minify.mangle === true,
+            // Omitted → `'dce'`: the semantic tier is ALWAYS on. Only an explicit `false` opts out.
+            compress:
+                minify.compress === true
+                    ? 'full'
+                    : minify.compress === false
+                      ? false
+                      : 'dce',
+        };
     }
-    return { whitespace: false, mangle: false, compress: false };
+    // No `minify` at all still runs the SEMANTIC tier. Optimisation (what code exists, which branch
+    // is taken) is then identical in dev and in a bundle; only the cosmetic tier is gated on `minify`.
+    return { whitespace: false, mangle: false, compress: 'dce' };
 }
 
 /** Fully-resolved output naming config with defaults applied. */

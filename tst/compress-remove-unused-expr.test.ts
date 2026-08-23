@@ -94,8 +94,8 @@ describe('remove-unused-expression (compress)', () => {
         expect(code).toMatch(/eff|push/);
     });
 
-    it('does not fire without compress', async () => {
-        const code = await build('export function f() { [1, 2, 3]; return 5; }\nexport const out = f();', false);
+    it('does not fire when compress is explicitly disabled', async () => {
+        const code = await build('export function f() { [1, 2, 3]; return 5; }\nexport const out = f();', { compress: false });
         expect(code).toMatch(/\[1,\s?2,\s?3\]/); // dead array literal kept without compress
     });
 });

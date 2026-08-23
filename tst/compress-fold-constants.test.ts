@@ -143,8 +143,8 @@ describe('fold-constants (compress)', () => {
         expect(q.out).toStrictEqual([14, 'xyz', true, 15, 0.30000000000000004]);
     });
 
-    it('does not fire without compress (plain build keeps the un-folded expression)', async () => {
-        const code = await build('export const out = 2 + 3;', false);
+    it('does not fire when compress is explicitly disabled (plain build keeps the un-folded expression)', async () => {
+        const code = await build('export const out = 2 + 3;', { compress: false });
         expect(code).toMatch(/2\s*\+\s*3/);
         expect((await run(code)).out).toBe(5);
     });
