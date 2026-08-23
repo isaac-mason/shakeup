@@ -23,6 +23,7 @@ import { booleanContext } from './boolean-context.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
+import { deadStore } from './dead-store.ts';
 import { dropDebugger } from './drop-debugger.ts';
 import { dropUnused } from './drop-unused.ts';
 import { foldConstants } from './fold-constants.ts';
@@ -75,6 +76,8 @@ const LOOP_PASSES: TaggedPass[] = [
     // full-mode branch of `exit_expression`, outside the tree-shake branch.
     { pass: inline, cosmetic: true },
     { pass: removeUnusedExpr },
+    // Flow-sensitive: drops a store whose value is never read. SEMANTIC — it removes code.
+    { pass: deadStore },
     { pass: joinVars, cosmetic: true },
     { pass: dropUnused },
 ];
