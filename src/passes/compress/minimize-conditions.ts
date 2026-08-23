@@ -180,14 +180,26 @@ function foldIfReturnFollow(body: Node[]): boolean {
         const stmt = body[i];
         if (stmt.type !== N.IfStatement) continue;
         const d = stmt.data as IfData;
-        if (d.alternate !== null) continue; // else form is handled by the node hook (ifReturnBoth)
-        const x = asReturnArg(d.consequent);
-        if (x === null) continue;
         const next = body[i + 1];
         if (next.type !== N.ReturnStatement) continue;
         const y = (next.data as ReturnData).argument;
-        if (y === null) continue; // trailing `return;` — bail (no ternary value)
-        const cond = create.ConditionalExpression(stmt.start, next.end, 0, d.test, x, y);
+        if (y === null) continue; // trailing `return;` — no ternary value, bail
+        let cons: Node;
+        let alt: Node;
+        if (d.alternate === null) {
+            // `if (a) return X;  return Y`  →  `return a ? X : Y`
+            const x = asReturnArg(d.consequent);
+            if (x === null) continue;
+            cons = x;
+            alt = y;
+        } else if (isEmptyBranch(d.consequent)) {
+            // `if (a) {} else return X;  return Y`  →  `return a ? Y : X`  (truthy falls through to Y).
+            const elseX = asReturnArg(d.alternate);
+            if (elseX === null) continue;
+            cons = y;
+            alt = elseX;
+        } else continue; // else-form with a non-empty consequent is handled by the node hook (ifReturnBoth)
+        const cond = create.ConditionalExpression(stmt.start, next.end, 0, d.test, cons, alt);
         body[i] = create.ReturnStatement(stmt.start, next.end, 0, cond);
         body.splice(i + 1, 1); // drop the consumed trailing return
         changed = true;
