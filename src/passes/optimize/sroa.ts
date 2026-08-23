@@ -30,6 +30,7 @@ import { VAR_KIND } from '../../parser/create.ts';
 import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
+import type { ShapeTable } from './shapes.ts';
 
 const isFn = (n: Node): boolean =>
     n.type === N.FunctionDeclaration || n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression;
@@ -40,8 +41,14 @@ type Plan = {
     decl: Node;
     /** Field key (`"0"`, `"x"`) → the scalar binding name that replaces it. */
     names: Map<string, string>;
-    /** Field key → its initialiser expression, in declaration order. */
+    /** Field key → its initialiser expression, in declaration order. Empty in `destructure` mode. */
     inits: [string, Node][];
+    /** `literal` splits a literal into scalars; `destructure` binds the fields off an opaque value. */
+    mode: 'literal' | 'destructure';
+    /** The opaque initialiser, in `destructure` mode. */
+    source: Node | null;
+    /** Field order for `destructure` mode. */
+    fields: string[];
     /** Member expressions to rewrite → the scalar name. */
     rewrites: Map<Node, string>;
 };
@@ -101,16 +108,18 @@ function scalarName(sem: Semantic, scope: number, base: string, field: string): 
  * Approve a declaration for replacement, or return `null`.
  * `declDepth` is the function nesting depth the declaration sits at; a reference from deeper is refused.
  */
-function planFor(program: Node, decl: Node, sem: Semantic, scope: number): Plan | null {
+function planFor(program: Node, decl: Node, sem: Semantic, scope: number, shapes: ShapeTable): Plan | null {
     const vd = decl.data as { declarations: Node[] };
     if (vd.declarations.length !== 1) return null;
     const d = vd.declarations[0].data as { id: Node; init: Node | null };
     if (d.id.type !== N.BindingIdentifier || d.init === null) return null;
     const sym = (d.id as { sym: number }).sym;
     if (sym <= 0) return null;
+    // Shape from the literal initialiser, else from the captured TYPE annotation.
     const fields = literalFields(d.init);
-    if (fields === null) return null;
-    const keys = new Set(fields.map(([k]) => k));
+    const typed = fields === null ? (shapes.get(decl.start) ?? null) : null;
+    if (fields === null && typed === null) return null;
+    const keys = new Set(fields !== null ? fields.map(([k]) => k) : typed!);
 
     // Every reference must be a fixed-field member access, at the declaration's own function depth.
     const rewrites = new Map<Node, string>();
@@ -151,14 +160,21 @@ function planFor(program: Node, decl: Node, sem: Semantic, scope: number): Plan 
     }
 
     const names = new Map<string, string>();
-    for (const [k] of fields) names.set(k, scalarName(sem, scope, d.id.name, k));
+    for (const k of keys) names.set(k, scalarName(sem, scope, d.id.name, k));
     const finalRewrites = new Map<Node, string>();
     for (const [m, key] of rewrites) finalRewrites.set(m, names.get(key)!);
-    return { decl, names, inits: fields, rewrites: finalRewrites };
+    return fields !== null
+        ? { decl, names, inits: fields, rewrites: finalRewrites, mode: 'literal', source: null, fields: [...keys] }
+        : { decl, names, inits: [], rewrites: finalRewrites, mode: 'destructure', source: d.init, fields: typed! };
 }
 
 /** Replace `@sroa`-approved aggregates with scalars. Returns whether anything changed. */
-export function scalarReplaceAggregates(program: Node, semantic: Semantic, source: string): boolean {
+export function scalarReplaceAggregates(
+    program: Node,
+    semantic: Semantic,
+    source: string,
+    shapes: ShapeTable = new Map(),
+): boolean {
     const spans = directiveSpans(source, program, DIRECTIVE.SROA);
     if (spans.size === 0) return false;
 
@@ -175,7 +191,7 @@ export function scalarReplaceAggregates(program: Node, semantic: Semantic, sourc
             [N.ArrowFunctionExpression]: (n) => void stack.push(gate.enterFn(n.start)),
             [N.VariableDeclaration]: (n, ctx: TransformCtx) => {
                 if (!gate.active && !spans.has(n.start)) return;
-                const plan = planFor(program, n, semantic, ctx.currentScope);
+                const plan = planFor(program, n, semantic, ctx.currentScope, shapes);
                 if (plan !== null) plans.push(plan);
             },
         }),
@@ -200,17 +216,33 @@ export function scalarReplaceAggregates(program: Node, semantic: Semantic, sourc
             [N.VariableDeclaration]: (n, ctx: TransformCtx) => {
                 const plan = declPlans.get(n);
                 if (plan === undefined) return;
-                const decls = plan.inits.map(([key, init]) =>
-                    create.VariableDeclarator(
-                        n.start,
-                        n.end,
-                        0,
-                        node(N.BindingIdentifier, n.start, n.start, plan.names.get(key)!, null),
-                        null,
-                        init,
-                    ),
+                const bind = (key: string): Node =>
+                    node(N.BindingIdentifier, n.start, n.start, plan.names.get(key)!, null);
+                if (plan.mode === 'literal') {
+                    const decls = plan.inits.map(([key, init]) =>
+                        create.VariableDeclarator(n.start, n.end, 0, bind(key), null, init),
+                    );
+                    ctx.replaceWith(create.VariableDeclaration(n.start, n.end, VAR_KIND.LET, decls));
+                    return;
+                }
+                // Opaque value + a shape from its TYPE → bind the fields by destructuring it once.
+                // A tuple shape (numeric keys) destructures positionally.
+                const isTuple = plan.fields.every((f) => /^\d+$/.test(f));
+                const pattern = isTuple
+                    ? create.ArrayPattern(n.start, n.end, 0, plan.fields.map((f) => bind(f)))
+                    : create.ObjectPattern(
+                          n.start,
+                          n.end,
+                          0,
+                          plan.fields.map((f) =>
+                              create.ObjectProperty(n.start, n.end, 0, node(N.IdentifierName, n.start, n.start, f, null), bind(f)),
+                          ),
+                      );
+                ctx.replaceWith(
+                    create.VariableDeclaration(n.start, n.end, VAR_KIND.LET, [
+                        create.VariableDeclarator(n.start, n.end, 0, pattern, null, plan.source),
+                    ]),
                 );
-                ctx.replaceWith(create.VariableDeclaration(n.start, n.end, VAR_KIND.LET, decls));
             },
             [N.StaticMemberExpression]: (n, ctx: TransformCtx) => {
                 const name = allRewrites.get(n);

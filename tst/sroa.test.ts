@@ -114,3 +114,82 @@ describe('sroa (@sroa)', () => {
         expect(await parity(src)).toContain('get x');
     });
 });
+
+describe('sroa — typed shapes (in-file)', () => {
+    const buildTs = async (src: string) =>
+        (await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify: { compress: false } } })).code;
+
+    const parityTs = async (src: string) => {
+        const on = await buildTs(src);
+        const off = await buildTs(src.replace(/\/\* @sroa \*\//g, ''));
+        expect(exportShape(await runModule(on))).toEqual(exportShape(await runModule(off)));
+        return on;
+    };
+
+    it('takes the shape from a local `type` alias when the initialiser is opaque', async () => {
+        const src = [
+            'type Vec2 = { x: number; y: number };',
+            'function mk(): Vec2 { return { x: 3, y: 4 }; }',
+            'export function len2() {',
+            '  /* @sroa */ const v: Vec2 = mk();',
+            '  return v.x * v.x + v.y * v.y;',
+            '}',
+            'export const out = len2();',
+        ].join('\n');
+        const code = await parityTs(src);
+        expect((await runModule(code)).out).toBe(25);
+        expect(code).toMatch(/\{\s*x:\s*v_x,\s*y:\s*v_y\s*\}\s*=\s*mk\(\)/); // destructured once
+        expect(code).not.toMatch(/v\.x/);
+    });
+
+    it('works from an `interface`', async () => {
+        const src = [
+            'interface P { a: number; b: number }',
+            'function mk(): P { return { a: 1, b: 2 }; }',
+            'export function f() { /* @sroa */ const p: P = mk(); return p.a + p.b; }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parityTs(src);
+        expect((await runModule(code)).out).toBe(3);
+        expect(code).toContain('p_a');
+    });
+
+    it('works from an inline type literal and a tuple type', async () => {
+        const src = [
+            'function mkO(): { m: number } { return { m: 7 }; }',
+            'function mkT(): [number, number] { return [1, 2]; }',
+            'export function f() {',
+            '  /* @sroa */ const o: { m: number } = mkO();',
+            '  /* @sroa */ const t: [number, number] = mkT();',
+            '  return o.m + t[0] + t[1];',
+            '}',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parityTs(src);
+        expect((await runModule(code)).out).toBe(10);
+        expect(code).toMatch(/\[\s*t_0,\s*t_1\s*\]\s*=\s*mkT\(\)/); // tuple destructures positionally
+    });
+
+    it('REFUSES an optional field — the shape is not fully known', async () => {
+        const src = [
+            'type Maybe = { a: number; b?: number };',
+            'function mk(): Maybe { return { a: 1 }; }',
+            'export function f() { /* @sroa */ const v: Maybe = mk(); return v.a; }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parityTs(src);
+        expect((await runModule(code)).out).toBe(1);
+        expect(code).toContain('v.a'); // refused
+    });
+
+    it('REFUSES a type it cannot resolve in this file', async () => {
+        const src = [
+            'declare function mk(): any;',
+            'export function f(mkv: any) { /* @sroa */ const v: SomeExternal = mkv(); return v.a; }',
+            'export const out = f(() => ({ a: 5 }));',
+        ].join('\n');
+        const code = await parityTs(src.replace('SomeExternal', 'any'));
+        expect((await runModule(code)).out).toBe(5);
+        expect(code).toContain('v.a');
+    });
+});

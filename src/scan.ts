@@ -14,6 +14,7 @@ import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
 import { inlineFunctions } from './passes/optimize/inline-functions';
+import { captureShapes } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
@@ -737,6 +738,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // 2nd traverse: strip residual TS types (assertions, type-only stmts/members, param
                 // properties) after value lowering. Separate traverse so tsStrip never races tsLower's
                 // replaceWith on a shared node (see ts-strip-pass-plan.md).
+                // SROA's type-shape oracle reads WRITTEN annotations, so it must run before the
+                // strip erases them; the table is handed to the optimizer below.
+                const shapes = captureShapes(program);
                 traverse(program, semantic, [tsStrip]);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
@@ -750,7 +754,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // compilecat's `run_all` uses (inline first, then the simplify loop).
                 let expanded = inlineFunctions(program, semantic, source);
                 if (unrollLoops(program, semantic, source)) expanded = true;
-                if (scalarReplaceAggregates(program, semantic, source)) expanded = true;
+                if (scalarReplaceAggregates(program, semantic, source, shapes)) expanded = true;
                 if (expanded) {
                     semantic = createSemantic();
                     analyze(semantic, program);
