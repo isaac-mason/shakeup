@@ -466,13 +466,13 @@ const freeVarsAllGlobal = (cand: Candidate): boolean => {
 
 /**
  * Inline calls to `@inline` functions imported from another module, across the whole graph.
- * Returns the set of module indices whose AST changed (their semantic must be rebuilt, and compress
- * re-run so the expansion is cleaned up).
+ * Returns consumer module index → the DONOR modules it inlined from: the consumer's AST now depends
+ * on another module's source, which the parse cache cannot see on its own.
  */
 export function inlineCrossModule(
     modules: readonly { program: Node; semantic: Semantic; source: string; namedImports: ReadonlyMap<number, unknown> }[],
     resolveImport: (moduleIdx: number, sym: number) => { mod: number; sym: number } | null,
-): Set<number> {
+): Map<number, Set<number>> {
     // Donor candidates per module, built lazily — most modules annotate nothing.
     const donorCache = new Map<number, Map<number, Candidate>>();
     const donorsOf = (idx: number): Map<number, Candidate> => {
@@ -484,9 +484,10 @@ export function inlineCrossModule(
         return c;
     };
 
-    const changed = new Set<number>();
+    const changed = new Map<number, Set<number>>();
     for (let idx = 0; idx < modules.length; idx++) {
         const mod = modules[idx];
+        const producers = new Set<number>();
         const visitor: Visitor = {
             name: 'inlineCrossModule',
             enter: null,
@@ -503,11 +504,12 @@ export function inlineCrossModule(
                     // Argument gates are the same as the local case; hygiene reduces to "each free
                     // name is still a global here", which `callIsInlinable` checks via `lookupValue`.
                     if (!callIsInlinable(cand, d.arguments, ctx.currentScope, mod.semantic)) return;
+                    producers.add(target.mod);
                     ctx.replaceWith(substitute(cand, d.arguments));
                 },
             }),
         };
-        if (traverse(mod.program, mod.semantic, [visitor])) changed.add(idx);
+        if (traverse(mod.program, mod.semantic, [visitor])) changed.set(idx, producers);
     }
     return changed;
 }

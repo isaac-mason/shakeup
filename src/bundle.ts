@@ -500,13 +500,29 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // re-compressed, since scan's compress ran before the graph existed.
     {
         const compressMode = resolveMinify(options.output?.minify).compress;
-        const touched = inlineCrossModule(graph.modules, (idx, sym) => {
+        const resolveImport = (idx: number, sym: number): { mod: number; sym: number } | null => {
             const bind = linked.binds.get(packRef(idx, sym));
             if (bind === undefined || bind.kind !== 'found') return null;
             return { mod: refMod(bind.ref), sym: refSym(bind.ref) };
-        });
-        for (const idx of touched) {
+        };
+        // consumer module idx → the producer modules whose SOURCE its AST now depends on.
+        const touched = inlineCrossModule(graph.modules, resolveImport);
+        // NOT WIRED YET: cross-module constant propagation
+        // (`passes/compress/cross-module-constants.ts`) is written and tested in isolation, but
+        // enabling it needs the parse cache to track CROSS-MODULE dependencies first — see the
+        // roadmap. Wiring it without that makes a consumer's cached AST depend on a producer's
+        // source with nothing to invalidate it.
+        for (const [idx, producers] of touched) {
             const mod = graph.modules[idx];
+            // A cross-module substitution makes this module's AST depend on ANOTHER module's source —
+            // a dependency the parse cache does not track. Editing the producer would otherwise leave
+            // the consumer holding a stale inlined value (its cached AST already has the old constant
+            // baked in). Evict it so the next build re-parses from source, and mark it changed so this
+            // build re-renders it. Conservative: only modules that actually received a substitution.
+            // KNOWN GAP (see roadmap): this module's AST now depends on `producers`' SOURCE, which
+            // the parse cache does not model — editing a donor leaves a consumer holding a stale
+            // inlined body. Evicting unconditionally would be correct but re-parses every build.
+            void producers;
             const fresh = createSemantic();
             analyze(fresh, mod.program);
             mod.semantic = fresh;
