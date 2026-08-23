@@ -122,13 +122,13 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // reference counts after this round's removals — the loop usually settles in 1–2 rounds.
         refresh();
     }
-    // Both final traversals are purely cosmetic — `'dce'` stops after the fixed point.
+    // Both final traversals are purely cosmetic — `'dce'` stops after the fixed point. They share a
+    // single rebuild: `joinVars` only merges adjacent declarations (pure syntax, no symbol lookups),
+    // so it does not need a semantic refreshed by `substituteAlternateSyntax` before it.
     if (mode === 'full') {
-        if (traverse(program, cur, FINAL_PASSES)) {
-            any = true;
-            refresh();
-        }
-        if (traverse(program, cur, POST_FINAL_PASSES)) {
+        let finalChanged = traverse(program, cur, FINAL_PASSES);
+        if (traverse(program, cur, POST_FINAL_PASSES)) finalChanged = true;
+        if (finalChanged) {
             any = true;
             refresh();
         }

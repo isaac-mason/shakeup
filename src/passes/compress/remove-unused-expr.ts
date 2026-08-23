@@ -36,7 +36,9 @@ function stripDiscarded(node: Node): Node | null {
                 const s = stripDiscarded(e);
                 if (s !== null) kept.push(s);
             }
-            return seqOf(kept);
+            // Nothing stripped → return the SAME reference. Rebuilding an identical node would make
+            // the caller report a change on every pass, so the fixed-point loop would never settle.
+            return sameList(kept, d.expressions as Node[]) ? node : seqOf(kept);
         }
         case N.BinaryExpression: {
             // Both operands evaluate unconditionally, the operator is pure → keep both effects.
@@ -57,6 +59,7 @@ function stripDiscarded(node: Node): Node | null {
             // effects strip away, only left's effect remains; else keep `left <op> strippedRight`.
             const rs = stripDiscarded(d.right as Node);
             if (rs === null) return stripDiscarded(d.left as Node);
+            if (rs === d.right) return node; // unchanged — do not rebuild (see `sameList`)
             return create.LogicalExpression(node.start, node.end, d.operator as string, d.left as Node, rs) as Node;
         }
         case N.ArrayExpression: {
@@ -87,6 +90,16 @@ function stripDiscarded(node: Node): Node | null {
         default:
             return node;
     }
+}
+
+/** Whether `kept` is exactly `orig` — same length, same node references, same order. Used to return
+ *  the ORIGINAL node when a strip removed nothing: returning a freshly-built but identical node makes
+ *  `rewriteBody` report a change every time, and the compress fixed point then never converges (it
+ *  ran to the iteration cap on every build, re-analysing the module's semantic each round). */
+function sameList(kept: readonly Node[], orig: readonly Node[]): boolean {
+    if (kept.length !== orig.length) return false;
+    for (let i = 0; i < kept.length; i++) if (kept[i] !== orig[i]) return false;
+    return true;
 }
 
 /** Rewrite one statement list: drop pure ExpressionStatements, and shrink impure ones to just their
