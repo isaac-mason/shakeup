@@ -96,7 +96,7 @@ function countShallowReturns(stmts: readonly Node[]): number {
     return count;
 }
 
-export interface BlockMutateInput {
+export type BlockMutateInput = {
     /** Callee body statements — CLONED by the caller; mutated in place here. */
     bodyStmts: Node[];
     /** Param names to bind in the prologue; `args[i]` pairs with `params[i]`. */
@@ -109,7 +109,7 @@ export interface BlockMutateInput {
     needsResult: boolean;
 }
 
-export interface BlockMutateOutput {
+export type BlockMutateOutput = {
     /** A LabeledStatement when interior returns forced `break`s, else a plain BlockStatement. */
     block: Node;
     /** Whether `result` is written on at least one path — lets the caller skip an unused temp. */

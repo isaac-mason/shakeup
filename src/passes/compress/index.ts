@@ -19,6 +19,7 @@ import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
+import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
@@ -59,6 +60,9 @@ type TaggedPass = { pass: Visitor; cosmetic?: true };
  *  can reason about them. */
 const LOOP_PASSES: TaggedPass[] = [
     { pass: normalize },
+    // Lifts the scaffolding blocks inlining emits, so the passes below see straight-line code.
+    // Cosmetic: it reshapes without changing which code exists.
+    { pass: blockFlatten, cosmetic: true },
     // `debugger` is dropped only for `'full'`: keeping the statement is the entire point in dev.
     { pass: dropDebugger, cosmetic: true },
     { pass: constProp },
