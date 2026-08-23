@@ -29,6 +29,7 @@ import { inline } from './inline.ts';
 import { joinVars } from './join-vars.ts';
 import { minimizeConditionalExpr } from './minimize-conditional.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
+import { minimizeExitPoints } from './minimize-exit-points.ts';
 import { minimizeNot } from './minimize-not.ts';
 import { normalize } from './normalize.ts';
 import { minimizeLogical } from './minimize-logical.ts';
@@ -61,6 +62,8 @@ const LOOP_PASSES: TaggedPass[] = [
     { pass: constProp },
     { pass: deadCode },
     { pass: foldConstants },
+    // Turns an early-return guard into a negated `if`; the passes below finish the job.
+    { pass: minimizeExitPoints, cosmetic: true },
     { pass: minimizeConditions, cosmetic: true },
     { pass: minimizeNot, cosmetic: true },
     { pass: minimizeConditionalExpr, cosmetic: true },
