@@ -98,3 +98,87 @@ describe('inline-functions (DIRECT)', () => {
         await parity(src); // parity is the assertion: behaviour must not change
     });
 });
+
+describe('inline-functions (BLOCK)', () => {
+    // A body that is NOT a single `return` — these go through `block-mutate`.
+    const MULTI = '/* @inline */ function pick(a) { if (a > 0) return "pos"; const t = a * 2; return t; }';
+
+    it('splices into a declarator init (`const x = f(a)`)', async () => {
+        // Inside a function body, so the declaration sits in a statement LIST that can hold the
+        // two statements the rewrite produces (`let x;` + the block).
+        const src = [
+            MULTI,
+            'function outer(n) { const r = pick(n); return r; }',
+            'export const out = [outer(1), outer(-2)];',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toEqual(['pos', -4]);
+        expect(code).not.toMatch(/\bpick\s*\(/); // it really fired
+    });
+
+    it('splices into an assignment (`x = f(a)`)', async () => {
+        const src = [MULTI, 'let v = 0;', 'v = pick(-3);', 'export const out = v;'].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(-6);
+        expect(code).not.toMatch(/\bpick\s*\(/); // it really fired
+    });
+
+    it('splices a statement-position call, keeping its effects', async () => {
+        const src = [
+            'let hits = 0;',
+            '/* @inline */ function bump(n) { if (n > 0) { hits += n; return 1; } hits = -1; return 0; }',
+            'bump(5);',
+            'export const out = hits;',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(5);
+        expect(code).not.toMatch(/\bbump\s*\(/); // it really fired
+    });
+
+    it('evaluates each argument exactly once, even when used repeatedly', async () => {
+        const src = [
+            'let calls = 0;',
+            'function next() { calls++; return 3; }',
+            '/* @inline */ function tri(a) { if (a < 0) return 0; return a + a + a; }',
+            // Inside a function body: a BLOCK splice needs a statement LIST for its `let x;` + block,
+            // which an `export const x = …` initialiser (an export's single child) cannot provide.
+            'function outer() { const r = tri(next()); return r; }',
+            'export const out = outer();',
+            'export const c = calls;',
+        ].join('\n');
+        const code = await parity(src);
+        const m = await run(code);
+        expect(m.out).toBe(9);
+        expect(m.c).toBe(1); // prologue temp — evaluated once
+        expect(code).not.toMatch(/\btri\s*\(/); // it really fired
+    });
+
+    it('handles a loop with an early return', async () => {
+        const src = [
+            '/* @inline */ function firstOver(n) { for (let i = 0; i < 10; i++) { if (i > n) return i; } return -1; }',
+            'export const out = [firstOver(3), firstOver(99)];',
+        ].join('\n');
+        expect((await run(await parity(src))).out).toEqual([4, -1]);
+    });
+
+    it('REFUSES when an argument reads a parameter name (would hit the prologue TDZ)', async () => {
+        const src = [
+            'const a = 5;',
+            '/* @inline */ function f(a) { if (a > 0) return a; return 0; }',
+            'export const out = f(a);',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe(5);
+        expect(code).toMatch(/\bf\s*\(/); // refused: the call survives
+    });
+
+    it('REFUSES a body containing try/catch', async () => {
+        const src = [
+            '/* @inline */ function safe(a) { try { return a.x; } catch { return "err"; } }',
+            'export const out = safe(null);',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('err');
+        expect(code).toMatch(/\bsafe\s*\(/);
+    });
+});
