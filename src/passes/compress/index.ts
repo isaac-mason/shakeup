@@ -14,6 +14,7 @@
 // safe across loop iterations. Ref-counting passes (the future drop-unused) will need the semantic
 // refreshed mid-loop; today we refresh ONCE at the end (returning a fresh `Semantic` when anything
 // changed) and will tighten to per-iteration when such a pass lands.
+import { stampPureCalls } from '../../analysis/purity.ts';
 import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
@@ -106,6 +107,10 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     let any = false;
     let cur = semantic;
     const loop = loopPassesFor(mode);
+    // Interprocedural purity runs ONCE up front, before the loop: it only ever ADDS information
+    // (`CallExpression.pure`) that the removal passes then act on, so it belongs to the semantic tier
+    // and runs in every mode. Stamping does not itself change the program, hence no `any = true`.
+    stampPureCalls(program);
     const refresh = (): void => {
         cur = createSemantic();
         analyze(cur, program);
