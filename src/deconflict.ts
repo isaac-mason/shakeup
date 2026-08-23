@@ -172,52 +172,6 @@ export function deconflictChunk(
     return claim;
 }
 
-/** Mangle every NON-module-scope binding (function params, locals, nested declarations) in a
- *  chunk to short base54 names, after {@link deconflictChunk} has fixed all chunk-top names.
- *
- *  `taken` must be the chunk's fully-populated top-level name set (module symbols + globals +
- *  reserved words + cross-chunk import locals + namespace/external names). The walk visits each
- *  module's scope tree depth-first, assigning names not in `taken` and backtracking on scope
- *  exit — so a sibling scope reuses the same short names (esbuild/oxc_mangler model,
- *  `llm/libs/oxc/crates/oxc_mangler/src/lib.rs:130-213`), while a descendant never shadows a
- *  name still live in an enclosing scope. Names are added to / removed from `taken` in place. */
-export function mangleNestedScopes(graph: Graph, linked: Linked, chunkModules: number[], taken: Set<string>): void {
-    for (const idx of chunkModules) {
-        const mod = graph.modules[idx];
-        const sem = mod.semantic;
-        const moduleScope = scopeOf(sem, mod.program);
-
-        // Child scopes per scope id, and the bindings declared directly in each (non-top) scope.
-        const childScopes: number[][] = sem.scopes.map(() => []);
-        for (let s = 1; s < sem.scopes.length; s++) childScopes[sem.scopes[s].parent].push(s);
-        const symsByScope: number[][] = sem.scopes.map(() => []);
-        for (let sym = 1; sym < sem.symbols.length; sym++) {
-            const sc = sem.symbols[sym].scope;
-            if (sc !== moduleScope) symsByScope[sc].push(sym);
-        }
-
-        const walk = (scope: number): void => {
-            const added: string[] = [];
-            let i = 0;
-            for (const sym of symsByScope[scope]) {
-                if (mod.namedImports.has(sym)) continue; // import binding — already resolved
-                let name = base54(i++);
-                while (taken.has(name)) name = base54(i++);
-                taken.add(name);
-                added.push(name);
-                linked.finalNames.set(packRef(idx, sym), name);
-            }
-            for (const child of childScopes[scope]) walk(child);
-            for (const name of added) taken.delete(name); // backtrack → sibling scopes reuse
-        };
-        for (const child of childScopes[moduleScope]) walk(child);
-    }
-}
-
-/** Whole-bundle deconflict — treat the entire graph as one lexical scope. The bundle path does NOT
- *  use this (it deconflicts per-chunk in {@link deconflictChunk} via buildChunkGraph); it's for
- *  single-scope callers/tests. Generate-stage naming — kept out of {@link linkGraph} so Link binds+
- *  sorts and names nothing (rolldown `link_stage` does no naming). */
 export function deconflictWholeBundle(graph: Graph, linked: Linked): void {
     deconflictChunk(graph, linked, linked.order, null, []);
 }

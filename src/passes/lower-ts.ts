@@ -11,7 +11,7 @@ import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the enum site)
 
 /** A minted IIFE param: its reserved name plus the real SymbolId it binds to, so every reference
- *  carries `sym` and `mangleNestedScopes` can shorten it (oxc's `generate_uid` returns a bound id).
+ *  carries `sym` and the chunk mangler (`src/mangle/`) can shorten it (oxc's `generate_uid` returns a bound id).
  *  `scope` is the fresh FUNCTION scope it lives in — the enclosing scope for the IIFE body's own
  *  nested enums/namespaces. */
 type Uid = { name: string; sym: number; scope: number };

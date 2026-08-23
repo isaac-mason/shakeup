@@ -598,7 +598,7 @@ export function createScope(semantic: Semantic, parent: number, flags: number): 
  *  param a lowering pass mints via `generateUid`). Appends a symbol record, associates the decl
  *  node, and returns the new SymbolId — the general-scope counterpart to
  *  {@link declareSyntheticImport}. Because the symbol lives in a non-module scope, deconflict
- *  leaves it and `mangleNestedScopes` renames it like any nested local. */
+ *  leaves it and the chunk mangler (`src/mangle/`) renames it like any nested local. */
 export function declareLocal(semantic: Semantic, declNode: Node, scope: number, flags: number): number {
     const id = semantic.symbols.length;
     semantic.symbols.push({ scope, decl: declNode, flags, nameId: 0 });
