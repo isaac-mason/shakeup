@@ -30,6 +30,7 @@ import { joinVars } from './join-vars.ts';
 import { minimizeConditionalExpr } from './minimize-conditional.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
 import { minimizeNot } from './minimize-not.ts';
+import { normalize } from './normalize.ts';
 import { minimizeLogical } from './minimize-logical.ts';
 import { removeUnusedExpr } from './remove-unused-expr.ts';
 
@@ -37,6 +38,7 @@ import { removeUnusedExpr } from './remove-unused-expr.ts';
  *  collapses `if(true)`), keeping booleans in their CANONICAL `true`/`false` form so fold-constants
  *  can reason about them. */
 const LOOP_PASSES: Visitor[] = [
+    normalize,
     dropDebugger,
     constProp,
     deadCode,

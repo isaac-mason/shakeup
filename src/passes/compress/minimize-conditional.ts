@@ -38,9 +38,14 @@
 //   - Sequence/logical-arm merges (:154-234) -- many shapes, each its own equality gate.
 //   - Same-callee call hoist `a ? f(c) : f(e)` -> `f(a ? c : e)` (:236-315) -- the prompt's optional #6.
 //   - Assignment merge `x ? a=0 : a=1` -> `a = x ? 0 : 1` (:595-681) -- reorders target eval; subtle.
-//   - `?? / ?.` nullish rewrites (:322-395) and `a ? 1 : 0` -> `+a` numeric coercions (:522-568).
+//   - `?? / ?.` nullish rewrites (:322-395).
 //   These are all correct in oxc but each carries a distinct correctness gate; ported conservatively
-//   later. The five above are the common, high-confidence wins.
+//   later.
+//
+//   6. NUMERIC-COERCION ARMS (oxc :522-568): `a ? 1 : 0` -> `+!!a`, `a ? 0 : 1` -> `+!a`. The test is
+//      evaluated once either way; the coercion reproduces the 0/1 result.
+//   (Identical-arm equality (#2) also covers calls -- `a ? x() : x()` -> `x()` -- since the call is
+//   evaluated exactly once regardless.)
 //
 // Real nodes are built (never hand-formatted text) so the printer's precedence machinery adds exactly
 // the parens each context needs: `(a, b)` as a ternary/assignment RHS, `a || b` / `a && b` as operands.
@@ -115,10 +120,23 @@ function exprEq(a: Node, b: Node): boolean {
             const y = b.data as { object: Node; expression: Node; optional: boolean };
             return x.optional === y.optional && exprEq(x.object, y.object) && exprEq(x.expression, y.expression);
         }
+        case N.CallExpression: {
+            // Equating calls is sound HERE only because the sole caller collapses IDENTICAL arms
+            // (`a ? x() : x()`), where the call is evaluated exactly once either way.
+            const x = a.data as { callee: Node; arguments: Node[]; optional: boolean };
+            const y = b.data as { callee: Node; arguments: Node[]; optional: boolean };
+            if (x.optional !== y.optional || x.arguments.length !== y.arguments.length) return false;
+            if (!exprEq(x.callee, y.callee)) return false;
+            for (let i = 0; i < x.arguments.length; i++) if (!exprEq(x.arguments[i], y.arguments[i])) return false;
+            return true;
+        }
         default:
             return false;
     }
 }
+
+/** A numeric literal whose value equals `v` (`0` or `1`). */
+const isNum = (n: Node, v: number): boolean => n.type === N.NumericLiteral && Number(n.name) === v;
 
 /** Rewrite a `ConditionalExpression`, or return `null` to leave it untouched. Applied on EXIT (after
  *  children are simplified) so the arms are already in their most-reduced form. */
@@ -142,6 +160,21 @@ function minimizeConditional(n: Node): Node | null {
     if (isFalseLit(consequent) && isTrueLit(alternate)) {
         // `a ? false : true` → `!a`
         return create.UnaryExpression(n.start, n.end, create.OP.NOT, test);
+    }
+
+    // 1b. Numeric 0/1 arms → the numeric coercion of the boolean (test evaluated once either way).
+    //     `a ? 1 : 0` → `+!!a` ; `a ? 0 : 1` → `+!a`.
+    if (isNum(consequent, 1) && isNum(alternate, 0)) {
+        const notNot = create.UnaryExpression(
+            n.start,
+            n.end,
+            create.OP.NOT,
+            create.UnaryExpression(n.start, n.end, create.OP.NOT, test),
+        );
+        return create.UnaryExpression(n.start, n.end, create.OP.POS, notNot);
+    }
+    if (isNum(consequent, 0) && isNum(alternate, 1)) {
+        return create.UnaryExpression(n.start, n.end, create.OP.POS, create.UnaryExpression(n.start, n.end, create.OP.NOT, test));
     }
 
     // 3. `a ? a : b` → `a || b` -- test is a bare ref, consequent is the SAME ref (double-read safe).
