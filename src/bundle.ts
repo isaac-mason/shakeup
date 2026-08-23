@@ -47,10 +47,13 @@ import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshak
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
 
-/** A codeSplitting group as a user config. */
+/** The `{ getModuleInfo }` context threaded into user chunk `name`/`test` functions. */
+export type ChunkMeta = { getModuleInfo: (id: string) => ModuleInfo | null };
+
+/** A codeSplitting / advancedChunks group as a user config (mirrors rolldown's MatchGroup). */
 export type CodeSplittingGroup = {
-    name: string | ((id: string) => string | null);
-    test?: string | RegExp | ((id: string) => boolean);
+    name: string | ((id: string, meta: ChunkMeta) => string | null);
+    test?: string | RegExp | ((id: string, meta: ChunkMeta) => boolean);
     priority?: number;
     minSize?: number;
     maxSize?: number;
@@ -63,13 +66,35 @@ export type CodeSplittingGroup = {
     tags?: '$initial'[];
 };
 
+/** `output.advancedChunks` — the public front door over the chunk-grouping engine. Top-level
+ *  `minSize`/`maxSize`/`minShareCount`/… are per-group fallbacks (mirrors rolldown). */
+export type AdvancedChunksOptions = {
+    minSize?: number;
+    maxSize?: number;
+    minModuleSize?: number;
+    maxModuleSize?: number;
+    minShareCount?: number;
+    includeDependenciesRecursively?: boolean;
+    groups: CodeSplittingGroup[];
+};
+
+/** manualChunks — Rollup-compatible: a fn (id→name) or an object map (name→ids). Normalized
+ *  into the same {@link ResolvedGroup} model as advancedChunks. */
+export type ManualChunks =
+    | ((id: string, meta: ChunkMeta) => string | null | undefined)
+    | Record<string, string[]>;
+
 /** Output-shaping options plus naming/hash/sourcemap (from {@link OutputOptionsNaming}). */
 export type OutputOptions = OutputOptionsNaming & {
     /** false / the deprecated inlineDynamicImports = don't split dynamic imports out. An
      *  object configures groups. Default true. */
     codeSplitting?: boolean | { minSize?: number; groups?: CodeSplittingGroup[] };
-    /** manualChunks — normalized to a single group. */
-    manualChunks?: (id: string, meta: { getModuleInfo: (id: string) => ModuleInfo | null }) => string | null | undefined;
+    /** Advanced code splitting — the public group API over the chunk engine. If both this and
+     *  `manualChunks` are provided, `advancedChunks` wins and `manualChunks` is ignored. */
+    advancedChunks?: AdvancedChunksOptions;
+    /** manualChunks — sugar over {@link advancedChunks}. Fn form (id→name) or object map
+     *  (name→[ids], listed modules + their deps land in the chunk). */
+    manualChunks?: ManualChunks;
     /** Deprecated alias for `codeSplitting: false` (single-input). */
     inlineDynamicImports?: boolean;
     /** One chunk per module, imports preserved as real ESM. */
@@ -826,8 +851,67 @@ function renderChunk(
     };
 }
 
-/** Resolve user `output` options into {@link ChunkOptions}, normalizing manualChunks → a
- *  single group and inlineDynamicImports → codeSplitting:false. */
+/** Per-group fallbacks (top-level advancedChunks values, else engine defaults). */
+type GroupDefaults = {
+    minSize: number;
+    maxSize: number;
+    minModuleSize: number;
+    maxModuleSize: number;
+    minShareCount: number;
+    includeDependenciesRecursively: boolean;
+};
+
+/** Engine defaults per rolldown MatchGroup (llm/libs/rolldown …/manual_code_splitting_options.rs
+ *  + output-options.ts @default tags): minSize 0, maxSize ∞, minModuleSize 0, maxModuleSize ∞,
+ *  minShareCount 1, priority 0, entriesAware false, entriesAwareMergeThreshold 0,
+ *  includeDependenciesRecursively true. */
+const ENGINE_GROUP_DEFAULTS: GroupDefaults = {
+    minSize: 0,
+    maxSize: Number.POSITIVE_INFINITY,
+    minModuleSize: 0,
+    maxModuleSize: Number.POSITIVE_INFINITY,
+    minShareCount: 1,
+    includeDependenciesRecursively: true,
+};
+
+/** Normalize one public group → a {@link ResolvedGroup}. `name`/`test` function forms are
+ *  threaded the `{ getModuleInfo }` meta; a string `name` becomes `() => name`; `test` compiles
+ *  to a predicate (string → substring match, RegExp → `re.test`, fn → threaded) or `null`. */
+function normalizeGroup(g: CodeSplittingGroup, index: number, defaults: GroupDefaults, meta: ChunkMeta): ResolvedGroup {
+    const gName = g.name;
+    const nameFn: (id: string) => string | null =
+        typeof gName === 'function' ? (id) => gName(id, meta) : () => gName;
+    let testFn: ((id: string) => boolean) | null = null;
+    if (typeof g.test === 'string') {
+        const t = g.test;
+        testFn = (id) => id.includes(t);
+    } else if (g.test instanceof RegExp) {
+        const re = g.test;
+        testFn = (id) => re.test(id);
+    } else if (typeof g.test === 'function') {
+        const fn = g.test;
+        testFn = (id) => fn(id, meta);
+    }
+    return {
+        name: nameFn,
+        test: testFn,
+        priority: g.priority ?? 0,
+        minSize: g.minSize ?? defaults.minSize,
+        maxSize: g.maxSize ?? defaults.maxSize,
+        minModuleSize: g.minModuleSize ?? defaults.minModuleSize,
+        maxModuleSize: g.maxModuleSize ?? defaults.maxModuleSize,
+        minShareCount: g.minShareCount ?? defaults.minShareCount,
+        entriesAware: g.entriesAware ?? false,
+        entriesAwareMergeThreshold: g.entriesAwareMergeThreshold ?? 0,
+        initialOnly: (g.tags ?? []).includes('$initial'),
+        includeDependenciesRecursively: g.includeDependenciesRecursively ?? defaults.includeDependenciesRecursively,
+        index,
+    };
+}
+
+/** Resolve user `output` options into {@link ChunkOptions}, normalizing codeSplitting groups,
+ *  advancedChunks, and manualChunks (fn/object) → the same {@link ResolvedGroup}[] the engine
+ *  consumes, and inlineDynamicImports → codeSplitting:false. */
 function resolveChunkOptions(
     output: OutputOptions | undefined,
     entryCount: number,
@@ -841,43 +925,60 @@ function resolveChunkOptions(
         warnings.push('inlineDynamicImports is only valid with a single input — ignored for multi-entry');
         codeSplitting = true;
     }
+    const meta: ChunkMeta = { getModuleInfo };
     const groups: ResolvedGroup[] = [];
     let index = 0;
-    const addGroup = (g: CodeSplittingGroup): void => {
-        const nameFn: (id: string) => string | null = typeof g.name === 'function' ? g.name : () => g.name as string;
-        let testFn: ((id: string) => boolean) | null = null;
-        if (typeof g.test === 'string') {
-            const t = g.test;
-            testFn = (id) => id.includes(t);
-        } else if (g.test instanceof RegExp) {
-            const re = g.test;
-            testFn = (id) => re.test(id);
-        } else if (typeof g.test === 'function') {
-            testFn = g.test;
-        }
-        groups.push({
-            name: nameFn,
-            test: testFn,
-            priority: g.priority ?? 0,
-            minSize: g.minSize ?? 0,
-            maxSize: g.maxSize ?? Number.POSITIVE_INFINITY,
-            minModuleSize: g.minModuleSize ?? 0,
-            maxModuleSize: g.maxModuleSize ?? Number.POSITIVE_INFINITY,
-            minShareCount: g.minShareCount ?? 1,
-            entriesAware: g.entriesAware ?? false,
-            entriesAwareMergeThreshold: g.entriesAwareMergeThreshold ?? 0,
-            initialOnly: (g.tags ?? []).includes('$initial'),
-            includeDependenciesRecursively: g.includeDependenciesRecursively ?? true,
-            index: index++,
-        });
+    const add = (g: CodeSplittingGroup, defaults: GroupDefaults): void => {
+        groups.push(normalizeGroup(g, index++, defaults, meta));
     };
+
+    // codeSplitting.groups (legacy inline form) → groups with engine defaults.
     if (typeof cs === 'object' && cs.groups !== undefined) {
-        for (const g of cs.groups) addGroup(g);
+        for (const g of cs.groups) add(g, ENGINE_GROUP_DEFAULTS);
     }
-    // manualChunks → single group whose `name` is the fn (test/priority/sizes default).
-    if (output?.manualChunks !== undefined) {
-        const fn = output.manualChunks;
-        addGroup({ name: (id: string) => fn(id, { getModuleInfo }) ?? null });
+
+    const adv = output?.advancedChunks;
+    if (adv !== undefined) {
+        // Group-level minSize/maxSize/… fall back to the top-level advancedChunks values, then
+        // engine defaults (mirrors rolldown's CodeSplittingOptions global fallbacks).
+        const defaults: GroupDefaults = {
+            minSize: adv.minSize ?? ENGINE_GROUP_DEFAULTS.minSize,
+            maxSize: adv.maxSize ?? ENGINE_GROUP_DEFAULTS.maxSize,
+            minModuleSize: adv.minModuleSize ?? ENGINE_GROUP_DEFAULTS.minModuleSize,
+            maxModuleSize: adv.maxModuleSize ?? ENGINE_GROUP_DEFAULTS.maxModuleSize,
+            minShareCount: adv.minShareCount ?? ENGINE_GROUP_DEFAULTS.minShareCount,
+            includeDependenciesRecursively:
+                adv.includeDependenciesRecursively ?? ENGINE_GROUP_DEFAULTS.includeDependenciesRecursively,
+        };
+        for (const g of adv.groups) add(g, defaults);
+        // Precedence: advancedChunks wins; manualChunks (if also present) is ignored.
+        if (output?.manualChunks !== undefined) {
+            warnings.push('both advancedChunks and manualChunks are set — manualChunks is ignored');
+        }
+    } else if (output?.manualChunks !== undefined) {
+        const mc = output.manualChunks;
+        if (typeof mc === 'function') {
+            // fn form → one group whose `name` is the fn; deps NOT pulled in (Rollup semantics:
+            // only the modules the fn names land in the chunk).
+            add(
+                { name: (id, m) => mc(id, m) ?? null, includeDependenciesRecursively: false },
+                ENGINE_GROUP_DEFAULTS,
+            );
+        } else {
+            // object map { chunkName: [ids] } → one group per entry; listed modules + their deps
+            // land in the chunk (Rollup semantics → includeDependenciesRecursively: true).
+            for (const [chunkName, ids] of Object.entries(mc)) {
+                const idSet = new Set(ids);
+                add(
+                    {
+                        name: () => chunkName,
+                        test: (id) => idSet.has(id),
+                        includeDependenciesRecursively: true,
+                    },
+                    ENGINE_GROUP_DEFAULTS,
+                );
+            }
+        }
     }
     return { codeSplitting, preserveModules: output?.preserveModules === true, groups };
 }
