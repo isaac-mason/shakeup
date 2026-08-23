@@ -47,8 +47,48 @@ function stripEmpty(list: Node[]): boolean {
     return true;
 }
 
+/** A statement safe to be a control-flow clause WITHOUT braces: it can't dangle an `else` (not a
+ *  nested `if`/loop) and needs no block scoping (not `let`/`const`/`class`/`function`; `var` is
+ *  function-scoped so fine). Anything else keeps its block. */
+function isClauseSafe(s: Node): boolean {
+    switch (s.type) {
+        case N.ExpressionStatement:
+        case N.ReturnStatement:
+        case N.ThrowStatement:
+        case N.BreakStatement:
+        case N.ContinueStatement:
+        case N.DebuggerStatement:
+        case N.EmptyStatement:
+            return true;
+        case N.VariableDeclaration:
+            return (s.data as { kind: string }).kind === 'var';
+        default:
+            return false;
+    }
+}
+
+/** A single-clause-safe-statement block → that bare statement (`{ return x }` → `return x`), else the
+ *  clause unchanged. The AST-level counterpart of minify brace-omission (`for(;x;){s}` → `for(;x;)s`),
+ *  done here (not in the printer) so the printer stays structure-preserving for its round-trip tests. */
+function unwrapClause(clause: Node | null): Node | null {
+    if (clause === null || clause.type !== N.BlockStatement) return clause;
+    const body = (clause.data as { body: Node[] }).body;
+    return body.length === 1 && isClauseSafe(body[0]) ? body[0] : clause;
+}
+
 const listHook = (field: 'body' | 'consequent') => (n: Node, ctx: TransformCtx) => {
     if (stripEmpty((n.data as Record<string, Node[]>)[field])) ctx.changed = true;
+};
+/** Unwrap the clause block(s) of a loop/if in place. */
+const clauseHook = (fields: string[]) => (n: Node, ctx: TransformCtx) => {
+    const d = n.data as Record<string, Node | null>;
+    for (const f of fields) {
+        const u = unwrapClause(d[f]);
+        if (u !== d[f]) {
+            d[f] = u;
+            ctx.changed = true;
+        }
+    }
 };
 const fnHook = (n: Node, ctx: TransformCtx) => {
     if (trimTrailingReturn(n)) ctx.changed = true;
@@ -64,6 +104,11 @@ export const normalize: Visitor = {
         [N.FunctionDeclaration]: fnHook,
         [N.FunctionExpression]: fnHook,
         [N.ArrowFunctionExpression]: fnHook,
+        [N.IfStatement]: clauseHook(['consequent', 'alternate']),
+        [N.ForStatement]: clauseHook(['body']),
+        [N.ForInStatement]: clauseHook(['body']),
+        [N.ForOfStatement]: clauseHook(['body']),
+        [N.DoWhileStatement]: clauseHook(['body']),
         [N.Program]: listHook('body'),
         [N.BlockStatement]: listHook('body'),
         [N.StaticBlock]: listHook('body'),
