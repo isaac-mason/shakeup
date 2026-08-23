@@ -21,6 +21,7 @@ import { traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
+import { aliasInline } from './alias-inline.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
@@ -66,6 +67,10 @@ const LOOP_PASSES: TaggedPass[] = [
     // `debugger` is dropped only for `'full'`: keeping the statement is the entire point in dev.
     { pass: dropDebugger, cosmetic: true },
     { pass: constProp },
+    // Alias inline (compilecat `inline_variables` path 3): `const b = a` → reads of `b` become `a`.
+    // Sits next to const-prop — both are pure read-substitutions that leave the dead declarator to
+    // drop-unused. Cosmetic: it renames references, it does not expose new dead code.
+    { pass: aliasInline, cosmetic: true },
     { pass: deadCode },
     { pass: foldConstants },
     // Turns an early-return guard into a negated `if`; the passes below finish the job.
