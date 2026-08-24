@@ -462,6 +462,30 @@ function collectTarget(state: AnalyseState, node: Node | null): void {
     }
 }
 
+/**
+ * Visit a FUNCTION BODY without opening a block scope of its own.
+ *
+ * A function body's top-level lexical declarations belong to the FUNCTION scope, not to a nested
+ * block: `function f(e) { let e; }` is an early SyntaxError, which only holds if the parameter and the
+ * `let` inhabit ONE scope. oxc encodes this structurally — its `FunctionBody` is a distinct AST node
+ * and never enters a scope, so only the function scope covers both — while shakeup reuses
+ * `BlockStatement` for bodies, and that case unconditionally opened a `SCOPE.BLOCK`.
+ *
+ * The consequence was not theoretical. `mangle/slots.ts` is a faithful port of oxc's
+ * `SlotAssignment::compute`, where two symbols may share a slot (hence a NAME) when their live ranges
+ * do not overlap. A parameter never read in the body has empty liveness, so a body-level `let` was
+ * free to take its slot — emitting `onBeforeRender(e,t,n,r,i){ … let e = … }` and a bundle Node
+ * refuses to parse. The mangler was right; the scope tree it was given was wrong.
+ */
+function visitFunctionBody(state: AnalyseState, body: Node | null): void {
+    if (body === null) return;
+    if (body.type !== N.BlockStatement) {
+        visit(state, body); // concise arrow body — an expression, no scope either way
+        return;
+    }
+    for (const s of body.data.body) visit(state, s);
+}
+
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
     switch (node.type) {
@@ -532,7 +556,7 @@ function visit(state: AnalyseState, node: Node | null): void {
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params);
                 visitType(state, node.data.returnType);
-                visit(state, node.data.body);
+                visitFunctionBody(state, node.data.body);
             });
             return;
         }
@@ -543,7 +567,7 @@ function visit(state: AnalyseState, node: Node | null): void {
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params);
                 visitType(state, node.data.returnType);
-                visit(state, node.data.body);
+                visitFunctionBody(state, node.data.body);
             });
             return;
         case N.ArrowFunctionExpression:
@@ -551,7 +575,7 @@ function visit(state: AnalyseState, node: Node | null): void {
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params);
                 visitType(state, node.data.returnType);
-                visit(state, node.data.body);
+                visitFunctionBody(state, node.data.body);
             });
             return;
         case N.ClassDeclaration: {
