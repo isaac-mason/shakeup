@@ -112,6 +112,37 @@ const isStmtList = (t: number): boolean => t === N.Program || t === N.BlockState
 const listOf = (n: Node): Node[] =>
     n.type === N.SwitchCase ? (n.data as { consequent: Node[] }).consequent : (n.data as { body: Node[] }).body;
 
+/**
+ * Node kinds the CFG traversal descends into: every statement, plus the containers that hold them.
+ * NOT "can contain a statement" — leaf statements (`ExpressionStatement`, `return`, `break`, …) must be
+ * visited too or they never become CFG nodes. Getting that distinction wrong broke 12 equivalence tests
+ * instantly, which is the harness doing its job.
+ */
+const isStatementish = (t: number): boolean =>
+    t === N.ExpressionStatement ||
+    t === N.ReturnStatement ||
+    t === N.ThrowStatement ||
+    t === N.BreakStatement ||
+    t === N.ContinueStatement ||
+    t === N.EmptyStatement ||
+    t === N.DebuggerStatement ||
+    t === N.FunctionDeclaration ||
+    t === N.Program ||
+    t === N.BlockStatement ||
+    t === N.StaticBlock ||
+    t === N.IfStatement ||
+    t === N.ForStatement ||
+    t === N.ForInStatement ||
+    t === N.ForOfStatement ||
+    t === N.WhileStatement ||
+    t === N.DoWhileStatement ||
+    t === N.SwitchStatement ||
+    t === N.SwitchCase ||
+    t === N.TryStatement ||
+    t === N.CatchClause ||
+    t === N.LabeledStatement ||
+    t === N.VariableDeclaration;
+
 const isFnNode = (t: number): boolean =>
     t === N.FunctionDeclaration || t === N.FunctionExpression || t === N.ArrowFunctionExpression;
 
@@ -131,15 +162,10 @@ export function buildCfg(root: Node): Cfg {
     };
 
     // Parent map — shakeup nodes carry no parent pointer (deliberate: monomorphic node shape), and
-    // `computeFollowNode` is defined by walking up. One pre-pass builds it.
+    // `computeFollowNode` is defined by walking up. It is filled DURING the main traversal rather than
+    // by a pre-pass: `handle` runs post-order, so by the time anything walks up from a node, every one
+    // of its ancestors has already been entered and recorded.
     const parent = new Map<Node, Node>();
-    const link = (n: Node): void => {
-        walkChildren(n, (c) => {
-            parent.set(c, n);
-            link(c);
-        });
-    };
-    link(root);
 
     const idFor = (n: Node | null): number => {
         if (n === null) return IMPLICIT_RETURN;
@@ -287,7 +313,7 @@ export function buildCfg(root: Node): Cfg {
 
     /** Closure `connectToPossibleExceptionHandler`. */
     const connectEx = (cfgNode: Node, target: Node | null): void => {
-        if (!mayThrow(target) || exceptionHandler.length === 0) return;
+        if (exceptionHandler.length === 0 || !mayThrow(target)) return;
         let lastJump: Node = cfgNode;
         for (let h = exceptionHandler.length - 1; h >= 0; h--) {
             const handler = exceptionHandler[h];
@@ -398,6 +424,9 @@ export function buildCfg(root: Node): Cfg {
 
         if (t === N.TryStatement) {
             const d = n.data as { block: Node; handler: Node | null; finalizer: Node | null };
+            parent.set(d.block, n);
+            if (d.handler !== null) parent.set(d.handler, n);
+            if (d.finalizer !== null) parent.set(d.finalizer, n);
             exceptionHandler.push(n);
             visit(d.block);
             exceptionHandler.pop();
@@ -407,8 +436,14 @@ export function buildCfg(root: Node): Cfg {
             return;
         }
 
+        // Record EVERY child (a CFG node can be a direct expression child — a `for`'s init/update, a
+        // for-in's right — and `connectEx` walks up from those), but only DESCEND into statement-ish
+        // ones. `handle` does nothing for an expression, and statements cannot occur inside one except
+        // in a nested function body, which is skipped anyway. Expressions dominate node counts, so
+        // this is most of the traversal.
         walkChildren(n, (c) => {
-            if (!isFnNode(c.type)) visit(c);
+            parent.set(c, n);
+            if (!isFnNode(c.type) && isStatementish(c.type)) visit(c);
         });
         handle(n);
     };

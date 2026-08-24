@@ -1,133 +1,156 @@
-// Generic dataflow framework — a port of Closure's `DataFlowAnalysis`
-// (llm/closure/src/com/google/javascript/jscomp/DataFlowAnalysis.java).
+// Generic dataflow framework — Closure's `DataFlowAnalysis`
+// (llm/closure/src/com/google/javascript/jscomp/DataFlowAnalysis.java), tuned for JS.
 //
-// THIS is the part worth evaluating. The claim under test is that the elegance people attribute to
-// "having a CFG" actually belongs to the FRAMEWORK — you supply a lattice, a transfer function and a
-// direction, and control flow is handled once, generically — and that the graph is merely one possible
-// input representation for it. Closure separates the two (`DataFlowAnalysis` vs `ControlFlowGraph`), so
-// the separation is the oracle's own, not an invention here.
+// An analysis still supplies Closure's five things — direction, transfer, boundary value, initial
+// estimate, join — so the framework stays generic and the control-flow knowledge lives once, in the
+// CFG. Two deliberate departures from a literal transcription, both measured:
 //
-// An analysis supplies five things (Closure's exact set, its docs quoted):
-//   • "Flow Direction: Implement isForward()"
-//   • "Flow Equations: Implement flowThrough(Object, LatticeElement)"
-//   • "Initial Entry Value: Implement createEntryLattice()"
-//   • "Initial Estimate: Implement createInitialEstimateLattice()"
-//   • a join operator (Closure `createFlowJoiner`)
-// plus equality, which Java gets from `equals` and TS has to be handed explicitly.
+//  1. MUTABLE LATTICE CONTRACT. Closure's `flowThrough` RETURNS a fresh lattice element, so every step
+//     allocates (`new LiveVariableLattice(input)`). Here the spec writes into a caller-owned buffer
+//     (`transfer(dst, src, …)`, `joinInto(dst, src)`), so a solve allocates O(nodes) once instead of
+//     O(steps). Java's escape analysis and generational GC make the pure version cheap there; on V8 it
+//     is the single largest cost in the solver.
 //
-// SOLVER: a work queue. Pop a node, join its inputs, run the transfer function; if its output changed,
-// enqueue the nodes it feeds (successors when forward, predecessors when backward). The implicit-return
-// node is never enqueued. This is Closure's `analyze()` verbatim, including the divergence guard.
+//  2. RPO SWEEPS instead of a FIFO work queue. Closure pops from a `UniqueQueue` and exposes an
+//     optional priority comparator (`getOptionalNodeComparator`) that its callers largely leave unset;
+//     a FIFO in node-creation order re-processes each node ~3x. Sweeping in reverse-postorder (for a
+//     backward analysis, postorder) propagates along the natural direction of the graph, so a
+//     structured function typically converges in two sweeps: one to compute, one to confirm.
+//     Both are worklist algorithms over the same lattice — this changes only the visit ORDER, which
+//     affects how fast the fixed point is reached and never what it is.
 import { type Cfg, IMPLICIT_RETURN } from './cfg.ts';
 import type { Node } from '../ast.ts';
 
-/** Closure's `MAX_STEPS_PER_NODE` — a divergence guard, not a precision knob. Its own comment calls
- *  20000 "way too high"; a monotone lattice of bounded height converges long before this. */
-export const MAX_STEPS_PER_NODE = 20000;
+/** Divergence guard (Closure's `MAX_STEPS_PER_NODE`), expressed as whole sweeps. */
+export const MAX_SWEEPS = 10_000;
 
 export type DataflowSpec<L> = {
     /** false ⇒ backward (liveness). Closure `isForward()`. */
     forward: boolean;
-    /** Lattice value at the graph's boundary. Closure `createEntryLattice()`. */
-    entry: () => L;
-    /** Optimistic starting value for every other node. Closure `createInitialEstimateLattice()`. */
-    initial: () => L;
-    /** Meet/join over incoming edges. Closure `createFlowJoiner()`. */
-    join: (values: L[]) => L;
-    /** The transfer function: the lattice value on the other side of `node`. */
-    flowThrough: (node: Node, input: L, cfgId: number) => L;
-    /** Fixed-point test. */
+    /** Allocate one lattice element, at the initial estimate. Closure `createInitialEstimateLattice()`. */
+    alloc: () => L;
+    /** `dst := src`. */
+    copy: (dst: L, src: L) => void;
+    /** `dst := dst ⊔ src`. Closure `createFlowJoiner()`, accumulating rather than allocating. */
+    joinInto: (dst: L, src: L) => void;
+    /** `dst := boundary`. Closure `createEntryLattice()`. */
+    boundary: (dst: L) => void;
+    /** `dst := transfer(src)` for CFG node `id`. Closure `flowThrough`, writing in place. */
+    transfer: (dst: L, src: L, node: Node, id: number) => void;
     equals: (a: L, b: L) => boolean;
 };
 
 export type DataflowResult<L> = {
-    /** `inAt[id]` / `outAt[id]` — lattice values on each side of CFG node `id`. For a BACKWARD analysis
-     *  `outAt` is the value AFTER the node and `inAt` the value before it, matching Closure. */
     inAt: L[];
     outAt: L[];
-    /** Work-queue pops performed — the honest cost measure for a solver comparison. */
+    /** Node visits performed — the honest cost measure when comparing solvers. */
     steps: number;
 };
 
-/** Solve `spec` over `cfg` to a fixed point. Closure `DataFlowAnalysis.analyze()`. */
+/**
+ * Reverse postorder from the entry, then any nodes the entry cannot reach (unreachable code still
+ * needs a defined answer). Postorder is computed iteratively — a recursive DFS blows the stack on the
+ * long statement chains a minified bundle produces.
+ */
+function reversePostorder(cfg: Cfg): Int32Array {
+    const n = cfg.value.length;
+    const seen = new Uint8Array(n);
+    const post: number[] = [];
+    const stack: number[] = [];
+    const next = new Int32Array(n); // per-node successor cursor
+
+    const dfs = (from: number): void => {
+        if (seen[from] === 1) return;
+        seen[from] = 1;
+        stack.push(from);
+        next[from] = 0;
+        while (stack.length > 0) {
+            const id = stack[stack.length - 1];
+            const succ = cfg.succ[id];
+            if (next[id] < succ.length) {
+                const s = succ[next[id]++];
+                if (seen[s] === 0) {
+                    seen[s] = 1;
+                    next[s] = 0;
+                    stack.push(s);
+                }
+            } else {
+                post.push(id);
+                stack.pop();
+            }
+        }
+    };
+
+    dfs(cfg.entry);
+    for (let i = 1; i < n; i++) dfs(i);
+    dfs(IMPLICIT_RETURN);
+
+    const order = new Int32Array(post.length);
+    for (let i = 0; i < post.length; i++) order[i] = post[post.length - 1 - i];
+    return order;
+}
+
+/** Solve `spec` over `cfg` to a fixed point. */
 export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
     const n = cfg.value.length;
     const inAt: L[] = new Array(n);
     const outAt: L[] = new Array(n);
     for (let i = 0; i < n; i++) {
-        inAt[i] = spec.initial();
-        outAt[i] = spec.initial();
+        inAt[i] = spec.alloc();
+        outAt[i] = spec.alloc();
     }
+    const rpo = reversePostorder(cfg);
+    // A backward analysis propagates against the edges, so it visits in postorder.
+    const order = spec.forward ? rpo : Int32Array.from(rpo).reverse();
 
-    // Closure uses a UniqueQueue: FIFO, but a node already queued is not queued twice.
-    const queued = new Uint8Array(n);
-    const queue: number[] = [];
-    let head = 0;
-    const push = (id: number): void => {
-        if (id === IMPLICIT_RETURN || queued[id] === 1) return;
-        queued[id] = 1;
-        queue.push(id);
-    };
-
-    // Seed EVERY node except the implicit return — Closure `initialize()` does exactly this, and it is
-    // not an optimisation detail but a correctness one. Seeding only the exits looks natural for a
-    // backward analysis and is WRONG: a node whose recomputed value equals its optimistic initial value
-    // reports "unchanged" and so never propagates, leaving everything upstream of it at the initial
-    // estimate. (That bug was live here until the equivalence harness caught it on `if/else`.)
-    for (let i = 1; i < n; i++) push(i);
-
-    const stepCount = new Int32Array(n);
+    const scratch = spec.alloc();
+    const prev = spec.alloc();
     let steps = 0;
 
-    while (head < queue.length) {
-        const id = queue[head++];
-        queued[id] = 0;
-        if (head > 4096 && head * 2 > queue.length) {
-            queue.splice(0, head); // keep the array from growing without bound on long runs
-            head = 0;
-        }
-        steps++;
-        if (++stepCount[id] > MAX_STEPS_PER_NODE) throw new Error('dataflow diverged');
+    for (let sweep = 0; sweep < MAX_SWEEPS; sweep++) {
+        let changed = false;
+        for (let k = 0; k < order.length; k++) {
+            const id = order[k];
+            if (id === IMPLICIT_RETURN) continue;
+            steps++;
 
-        // joinInputs
-        if (spec.forward && id === cfg.entry) {
-            inAt[id] = spec.entry();
-        } else {
-            const incoming = spec.forward ? cfg.pred[id] : cfg.succ[id];
-            if (incoming.length === 1) {
-                const src = incoming[0];
-                const v = spec.forward ? outAt[src] : inAt[src];
-                if (spec.forward) inAt[id] = v;
-                else outAt[id] = v;
-            } else if (incoming.length > 1) {
-                const vals: L[] = new Array(incoming.length);
-                for (let k = 0; k < incoming.length; k++) {
-                    const src = incoming[k];
-                    vals[k] = spec.forward ? outAt[src] : inAt[src];
+            // joinInputs
+            if (spec.forward && id === cfg.entry) {
+                spec.boundary(inAt[id]);
+            } else {
+                const incoming = spec.forward ? cfg.pred[id] : cfg.succ[id];
+                const target = spec.forward ? inAt[id] : outAt[id];
+                if (incoming.length === 0) {
+                    if (!spec.forward) spec.boundary(target);
+                } else if (incoming.length === 1) {
+                    // The common case in structured code — join straight into the target instead of
+                    // through the scratch buffer, halving the copies.
+                    spec.copy(target, spec.forward ? outAt[incoming[0]] : inAt[incoming[0]]);
+                } else {
+                    spec.copy(scratch, spec.forward ? outAt[incoming[0]] : inAt[incoming[0]]);
+                    for (let j = 1; j < incoming.length; j++) {
+                        const src = incoming[j];
+                        spec.joinInto(scratch, spec.forward ? outAt[src] : inAt[src]);
+                    }
+                    spec.copy(target, scratch);
                 }
-                const j = spec.join(vals);
-                if (spec.forward) inAt[id] = j;
-                else outAt[id] = j;
-            } else if (!spec.forward) {
-                // No successors at all — an exit node. Its out-value is the boundary.
-                outAt[id] = spec.entry();
             }
-        }
 
-        // flow
-        const value = cfg.value[id];
-        let changed: boolean;
-        if (spec.forward) {
-            const before = outAt[id];
-            outAt[id] = value === null ? before : spec.flowThrough(value, inAt[id], id);
-            changed = !spec.equals(before, outAt[id]);
-        } else {
-            const before = inAt[id];
-            inAt[id] = value === null ? before : spec.flowThrough(value, outAt[id], id);
-            changed = !spec.equals(before, inAt[id]);
+            // flow
+            const value = cfg.value[id];
+            if (value === null) continue;
+            // NOTE: folding the change test INTO `transfer` (write-and-compare in one pass, no `prev`
+            // copy) reads as exactly equivalent and is NOT — it took convergence from 2.59 sweeps per
+            // node to 464, with one function pinned at the sweep cap while still producing the right
+            // answer. Bisected to this line; not root-caused; reverted. Do not "simplify" it back
+            // without re-measuring `stepsPerNode`.
+            const target = spec.forward ? outAt[id] : inAt[id];
+            const source = spec.forward ? inAt[id] : outAt[id];
+            spec.copy(prev, target);
+            spec.transfer(target, source, value, id);
+            if (!spec.equals(prev, target)) changed = true;
         }
-
-        if (changed) for (const next of spec.forward ? cfg.succ[id] : cfg.pred[id]) push(next);
+        if (!changed) break;
     }
 
     return { inAt, outAt, steps };

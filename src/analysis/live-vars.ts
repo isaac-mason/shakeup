@@ -32,11 +32,6 @@ const bitSet = (s: LiveSet, i: number): void => {
     s[i >>> 5] |= 1 << (i & 31);
 };
 
-const eqSet = (a: LiveSet, b: LiveSet): boolean => {
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-    return true;
-};
-
 export type LiveVarsResult = {
     /** Tracked symbol id → dense bit index. */
     index: Map<number, number>;
@@ -194,6 +189,13 @@ function lhsNames(pattern: Node, tracked: ReadonlySet<number>, kill: (s: number)
 /**
  * Live-out sets for every CFG node of `cfg`, over `tracked`. `alwaysLive` (escaped/captured symbols)
  * are live everywhere — Closure's `escaped` set, and the same rule `liveness.ts` already implements.
+ *
+ * GEN/KILL ARE PRECOMPUTED, once per CFG node. Closure calls `computeGenKill` inside `flowThrough`, so
+ * it re-walks the AST subtree on every visit — with a work queue re-processing each node ~3x that is
+ * three AST walks per node to recover a value that cannot change. They are a pure function of the
+ * node, so they are hoisted out of the fixed point entirely and the solver reduces to bit arithmetic:
+ *
+ *     L_in = (L_out & ~KILL) | GEN
  */
 export function computeLiveVars(
     cfg: Cfg,
@@ -203,6 +205,7 @@ export function computeLiveVars(
     const index = new Map<number, number>();
     for (const s of tracked) index.set(s, index.size);
     const W = words(Math.max(index.size, 1));
+    const n = cfg.value.length;
 
     // The boundary value: nothing is live at an exit except what escaped.
     const boundary = new Uint32Array(W);
@@ -211,51 +214,58 @@ export function computeLiveVars(
         if (i !== undefined) bitSet(boundary, i);
     }
 
-    // Does this CFG node have an exception edge out? Then its kills are only MAYBE-kills.
-    const conditional = new Uint8Array(cfg.value.length);
-    for (let id = 0; id < cfg.value.length; id++)
+    // One flat buffer for all gen sets and one for all kills — `nodeGen[id*W .. id*W+W]`. Flat typed
+    // arrays rather than an array of arrays: one allocation, and the solver's hot loop reads them with
+    // a computed offset instead of chasing a pointer per node.
+    const nodeGen = new Uint32Array(n * W);
+    const nodeKill = new Uint32Array(n * W);
+
+    for (let id = 1; id < n; id++) {
+        const node = cfg.value[id];
+        if (node === null) continue;
+        // A node with an exception edge out may terminate part-way, so its assignments MIGHT not
+        // happen: they gen but do not kill (Closure's `conditional`).
+        let conditional = false;
         for (const b of cfg.succBranch[id])
             if (b === BRANCH.ON_EX) {
-                conditional[id] = 1;
+                conditional = true;
                 break;
             }
+        const base = id * W;
+        computeGenKill(
+            node,
+            tracked,
+            conditional,
+            (sym) => {
+                const i = index.get(sym);
+                if (i !== undefined) nodeGen[base + (i >>> 5)] |= 1 << (i & 31);
+            },
+            (sym) => {
+                const i = index.get(sym);
+                if (i !== undefined) nodeKill[base + (i >>> 5)] |= 1 << (i & 31);
+            },
+        );
+    }
 
     const spec: DataflowSpec<LiveSet> = {
         forward: false,
-        entry: () => boundary.slice(),
-        initial: () => boundary.slice(),
-        join: (vals) => {
-            const out = vals[0].slice();
-            for (let k = 1; k < vals.length; k++) {
-                const v = vals[k];
-                for (let w = 0; w < W; w++) out[w] |= v[w];
-            }
-            return out;
+        alloc: () => boundary.slice(),
+        copy: (dst, src) => {
+            dst.set(src);
         },
-        equals: eqSet,
-        flowThrough: (node, out, id) => {
-            // L_in = (L_out - KILL) ∪ GEN. Kills are collected separately and applied FIRST, so a node
-            // that both reads and writes a variable (`a = a + 1`) leaves it live, as it must.
-            const killed: number[] = [];
-            const genned: number[] = [];
-            computeGenKill(
-                node,
-                tracked,
-                conditional[id] === 1,
-                (s) => genned.push(s),
-                (s) => killed.push(s),
-            );
-            if (killed.length === 0 && genned.length === 0) return out;
-            const res = out.slice();
-            for (const s of killed) {
-                const i = index.get(s);
-                if (i !== undefined) res[i >>> 5] &= ~(1 << (i & 31));
-            }
-            for (const s of genned) {
-                const i = index.get(s);
-                if (i !== undefined) bitSet(res, i);
-            }
-            return res;
+        joinInto: (dst, src) => {
+            for (let w = 0; w < W; w++) dst[w] |= src[w];
+        },
+        boundary: (dst) => {
+            dst.set(boundary);
+        },
+        equals: (a, b) => {
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+            return true;
+        },
+        transfer: (dst, src, _node, id) => {
+            const base = id * W;
+            for (let w = 0; w < W; w++) dst[w] = (src[w] & ~nodeKill[base + w]) | nodeGen[base + w];
         },
     };
 
