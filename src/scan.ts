@@ -765,7 +765,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 analyze(semantic, program);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
-                collectUnsupported(program, id, graph.errors);
+                // Only a TS module can contain the construct this looks for (a value
+                // `namespace`), so a `.js`/`.jsx` module skips the walk entirely.
+                if (isTs) collectUnsupported(program, id, graph.errors);
                 // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
                 // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
                 // and the (compress-aware) cache stores the already-compressed AST.

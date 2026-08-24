@@ -268,6 +268,10 @@ function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunk, chunkGraph } = ctx;
     const map = new Map<Node, string>();
+    // Only `import()` and `new URL(...)` produce an override, and the scan already recorded both as
+    // import records — so a module with neither cannot contribute one, and the whole-program walk
+    // below is skipped. Checking is O(records).
+    if (!mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)) return map;
     walk(mod.program, (n) => {
         if (n.type === N.ImportExpression && chunk !== null && chunkGraph !== null) {
             const source = n.data.source;
