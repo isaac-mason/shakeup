@@ -44,6 +44,24 @@ export type Semantic = {
 
     unresolved: Node[];
 
+    /**
+     * REVERSE INDEX: symbol id → the reference nodes that resolve to it (reads and writes both;
+     * `IdentifierReference` nodes only — a declaration is not a reference).
+     *
+     * This is oxc's `Scoping::resolved_references` (`ArenaVec<ArenaVec<ReferenceId>>`), the structure
+     * that lets a pass ask "is this symbol unused / how many reads has it" in O(1) instead of walking
+     * the whole program. Without it, `analysis/movement.ts`'s `tallyRefs` is the only way to answer, so
+     * `constProp`, `aliasInline` and `dropUnused` each walk every node, every traverse, every
+     * fixed-point iteration — which profiling showed to be the dominant cost of compress.
+     *
+     * MAINTENANCE CONTRACT (oxc's, verbatim from `compressor.rs`): a stale EXTRA reference only costs
+     * optimizations — the output stays correct; an ADDED reference that was never recorded can produce
+     * INCORRECT output. So: **prune lazily, register eagerly.** A pass that drops a subtree may leave
+     * its references behind (they resolve to nodes no longer in the tree, and readers must tolerate
+     * that); a pass that introduces a reference MUST record it.
+     */
+    resolvedReferences: Node[][];
+
     names: Map<string, number>;
     bindings: Map<number, number>;
 
@@ -77,6 +95,7 @@ export function createSemantic(): Semantic {
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
         nodeScope: new Map(),
         unresolved: [],
+        resolvedReferences: [],
         names: new Map(),
         bindings: new Map(),
     };
@@ -143,6 +162,13 @@ function hoistTarget(state: AnalyseState): number {
     }
 }
 
+/** Record `identNode` as a reference to `sym` in the reverse index (oxc `add_resolved_reference`). */
+function recordRef(sem: Semantic, sym: number, identNode: Node): void {
+    const list = sem.resolvedReferences[sym];
+    if (list === undefined) sem.resolvedReferences[sym] = [identNode];
+    else list.push(identNode);
+}
+
 function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
     const nameId = state.sem.names.get(identNode.name);
     if (nameId !== undefined) {
@@ -151,6 +177,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
             const hit = state.sem.bindings.get(bindingKey(s, ns, nameId));
             if (hit !== undefined) {
                 identNode.sym = hit;
+                recordRef(state.sem, hit, identNode);
                 return;
             }
             s = state.sem.scopes[s].parent;
@@ -164,6 +191,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
                     (state.sem.symbols[hit].flags & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0
                 ) {
                     identNode.sym = hit;
+                    recordRef(state.sem, hit, identNode);
                     return;
                 }
                 s = state.sem.scopes[s].parent;
@@ -178,6 +206,7 @@ function resetSem(out: Semantic): void {
     out.scopes.length = 1;
     out.symbols.length = 1;
     out.unresolved.length = 0;
+    out.resolvedReferences.length = 0;
     out.names.clear();
     out.bindings.clear();
     out.nodeScope.clear();
