@@ -1,22 +1,20 @@
-// Shared compress prelude — the facts every reference-driven pass needs, gathered in ONE walk.
+// Reference-fact ORACLE for `tst/semantic-refs-differential.test.ts`. NOT part of the pipeline.
 //
-// WHY THIS EXISTS (CPU-profiled, see the roadmap's compress-perf section). Four passes each ran their
-// own FULL-PROGRAM pre-pass at `[N.Program]` enter:
-//     constProp   → tallyRefs + walkRefIdents
-//     aliasInline → tallyRefs + walkRefIdents + scanExports
-//     inline      → tallyRefs
-//     dropUnused  → countUses (another walkRefIdents)
-// That is ~7 whole-program walks PER ITERATION, on top of the main traversal, across ~6 iterations —
-// roughly 42 extra walks per module. `walkRefIdents` came out as the single hottest function in the
-// entire compress tier (14.2% of self-time), ahead of both the parser and `analyze`. oxc runs ONE
-// traversal per iteration and reads everything from its maintained `Scoping`; the ~37x speed gap
-// against `oxc-minify` is mostly this, not language.
+// HISTORY, because the comment that used to live here described a design that no longer exists.
+// Four compress passes each ran their own full-program pre-pass at `[N.Program]` enter (constProp,
+// aliasInline, inline, dropUnused — `tallyRefs` / `walkRefIdents` / an export scan between them),
+// ~7 whole-program walks per iteration. That collapsed into ONE shared walk here, and then into no
+// walk at all: `analyze` now maintains `refs`/`uses`/`shorthand`/`exported` on the `Semantic` as it
+// goes, because it already visits every node and already collects every reference.
 //
-// WHY MERGING IS SAFE — the property that makes this a zero-risk change rather than a redesign: all
-// four hooks fire on `[N.Program]` ENTER of the SAME fused traversal, so they each observe the identical
-// pre-mutation tree. Computing their inputs once, at that same moment, is therefore SEMANTICALLY
-// IDENTICAL — no staleness question, no maintenance contract, no output change. (Maintaining these
-// incrementally across a traversal is a separate, much larger step; see the roadmap's P4.)
+// This file survives ONLY as the differential's reference implementation, and that is the point of
+// keeping it: it derives the same four facts by a completely INDEPENDENT route (a bespoke tally walk
+// plus `walkRefIdents`, rather than the semantic builder's deferred-resolution queue). Two
+// implementations that share no code disagreeing is a signal; one implementation agreeing with itself
+// is not. Do not "simplify" this to call into `analyze` — that would delete the test's only evidence.
+//
+// Keep it CORRECT, not merely historical: it is asserted equal to `analyze`, so a bug here reads as a
+// bug there. It has already had one (computed keys in a destructuring target went uncounted).
 import { N, type Node } from '../../ast.ts';
 import { walkRefIdents } from '../../analysis/refs.ts';
 import type { RefCounts } from '../../analysis/movement.ts';
@@ -70,6 +68,12 @@ export function computePrelude(program: Node): Prelude {
                 for (const p of node.data.properties) visitTarget(p);
                 return;
             case N.ObjectProperty:
+                // `({ [k]: a } = o)` EVALUATES `k` to pick the property, so `k` is a genuine read.
+                // This walk used to skip it, under-counting — the direction the invariant forbids.
+                // It happened to be benign (`const-prop` gates on `reads === 0 -> skip`, so the loss
+                // was an optimization, not a miscompile), but `analyze` counts it, and this oracle
+                // has to agree or the differential is asserting the wrong thing.
+                if (node.data.computed) visit(node.data.key);
                 visitTarget(node.data.value);
                 return;
             case N.SpreadElement:
@@ -147,27 +151,4 @@ export function computePrelude(program: Node): Prelude {
     });
 
     return { refs, shorthand, exported, uses };
-}
-
-// ── sharing across one traversal ──────────────────────────────────────────────────────────────────
-// The compress driver computes the prelude ONCE before each fixed-point traversal and installs it here;
-// every pass then reads the same object at its `[N.Program]` enter. Module-level state matches how the
-// passes already carry per-traversal data (`REFS`, `ALIAS`, `INLINE`, …) — a single-threaded traverse.
-let CURRENT: Prelude | null = null;
-
-/** Install the prelude for the traversal about to run (null to clear). */
-export const setPrelude = (p: Prelude | null): void => {
-    CURRENT = p;
-};
-
-/**
- * The prelude for the current traversal, computing it on demand when none is installed.
- *
- * The fallback matters: a pass used standalone (a unit test, a one-off traversal) must still work, and
- * computing it there costs exactly what that pass used to pay for its own pre-pass. Only the shared
- * path gets the saving, which is the point.
- */
-export function getPrelude(program: Node): Prelude {
-    if (CURRENT !== null) return CURRENT;
-    return computePrelude(program);
 }
