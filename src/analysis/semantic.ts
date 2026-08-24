@@ -26,6 +26,13 @@ const NS_TYPE = 1;
 /** One lexical scope. `parent` is a scope id (0 = none); `node` is the scope-owning AST node. */
 export type ScopeRec = { parent: number; flags: number; node: Node | null };
 
+/**
+ * One resolved reference: the node, and HOW it uses the binding. A reference can be both (`x++` and
+ * `x += 1` read then write) — oxc models this the same way, as `ReferenceFlags` bits on each
+ * `Reference`, not as two disjoint kinds.
+ */
+export type RefEntry = { node: Node; read: boolean; write: boolean };
+
 /** One binding. `scope` is the owning scope id; `decl` is the declaring Ident; `nameId` is an interned name. */
 export type SymbolRec = { scope: number; decl: Node | null; flags: number; nameId: number };
 
@@ -60,7 +67,7 @@ export type Semantic = {
      * its references behind (they resolve to nodes no longer in the tree, and readers must tolerate
      * that); a pass that introduces a reference MUST record it.
      */
-    resolvedReferences: Node[][];
+    resolvedReferences: RefEntry[][];
 
     names: Map<string, number>;
     bindings: Map<number, number>;
@@ -106,7 +113,7 @@ export function createSemantic(): Semantic {
  * run holds no module-global state (reentrant). `sem` is the table being filled; `scope`
  * is the current-scope cursor, saved/restored as the walk descends and ascends.
  */
-type RefColl = { node: Node; scope: number; ns: number };
+type RefColl = { node: Node; scope: number; ns: number; read: boolean; write: boolean };
 type AnalyseState = { sem: Semantic; scope: number; pending: RefColl[] };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -163,13 +170,14 @@ function hoistTarget(state: AnalyseState): number {
 }
 
 /** Record `identNode` as a reference to `sym` in the reverse index (oxc `add_resolved_reference`). */
-function recordRef(sem: Semantic, sym: number, identNode: Node): void {
+function recordRef(sem: Semantic, sym: number, identNode: Node, read: boolean, write: boolean): void {
+    const entry: RefEntry = { node: identNode, read, write };
     const list = sem.resolvedReferences[sym];
-    if (list === undefined) sem.resolvedReferences[sym] = [identNode];
-    else list.push(identNode);
+    if (list === undefined) sem.resolvedReferences[sym] = [entry];
+    else list.push(entry);
 }
 
-function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
+function resolveRef(state: AnalyseState, identNode: Node, ns: number, read = true, write = false): void {
     const nameId = state.sem.names.get(identNode.name);
     if (nameId !== undefined) {
         let s = state.scope;
@@ -177,7 +185,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
             const hit = state.sem.bindings.get(bindingKey(s, ns, nameId));
             if (hit !== undefined) {
                 identNode.sym = hit;
-                recordRef(state.sem, hit, identNode);
+                recordRef(state.sem, hit, identNode, read, write);
                 return;
             }
             s = state.sem.scopes[s].parent;
@@ -191,7 +199,7 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
                     (state.sem.symbols[hit].flags & (SYM.CLASS | SYM.ENUM | SYM.IMPORT | SYM.NAMESPACE)) !== 0
                 ) {
                     identNode.sym = hit;
-                    recordRef(state.sem, hit, identNode);
+                    recordRef(state.sem, hit, identNode, read, write);
                     return;
                 }
                 s = state.sem.scopes[s].parent;
@@ -226,7 +234,7 @@ export function analyze(out: Semantic, program: Node): void {
     visit(state, program);
     for (const p of state.pending) {
         state.scope = p.scope;
-        resolveRef(state, p.node, p.ns);
+        resolveRef(state, p.node, p.ns, p.read, p.write);
     }
 }
 
@@ -274,9 +282,40 @@ function declareInScope(state: AnalyseState, kind: number, node: Node, body: () 
 
 // ─── single-pass traversal: declare + create scopes + COLLECT refs (resolution deferred) ──────────
 
-const collect = (state: AnalyseState, node: Node, ns: number): void => {
-    state.pending.push({ node, scope: state.scope, ns });
+const collect = (state: AnalyseState, node: Node, ns: number, read = true, write = false): void => {
+    state.pending.push({ node, scope: state.scope, ns, read, write });
 };
+
+/**
+ * Collect an ASSIGNMENT TARGET. Mirrors `movement.ts`'s `visitTarget`: identifiers in a target position
+ * are writes; a member target (`a.b = …`) sets a property, so `a` is a READ, not a binding write; a
+ * destructuring default (`[x = d] = …`) writes `x` and reads `d`.
+ */
+function collectTarget(state: AnalyseState, node: Node | null, ns: number): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.IdentifierReference:
+            collect(state, node, ns, false, true);
+            return;
+        // BOTH node types: a destructuring target written with the cover grammar (`[a = d] = o`)
+        // parses the element as an AssignmentExpression, not an AssignmentPattern. `tallyRefs` handles
+        // the pair together for the same reason — miss it and the DEFAULT VALUE is misread as a write.
+        case N.AssignmentExpression:
+        case N.AssignmentPattern:
+            collectTarget(state, node.data.left, ns);
+            visit(state, node.data.right);
+            return;
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+        case N.PrivateFieldExpression:
+            visit(state, node); // the object/key are ordinary reads
+            return;
+        default:
+            walkChildren(node, (c) => {
+                collectTarget(state, c, ns);
+            });
+    }
+}
 
 function collectEntityName(state: AnalyseState, node: Node | null, ns: number): void {
     if (node === null) return;
@@ -358,6 +397,25 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.IdentifierReference:
             collect(state, node, NS_VALUE);
             return;
+        // Write positions. Classification matches `movement.ts`'s `tallyRefs` exactly, so the reverse
+        // index can replace that full-program walk: a plain assignment WRITES its target; a compound
+        // assignment (`x += 1`) and an update (`x++`) both READ and WRITE it.
+        case N.AssignmentExpression: {
+            const d = node.data as { operator: string; left: Node; right: Node };
+            if (d.left.type === N.IdentifierReference) {
+                collect(state, d.left, NS_VALUE, d.operator !== '=', true);
+            } else {
+                collectTarget(state, d.left, NS_VALUE);
+            }
+            visit(state, d.right);
+            return;
+        }
+        case N.UpdateExpression: {
+            const arg = (node.data as { argument: Node }).argument;
+            if (arg.type === N.IdentifierReference) collect(state, arg, NS_VALUE, true, true);
+            else visit(state, arg);
+            return;
+        }
         case N.StaticMemberExpression:
         case N.PrivateFieldExpression:
             visit(state, node.data.object);
@@ -472,7 +530,12 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.ForInStatement:
         case N.ForOfStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
-                visit(state, node.data.left);
+                // `for (x of …)` ASSIGNS `x` each iteration; `for (const x of …)` declares it fresh.
+                // The scope must still be created either way — an earlier version of this classification
+                // shadowed this case and skipped `declareInScope`, which moved every loop binding into
+                // the enclosing scope and broke the eslint-scope differential.
+                if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
+                else collectTarget(state, node.data.left, NS_VALUE);
                 visit(state, node.data.right);
                 visit(state, node.data.body);
             });

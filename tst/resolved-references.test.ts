@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast.ts';
+import { tallyRefs } from '../src/analysis/movement.ts';
 import { parse } from '../src/index.ts';
 
 // `Semantic.resolvedReferences` is the reverse index (oxc `Scoping::resolved_references`) that lets a
@@ -89,5 +90,75 @@ describe('resolvedReferences agrees with the full walk', () => {
         if (!existsSync(p)) return;
         const { missing } = check(readFileSync(p, 'utf8'), true);
         expect(missing.slice(0, 10)).toEqual([]);
+    }, 60000);
+
+});
+
+// The decisive equivalence: the index must reproduce `tallyRefs`' read/write COUNTS exactly, since that
+// is the function it exists to replace. `x++` and `x += 1` count as BOTH a read and a write — oxc models
+// this the same way (ReferenceFlags bits per Reference, not disjoint kinds).
+describe('resolvedReferences reproduces tallyRefs read/write counts', () => {
+    const countsFromIndex = (sem: ReturnType<typeof createSemantic>): Map<number, { reads: number; writes: number }> => {
+        const out = new Map<number, { reads: number; writes: number }>();
+        for (let sym = 1; sym < sem.resolvedReferences.length; sym++) {
+            const list = sem.resolvedReferences[sym];
+            if (list === undefined) continue;
+            let reads = 0;
+            let writes = 0;
+            for (const e of list) {
+                if (e.read) reads++;
+                if (e.write) writes++;
+            }
+            if (reads > 0 || writes > 0) out.set(sym, { reads, writes });
+        }
+        return out;
+    };
+
+    const diff = (src: string, ts = false): string[] => {
+        const { program } = parse(src, { ts, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program);
+        const idx = countsFromIndex(sem);
+        const walk2 = tallyRefs(program);
+        const bad: string[] = [];
+        for (const [sym, c] of walk2) {
+            if (sym === 0) continue;
+            const got = idx.get(sym) ?? { reads: 0, writes: 0 };
+            if (got.reads !== c.reads || got.writes !== c.writes)
+                bad.push(`sym${sym}: index r${got.reads}/w${got.writes} vs walk r${c.reads}/w${c.writes}`);
+        }
+        return bad;
+    };
+
+    const CASES: [string, string][] = [
+        ['plain assignment', 'function f(){ let a = 1; a = 2; return a; }'],
+        ['compound assignment', 'function f(){ let a = 1; a += 2; return a; }'],
+        ['update', 'function f(){ let a = 1; a++; return a; }'],
+        ['member target', 'function f(o){ o.x = 1; return o; }'],
+        ['computed member target', 'function f(o, k){ o[k] = 1; return o; }'],
+        ['destructuring assign', 'function f(o){ let a, b; ({ a, b } = o); return a + b; }'],
+        ['array destructuring assign', 'function f(o){ let a; [a] = o; return a; }'],
+        ['destructuring default', 'function f(o, d){ let a; [a = d] = o; return a; }'],
+        ['for-of assign', 'function f(xs){ let x, s = 0; for (x of xs) s += x; return s; }'],
+        ['for-in assign', 'function f(o){ let k, s = ""; for (k in o) s += k; return s; }'],
+        ['for-of declare', 'function f(xs){ let s = 0; for (const x of xs) s += x; return s; }'],
+        ['nested writes', 'function f(){ let a = 1, b = 2; a = b = 3; return a + b; }'],
+    ];
+    for (const [name, src] of CASES) {
+        it(`matches on: ${name}`, () => {
+            expect(diff(src)).toEqual([]);
+        });
+    }
+
+    it('matches across three.core.js', () => {
+        const p = '/Users/isaacmason/Development/shakeup/llm/spikes/node_modules/three/build/three.core.js';
+        if (!existsSync(p)) return;
+        expect(diff(readFileSync(p, 'utf8')).slice(0, 10)).toEqual([]);
+    }, 60000);
+
+    it('matches across a real TS module', () => {
+        const p = '/Users/isaacmason/Development/crashcat/src/index.ts';
+        if (!existsSync(p)) return;
+        expect(diff(readFileSync(p, 'utf8'), true).slice(0, 10)).toEqual([]);
     }, 60000);
 });
