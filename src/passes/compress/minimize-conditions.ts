@@ -174,7 +174,7 @@ function ifReturnBoth(n: Node): Node | null {
  *  `return a ? x : y;`, consuming the trailing return. Only fires when the `if` has NO else, its
  *  consequent is a single `return <arg>`, and the IMMEDIATELY-following statement is a
  *  `return <arg>`. Returns whether anything changed. */
-function foldIfReturnFollow(body: Node[]): boolean {
+function foldIfReturnFollow(body: Node[], ctx: TransformCtx): boolean {
     let changed = false;
     for (let i = 0; i < body.length - 1; i++) {
         const stmt = body[i];
@@ -201,14 +201,14 @@ function foldIfReturnFollow(body: Node[]): boolean {
         } else continue; // else-form with a non-empty consequent is handled by the node hook (ifReturnBoth)
         const cond = create.ConditionalExpression(stmt.start, next.end, 0, d.test, cons, alt);
         body[i] = create.ReturnStatement(stmt.start, next.end, 0, cond);
-        body.splice(i + 1, 1); // drop the consumed trailing return
+        ctx.spliceStatements(body, i + 1, 1); // drop the consumed trailing return
         changed = true;
     }
     return changed;
 }
 
 function listHook(n: Node, ctx: TransformCtx): void {
-    if (foldIfReturnFollow((n.data as BlockData).body)) ctx.changed = true;
+    if (foldIfReturnFollow((n.data as BlockData).body, ctx)) ctx.changed = true;
 }
 
 export const minimizeConditions: Visitor = {
@@ -223,7 +223,7 @@ export const minimizeConditions: Visitor = {
         [N.StaticBlock]: listHook,
         // A switch case's `consequent` is a same-scope statement list too.
         [N.SwitchCase]: (n, ctx) => {
-            if (foldIfReturnFollow((n.data as SwitchCaseData).consequent)) ctx.changed = true;
+            if (foldIfReturnFollow((n.data as SwitchCaseData).consequent, ctx)) ctx.changed = true;
         },
     }),
     // The `if`-shape rewrites run on EXIT — after the test's children are visited, so a constProp

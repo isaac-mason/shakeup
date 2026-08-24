@@ -114,9 +114,8 @@ export function makeBlockFlatten(): Visitor {
                 renameSymbol(b, sym, fresh);
                 used.add(fresh);
             }
-            stmts.splice(i, 1, ...inner);
+            ctx.spliceStatements(stmts, i, 1, ...inner);
             i--; // re-examine from here: the lifted statements may include further blocks
-            ctx.changed = true;
         }
     };
 
