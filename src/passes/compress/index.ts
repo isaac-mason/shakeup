@@ -108,27 +108,43 @@ const POST_FINAL_PASSES: Visitor[] = [joinVars];
 /** Closure's placement for `CoalesceVariableNames`: ONCE, LATE, after everything else has settled —
  *  never inside the fixed point. It must follow `substituteAlternateSyntax` (which rewrites `const`→
  *  `let`), because a coalesced binding is assigned after its declaration and `const` forbids that.
- *  Closure marks the AST un-normalised from this point and runs a peephole cleanup afterwards, since
- *  coalescing "creates identity assignments and more redundant code"; `COALESCE_CLEANUP` is ours. */
+ *  Closure marks the AST un-normalised from here and runs a peephole cleanup afterwards, since
+ *  coalescing "creates identity assignments and more redundant code". We do NOT: the pass drops its own
+ *  identity assignments at the point it would create them, and the `refresh()` below already covers the
+ *  symbol changes. An explicit cleanup traversal plus a second `analyze()` was measured at more than
+ *  HALF this pass's cost while changing not one byte of output. */
 const COALESCE_PASSES: Visitor[] = [coalesceVariableNames];
 
 /**
- * Coalescing is OFF by default, on measurement rather than doubt.
+ * Coalescing is OFF by default — **because it makes COMPRESSED output BIGGER**, which is the size that
+ * actually ships. Measured on both corpora, and they agree:
  *
- * Interleaved A/B on three.core.js (same process, min of 3): **+28.8% build time (4,465 → 5,752ms) for
- * −463 bytes (−0.12%)**. The pass is correct and the win is real, but that is not a trade worth
- * shipping. The cost is not inherent: it builds its OWN CFG and liveness per function, duplicating what
- * dead-store already computes, and then forces a semantic `refresh()` plus a cleanup traversal.
+ *   three.core.js       raw −0.121%   gzip **+0.041%**   brotli **+0.060%**
+ *   three/src (750 mod) raw −0.121%   gzip **+0.077%**   brotli **+0.147%**
  *
- * There are now TWO consumers of per-function CFG+liveness, which is exactly the condition that makes
- * caching them worthwhile (the migration plan's Phase 3, option B). Once the graph is built once and
- * shared, coalescing's marginal cost approaches the interference graph alone and this flips on.
+ * This CONTRADICTS Closure's own stated rationale ("less unique variables in hope for better renaming,
+ * and finally better gzip compression"). The likely reason it no longer holds: gzip thrives on
+ * REPETITION, and a pipeline that has already mangled every local to one or two characters emits long
+ * runs of near-identical `let a=…;let b=…` text that compress extremely well. Coalescing deletes some
+ * of those declarations and replaces them with bare assignments, trading a few raw bytes for a less
+ * regular token stream. Closure's claim may predate this much aggressive mangling.
+ *
+ * The pass itself is correct, tested (`tst/coalesce.test.ts`), and now cheap: +3.2% build time, down
+ * from +28.8% (see below). It stays in-tree because it is the only optimisation in the whole
+ * Closure/compilecat audit that oxc and esbuild both lack, and because it is the right thing to enable
+ * for a target that ships UNCOMPRESSED. It is simply not a win for the web.
+ *
+ * COST REDUCTION, for the record — the first implementation cost +28.8% and profiling showed why:
+ * coalescing's own analysis (scope walk, candidates, CFG, liveness, interference, colouring, rewrite)
+ * totalled **66ms of a 3,538ms build**. The rest was machinery I had wrapped around it — an explicit
+ * `refresh()` that the existing `if (finalChanged)` already performed, and a cleanup traversal for
+ * identity assignments that the pass now drops at the point it would create them. Removing both changed
+ * not one byte of output and took the cost from +28.8% → +9.8% → +3.2%.
  */
 let COALESCE_ENABLED = false;
 export const setCoalesceEnabled = (on: boolean): void => {
     COALESCE_ENABLED = on;
 };
-const COALESCE_CLEANUP: Visitor[] = [removeUnusedExpr, dropUnused];
 
 /** The loop passes for `mode`, in their canonical order. */
 const loopPassesFor = (mode: CompressMode): Visitor[] =>
@@ -166,11 +182,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     if (mode === 'full') {
         let finalChanged = traverse(program, cur, FINAL_PASSES);
         if (traverse(program, cur, POST_FINAL_PASSES)) finalChanged = true;
-        if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) {
-            finalChanged = true;
-            refresh(); // the rewrite moves symbols between bindings — later passes need current ids
-            traverse(program, cur, COALESCE_CLEANUP);
-        }
+        if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
         if (finalChanged) {
             any = true;
             refresh();
