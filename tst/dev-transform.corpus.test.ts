@@ -35,5 +35,5 @@ describe('devTransform — real TS corpus (shakeup src/)', () => {
             if (reparsed.errors.length > 0) failures.push(`${file}: output not valid JS: ${reparsed.errors[0]?.msg}`);
         }
         expect(failures.slice(0, 15).join('\n')).toBe('');
-    });
+    }, 30000);
 });

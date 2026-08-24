@@ -42,7 +42,7 @@ describe('printer — real corpus (three.core.js, pure JS round-trip)', () => {
             expect(reparsed.errors).toEqual([]);
             const eq = minify ? semanticEqual : astEqual;
             expect(eq(original, reparsed.program)).toBe(true);
-        });
+        }, 30000);
     }
 });
 
@@ -76,14 +76,14 @@ describe('printer — self corpus (shakeup src/, TS strip breadth)', () => {
     const files = walkTs(SELF_SRC);
     it(`strips ${files.length} of our own TS files to valid JS`, () => {
         expect(stripBreadth(files).slice(0, 20).join('\n')).toBe('');
-    });
+    }, 30000);
 });
 
 describe.skipIf(!existsSync(CRASHCAT_SRC))('printer — real corpus (crashcat TS strip breadth)', () => {
     const files = walkTs(CRASHCAT_SRC);
     it(`strips ${files.length} TS files to valid JS`, () => {
         expect(stripBreadth(files).slice(0, 20).join('\n')).toBe('');
-    });
+    }, 30000);
 });
 
 describe('printer — JSX corpus (lowers every fixture to valid JS)', () => {

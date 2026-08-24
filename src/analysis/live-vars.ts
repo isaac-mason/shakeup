@@ -259,13 +259,17 @@ export function computeLiveVars(
         boundary: (dst) => {
             dst.set(boundary);
         },
-        equals: (a, b) => {
-            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-            return true;
-        },
         transfer: (dst, src, _node, id) => {
             const base = id * W;
-            for (let w = 0; w < W; w++) dst[w] = (src[w] & ~nodeKill[base + w]) | nodeGen[base + w];
+            let ch = false;
+            for (let w = 0; w < W; w++) {
+                const v = ((src[w] & ~nodeKill[base + w]) | nodeGen[base + w]) >>> 0;
+                if (dst[w] !== v) {
+                    dst[w] = v;
+                    ch = true;
+                }
+            }
+            return ch;
         },
     };
 

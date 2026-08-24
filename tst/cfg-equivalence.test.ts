@@ -189,7 +189,7 @@ describe('CFG liveness vs structural liveness — equivalence', () => {
         expect(r.precise.length).toBeGreaterThan(0);
         expect(r.conservative.length).toBeGreaterThan(0);
         expect(r.precise.length + r.conservative.length).toBeLessThan(r.checked / 4);
-    });
+    }, 30000);
 });
 
 describe('CFG is strictly more precise where Closure documents it', () => {

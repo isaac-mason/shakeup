@@ -35,9 +35,20 @@ export type DataflowSpec<L> = {
     joinInto: (dst: L, src: L) => void;
     /** `dst := boundary`. Closure `createEntryLattice()`. */
     boundary: (dst: L) => void;
-    /** `dst := transfer(src)` for CFG node `id`. Closure `flowThrough`, writing in place. */
-    transfer: (dst: L, src: L, node: Node, id: number) => void;
-    equals: (a: L, b: L) => boolean;
+    /**
+     * `dst := transfer(src)` for CFG node `id`, RETURNING whether `dst` changed. Closure's
+     * `flowThrough` returns a fresh element and the solver compares it against the old one; detecting
+     * the change while writing folds the allocation, the copy and the compare into one pass.
+     *
+     * ⚠ IF THE LATTICE IS A TYPED ARRAY, COERCE THE COMPUTED VALUE WITH `>>> 0` BEFORE COMPARING.
+     * JS bitwise operators yield a SIGNED int32 while a `Uint32Array` read is UNSIGNED, so for any
+     * value with the high bit set `dst[w] !== v` is true even though the bits are identical. The store
+     * coerces, so the value never actually changes — the node reports "changed" on every sweep forever
+     * and the analysis only terminates by hitting the sweep cap, WITH THE CORRECT ANSWER. That bug cost
+     * a full debugging session here (2.59 → 464 visits/node); it will silently ruin any future analysis
+     * that repeats it.
+     */
+    transfer: (dst: L, src: L, node: Node, id: number) => boolean;
 };
 
 export type DataflowResult<L> = {
@@ -104,7 +115,6 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
     const order = spec.forward ? rpo : Int32Array.from(rpo).reverse();
 
     const scratch = spec.alloc();
-    const prev = spec.alloc();
     let steps = 0;
 
     for (let sweep = 0; sweep < MAX_SWEEPS; sweep++) {
@@ -139,16 +149,9 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
             // flow
             const value = cfg.value[id];
             if (value === null) continue;
-            // NOTE: folding the change test INTO `transfer` (write-and-compare in one pass, no `prev`
-            // copy) reads as exactly equivalent and is NOT — it took convergence from 2.59 sweeps per
-            // node to 464, with one function pinned at the sweep cap while still producing the right
-            // answer. Bisected to this line; not root-caused; reverted. Do not "simplify" it back
-            // without re-measuring `stepsPerNode`.
             const target = spec.forward ? outAt[id] : inAt[id];
             const source = spec.forward ? inAt[id] : outAt[id];
-            spec.copy(prev, target);
-            spec.transfer(target, source, value, id);
-            if (!spec.equals(prev, target)) changed = true;
+            if (spec.transfer(target, source, value, id)) changed = true;
         }
         if (!changed) break;
     }
