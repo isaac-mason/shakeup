@@ -284,6 +284,18 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
             // exactly one syntactic occurrence in the use node.
             if (countReads(useNode, sym) !== 1) continue;
 
+            // …and that occurrence must be a genuine READ, never an LVALUE. `countReads` counts every
+            // `IdentifierReference` carrying the symbol, including one being assigned or updated, so
+            // `_flatStack[stackSize++] = root` looked like a single clean use of `stackSize`;
+            // substituting its definition (`0`) produced `_flatStack[0++] = root`, which is not
+            // JavaScript at all. Closure guards this in `FlowSensitiveInlineVariables` with
+            // `NodeUtil.isLValue(n)` (line 106) — the check this port omitted.
+            //
+            // `writesAny` is reused rather than a fresh walk because it already recognises exactly the
+            // lvalue positions (assignment target, update argument, declarator id) and already stops
+            // at nested function boundaries, matching `countReads`.
+            if (writesAny(useNode, new Set([sym]))) continue;
+
             // scope: every free symbol the RHS reads must resolve to the SAME binding at the use site.
             const rhsReads = new Set<number>();
             readSyms(loc.rhs, rhsReads);
