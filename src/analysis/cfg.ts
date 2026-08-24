@@ -578,3 +578,110 @@ export function buildCfg(root: Node): Cfg {
     visit(root);
     return cfg;
 }
+
+/**
+ * Structural invariants of a built CFG, returned as a list of violations (empty = valid).
+ *
+ * This is the insurance Phase 0c of the CFG migration asked for. The motivating precedent is the chunk
+ * mangler, which indexed a symbol map out of range and crashed every multi-module full minify — a
+ * structural defect that no output test noticed because it was never exercised. A graph is exactly the
+ * kind of thing that can be subtly malformed while still producing plausible answers, so it gets an
+ * explicit check rather than trust.
+ *
+ * Not a correctness proof: it verifies the graph is WELL-FORMED, not that the edges model JS semantics.
+ * `tst/cfg-equivalence.test.ts` is what checks the semantics.
+ */
+export function verifyCfg(cfg: Cfg): string[] {
+    const bad: string[] = [];
+    const n = cfg.value.length;
+    const at = (i: number): string => {
+        const v = cfg.value[i];
+        return v === null ? `#${i}(implicit-return)` : `#${i}(type=${v.type}@${v.start})`;
+    };
+
+    // ── shape ────────────────────────────────────────────────────────────────────────────────────
+    if (cfg.value[IMPLICIT_RETURN] !== null) bad.push('node 0 must be the implicit return (null value)');
+    if (cfg.entry !== 1) bad.push(`entry must be node 1, got ${cfg.entry}`);
+    if (n > 1 && cfg.value[1] === null) bad.push('entry node has no AST value');
+    for (const [name, arr] of [
+        ['succ', cfg.succ],
+        ['succBranch', cfg.succBranch],
+        ['pred', cfg.pred],
+        ['predBranch', cfg.predBranch],
+    ] as const) {
+        if (arr.length !== n) bad.push(`${name}.length ${arr.length} != node count ${n}`);
+    }
+
+    // ── edge integrity ───────────────────────────────────────────────────────────────────────────
+    // Every forward edge must have exactly one matching reverse edge with the same branch kind. A
+    // one-sided edge is invisible to whichever direction does not see it, and a BACKWARD analysis
+    // traverses `succ` while a FORWARD one traverses `pred` — so a mismatch silently changes results
+    // for one direction only.
+    const seenRev = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+        if (cfg.succ[i].length !== cfg.succBranch[i].length) bad.push(`${at(i)}: succ/succBranch length mismatch`);
+        const pairs = new Set<string>();
+        for (let k = 0; k < cfg.succ[i].length; k++) {
+            const t = cfg.succ[i][k];
+            const b = cfg.succBranch[i][k];
+            if (t < 0 || t >= n) {
+                bad.push(`${at(i)}: dangling succ -> ${t}`);
+                continue;
+            }
+            const key = `${t}/${b}`;
+            if (pairs.has(key)) bad.push(`${at(i)}: duplicate edge -> ${at(t)} branch ${b}`);
+            pairs.add(key);
+            seenRev.set(`${i}->${t}/${b}`, (seenRev.get(`${i}->${t}/${b}`) ?? 0) + 1);
+        }
+    }
+    for (let t = 0; t < n; t++) {
+        if (cfg.pred[t].length !== cfg.predBranch[t].length) bad.push(`${at(t)}: pred/predBranch length mismatch`);
+        for (let k = 0; k < cfg.pred[t].length; k++) {
+            const i = cfg.pred[t][k];
+            const b = cfg.predBranch[t][k];
+            if (i < 0 || i >= n) {
+                bad.push(`${at(t)}: dangling pred <- ${i}`);
+                continue;
+            }
+            const key = `${i}->${t}/${b}`;
+            const c = seenRev.get(key) ?? 0;
+            if (c === 0) bad.push(`${at(t)}: pred <- ${at(i)} branch ${b} has no matching succ`);
+            else seenRev.set(key, c - 1);
+        }
+    }
+    for (const [key, c] of seenRev) if (c > 0) bad.push(`succ edge ${key} has no matching pred (x${c})`);
+
+    // ── the implicit return is a sink ────────────────────────────────────────────────────────────
+    if (cfg.succ[IMPLICIT_RETURN].length > 0) bad.push('implicit return must have no successors');
+
+    // ── branch typing ────────────────────────────────────────────────────────────────────────────
+    // Conditional edges may only leave a node that actually branches. A conditional edge anywhere else
+    // means `handle` wired a construct with the wrong branch kind, which a dataflow analysis that reads
+    // branch kinds (Closure's `isBranched` analyses) would silently misinterpret.
+    const BRANCHERS = new Set<number>([
+        N.IfStatement,
+        N.WhileStatement,
+        N.DoWhileStatement,
+        N.ForStatement,
+        N.ForInStatement,
+        N.ForOfStatement,
+        N.SwitchCase,
+    ]);
+    for (let i = 1; i < n; i++) {
+        const v = cfg.value[i];
+        if (v === null) continue;
+        let trues = 0;
+        let falses = 0;
+        for (let k = 0; k < cfg.succBranch[i].length; k++) {
+            const b = cfg.succBranch[i][k];
+            if (b === BRANCH.ON_TRUE) trues++;
+            if (b === BRANCH.ON_FALSE) falses++;
+            if ((b === BRANCH.ON_TRUE || b === BRANCH.ON_FALSE) && !BRANCHERS.has(v.type))
+                bad.push(`${at(i)}: conditional edge from a non-branching node`);
+        }
+        if (trues > 1) bad.push(`${at(i)}: ${trues} ON_TRUE edges`);
+        if (falses > 1) bad.push(`${at(i)}: ${falses} ON_FALSE edges`);
+    }
+
+    return bad;
+}
