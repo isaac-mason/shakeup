@@ -138,7 +138,7 @@ function readsSym(n: Node, sym: number): boolean {
  * a gap either. So the gap machinery cost the quadratic scan and bought nothing measurable, and the
  * helpers that served it are gone with it.
  */
-function inlineBody(body: Node[], refs: Map<number, RefCounts>): boolean {
+function inlineBody(body: Node[], refs: Map<number, RefCounts>, ctx: TransformCtx): boolean {
     let changed = false;
     for (let u = 1; u < body.length; u++) {
         // Chain backwards, mirroring oxc's `while let Some(..) = stmts.last_mut()`: once a declaration
@@ -148,7 +148,8 @@ function inlineBody(body: Node[], refs: Map<number, RefCounts>): boolean {
             if (cand === null) break;
             if (!readsSym(body[u], cand.sym)) break;
             if (!substituteInUse(body[u], cand.sym, cand.init, cand.impure, cand.fragile, refs)) break;
-            body.splice(u - 1, 1); // the decl is dead — its init moved into the use, which shifts down
+            // the decl is dead — its init moved into the use, which shifts down
+            ctx.spliceStatements(body, u - 1, 1);
             u--;
             changed = true;
         }
@@ -176,5 +177,5 @@ export const inline: Visitor = {
 function bodyHook(n: Node, ctx: TransformCtx): void {
     if (REFS === null) return;
     const list = statementListOf(n);
-    if (list !== null && inlineBody(list, REFS)) ctx.changed = true;
+    if (list !== null && inlineBody(list, REFS, ctx)) ctx.changed = true;
 }

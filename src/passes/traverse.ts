@@ -100,6 +100,25 @@ class Ctx {
         this.op = OP_REMOVE;
         this.changed = true;
     }
+    /**
+     * Splice a statement list the pass is holding directly, instead of `list.splice(...)`.
+     *
+     * `replaceWith` / `replaceWithMultiple` / `remove` act on the slot currently being visited, so a
+     * pass that restructures a list it is holding (lifting a block's statements, folding a declaration
+     * into the next statement, dropping a consumed trailing return) has always reached past them and
+     * called `Array.prototype.splice` itself. That leaves the discarded subtrees invisible to the
+     * traversal — fine while a full `analyze()` runs after every round and re-derives everything from
+     * the tree, and NOT fine the moment reference facts are maintained incrementally, because an
+     * unrecorded drop under-counts, and under-counting is the direction that deletes live bindings.
+     *
+     * Today this only marks `changed` and splices: behaviour is identical, and the point is that there
+     * is now ONE place to record from. See `llm/notes/incremental-refs-design.md` phase B.
+     */
+    spliceStatements(list: Node[], start: number, deleteCount: number, ...insert: Node[]): void {
+        if (deleteCount === 0 && insert.length === 0) return;
+        list.splice(start, deleteCount, ...insert);
+        this.changed = true;
+    }
     /** Mint a unique binding name `_base`/`_base2`/… (Babel/oxc), reserving it against the module's
      *  name set so later deconfliction never re-issues it. */
     generateUid(base: string): string {
