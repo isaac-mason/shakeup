@@ -23,7 +23,10 @@ import { computeLiveness } from '../../analysis/liveness.ts';
 import { isPureExpr } from '../../analysis/effects.ts';
 import { N, type Node, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
-import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
+import { hookTable, traverse, type TransformCtx, type Visitor } from '../traverse.ts';
+import type { Semantic } from '../../analysis/semantic.ts';
+import { DIRECTIVE, directiveSpans } from './directives.ts';
+import { Gate } from './gate.ts';
 
 const isFn = (n: Node): boolean =>
     n.type === N.FunctionDeclaration || n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression;
@@ -142,3 +145,48 @@ export const deadStore: Visitor = {
     }),
     exit: null,
 };
+
+/**
+ * Directive-gated entry point — the way this pass is actually run.
+ *
+ * WHY IT LIVES IN THE OPTIMIZE TIER. Measured: with dead-store on vs off, output is BYTE-IDENTICAL on
+ * both corpora (three.core.js 381,846 and crashcat 410,263), while it cost ~8% of every build. It earns
+ * nothing on code that has not opted in, and that is not a surprise — it is a port of Closure's
+ * `DeadAssignmentsElimination`, oxc's peephole minifier has NO equivalent (deliberately: flow-sensitive
+ * analysis is not what a peephole minifier does), and compilecat gates it to `@optimize` functions.
+ * Running it ungated inside the minify loop put a Closure-lineage flow pass in the tier whose oracle is
+ * oxc, and paid for it on every build.
+ *
+ * Its real job is cleaning up after aggressive inlining — the `result = X; break L;` scaffolding that
+ * block-inlining emits — which only happens under a directive. So it runs here, where that scaffolding
+ * exists, and `output.optimize: false` switches it off with the rest of the tier.
+ */
+export function eliminateDeadStores(program: Node, semantic: Semantic, source: string): boolean {
+    const spans = directiveSpans(source, program, DIRECTIVE.FLATTEN);
+    if (spans.size === 0) return false;
+    const gate = Gate.gated(spans);
+    const stack: boolean[] = [];
+    const gated: Visitor = {
+        name: 'deadStore',
+        enter: hookTable({
+            [N.FunctionDeclaration]: (n, ctx) => {
+                stack.push(gate.enterFn(n.start));
+                if (gate.active) fnHook(n, ctx);
+            },
+            [N.FunctionExpression]: (n, ctx) => {
+                stack.push(gate.enterFn(n.start));
+                if (gate.active) fnHook(n, ctx);
+            },
+            [N.ArrowFunctionExpression]: (n, ctx) => {
+                stack.push(gate.enterFn(n.start));
+                if (gate.active) fnHook(n, ctx);
+            },
+        }),
+        exit: hookTable({
+            [N.FunctionDeclaration]: () => gate.exit(stack.pop() ?? false),
+            [N.FunctionExpression]: () => gate.exit(stack.pop() ?? false),
+            [N.ArrowFunctionExpression]: () => gate.exit(stack.pop() ?? false),
+        }),
+    };
+    return traverse(program, semantic, [gated]);
+}

@@ -13,6 +13,7 @@ import {
 import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
+import { eliminateDeadStores } from './passes/optimize/dead-store';
 import { flowInlineVariables } from './passes/optimize/flow-inline';
 import { inlineFunctions } from './passes/optimize/inline-functions';
 import { captureShapes } from './passes/optimize/shapes';
@@ -773,6 +774,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     // point then folds each substituted RHS. Directive-gated like the rest of the tier.
                     if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
                     if (flowInlineVariables(program, semantic, source)) expanded = true;
+                    // Dead-store LAST in the tier: its job is cleaning up the `result = X; break L;`
+                    // scaffolding the inliners emit, so it must see their output.
+                    if (eliminateDeadStores(program, semantic, source)) expanded = true;
                 }
                 if (expanded) {
                     semantic = createSemantic();

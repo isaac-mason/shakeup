@@ -15,7 +15,7 @@ const parity = async (src: string) => {
 describe('dead-store elimination', () => {
     it('drops a store whose value is never read', async () => {
         const src = [
-            'export function f() { let x; x = 1; x = 2; return x; }',
+            '/* @optimize */ export function f() { let x; x = 1; x = 2; return x; }',
             'export const out = f();',
         ].join('\n');
         const code = await parity(src);
@@ -27,7 +27,7 @@ describe('dead-store elimination', () => {
         const src = [
             'let hits = 0;',
             'function eff() { hits++; return 1; }',
-            'export function f() { let x; x = eff(); x = 2; return x; }',
+            '/* @optimize */ export function f() { let x; x = eff(); x = 2; return x; }',
             'export const out = [f(), hits];',
         ].join('\n');
         const code = await parity(src);
@@ -71,7 +71,7 @@ describe('dead-store elimination', () => {
 
     it('leaves a variable captured by a closure alone', async () => {
         const src = [
-            'export function f() { let x; x = 1; const g = () => x; x = 2; return g(); }',
+            '/* @optimize */ export function f() { let x; x = 1; const g = () => x; x = 2; return g(); }',
             'export const out = f();',
         ].join('\n');
         expect((await runModule(await parity(src))).out).toBe(2);
@@ -79,14 +79,18 @@ describe('dead-store elimination', () => {
 
     it('skips a function whose flow it cannot model (try)', async () => {
         const src = [
-            'export function f() { let x; x = 1; try { x = 2; } catch { x = 3; } return x; }',
+            '/* @optimize */ export function f() { let x; x = 1; try { x = 2; } catch { x = 3; } return x; }',
             'export const out = f();',
         ].join('\n');
         expect((await runModule(await parity(src))).out).toBe(2);
     });
 
-    it('runs in the semantic tier, so dev and bundle agree', async () => {
-        const src = ['export function f() { let x; x = 1; x = 2; return x; }', 'export const out = f();'].join('\n');
+    // Dead-store is OPTIMIZE-tier (directive-gated) as of the tier move — it earned zero bytes on
+    // non-directive code while costing ~8% of every build. The dev/bundle parity property still holds
+    // and is what this pins: the optimize tier runs in scan regardless of compress mode, so a
+    // directive-annotated function is optimized identically in `'dce'` (dev) and full minify.
+    it('runs in dev (dce) as well as full minify, so dev and bundle agree', async () => {
+        const src = ['/* @optimize */ export function f() { let x; x = 1; x = 2; return x; }', 'export const out = f();'].join('\n');
         const dce = await build(src, 'dce');
         expect((await runModule(dce)).out).toBe(2);
         expect(dce).not.toContain('x = 1');
