@@ -95,9 +95,24 @@ export function makeBlockFlatten(): Visitor {
             }
         }
         const target = sem.nodeScope.get(n) ?? ctx.currentScope;
-        // A fresh copy: the loop below ADDS to it as blocks are lifted, and that must not leak into
-        // the shared per-scope set.
-        const used = new Set<string>(namesByScope.get(target));
+        // LIVE, not a copy. A lift genuinely moves a binding into `target`, so the name must stay
+        // visible to every LATER list that flattens into the SAME scope — otherwise two sibling
+        // blocks lifted into one scope cannot see each other.
+        //
+        // That is not hypothetical: a `switch` gives each `case` its own consequent LIST while all of
+        // them share the switch's BLOCK SCOPE, so `case A: { const radius = … }` and
+        // `case B: { const radius = … }` were both lifted, both kept the name, and the bundle became a
+        // `SyntaxError: Identifier 'radius' has already been declared` — which shakeup's own parser
+        // does not diagnose (`semantic.ts`: "no TDZ or redeclaration diagnostics"), so it shipped.
+        //
+        // Copying was deliberate — it kept this cache faithful to the SEMANTIC — but the semantic is
+        // already stale by construction here: lifting mutates the AST without re-analysing. The set
+        // has to track the TREE, which is what the collision test actually depends on.
+        let used = namesByScope.get(target);
+        if (used === undefined) {
+            used = new Set<string>();
+            namesByScope.set(target, used);
+        }
 
         for (let i = 0; i < stmts.length; i++) {
             const b = stmts[i];
