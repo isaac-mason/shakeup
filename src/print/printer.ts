@@ -55,7 +55,23 @@ export type Printer = {
     col: number; // 0-based generated column (UTF-16 units)
     srcLines: Uint32Array | null;
     sourceIdx: number;
+    /** A mandatory separator that has been requested but not yet committed — see {@link space}. */
+    pendingSpace: boolean;
+    /** Last character actually emitted, for deciding whether `pendingSpace` is really needed. */
+    lastChar: string;
 };
+
+/** Would `a` and `b`, written adjacently, lex as ONE token instead of two? */
+function wouldMerge(a: string, b: string): boolean {
+    if (a === '' || b === '') return false;
+    const ident = (c: string): boolean => /[A-Za-z0-9_$\\]/.test(c) || c.charCodeAt(0) > 127;
+    if (ident(a) && ident(b)) return true; // `return x`, `typeof y`
+    if (a === '+' && (b === '+' || b === '=')) return true; // `+ +x` vs `++x`
+    if (a === '-' && (b === '-' || b === '=')) return true;
+    if (a === '/' && (b === '/' || b === '*')) return true; // would open a comment
+    if (a === '<' && b === '!') return true; // `<!--` is a line comment in scripts
+    return false;
+}
 
 export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Printer {
     const wantMap = cfg.srcLines !== undefined;
@@ -73,6 +89,8 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         col: 0,
         srcLines: cfg.srcLines ?? null,
         sourceIdx: cfg.sourceIdx ?? 0,
+        pendingSpace: false,
+        lastChar: '',
     };
 }
 
@@ -89,6 +107,19 @@ export function printerPart(p: Printer): { code: string; map?: Mappings } {
 /** The single output sink: append `s` and advance the generated position, opening a new
  *  mapped line at every '\n' so segments land on the right generated line. */
 function push(p: Printer, s: string): void {
+    if (p.pendingSpace) {
+        p.pendingSpace = false;
+        // Commit the deferred separator ONLY if the two tokens would otherwise merge. `return(x)`,
+        // `case-1:`, `typeof"a"` and `return--e` are all single tokens shorter than their spaced
+        // form, and oxc's codegen emits them that way; we were spending a byte on every one.
+        if (s.length > 0 && wouldMerge(p.lastChar, s[0])) emit(p, ' ');
+    }
+    emit(p, s);
+}
+
+/** Unconditional buffer append + position tracking. */
+function emit(p: Printer, s: string): void {
+    if (s.length > 0) p.lastChar = s[s.length - 1];
     p.out.push(s);
     if (p.map === null) return;
     for (let i = 0; i < s.length; i++) {
@@ -131,11 +162,16 @@ export function softNewline(p: Printer): void {
     }
 }
 
-/** A single mandatory space (keyword/operand separator, e.g. `return x`, `typeof x`).
- *  Always emitted — omitting it would change tokenisation. Phase 2 narrows the cases
- *  where it can be dropped. */
+/**
+ * A mandatory separator (keyword/operand, e.g. `return x`, `typeof x`).
+ *
+ * DEFERRED, not written. The next {@link push} commits it only when the adjacent characters would
+ * actually lex as one token (see `wouldMerge`) — so `return x` keeps its space while `return(x)`,
+ * `case-1:` and `return--e` lose it. Worth 217 bytes on three.core.js, which is ~23% of our entire
+ * raw size gap against oxc-minify.
+ */
 export function space(p: Printer): void {
-    push(p, ' ');
+    p.pendingSpace = true;
 }
 
 /** Statement terminator. */
