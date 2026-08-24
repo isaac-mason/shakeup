@@ -113,6 +113,18 @@ function awaitedUsage(awaitNode: Node, parentOf: Map<Node, Node>, program: Node,
  *  `import()` statement is `none` (result unused); anything else escapes to the whole surface.
  *  Returns one entry per literal `import()` site, in source order. */
 export function analyzeDynamicUsage(program: Node, semantic: Semantic, source: string): { specifier: string; usage: NsUsage }[] {
+    // Find the `import()` sites FIRST. The parent map below exists only to classify them, and it is a
+    // `Map<Node, Node>` covering EVERY node in the module — 138k entries on three.core.js — built once
+    // per module by `computeDynamicUsage`, whether or not the module contains a single dynamic import.
+    // Most modules contain none, so the map was allocated, filled and discarded: 4.6% of a no-minify
+    // bundle's profile, and a top source of `Map.set` allocation in the heap profile.
+    const sites: Node[] = [];
+    walk(program, (n) => {
+        if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) sites.push(n);
+        return undefined;
+    });
+    if (sites.length === 0) return [];
+
     const parentOf = new Map<Node, Node>();
     const buildParents = (n: Node): void => {
         walkChildren(n, (c) => {
@@ -123,11 +135,11 @@ export function analyzeDynamicUsage(program: Node, semantic: Semantic, source: s
     buildParents(program);
 
     const out: { specifier: string; usage: NsUsage }[] = [];
-    walk(program, (n) => {
-        if (n.type !== N.ImportExpression || n.data.source.type !== N.StringLiteral) return;
-        const specifier = source.slice(n.data.source.start + 1, n.data.source.end - 1);
+    for (const n of sites) {
+        const src = (n.data as { source: Node }).source;
+        const specifier = source.slice(src.start + 1, src.end - 1);
         out.push({ specifier, usage: classifyImportExpr(n, parentOf, program, semantic) });
-    });
+    }
     return out;
 }
 
