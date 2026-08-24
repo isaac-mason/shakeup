@@ -17,7 +17,7 @@
 // LEFT INTACT: a block declaring a `function` or `class` (hoisting and id-renaming are not worth it),
 // and any block that is a control-flow body rather than a list element (`if (c) { … }` — `normalize`
 // owns that case, and unwrapping it there is subject to the dangling-`else` rule).
-import { N, type Node, walk } from '../../ast.ts';
+import { N, type Node, statementListOf, walk } from '../../ast.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -63,13 +63,12 @@ export function makeBlockFlatten(): Visitor {
     // container would make this pass O(names × lists) inside the compress fixed point.
     let cachedSem: Semantic | null = null;
     let nameOf = new Map<number, string>();
+    // scope id → names bound directly in it. Built ONCE per Semantic, alongside `nameOf`.
+    let namesByScope = new Map<number, Set<string>>();
 
     const listHook = (n: Node, ctx: TransformCtx): void => {
-        if (n.data === null) return;
-        const field = n.type === N.SwitchCase ? 'consequent' : 'body';
-        const list = (n.data as Record<string, unknown>)[field];
-        if (!Array.isArray(list)) return;
-        const stmts = list as Node[];
+        const stmts = statementListOf(n);
+        if (stmts === null) return;
 
         // Names already bound in the scope we are lifting INTO. Maintained as we go, so a second block
         // declaring the same name sees the first one's contribution.
@@ -78,15 +77,27 @@ export function makeBlockFlatten(): Visitor {
             cachedSem = sem;
             nameOf = new Map<number, string>();
             for (const [name, id] of sem.names) nameOf.set(id, name);
-        }
-        const target = sem.nodeScope.get(n) ?? ctx.currentScope;
-        const used = new Set<string>();
-        for (let i = 1; i < sem.symbols.length; i++) {
-            if (sem.symbols[i].scope === target) {
-                const nm = nameOf.get(sem.symbols[i].nameId);
-                if (nm !== undefined) used.add(nm);
+            // Bucket every symbol by its owning scope ONCE. The previous version re-scanned the whole
+            // symbol table for EVERY statement-list container — O(symbols x lists) per traversal, which
+            // profiling showed as 13.8% of the compress tier, the largest single pass. The comment above
+            // already avoided exactly this shape for `nameOf`; the `used` set did it anyway.
+            namesByScope = new Map<number, Set<string>>();
+            for (let i = 1; i < sem.symbols.length; i++) {
+                const rec = sem.symbols[i];
+                const nm = nameOf.get(rec.nameId);
+                if (nm === undefined) continue;
+                let set = namesByScope.get(rec.scope);
+                if (set === undefined) {
+                    set = new Set<string>();
+                    namesByScope.set(rec.scope, set);
+                }
+                set.add(nm);
             }
         }
+        const target = sem.nodeScope.get(n) ?? ctx.currentScope;
+        // A fresh copy: the loop below ADDS to it as blocks are lifted, and that must not leak into
+        // the shared per-scope set.
+        const used = new Set<string>(namesByScope.get(target));
 
         for (let i = 0; i < stmts.length; i++) {
             const b = stmts[i];
