@@ -118,87 +118,39 @@ function readsSym(n: Node, sym: number): boolean {
     return found;
 }
 
-/** Symbols `init` reads. Empty ⇒ nothing in a gap can disturb it. */
-function readSyms(init: Node): Set<number> {
-    const out = new Set<number>();
-    const visit = (n: Node): void => {
-        if (n.type === N.IdentifierReference) {
-            out.add((n as { sym: number }).sym);
-            return;
-        }
-        walkChildren(n, visit);
-    };
-    visit(init);
-    return out;
-}
-
-/** Whether `stmt` gives a new value to any symbol in `syms`. Covers assignment targets, `++`/`--`
- *  AND declarator initializations — the last because a declarator's init is NOT a write in the ref
- *  tally, which is exactly the `var p = 5` hole described at the top of this file. */
-function assignsAny(stmt: Node, syms: Set<number>): boolean {
-    let hit = false;
-    const targets = (n: Node): void => {
-        if (hit) return;
-        if (n.type === N.IdentifierReference || n.type === N.BindingIdentifier) {
-            if (syms.has((n as { sym: number }).sym)) hit = true;
-            return;
-        }
-        walkChildren(n, targets);
-    };
-    const visit = (n: Node): void => {
-        if (hit) return;
-        switch (n.type) {
-            case N.AssignmentExpression:
-                targets((n.data as { left: Node }).left);
-                break;
-            case N.UpdateExpression:
-                targets((n.data as { argument: Node }).argument);
-                break;
-            case N.VariableDeclarator:
-                if ((n.data as { init: Node | null }).init !== null) targets((n.data as { id: Node }).id);
-                break;
-            default:
-                break;
-        }
-        walkChildren(n, visit);
-    };
-    visit(stmt);
-    return hit;
-}
-
-/** Process one statement list: for each inlinable single-use binding, move its init into the sibling
- *  statement holding the sole read and drop the decl. The use may be any later sibling, not just the
- *  next one — see the GAP note at the top of this file for what crossing statements requires. */
+/** Process one statement list, driving from the USE and looking BACKWARD at the adjacent declaration.
+ *
+ * This is esbuild's `substituteSingleUseSymbolInStmt` shape, which oxc ports as
+ * `substitute_single_use_symbol_in_statement` (`peephole/minimize_statements.rs`): for the statement
+ * being considered, inspect only the IMMEDIATELY PRECEDING declaration (oxc's `stmts.last_mut()`),
+ * substitute, drop it, and repeat — chaining backwards through a run of adjacent declarations.
+ *
+ * It replaces a forward scan that, for every candidate declaration, called `readsSym` on EVERY later
+ * sibling until it found the sole read — a full subtree walk per (candidate, sibling) pair, so
+ * O(statements x subtree) per body, and worst on the common case where the sole read is NOT in this
+ * list at all (it may live in a nested function) and the scan therefore ran to the end for nothing.
+ * CPU profiling put this pass at ~12% of the whole compress tier while producing 20 mutations on
+ * three.core.js.
+ *
+ * WHY DROPPING THE GAP IS FREE. The old code also handled a NON-adjacent use (`use > i + 1`), guarded
+ * by a purity check plus a disturbance scan (`readSyms`/`assignsAny`) over the crossed statements.
+ * Instrumenting both corpora, every single substitution was adjacent — 20/20 on three.core.js and
+ * 99/99 on crashcat, 119 with a gap of zero and none with a gap at all. esbuild and oxc do not support
+ * a gap either. So the gap machinery cost the quadratic scan and bought nothing measurable, and the
+ * helpers that served it are gone with it.
+ */
 function inlineBody(body: Node[], refs: Map<number, RefCounts>): boolean {
     let changed = false;
-    for (let i = 0; i < body.length - 1; i++) {
-        const cand = candidate(body[i], refs);
-        if (cand === null) continue;
-
-        // Locate the sole read. The binding has exactly one (checked in `candidate`), so the first
-        // sibling that mentions it is the use statement.
-        let use = -1;
-        for (let k = i + 1; k < body.length; k++) {
-            if (readsSym(body[k], cand.sym)) {
-                use = k;
-                break;
-            }
-        }
-        if (use < 0) continue;
-
-        if (use > i + 1) {
-            // Crossing statements: the init must be position-independent, and nothing in the gap may
-            // reassign what it reads.
-            if (cand.impure || cand.fragile) continue;
-            const reads = readSyms(cand.init);
-            let disturbed = false;
-            for (let k = i + 1; k < use && !disturbed; k++) if (assignsAny(body[k], reads)) disturbed = true;
-            if (disturbed) continue;
-        }
-
-        if (substituteInUse(body[use], cand.sym, cand.init, cand.impure, cand.fragile, refs)) {
-            body.splice(i, 1); // drop the now-dead declaration (its init moved into the use)
-            i--; // re-examine from the shifted position
+    for (let u = 1; u < body.length; u++) {
+        // Chain backwards, mirroring oxc's `while let Some(..) = stmts.last_mut()`: once a declaration
+        // is folded into `body[u]`, the one before it may now be adjacent to that same use.
+        while (u > 0) {
+            const cand = candidate(body[u - 1], refs);
+            if (cand === null) break;
+            if (!readsSym(body[u], cand.sym)) break;
+            if (!substituteInUse(body[u], cand.sym, cand.init, cand.impure, cand.fragile, refs)) break;
+            body.splice(u - 1, 1); // the decl is dead — its init moved into the use, which shifts down
+            u--;
             changed = true;
         }
     }
