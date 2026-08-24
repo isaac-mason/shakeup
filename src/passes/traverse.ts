@@ -259,29 +259,44 @@ function visitSingle(node: Node, ctx: Ctx): Node {
  *  produced by replaceWithMultiple are not re-visited (they came from the hook). */
 function visitList(list: (Node | null)[], ctx: Ctx): void {
     if (list.length === 0) return; // nothing to visit (also skips the shared frozen EMPTY_LIST)
-    const out: (Node | null)[] = [];
-    let changed = false; // only rebuild the array if an element was replaced/removed/spliced
-    for (const el of list) {
+    // COPY-ON-WRITE. The overwhelming majority of statement lists come through a round untouched, and
+    // building a parallel array for every one of them — on every list, on every round — was pure
+    // garbage: filled, compared, discarded. `out` is now allocated only when an element actually moves,
+    // seeded with the prefix already passed over (which cannot contain a change, or it would have
+    // allocated then). An unchanged list allocates nothing at all.
+    // NO CLOSURES here. The first cut of this used `fork`/`push` helpers and measured WORSE than the
+    // unconditional array it replaced (traverse machinery 11.6% -> 16.2% of a bundle profile): two
+    // closure allocations per list per round cost more than the one array they were saving.
+    let out: (Node | null)[] = list; // unused until `forked`; never null, so no narrowing games
+    let forked = false;
+    for (let idx = 0; idx < list.length; idx++) {
+        const el = list[idx];
         if (el === null) {
-            out.push(null);
+            if (forked) out.push(null);
             continue;
         }
         ctx.op = OP_NONE;
         fireEnter(el, ctx);
         if (ctx.op === OP_REMOVE) {
             ctx.dropRefs(el);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             ctx.op = OP_NONE;
-            changed = true;
             continue;
         }
         if (ctx.op === OP_MULTI) {
             ctx.dropRefs(el);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             for (const m of ctx.opNodes as Node[]) {
                 ctx.addRefs(m);
                 out.push(m);
             }
             ctx.op = OP_NONE;
-            changed = true;
             continue;
         }
         let cur = el;
@@ -289,40 +304,53 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
             ctx.dropRefs(cur);
             cur = ctx.opNode as Node;
             ctx.addRefs(cur);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             ctx.op = OP_NONE;
-            changed = true;
         }
         descend(cur, ctx);
         ctx.op = OP_NONE;
         fireExit(cur, ctx);
         if (ctx.op === OP_REMOVE) {
             ctx.dropRefs(cur);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             ctx.op = OP_NONE;
-            changed = true;
             continue;
         }
         if (ctx.op === OP_MULTI) {
             ctx.dropRefs(cur);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             for (const m of ctx.opNodes as Node[]) {
                 ctx.addRefs(m);
                 out.push(m);
             }
             ctx.op = OP_NONE;
-            changed = true;
             continue;
         }
         if (ctx.op === OP_REPLACE) {
             ctx.dropRefs(cur);
             cur = ctx.opNode as Node;
             ctx.addRefs(cur);
+            if (!forked) {
+                out = list.slice(0, idx);
+                forked = true;
+            }
             ctx.op = OP_NONE;
-            changed = true;
         }
-        out.push(cur);
+        if (forked) out.push(cur);
     }
-    if (!changed) return; // list untouched — leave it (may be a shared/frozen array)
+    if (!forked) return; // list untouched — leave it (may be a shared/frozen array)
+    const built = out;
     list.length = 0;
-    for (const x of out) list.push(x);
+    for (const x of built) list.push(x);
 }
 
 /** Run the ordered `visitors` over `program` in one fused mutable traversal (oxc `traverse_mut`).

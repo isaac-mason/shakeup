@@ -53,8 +53,28 @@ function nextTokenStart(source: string, i: number): number {
     return -1;
 }
 
+// One-entry memo. `directiveSpans` is called once per OPTIMIZE PASS per module — six passes, all with
+// the same source, back to back — so each module was scanned six times over. The `anyInSource`
+// pre-filter does not save it either: any file containing an `@` anywhere (JSDoc, an email in a
+// comment) falls through to a full `String.includes` sweep PER DIRECTIVE TOKEN, and on three.core.js
+// that came to ~30 scans of 1.2MB, 3.3% of a whole bundle, to conclude "no directives here".
+//
+// A single slot is the right size: the calls are consecutive per module, so it hits five times out of
+// six, and nothing is retained past the next module (a Map keyed by source would pin every module's
+// text for the life of the process).
+let MEMO_SRC: string | null = null;
+let MEMO_HITS: Map<number, number> | null = null;
+
 /** Map of `attached-to offset` → directive bits, for every directive comment in `source`. */
 export function scanDirectives(source: string): Map<number, number> {
+    if (MEMO_SRC === source && MEMO_HITS !== null) return MEMO_HITS;
+    const computed = scanDirectivesUncached(source);
+    MEMO_SRC = source;
+    MEMO_HITS = computed;
+    return computed;
+}
+
+function scanDirectivesUncached(source: string): Map<number, number> {
     const hits = new Map<number, number>();
     if (!anyInSource(source)) return hits;
     for (let i = source.indexOf('/*'); i !== -1; i = source.indexOf('/*', i + 2)) {
