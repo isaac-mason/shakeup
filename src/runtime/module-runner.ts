@@ -35,6 +35,13 @@ export type ModuleRunnerOptions = {
     /** outbound custom HMR events: a module's `import.meta.hot.send(event, data)`
      *  lands here (the host forwards to the server / other realms). */
     onHotSend?: (event: string, data: unknown) => void;
+    /** a module's own HMR callback (accept / dispose / prune) threw. These are USER
+     *  handlers running around an already-installed module, so one throwing must not
+     *  withhold the update from sibling boundaries or other realms — it's reported
+     *  here and the update continues. A module BODY that throws is different: that
+     *  edit is broken, so it rejects out of `applyHmr` and restores the last-good
+     *  instance. Defaults to `console.error`; never silent. */
+    onHotError?: (err: unknown, ctx: { id: string; phase: 'accept' | 'dispose' | 'prune' }) => void;
 };
 
 /** The standard import.meta.hot surface. */
@@ -175,6 +182,21 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     // rest of an import's wall is module-body eval, so `importWall − fetchMs ≈ eval`.
     const perf = { fetchMs: 0, fetches: 0 };
     const evaluator = options.evaluator ?? defaultEvaluator;
+
+    // A user HMR callback runs around an already-installed module; a throw in one is that
+    // module's bug, not grounds for aborting the rest of the update. Report and continue.
+    const onHotError =
+        options.onHotError ??
+        ((err: unknown, ctx: { id: string; phase: string }) => {
+            console.error(`[hmr] ${ctx.phase} callback threw in ${ctx.id}:`, err);
+        });
+    function fire(id: string, phase: 'accept' | 'dispose' | 'prune', cb: () => void): void {
+        try {
+            cb();
+        } catch (err) {
+            onHotError(err, { id, phase });
+        }
+    }
 
     let prepared = false;
     const ensurePrepared = (): void => {
@@ -317,8 +339,8 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     function prune(id: string): void {
         const rec = modules.get(id);
         if (rec === undefined) return;
-        for (const cb of rec.pruneCallbacks) cb(rec.hotData);
-        for (const cb of rec.disposeCallbacks) cb(rec.hotData);
+        for (const cb of rec.pruneCallbacks) fire(id, 'prune', () => cb(rec.hotData));
+        for (const cb of rec.disposeCallbacks) fire(id, 'dispose', () => cb(rec.hotData));
         modules.delete(id);
     }
 
@@ -328,7 +350,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
      *  rather than a broken partial. */
     async function reeval(id: string): Promise<Namespace> {
         const old = modules.get(id);
-        if (old !== undefined) for (const cb of old.disposeCallbacks) cb(old.hotData);
+        if (old !== undefined) for (const cb of old.disposeCallbacks) fire(id, 'dispose', () => cb(old.hotData));
         const fresh: ModuleRecord = {
             id,
             exports: {},
@@ -370,9 +392,9 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             // snapshot the old named-export values for acceptExports comparison.
             const oldVals = exportAccepts.map((ea) => ea.names.map((n) => rec.exports[n]));
             const ns = await reeval(boundary);
-            for (const cb of accepts) cb(ns);
+            for (const cb of accepts) fire(boundary, 'accept', () => cb(ns));
             exportAccepts.forEach((ea, i) => {
-                if (ea.names.some((n, j) => ns[n] !== oldVals[i][j])) ea.cb(ns);
+                if (ea.names.some((n, j) => ns[n] !== oldVals[i][j])) fire(boundary, 'accept', () => ea.cb(ns));
             });
             return true;
         }
@@ -391,7 +413,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
                 mods.push(depId === acceptedPath ? freshDep : depId ? (modules.get(depId)?.exports ?? {}) : {});
             }
             if (!matches) continue;
-            da.cb(da.single ? freshDep : mods);
+            fire(boundary, 'accept', () => da.cb(da.single ? freshDep : mods));
             fired = true;
         }
         return fired;

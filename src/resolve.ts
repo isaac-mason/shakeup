@@ -126,6 +126,12 @@ export type GraphOptions = CommonOptions & {
      *  lowering), so it lives in scan and the parse-cache key includes it. Set by `bundle()` from
      *  `output.minify`; default false. */
     compress?: CompressMode | false;
+    /** Run the OPTIMIZE tier (directive-gated: `@optimize`/`@inline`/`@sroa`/`@unroll` → function
+     *  inlining, loop unrolling, SROA, flow-sensitive inlining). These fire only where a source
+     *  directive opts in, so `true` is safe as the default; set `false` to IGNORE all directives —
+     *  a faster, directive-free build (e.g. dev), or to A/B the tier's effect. Part of the
+     *  parse-cache key, like `compress`, since it changes the emitted AST. Default true. */
+    optimize?: boolean;
 };
 
 /** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target. Runs

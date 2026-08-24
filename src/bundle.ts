@@ -494,7 +494,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             }
         }
     }
-    graph = await buildGraph({ ...options, compress: compressForScan }, pipeline);
+    graph = await buildGraph({ ...options, compress: compressForScan, optimize: options.output?.optimize ?? true }, pipeline);
     // Generate-stage asset emit: read + content-hash resolved `new-url` assets (scan only resolved
     // their paths). Before the error gate so an asset load failure surfaces like a scan error.
     await emitAssets(graph, options.fs);

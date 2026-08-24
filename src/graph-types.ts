@@ -140,6 +140,9 @@ export type CachedParse = {
     /** Whether compress passes were applied when this AST was produced — part of the cache key, so
      *  a `minify` toggle across builds re-parses instead of reusing a wrongly-(un)compressed AST. */
     compress: CompressMode | false;
+    /** Whether the optimize tier ran when this AST was produced — part of the cache key for the same
+     *  reason: toggling `output.optimize` must re-parse rather than reuse an AST built the other way. */
+    optimize: boolean;
     program: Program;
     nodeCount: number;
     semantic: Semantic;

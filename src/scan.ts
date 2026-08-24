@@ -519,6 +519,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
     const compress = options.compress ?? false; // minify P4 — a MODE ('full'|'dce'|false); part of the parse-cache key below
+    const optimizeTier = options.optimize ?? true; // directive-gated hot-path opts; `false` ignores all directives
     // The injected automatic JSX runtime is side-effect-free (conventionally pure), so an unused
     // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
     // jsx-runtime special-case (see pruneUnusedExternals).
@@ -711,7 +712,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
             srcHash = hashSource(source);
             hit = cache?.get(id);
-            reuse = hit !== undefined && hit.srcHash === srcHash && hit.compress === compress;
+            reuse = hit !== undefined && hit.srcHash === srcHash && hit.compress === compress && hit.optimize === optimizeTier;
             if (reuse && hit !== undefined) {
                 ({ program, nodeCount, semantic } = hit);
                 hasJSX = hit.hasJSX;
@@ -762,14 +763,17 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // compress fixed point is what cleans the result up — folding the substituted
                 // arguments and dropping the now-unreferenced declaration. This is the same ordering
                 // compilecat's `run_all` uses (inline first, then the simplify loop).
-                let expanded = inlineFunctions(program, semantic, source);
-                if (unrollLoops(program, semantic, source)) expanded = true;
-                if (scalarReplaceAggregates(program, semantic, source, shapes)) expanded = true;
-                // Flow-sensitive inlining runs AFTER the structural expanders (function-inline, unroll,
-                // sroa) so it sees the straight-line code they produce; the compress fixed point then
-                // folds each substituted RHS. Directive-gated like the rest of the tier.
-                if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
-                if (flowInlineVariables(program, semantic, source)) expanded = true;
+                let expanded = false;
+                if (optimizeTier) {
+                    expanded = inlineFunctions(program, semantic, source);
+                    if (unrollLoops(program, semantic, source)) expanded = true;
+                    if (scalarReplaceAggregates(program, semantic, source, shapes)) expanded = true;
+                    // Flow-sensitive inlining runs AFTER the structural expanders (function-inline,
+                    // unroll, sroa) so it sees the straight-line code they produce; the compress fixed
+                    // point then folds each substituted RHS. Directive-gated like the rest of the tier.
+                    if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
+                    if (flowInlineVariables(program, semantic, source)) expanded = true;
+                }
                 if (expanded) {
                     semantic = createSemantic();
                     analyze(semantic, program);
@@ -831,6 +835,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             cache?.set(id, {
                 srcHash,
                 compress,
+                optimize: optimizeTier,
                 program,
                 nodeCount,
                 semantic,

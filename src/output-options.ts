@@ -48,6 +48,12 @@ export type OutputOptionsNaming = {
      *  sub-stage independently (esbuild's `minifyWhitespace`/`minifyIdentifiers`/`minifySyntax`):
      *  each field defaults to `false`, so `{ compress: true }` runs ONLY the compress passes. */
     minify?: boolean | MinifyOptions;
+    /** Run the OPTIMIZE tier — the directive-gated hot-path optimizations (`@optimize`/`@inline`/
+     *  `@sroa`/`@unroll` → function inlining, loop unrolling, SROA, flow-sensitive inlining). They fire
+     *  only where a source directive opts in, so `true` (the default) is safe; set `false` to ignore
+     *  all directives for a faster, directive-free build, or to A/B the tier. Independent of `minify`:
+     *  the two tiers are orthogonal (minify = whitespace/mangle/compress; optimize = directive opts). */
+    optimize?: boolean;
 };
 
 /** Per-stage minify toggles (esbuild model). Each defaults to false in the object form. */

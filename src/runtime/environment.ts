@@ -31,6 +31,10 @@ export type EnvironmentOptions = {
      *  (host decides how: re-import the entry, reload the realm/iframe). `id` is the
      *  changed module that triggered it. Host-neutral — the core only signals. */
     onFullReload?: (id: string) => void;
+    /** a module's own accept/dispose/prune callback threw. Reported rather than
+     *  thrown, so one bad handler can't withhold the update from the other
+     *  boundaries in this env (or from the other realms this change fans to). */
+    onHotError?: (err: unknown, ctx: { id: string; phase: 'accept' | 'dispose' | 'prune' }) => void;
 };
 
 type EnvNode = {
@@ -99,6 +103,7 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
         evaluator: options.evaluator,
         prepare: options.prepare,
         onHotSend: options.onHotSend,
+        onHotError: options.onHotError,
         onInvalidate: (id) => pendingInvalidations.add(id),
     });
 
