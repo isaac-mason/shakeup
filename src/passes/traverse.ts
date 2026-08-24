@@ -69,7 +69,16 @@ const OP_REMOVE = 3;
 class Ctx {
     semantic: Semantic;
     visitors: Visitor[];
-    private used: Set<string>;
+    /**
+     * Names already taken, for {@link generateUid}. Built LAZILY.
+     *
+     * This used to be `new Set(semantic.names.keys())` in the constructor — a copy of every name in the
+     * program, allocated on EVERY `traverse` call, so once per compress round. It exists only for
+     * `generateUid`, and no compress-loop pass mints a binding at all (`generateUid`, `createScope` and
+     * `declareSymbol` have zero uses under `src/passes/compress/`), so the whole set was allocated and
+     * thrown away every round. Allocation profiling put `Set`/`set` construction among the top sites.
+     */
+    private used: Set<string> | null = null;
     op = OP_NONE;
     opNode: Node | null = null;
     opNodes: Node[] | null = null;
@@ -80,7 +89,6 @@ class Ctx {
     constructor(semantic: Semantic, visitors: Visitor[]) {
         this.semantic = semantic;
         this.visitors = visitors;
-        this.used = new Set(semantic.names.keys());
     }
     /** Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point. */
     changed = false;
@@ -170,8 +178,9 @@ class Ctx {
     generateUid(base: string): string {
         const b = base.replace(/^_+/, '').replace(/[0-9]+$/, '') || 'ref';
         let name = `_${b}`;
-        for (let i = 2; this.used.has(name); i++) name = `_${b}${i}`;
-        this.used.add(name);
+        const used = (this.used ??= new Set(this.semantic.names.keys()));
+        for (let i = 2; used.has(name); i++) name = `_${b}${i}`;
+        used.add(name);
         this.semantic.names.set(name, this.semantic.names.size + 1);
         return name;
     }
