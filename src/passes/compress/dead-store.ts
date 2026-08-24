@@ -17,6 +17,8 @@
 //     nothing. Only a provably pure right-hand side lets the statement go.
 //   • A function whose flow the analysis cannot model (a `try`, an unresolved `break` target) is
 //     skipped wholesale.
+import { buildCfg } from '../../analysis/cfg.ts';
+import { computeLiveVars } from '../../analysis/live-vars.ts';
 import { computeLiveness } from '../../analysis/liveness.ts';
 import { isPureExpr } from '../../analysis/effects.ts';
 import { N, type Node, walk } from '../../ast.ts';
@@ -62,6 +64,36 @@ function deadCandidate(stmt: Node, tracked: ReadonlySet<number>): { sym: number;
     return tracked.has(s) ? { sym: s, value: a.right } : null;
 }
 
+/**
+ * Which liveness driver dead-store uses. Both compute the SAME answer — `tst/cfg-equivalence.test.ts`
+ * asserts exact agreement across three.core.js — so this exists to migrate safely, not to choose
+ * between two behaviours.
+ *
+ * The one real difference is COVERAGE: the structural walker bails on a function containing `try`
+ * (and, before it was fixed, on labelled `continue`), skipping it entirely. The CFG models exception
+ * edges, so it analyses those functions and can additionally suppress a kill that an exception might
+ * skip past (a "conditional kill"). So `'cfg'` should be a strict superset of `'structural'`.
+ */
+export type LivenessDriver = 'structural' | 'cfg';
+let DRIVER: LivenessDriver = 'structural';
+export const setLivenessDriver = (d: LivenessDriver): void => {
+    DRIVER = d;
+};
+export const getLivenessDriver = (): LivenessDriver => DRIVER;
+
+/** Live-out lookup for `body`, or null when the driver cannot model this function's flow. */
+function liveOutOf(body: Node, tracked: ReadonlySet<number>): ((stmt: Node) => ReadonlySet<number> | null) | null {
+    if (DRIVER === 'cfg') {
+        // Never bails — that is the point of the CFG.
+        const flow = computeLiveVars(buildCfg(body), tracked, EMPTY);
+        return flow.liveOut;
+    }
+    const map = computeLiveness(body, tracked, EMPTY);
+    return map === null ? null : (stmt: Node) => map.get(stmt) ?? null;
+}
+
+const EMPTY: ReadonlySet<number> = new Set<number>();
+
 const fnHook = (fn: Node, ctx: TransformCtx): void => {
     const body = (fn.data as { body: Node | null }).body;
     if (body === null || body.type !== N.BlockStatement) return;
@@ -70,8 +102,8 @@ const fnHook = (fn: Node, ctx: TransformCtx): void => {
     const tracked = new Set([...locals].filter((s) => !escaped.has(s)));
     if (tracked.size === 0) return;
 
-    const liveOut = computeLiveness(body, tracked, new Set());
-    if (liveOut === null) return; // flow this analysis does not model — skip the function
+    const liveOut = liveOutOf(body, tracked);
+    if (liveOut === null) return; // flow this driver does not model — skip the function
 
     // Rewrite dead stores in every statement list inside this function.
     let changed = false;
@@ -85,8 +117,8 @@ const fnHook = (fn: Node, ctx: TransformCtx): void => {
         for (let i = 0; i < stmts.length; i++) {
             const cand = deadCandidate(stmts[i], tracked);
             if (cand === null) continue;
-            const after = liveOut.get(stmts[i]);
-            if (after === undefined || after.has(cand.sym)) continue; // still read — keep it
+            const after = liveOut(stmts[i]);
+            if (after === null || after.has(cand.sym)) continue; // no answer, or still read — keep it
             if (isPureExpr(cand.value)) {
                 stmts.splice(i, 1);
                 i--;
