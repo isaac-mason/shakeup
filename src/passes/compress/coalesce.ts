@@ -31,7 +31,7 @@
 //   • never an escaped/captured local — a closure may read it at any time
 import { buildCfg } from '../../analysis/cfg.ts';
 import { computeLiveVars } from '../../analysis/live-vars.ts';
-import { N, node, type Node, walk } from '../../ast.ts';
+import { N, node, type Node, statementListOf, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -73,11 +73,9 @@ function collectCandidates(body: Node, tracked: ReadonlySet<number>, params: Rea
     const out: Candidate[] = [];
     walk(body, (n) => {
         if (n !== body && isFn(n)) return false; // a nested function's declarations are its own problem
-        if (n.data === null) return undefined;
-        const field = n.type === N.SwitchCase ? 'consequent' : 'body';
-        const list = (n.data as Record<string, unknown>)[field];
-        if (!Array.isArray(list)) return undefined;
-        for (const stmt of list as Node[]) {
+        const list = statementListOf(n);
+        if (list === null) return undefined;
+        for (const stmt of list) {
             if (stmt.type !== N.VariableDeclaration) continue;
             const d = stmt.data as { kind: string; declarations: Node[] };
             // `const` cannot be assigned after its declaration, and a multi-declarator statement cannot

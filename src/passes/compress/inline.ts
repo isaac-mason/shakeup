@@ -32,7 +32,7 @@
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
 import { type RefCounts, readsMutableSymbol, substituteSingleUse } from '../../analysis/movement.ts';
 import { getPrelude } from './prelude.ts';
-import { N, type Node, walkChildren } from '../../ast.ts';
+import { N, type Node, statementListOf, walkChildren } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Snapshot state for one traversal (set at Program enter; the driver rebuilds the semantic + these
@@ -216,13 +216,14 @@ export const inline: Visitor = {
     // Body-level rewrite on EXIT (bottom-up, so inner bodies settle first). Hooks each statement-list
     // container and rewrites its `.body` in place.
     exit: hookTable({
-        [N.Program]: (n, ctx: TransformCtx) => bodyHook(n, 'body', ctx),
-        [N.BlockStatement]: (n, ctx: TransformCtx) => bodyHook(n, 'body', ctx),
-        [N.StaticBlock]: (n, ctx: TransformCtx) => bodyHook(n, 'body', ctx),
+        [N.Program]: bodyHook,
+        [N.BlockStatement]: bodyHook,
+        [N.StaticBlock]: bodyHook,
     }),
 };
 
-function bodyHook(n: Node, field: 'body', ctx: TransformCtx): void {
+function bodyHook(n: Node, ctx: TransformCtx): void {
     if (REFS === null) return;
-    if (inlineBody((n.data as Record<'body', Node[]>)[field], REFS)) ctx.changed = true;
+    const list = statementListOf(n);
+    if (list !== null && inlineBody(list, REFS)) ctx.changed = true;
 }

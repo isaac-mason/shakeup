@@ -4,7 +4,7 @@
 //   • drop a trailing no-op `return` from a function body (`return;` / `return undefined;` /
 //     `return void 0;` as the LAST statement — the function falls through to the same `undefined`)
 //   • strip `EmptyStatement`s from statement lists (`;`)
-import { N, type Node } from '../../ast.ts';
+import { N, type Node, statementListOf } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -94,8 +94,9 @@ function unwrapClause(clause: Node | null, loopBody: boolean): Node | null {
     return body.length === 1 && safe(body[0]) ? body[0] : clause;
 }
 
-const listHook = (field: 'body' | 'consequent') => (n: Node, ctx: TransformCtx) => {
-    if (stripEmpty((n.data as Record<string, Node[]>)[field])) ctx.changed = true;
+const listHook = (n: Node, ctx: TransformCtx): void => {
+    const list = statementListOf(n);
+    if (list !== null && stripEmpty(list)) ctx.changed = true;
 };
 /** Unwrap the clause block(s) of a loop/if in place. */
 const clauseHook = (fields: string[], loopBody = false) => (n: Node, ctx: TransformCtx) => {
@@ -144,10 +145,10 @@ export const normalize: Visitor = {
         [N.ForInStatement]: clauseHook(['body'], true),
         [N.ForOfStatement]: clauseHook(['body'], true),
         [N.DoWhileStatement]: clauseHook(['body'], true),
-        [N.Program]: listHook('body'),
-        [N.BlockStatement]: listHook('body'),
-        [N.StaticBlock]: listHook('body'),
-        [N.SwitchCase]: listHook('consequent'),
+        [N.Program]: listHook,
+        [N.BlockStatement]: listHook,
+        [N.StaticBlock]: listHook,
+        [N.SwitchCase]: listHook,
     }),
     exit: null,
 };

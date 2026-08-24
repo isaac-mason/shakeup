@@ -21,7 +21,7 @@ import { buildCfg } from '../../analysis/cfg.ts';
 import { computeLiveVars } from '../../analysis/live-vars.ts';
 import { computeLiveness } from '../../analysis/liveness.ts';
 import { isPureExpr } from '../../analysis/effects.ts';
-import { N, type Node, walk } from '../../ast.ts';
+import { N, type Node, statementListOf, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, traverse, type TransformCtx, type Visitor } from '../traverse.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
@@ -112,11 +112,8 @@ const fnHook = (fn: Node, ctx: TransformCtx): void => {
     let changed = false;
     walk(body, (n) => {
         if (n !== body && isFn(n)) return false;
-        if (n.data === null) return undefined; // data-less leaf (identifier, literal)
-        const field = n.type === N.SwitchCase ? 'consequent' : 'body';
-        const list = (n.data as Record<string, unknown>)[field];
-        if (!Array.isArray(list)) return undefined;
-        const stmts = list as Node[];
+        const stmts = statementListOf(n);
+        if (stmts === null) return undefined;
         for (let i = 0; i < stmts.length; i++) {
             const cand = deadCandidate(stmts[i], tracked);
             if (cand === null) continue;

@@ -28,7 +28,7 @@ import { isPureExpr, mayHaveSideEffects } from '../../analysis/effects.ts';
 import { buildCfg, type Cfg } from '../../analysis/cfg.ts';
 import { computeReachingDefs, TOP } from '../../analysis/reaching-defs.ts';
 import { computeReachingUses } from '../../analysis/reaching-uses.ts';
-import { cloneNode, N, type Node, set, walk, walkChildren } from '../../ast.ts';
+import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast.ts';
 import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
@@ -228,10 +228,8 @@ function statementLists(body: Node): Node[][] {
     const lists: Node[][] = [];
     walk(body, (n) => {
         if (n !== body && isFn(n)) return false;
-        if (n.data === null) return undefined;
-        const field = n.type === N.SwitchCase ? 'consequent' : 'body';
-        const list = (n.data as Record<string, unknown>)[field];
-        if (Array.isArray(list)) lists.push(list as Node[]);
+        const list = statementListOf(n);
+        if (list !== null) lists.push(list);
         return undefined;
     });
     return lists;

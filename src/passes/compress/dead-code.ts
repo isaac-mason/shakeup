@@ -18,7 +18,7 @@
 // list (list-container hook) so `if(true){a;b}` becomes `a;b` — but only when the block has no
 // block-scoped declarations (`let`/`const`/`class`/`function`) at its top level, else flattening
 // would leak lexical scope, so we keep the block intact.
-import { N, type Node } from '../../ast.ts';
+import { N, type Node, statementListOf } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -174,19 +174,18 @@ function rewriteList(body: Node[]): boolean {
 
 /** A statement-list container hook: run {@link rewriteList} over its list field, marking the ctx
  *  changed so the fixed-point driver re-runs. */
-function listHook(field: 'body'): (n: Node, ctx: TransformCtx) => void {
-    return (n, ctx) => {
-        if (rewriteList((n.data as Record<string, Node[]>)[field])) ctx.changed = true;
-    };
+function listHook(n: Node, ctx: TransformCtx): void {
+    const list = statementListOf(n);
+    if (list !== null && rewriteList(list)) ctx.changed = true;
 }
 
 export const deadCode: Visitor = {
     name: 'deadCode',
     enter: hookTable({
         // Statement-list containers: collapse constant `if`s (with flattening) + drop unreachable.
-        [N.Program]: listHook('body'),
-        [N.BlockStatement]: listHook('body'),
-        [N.StaticBlock]: listHook('body'),
+        [N.Program]: listHook,
+        [N.BlockStatement]: listHook,
+        [N.StaticBlock]: listHook,
         // A switch case's statement list (`consequent`) is also a same-scope statement list.
         [N.SwitchCase]: (n, ctx) => {
             if (rewriteList((n.data as SwitchCaseData).consequent)) ctx.changed = true;

@@ -464,6 +464,35 @@ export function set<Id extends NodeType>(n: Node, type: Id, data: DataForId<Id>)
     w.sym = 0; // a retyped node is a fresh node — it carries no prior symbol association
 }
 
+/**
+ * The STATEMENT LIST a container node holds, or null if it holds none.
+ *
+ * Ten passes each open-coded this as `(n.data as Record<string, unknown>)[field]` with `field` either
+ * a ternary on the node type or a curried literal — a computed-key access, behind a cast that defeats
+ * the schema types, restated ten times. This says the schema fact ("these are the statement-list
+ * containers") ONCE, with literal property access per case and no cast.
+ *
+ * It is written this way for the same reason `walkChildren` is: no computed keys on `data`. That is a
+ * codebase rule, not a measured win here — an interleaved CPU-time A/B against the old form could not
+ * resolve the two (the between-arm gap sat well inside the run-to-run spread). Four of the ten callers
+ * (coalesce, dead-store, flow-inline, unroll) do invoke it at EVERY node of a full walk, so the cheap
+ * `default: return null` is the shape that matters there.
+ *
+ * Returns the LIVE array, so callers may splice it in place — which is what every caller does.
+ */
+export function statementListOf(n: Node): Node[] | null {
+    switch (n.type) {
+        case N.Program:
+        case N.BlockStatement:
+        case N.StaticBlock:
+            return (n.data as { body: Node[] } | null)?.body ?? null;
+        case N.SwitchCase:
+            return (n.data as { consequent: Node[] } | null)?.consequent ?? null;
+        default:
+            return null;
+    }
+}
+
 /** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
 export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => boolean | void): void {
     const fields = FIELDS[n.type];
