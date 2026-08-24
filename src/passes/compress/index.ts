@@ -15,6 +15,8 @@
 // refreshed mid-loop; today we refresh ONCE at the end (returning a fresh `Semantic` when anything
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
+import { emitRefFacts, REF } from '../../analysis/ref-facts.ts';
+import type { RefCounts } from '../../analysis/movement.ts';
 import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { traverse, type Visitor } from '../traverse.ts';
@@ -169,7 +171,64 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     // (`CallExpression.pure`) that the removal passes then act on, so it belongs to the semantic tier
     // and runs in every mode. Stamping does not itself change the program, hence no `any = true`.
     stampPureCalls(program);
-    const refresh = (): void => {
+    /**
+     * Between-round refresh. Recomputes ONLY the reference facts, in one walk over the already
+     * resolved tree, instead of rebuilding the whole `Semantic`.
+     *
+     * WHY THIS IS ENOUGH, measured rather than argued. Running the loop with NO refresh at all costs
+     * output size but never correctness (three +204 bytes, crashcat +1,646; across 1509 tests the only
+     * failures were four `aliasInline` assertions that an optimization FIRED — stale counts are pure
+     * over-counting, which is oxc's documented safe direction). Running it with a refs-only refresh is
+     * BYTE-IDENTICAL to the full rebuild on both corpora. So the entire value of the old
+     * `createSemantic() + analyze()` was its reference counts; the scopes, symbols, bindings and
+     * `nodeScope` it also rebuilt were worth nothing between rounds — and `analyze` is not cheap, since
+     * it re-creates every scope, re-declares every binding and re-runs `resolveRef`'s scope-chain walk
+     * per reference (4.0% of profile on its own).
+     *
+     * `node.sym` is NOT reassigned, so symbol ids stay stable across rounds and every id already in
+     * `symbols`/`bindings`/`symbolInit` remains valid.
+     *
+     * STALENESS THAT REMAINS, deliberately. `symbolInit` keeps entries for declarators later removed or
+     * moved. That is safe because it is only ever read together with the FRESH counts: a symbol whose
+     * declarator went away has no reads left, and both consumers skip on `reads === 0`. A future pass
+     * that reads `symbolInit` WITHOUT checking counts would need this revisited.
+     */
+    const refreshRefs = (): void => {
+        const refs = new Map<number, RefCounts>();
+        const uses = new Map<number, number>();
+        const shorthand = new Set<number>();
+        const exported = new Set<number>();
+        emitRefFacts(program, (sym, flags) => {
+            if ((flags & (REF.READ | REF.WRITE)) !== 0) {
+                let c = refs.get(sym);
+                if (c === undefined) {
+                    c = { reads: 0, writes: 0 };
+                    refs.set(sym, c);
+                }
+                if ((flags & REF.READ) !== 0) c.reads++;
+                if ((flags & REF.WRITE) !== 0) c.writes++;
+            }
+            uses.set(sym, (uses.get(sym) ?? 0) + 1);
+            if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
+            if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
+        });
+        cur.refs = refs;
+        cur.uses = uses;
+        cur.shorthand = shorthand;
+        cur.exported = exported;
+    };
+
+    /**
+     * FULL rebuild — a genuinely fresh `Semantic`, symbol ids renumbered and `node.sym` reassigned.
+     *
+     * Needed exactly once, at the end: `runCompress` RETURNS this object and the caller installs it for
+     * the downstream tier, where the MANGLER walks `symbols` to assign short names. A semantic that has
+     * been carried through the loop still lists symbols whose declarations were deleted, so the mangler
+     * would allocate names against a stale set — output the same LENGTH but with different identifiers,
+     * which is exactly how this was caught (three.core.js unchanged at 381,846 bytes but a different
+     * hash). Between rounds nothing reads that; `refreshRefs` is enough there.
+     */
+    const refreshFull = (): void => {
         cur = createSemantic();
         analyze(cur, program);
     };
@@ -187,7 +246,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
         // reference counts after this round's removals — the loop usually settles in 1–2 rounds.
-        refresh();
+        refreshRefs();
     }
     // Both final traversals are purely cosmetic — `'dce'` stops after the fixed point. They share a
     // single rebuild: `joinVars` only merges adjacent declarations (pure syntax, no symbol lookups),
@@ -198,7 +257,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
         if (finalChanged) {
             any = true;
-            refresh();
+            refreshFull();
         }
     }
     return any ? cur : null;
