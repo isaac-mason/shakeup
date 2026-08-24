@@ -15,7 +15,8 @@
 // SIZE POLICY (oxc/esbuild): a SINGLE-read binding inlines any primitive (the decl then vanishes, net
 // win). A MULTI-read binding inlines only SMALL constants (int −99..999, string ≤3 chars, bool/null/
 // undefined) — duplicating a long string across many reads would bloat the output.
-import { N, type Node, node, walkChildren } from '../../ast.ts';
+import { SYM } from '../../analysis/semantic.ts';
+import { N, type Node, node } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** Map from a candidate SymbolId to the literal template to copy into each of its reads. Set at
@@ -88,35 +89,31 @@ function copyConst(n: Node): Node {
 export const constProp: Visitor = {
     name: 'constProp',
     enter: hookTable({
-        [N.Program]: (program, ctx: TransformCtx) => {
+        [N.Program]: (_program, ctx: TransformCtx) => {
             // Both facts are maintained by `analyze` (see `Semantic.refs`) — no pre-pass walk at all,
             // where this pass once ran its own `tallyRefs` + `walkRefIdents`.
             const { refs, shorthand } = ctx.semantic;
             const map = new Map<number, Node>();
-            // Collect candidate declarators: `const`/`let` with a plain BindingIdentifier id and a
-            // primitive-literal init, whose symbol has zero writes and the right read count.
-            const scan = (n: Node): void => {
-                if (n.type === N.VariableDeclaration) {
-                    const kind = (n.data as { kind: string }).kind;
-                    if (kind !== 'var') {
-                        for (const d of (n.data as { declarations: Node[] }).declarations) {
-                            const id = (d.data as { id: Node; init: Node | null }).id;
-                            const lit = constInit((d.data as { init: Node | null }).init);
-                            if (lit === null || id.type !== N.BindingIdentifier) continue;
-                            const sym = (id as { sym: number }).sym;
-                            if (sym === 0 || shorthand.has(sym)) continue;
-                            const c = refs.get(sym);
-                            const reads = c?.reads ?? 0;
-                            const writes = c?.writes ?? 0;
-                            if (writes > 0 || reads === 0) continue; // reassigned, or unused (leave to DCE)
-                            if (reads > 1 && !isSmall(lit)) continue; // multi-read: small constants only
-                            map.set(sym, lit);
-                        }
-                    }
-                }
-                walkChildren(n, scan);
-            };
-            scan(program);
+            // Candidates come from `Semantic.symbolInit` (oxc's `SymbolValue` model) — this used to be
+            // a FULL-PROGRAM walk at every round's Program enter, hunting for the declarations that
+            // `analyze` had already visited. Filtering the table is O(bindings-with-inits) instead of
+            // O(nodes), and applies exactly the same policy in the same source order (the table is
+            // populated by the semantic walk, so its insertion order IS declaration order).
+            for (const [sym, init] of ctx.semantic.symbolInit) {
+                // `var` is excluded as before: it hoists, so a read above the declaration sees
+                // `undefined` rather than the literal. The kind is on the symbol's flags now that the
+                // declaration node is not in hand.
+                if ((ctx.semantic.symbols[sym].flags & SYM.VAR) !== 0) continue;
+                const lit = constInit(init);
+                if (lit === null) continue;
+                if (shorthand.has(sym)) continue;
+                const c = refs.get(sym);
+                const reads = c?.reads ?? 0;
+                const writes = c?.writes ?? 0;
+                if (writes > 0 || reads === 0) continue; // reassigned, or unused (leave to DCE)
+                if (reads > 1 && !isSmall(lit)) continue; // multi-read: small constants only
+                map.set(sym, lit);
+            }
             INLINE = map.size > 0 ? map : null;
         },
         [N.IdentifierReference]: (n, ctx: TransformCtx) => {

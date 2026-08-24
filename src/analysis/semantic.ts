@@ -61,6 +61,21 @@ export type Semantic = {
     shorthand: Set<number>;
     /** Locals re-exported by a bare `export { X }` — renaming one would rewrite the public name. */
     exported: Set<number>;
+    /**
+     * The INIT expression of the declarator that bound each symbol, for plain-identifier bindings.
+     *
+     * oxc's `SymbolValue` / `init_symbol_value`: record what a binding was initialized with as the
+     * declarator is walked, so consumers read a table instead of hunting for declarations. `constProp`
+     * and `aliasInline` each used to walk the WHOLE PROGRAM at `[N.Program]` enter to build their own
+     * candidate map — 5.9% of profile between them, every round, the same shape as the prelude walks
+     * this file already absorbed. They now filter this table by their own policy instead.
+     *
+     * Deliberately UNFILTERED: it records the init for every `BindingIdentifier` declarator regardless
+     * of kind, literalness or reference counts, because the two consumers want different subsets
+     * (`constProp` wants primitive literals, `aliasInline` wants bare identifiers). Kind lives on
+     * `symbols[sym].flags` (`SYM.VAR`/`LET`/`CONST`), so a consumer that cares still has it.
+     */
+    symbolInit: Map<number, Node>;
 };
 
 /** Read/write tally for one symbol. */
@@ -104,6 +119,7 @@ export function createSemantic(): Semantic {
         uses: new Map(),
         shorthand: new Set(),
         exported: new Set(),
+        symbolInit: new Map(),
         unresolved: [],
         names: new Map(),
         bindings: new Map(),
@@ -213,6 +229,7 @@ function resetSem(out: Semantic): void {
     out.uses.clear();
     out.shorthand.clear();
     out.exported.clear();
+    out.symbolInit.clear();
 }
 
 /**
@@ -498,6 +515,10 @@ function visit(state: AnalyseState, node: Node | null): void {
             for (const d of node.data.declarations) {
                 if (d.type !== N.VariableDeclarator) continue;
                 declarePattern(state, d.data.id, flags, target);
+                // `declarePattern` has assigned `id.sym` by here, so the init can be filed against it.
+                const dId = d.data.id;
+                if (dId.type === N.BindingIdentifier && d.data.init !== null && dId.sym !== 0)
+                    state.sem.symbolInit.set(dId.sym, d.data.init);
                 collectPattern(state, d.data.id);
                 visitType(state, d.data.typeAnnotation);
                 visit(state, d.data.init);
