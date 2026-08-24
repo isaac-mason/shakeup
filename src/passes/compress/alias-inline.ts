@@ -29,7 +29,7 @@
 // IMPORT because an ESM import is a LIVE binding: `export let counter` can be reassigned by the
 // exporter, so a captured `const b = counter` is NOT interchangeable with a fresh read of `counter`.
 import { lookupValue, SYM } from '../../analysis/semantic.ts';
-import { N, type Node, node, walkChildren } from '../../ast.ts';
+import { N, node } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** The binding a candidate alias stands for: its symbol id, and the name to print at each read. */
@@ -52,50 +52,45 @@ const UNSTABLE = SYM.VAR | SYM.IMPORT;
 export const aliasInline: Visitor = {
     name: 'aliasInline',
     enter: hookTable({
-        [N.Program]: (program, ctx: TransformCtx) => {
+        [N.Program]: (_program, ctx: TransformCtx) => {
             const sem = ctx.semantic;
             // All three facts are maintained by `analyze` (see `Semantic.refs`) — no pre-pass walk at
             // all, where this pass once ran `tallyRefs` + `walkRefIdents` + its own export scan.
             const { refs, shorthand, exported } = sem;
 
             const map = new Map<number, Alias>();
-            const scan = (n: Node): void => {
+            // Candidates come from `Semantic.symbolInit` (oxc's `SymbolValue` model). This was a
+            // FULL-PROGRAM walk at every round's Program enter, re-finding declarations the semantic
+            // walk had already visited; filtering the table is O(bindings-with-inits) and applies the
+            // same policy in the same order.
+            for (const [aliasSym, init] of sem.symbolInit) {
+                // A destructuring pattern gives every one of its bindings the SAME declarator, whose
+                // `init` is the whole RHS — so `symbolInit` only ever files BindingIdentifier
+                // declarators, and an alias must additionally have a bare identifier on the right.
+                if (init.type !== N.IdentifierReference) continue;
                 // `var b = a` is rejected with the same hoisting argument as the aliased side: reads
-                // of `b` above its declaration see `undefined`, not `a`.
-                if (n.type === N.VariableDeclaration && n.data.kind !== 'var') {
-                    for (const d of n.data.declarations) {
-                        if (d.type !== N.VariableDeclarator) continue;
-                        const id = d.data.id;
-                        const init = d.data.init;
-                        // A destructuring pattern gives every one of its bindings the SAME declarator,
-                        // whose `init` is the whole RHS — treating one as an alias of `init` would
-                        // substitute the aggregate for the element. Bare identifiers only.
-                        if (id.type !== N.BindingIdentifier || init === null) continue;
-                        if (init.type !== N.IdentifierReference) continue;
+                // of `b` above its declaration see `undefined`, not `a`. Read off the symbol's flags
+                // now that the declaration node is not in hand.
+                if ((sem.symbols[aliasSym].flags & SYM.VAR) !== 0) continue;
 
-                        const aliasSym = id.sym;
-                        const aliasedSym = init.sym;
-                        // Unresolved on either side (sym 0) → cannot prove stability or scope.
-                        // Self-alias (`const x = x` after other rewrites) → nothing to gain, and it
-                        // would substitute forever.
-                        if (aliasSym === 0 || aliasedSym === 0 || aliasSym === aliasedSym) continue;
-                        if (exported.has(aliasSym) || shorthand.has(aliasSym)) continue;
+                const aliasedSym = init.sym;
+                // Unresolved on either side (sym 0) → cannot prove stability or scope. Self-alias
+                // (`const x = x` after other rewrites) → nothing to gain, and it would substitute
+                // forever.
+                if (aliasSym === 0 || aliasedSym === 0 || aliasSym === aliasedSym) continue;
+                if (exported.has(aliasSym) || shorthand.has(aliasSym)) continue;
 
-                        const a = refs.get(aliasSym);
-                        if (a === undefined || a.writes > 0 || a.reads === 0) continue;
-                        const target = refs.get(aliasedSym);
-                        if (target !== undefined && target.writes > 0) continue;
+                const a = refs.get(aliasSym);
+                if (a === undefined || a.writes > 0 || a.reads === 0) continue;
+                const target = refs.get(aliasedSym);
+                if (target !== undefined && target.writes > 0) continue;
 
-                        const rec = sem.symbols[aliasedSym];
-                        if (rec === undefined) continue;
-                        if ((rec.flags & STABLE) === 0 || (rec.flags & UNSTABLE) !== 0) continue;
+                const rec = sem.symbols[aliasedSym];
+                if (rec === undefined) continue;
+                if ((rec.flags & STABLE) === 0 || (rec.flags & UNSTABLE) !== 0) continue;
 
-                        map.set(aliasSym, { sym: aliasedSym, name: init.name });
-                    }
-                }
-                walkChildren(n, scan);
-            };
-            scan(program);
+                map.set(aliasSym, { sym: aliasedSym, name: init.name });
+            }
             ALIAS = map.size > 0 ? map : null;
         },
         [N.IdentifierReference]: (n, ctx: TransformCtx) => {
