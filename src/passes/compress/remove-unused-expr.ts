@@ -9,7 +9,7 @@
 // oxc's `remove_unused_assignment_expr` needs position-sensitive liveness + `is_implicitly_observable`
 // + is itself gated behind a `CompressOptionsUnused` option — a larger, separately-gated pass.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
-import { N, type Node } from '../../ast.ts';
+import { N, type Node, statementListOf } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -130,19 +130,18 @@ function rewriteBody(body: Node[]): boolean {
     return true;
 }
 
-function bodyHook(field: 'body' | 'consequent'): (n: Node, ctx: TransformCtx) => void {
-    return (n, ctx) => {
-        if (rewriteBody((n.data as Record<string, Node[]>)[field])) ctx.changed = true;
-    };
+function bodyHook(n: Node, ctx: TransformCtx): void {
+    const list = statementListOf(n);
+    if (list !== null && rewriteBody(list)) ctx.changed = true;
 }
 
 export const removeUnusedExpr: Visitor = {
     name: 'removeUnusedExpr',
     enter: hookTable({
-        [N.Program]: bodyHook('body'),
-        [N.BlockStatement]: bodyHook('body'),
-        [N.StaticBlock]: bodyHook('body'),
-        [N.SwitchCase]: bodyHook('consequent'),
+        [N.Program]: bodyHook,
+        [N.BlockStatement]: bodyHook,
+        [N.StaticBlock]: bodyHook,
+        [N.SwitchCase]: bodyHook,
     }),
     exit: null,
 };

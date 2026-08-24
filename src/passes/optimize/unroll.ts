@@ -19,7 +19,7 @@
 // closure created in the body captures that iteration's value — exactly what substituting the literal
 // produces. Each iteration is wrapped in its own block so body-level `let`/`const` declarations don't
 // collide across copies.
-import { cloneNode, N, type Node, node, walk } from '../../ast.ts';
+import { cloneNode, N, type Node, node, statementListOf, walk } from '../../ast.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
@@ -180,9 +180,8 @@ export function unrollLoops(program: Node, semantic: Semantic, source: string): 
     };
 
     const listHook = (n: Node, ctx: TransformCtx): void => {
-        const field = n.type === N.SwitchCase ? 'consequent' : 'body';
-        const list = (n.data as Record<string, Node[]>)[field];
-        if (!Array.isArray(list)) return;
+        const list = statementListOf(n);
+        if (list === null) return;
         for (let i = 0; i < list.length; i++) {
             const expanded = expand(list[i]);
             if (expanded === null) continue;

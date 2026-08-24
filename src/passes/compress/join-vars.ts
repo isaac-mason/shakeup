@@ -38,7 +38,7 @@
 //     elements in so we get one flat `(a(), b(), x)` rather than a nested `((a(), b()), x)`.
 //   - We rebuild the list into a fresh array and assign (dead-code's pattern) — never splice a
 //     possibly-frozen shared array in place.
-import { N, type Node, node } from '../../ast.ts';
+import { N, type Node, node, statementListOf } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -201,21 +201,20 @@ function rewriteList(body: Node[]): boolean {
 
 /** A statement-list container hook: run {@link rewriteList} over its list field, marking the ctx
  *  changed so the fixed-point driver re-runs. */
-function listHook(field: string): (n: Node, ctx: TransformCtx) => void {
-    return (n, ctx) => {
-        if (rewriteList((n.data as Record<string, Node[]>)[field])) ctx.changed = true;
-    };
+function listHook(n: Node, ctx: TransformCtx): void {
+    const list = statementListOf(n);
+    if (list !== null && rewriteList(list)) ctx.changed = true;
 }
 
 export const joinVars: Visitor = {
     name: 'joinVars',
     enter: hookTable({
         // Statement-list containers (same-scope statement lists): Program / block / static block.
-        [N.Program]: listHook('body'),
-        [N.BlockStatement]: listHook('body'),
-        [N.StaticBlock]: listHook('body'),
+        [N.Program]: listHook,
+        [N.BlockStatement]: listHook,
+        [N.StaticBlock]: listHook,
         // A switch case's `consequent` is a same-scope statement list too.
-        [N.SwitchCase]: listHook('consequent'),
+        [N.SwitchCase]: listHook,
     }),
     exit: null,
 };
