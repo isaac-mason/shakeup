@@ -164,8 +164,17 @@ export function computeLiveness(
                 for (let i = decls.length - 1; i >= 0; i--) {
                     const d = decls[i].data as { id: Node; init: Node | null };
                     const next = new Set(live);
-                    if (d.id.type === N.BindingIdentifier) next.delete((d.id as { sym: number }).sym);
-                    else reads(d.id, tracked, next); // destructuring — treat as reads, never a kill
+                    // Only an INITIALISED declarator kills. A bare `var h;` does NOT reset the binding —
+                    // `var` is hoisted, so a store can textually PRECEDE the declaration and still be
+                    // live through it: `h = 7; var h; return h` must return 7. Treating the bare
+                    // declaration as a kill made that store look dead and dead-store DELETED it, which
+                    // returned `undefined`. (Closure's `computeGenKill` kills only when the declarator
+                    // `hasChildren()`, i.e. has an init; the CFG port matches. This arm did not.)
+                    if (d.id.type === N.BindingIdentifier) {
+                        if (d.init !== null) next.delete((d.id as { sym: number }).sym);
+                    } else {
+                        reads(d.id, tracked, next); // destructuring — treat as reads, never a kill
+                    }
                     reads(d.init, tracked, next);
                     live = next;
                 }
