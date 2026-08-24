@@ -1,6 +1,6 @@
 import { bench, group } from '@pmndrs/labs';
 import { bundle } from '../../src/bundle';
-import { makeGraph } from '../_graph';
+import { makeDeepModule, makeGraph } from '../_graph';
 
 // The MINIFY tier had no bench coverage at all: `makeGraph().opts()` passes no `output`, so every
 // existing bundle bench measured parse/link/tree-shake/render with compress and mangle switched off.
@@ -32,6 +32,20 @@ group('minify @bundle @minify', () => {
             const g = makeGraph(N);
             yield async () => {
                 await bundle({ ...g.opts(), output: { minify: true, optimize: false } });
+            };
+        });
+    }
+});
+
+// Statement-list DEPTH, the axis `makeGraph` cannot express (see `makeDeepModule`). Without this the
+// suite is blind to anything superlinear in statement-list length — which is where the compress
+// statement-list passes (inline, join-vars, dead-code, remove-unused-expr) all do their work.
+group('minify deep @bundle @minify @deep', () => {
+    for (const [fns, stmts] of [[4, 150], [4, 400]] as const) {
+        bench(`minified, ${fns} fns x ${stmts} stmts`, function* () {
+            const g = makeDeepModule(fns, stmts);
+            yield async () => {
+                await bundle({ ...g.opts(), output: { minify: true } });
             };
         });
     }
