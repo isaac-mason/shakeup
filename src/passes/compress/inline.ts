@@ -31,7 +31,6 @@
 // TDZ is never a concern: the init only ever moves LATER.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
 import { type RefCounts, readsMutableSymbol, substituteSingleUse } from '../../analysis/movement.ts';
-import { getPrelude } from './prelude.ts';
 import { N, type Node, statementListOf, walkChildren } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -160,9 +159,9 @@ function inlineBody(body: Node[], refs: Map<number, RefCounts>): boolean {
 export const inline: Visitor = {
     name: 'inline',
     enter: hookTable({
-        [N.Program]: (program) => {
+        [N.Program]: (program, ctx: TransformCtx) => {
             DYNAMIC_SCOPE = hasDynamicScope(program);
-            REFS = DYNAMIC_SCOPE ? null : getPrelude(program).refs;
+            REFS = DYNAMIC_SCOPE ? null : ctx.semantic.refs;
         },
     }),
     // Body-level rewrite on EXIT (bottom-up, so inner bodies settle first). Hooks each statement-list

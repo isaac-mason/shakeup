@@ -30,7 +30,6 @@
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
 import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
-import { getPrelude } from './prelude.ts';
 import { N, type Node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -134,9 +133,9 @@ export const dropUnused: Visitor = {
     enter: hookTable({
         // Program-enter fires once, before descending — snapshot the module's use counts here so the
         // VariableDeclaration hook (fired during descent) reads a consistent, current tally.
-        [N.Program]: (n, ctx) => {
+        [N.Program]: (_n, ctx) => {
             SEM = ctx.semantic;
-            USES = getPrelude(n).uses;
+            USES = ctx.semantic.uses;
         },
         [N.VariableDeclaration]: onVariableDeclaration,
     }),

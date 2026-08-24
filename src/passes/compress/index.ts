@@ -23,7 +23,6 @@ import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
 import { aliasInline } from './alias-inline.ts';
 import { coalesceVariableNames } from './coalesce.ts';
-import { computePrelude, setPrelude } from './prelude.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
@@ -175,13 +174,15 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         analyze(cur, program);
     };
     for (let i = 0; i < MAX_ITERS; i++) {
-        // ONE prelude per traversal, shared by every reference-driven pass. Each of them used to run
-        // its own full-program pre-pass at `[N.Program]` enter — ~7 whole-program walks per iteration,
-        // and `walkRefIdents` was the hottest function in the tier. They all fire at the same point on
-        // the same pre-mutation tree, so sharing is semantically identical (see `prelude.ts`).
-        setPrelude(computePrelude(program));
+        // No pre-pass at all: the reference facts every pass here reads (`refs`/`uses`/`shorthand`/
+        // `exported`) are now maintained by `analyze` itself, which already walks every node and
+        // already collects every reference. They were a SHARED prelude walk before that, and one
+        // pre-pass PER PASS before that — 23.8% of this loop when last measured.
+        //
+        // The ordering that makes this sound: `refresh()` runs at the END of the previous round and
+        // nothing mutates between there and here, so the facts describe exactly the tree this
+        // traversal is about to see. Round 1 is the same case via the caller's own `analyze`.
         const changed = traverse(program, cur, loop);
-        setPrelude(null);
         if (!changed) break;
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
