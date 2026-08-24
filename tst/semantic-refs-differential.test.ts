@@ -57,6 +57,22 @@ describe('analyze reference facts == computePrelude', () => {
         ['binding identifiers are not references', 'function f(p) { return p; } class C {}'],
         ['shadowing', 'const a = 1; { const a = 2; g(a); } g(a);'],
         ['closure capture', 'let c = 0; function inc() { c++; } inc();'],
+        // Added by a scrutiny pass over the shapes the first round of cases never reached. The first
+        // two of these FAILED when written: `computePrelude`'s target walk skipped computed keys, so
+        // it counted zero reads for `k` where `analyze` counts one. `analyze` is right — `k` is
+        // evaluated at runtime to pick the property.
+        ['computed key in a destructuring TARGET', 'let a; const k = "p"; ({ [k]: a } = o); g(a);'],
+        ['nested computed key in a target', 'let a; const k = 1; ({ x: { [k]: a } } = o); g(a);'],
+        ['array-hole target', 'let a; const k = 1; [ , a ] = xs; g(a, k);'],
+        ['getter/setter object literal', 'const v = 1; const o = { get p(){ return v; }, set p(x){} };'],
+        ['class computed member names', 'const k = "m"; class C { [k]() {} static [k + 1] = 2; }'],
+        ['for await of target', 'let v; async function f(){ for await (v of xs) g(v); }'],
+        ['member chain assignment', 'const o = {}; o.a.b = 1;'],
+        ['logical assignment operators', 'let x = 1; x ||= 2; x &&= 3; x ??= 4;'],
+        ['destructuring default reads', 'let a; const d = 1; ({ a = d } = o); g(a);'],
+        ['rest element in an object target', 'let a, r; ({ a, ...r } = o); g(a, r);'],
+        ['tagged template', 'const t = x => x; const v = 1; t`a${v}b`;'],
+        ['optional chain call', 'const o = {}; o?.m?.(1);'],
     ];
     for (const [name, src] of cases) {
         it(name, () => expect(diff(src, false)).toEqual([]));
@@ -66,6 +82,16 @@ describe('analyze reference facts == computePrelude', () => {
     it.skipIf(!existsSync(three))('agrees across three.core.js', () => {
         expect(diff(readFileSync(three, 'utf8'), false)).toEqual([]);
     }, 60000);
+
+    const tsCases: [string, string][] = [
+        ['ts: a type and a value sharing a name', 'type T = number; const T = 1; let x: T = T;'],
+        ['ts: enum member reference', 'enum E { A = 1 } const v = E.A;'],
+        ['ts: as / satisfies', 'const v = 1; const w = v as number; const z = v satisfies number;'],
+        ['ts: decorator', 'const d = () => {}; class C { @d m() {} }'],
+    ];
+    for (const [name, src] of tsCases) {
+        it(name, () => expect(diff(src, true)).toEqual([]));
+    }
 
     const cc = '/Users/isaacmason/Development/crashcat/src/world.ts';
     it.skipIf(!existsSync(cc))('agrees across a real TS module', () => {
