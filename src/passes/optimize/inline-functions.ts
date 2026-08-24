@@ -509,6 +509,21 @@ export function inlineCrossModule(
                 },
             }),
         };
+        // Do not traverse a module that CANNOT contain an inlinable call. The hook only ever fires on
+        // a call whose callee is a named import resolving to an `@inline` donor in another module, and
+        // that is decidable in O(imports) from tables we already hold — whereas the traversal it
+        // guards is O(nodes) and, on a graph with no `@inline` at all, finds nothing in any module.
+        // Counting traversals rather than reading a profile is what surfaced this: it was 1 of the 12
+        // whole-program walks a three.core.js build performed, and that file imports nothing.
+        let reachesDonor = false;
+        for (const localSym of mod.namedImports.keys()) {
+            const target = resolveImport(idx, localSym);
+            if (target !== null && target.mod !== idx && donorsOf(target.mod).has(target.sym)) {
+                reachesDonor = true;
+                break;
+            }
+        }
+        if (!reachesDonor) continue;
         if (traverse(mod.program, mod.semantic, [visitor])) changed.set(idx, producers);
     }
     return changed;

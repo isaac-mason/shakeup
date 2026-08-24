@@ -722,7 +722,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
                 // TS-mode parsing there is both wrong (rejects valid JS the TS grammar disallows) and
                 // slower (needless type/generic speculation).
-                const parsed = parse(source, { ts: moduleTypeVal === 'ts' || moduleTypeVal === 'tsx', jsx });
+                const isTs = moduleTypeVal === 'ts' || moduleTypeVal === 'tsx';
+                const parsed = parse(source, { ts: isTs, jsx });
                 for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
@@ -732,19 +733,27 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
                 // real `import {…} from "…/jsx-runtime"` scanned as a normal record. Its minted runtime
                 // symbols are captured into `jsxRt` → mod.jsxRuntime (for the runtime-import prune).
-                const passes = [tsLower];
+                // GATED ON THE MODULE'S LANGUAGE. The parser already skips TS-mode parsing for a
+                // `.js` file (see above); the LOWERING did not, so every JavaScript module paid two
+                // whole-program traversals — `tsLower` and `tsStrip` — to find nothing. Counting work
+                // rather than time made it obvious: a build of three.core.js (plain JS) ran 12 full
+                // traversals, and these were 2 of them, ~17% of all 1.59M node visits, for zero
+                // mutations. A profile cannot show this; it looks like ordinary traversal cost.
+                const passes = isTs ? [tsLower] : [];
                 if (jsx && hasJSX) {
                     jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
                     passes.push(makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt));
                 }
-                traverse(program, semantic, passes);
+                if (passes.length > 0) traverse(program, semantic, passes);
                 // 2nd traverse: strip residual TS types (assertions, type-only stmts/members, param
                 // properties) after value lowering. Separate traverse so tsStrip never races tsLower's
                 // replaceWith on a shared node (see ts-strip-pass-plan.md).
                 // SROA's type-shape oracle reads WRITTEN annotations, so it must run before the
                 // strip erases them; the table is handed to the optimizer below.
-                const shapes = captureShapes(program);
-                traverse(program, semantic, [tsStrip]);
+                // `captureShapes` reads WRITTEN type annotations for SROA's oracle, and `tsStrip`
+                // erases TS-only syntax — neither can find anything in a JavaScript module.
+                const shapes = isTs ? captureShapes(program) : new Map();
+                if (isTs) traverse(program, semantic, [tsStrip]);
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
