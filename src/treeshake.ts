@@ -140,6 +140,15 @@ function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynami
 function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; members: Set<string> }> {
     const acc = new Map<number, { escapes: boolean; members: Set<string> }>();
     for (const mod of graph.modules) {
+        // The scan already recorded every `import()` site, so a module with none cannot produce one —
+        // checking that is O(records) against a walk of the whole module.
+        //
+        // `hasDynamicLiteral` is load-bearing, not belt-and-braces: when a specifier is imported BOTH
+        // statically and dynamically the records are deduped into a single `static` one, and the
+        // dynamic-ness survives only on that flag. Gating on `kind === 'dynamic'` alone silently
+        // skipped those modules — caught by `dynamic-narrow` and `treeshake`, which cover exactly the
+        // mixed case.
+        if (!mod.importRecords.some((r) => r.kind === 'dynamic' || r.hasDynamicLiteral)) continue;
         const sites = analyzeDynamicUsage(mod.program, mod.semantic, mod.source);
         for (const { specifier, usage } of sites) {
             const rec = mod.importRecords.find((r) => r.specifier === specifier);
