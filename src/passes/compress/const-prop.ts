@@ -15,8 +15,7 @@
 // SIZE POLICY (oxc/esbuild): a SINGLE-read binding inlines any primitive (the decl then vanishes, net
 // win). A MULTI-read binding inlines only SMALL constants (int −99..999, string ≤3 chars, bool/null/
 // undefined) — duplicating a long string across many reads would bloat the output.
-import { tallyRefs } from '../../analysis/movement.ts';
-import { walkRefIdents } from '../../analysis/refs.ts';
+import { getPrelude } from './prelude.ts';
 import { N, type Node, node, walkChildren } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -91,13 +90,9 @@ export const constProp: Visitor = {
     name: 'constProp',
     enter: hookTable({
         [N.Program]: (program, _ctx) => {
-            const refs = tallyRefs(program);
-            // A binding read as a shorthand-property value (`{ x }`) needs property-expansion to
-            // substitute — skip those symbols (conservative; rare for a primitive const).
-            const shorthand = new Set<number>();
-            walkRefIdents(program, (ident, shp) => {
-                if (shp !== null && ident.type === N.IdentifierReference) shorthand.add(ident.sym);
-            });
+            // Both facts come from the SHARED prelude — one walk for the whole traversal instead of
+            // this pass doing its own `tallyRefs` + `walkRefIdents`.
+            const { refs, shorthand } = getPrelude(program);
             const map = new Map<number, Node>();
             // Collect candidate declarators: `const`/`let` with a plain BindingIdentifier id and a
             // primitive-literal init, whose symbol has zero writes and the right read count.

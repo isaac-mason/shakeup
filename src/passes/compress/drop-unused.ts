@@ -30,7 +30,7 @@
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
 import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
-import { walkRefIdents } from '../../analysis/refs.ts';
+import { getPrelude } from './prelude.ts';
 import { N, type Node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -50,16 +50,6 @@ let SEM: Semantic | null = null;
  *  before this pass sees them). Using it over-counts, which is safe but keeps bindings — worth
  *  +2,782 bytes on three.core.js in `dce` mode, for no measurable time saving. Freshness here is
  *  worth more than the walk costs. */
-function countUses(program: Node): Map<number, number> {
-    const uses = new Map<number, number>();
-    walkRefIdents(program, (ident) => {
-        if (ident.type !== N.IdentifierReference) return; // count USES, not the binding decls
-        const sym = ident.sym; // symbolOf(): the resolved SymbolId (0 = global/unresolved)
-        if (sym === 0) return;
-        uses.set(sym, (uses.get(sym) ?? 0) + 1);
-    });
-    return uses;
-}
 
 /** True when SymbolId `sym` is bound in the MODULE scope (treeshake's territory — we must not touch
  *  it). Also treats an out-of-range/zero symbol as "module" so we conservatively bail. */
@@ -146,7 +136,7 @@ export const dropUnused: Visitor = {
         // VariableDeclaration hook (fired during descent) reads a consistent, current tally.
         [N.Program]: (n, ctx) => {
             SEM = ctx.semantic;
-            USES = countUses(n);
+            USES = getPrelude(n).uses;
         },
         [N.VariableDeclaration]: onVariableDeclaration,
     }),

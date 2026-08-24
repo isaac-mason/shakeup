@@ -23,6 +23,7 @@ import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
 import { aliasInline } from './alias-inline.ts';
 import { coalesceVariableNames } from './coalesce.ts';
+import { computePrelude, setPrelude } from './prelude.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
@@ -174,7 +175,14 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         analyze(cur, program);
     };
     for (let i = 0; i < MAX_ITERS; i++) {
-        if (!traverse(program, cur, loop)) break;
+        // ONE prelude per traversal, shared by every reference-driven pass. Each of them used to run
+        // its own full-program pre-pass at `[N.Program]` enter — ~7 whole-program walks per iteration,
+        // and `walkRefIdents` was the hottest function in the tier. They all fire at the same point on
+        // the same pre-mutation tree, so sharing is semantically identical (see `prelude.ts`).
+        setPrelude(computePrelude(program));
+        const changed = traverse(program, cur, loop);
+        setPrelude(null);
+        if (!changed) break;
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
         // reference counts after this round's removals — the loop usually settles in 1–2 rounds.

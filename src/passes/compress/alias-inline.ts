@@ -28,8 +28,7 @@
 // function/class — and must additionally have zero writes. `var` is excluded for the reason above, and
 // IMPORT because an ESM import is a LIVE binding: `export let counter` can be reassigned by the
 // exporter, so a captured `const b = counter` is NOT interchangeable with a fresh read of `counter`.
-import { tallyRefs } from '../../analysis/movement.ts';
-import { walkRefIdents } from '../../analysis/refs.ts';
+import { getPrelude } from './prelude.ts';
 import { lookupValue, SYM } from '../../analysis/semantic.ts';
 import { N, type Node, node, walkChildren } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -56,27 +55,9 @@ export const aliasInline: Visitor = {
     enter: hookTable({
         [N.Program]: (program, ctx: TransformCtx) => {
             const sem = ctx.semantic;
-            const refs = tallyRefs(program);
-
-            // A binding read as a shorthand-property value (`{ b }`) cannot be substituted by span —
-            // it needs property expansion (`{ b: a }`). Skip those symbols, as const-prop does.
-            const shorthand = new Set<number>();
-            walkRefIdents(program, (ident, shp) => {
-                if (shp !== null && ident.type === N.IdentifierReference) shorthand.add(ident.sym);
-            });
-
-            // `export { b }` — the specifier's `local` IS an IdentifierReference, so substituting it
-            // would rewrite the PUBLIC export name (`export { a }` exports under the name "a").
-            // Exclude such symbols outright (compilecat `collect_exported_names`).
-            const exported = new Set<number>();
-            const scanExports = (n: Node): void => {
-                if (n.type === N.ExportSpecifier) {
-                    const local = n.data.local;
-                    if (local.type === N.IdentifierReference) exported.add(local.sym);
-                }
-                walkChildren(n, scanExports);
-            };
-            scanExports(program);
+            // All three facts come from the SHARED prelude — one walk for the whole traversal instead
+            // of this pass running `tallyRefs` + `walkRefIdents` + its own export scan.
+            const { refs, shorthand, exported } = getPrelude(program);
 
             const map = new Map<number, Alias>();
             const scan = (n: Node): void => {
