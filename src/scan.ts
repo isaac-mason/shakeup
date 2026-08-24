@@ -13,6 +13,7 @@ import {
 import { EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
+import { flowInlineVariables } from './passes/optimize/flow-inline';
 import { inlineFunctions } from './passes/optimize/inline-functions';
 import { captureShapes } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
@@ -764,6 +765,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 let expanded = inlineFunctions(program, semantic, source);
                 if (unrollLoops(program, semantic, source)) expanded = true;
                 if (scalarReplaceAggregates(program, semantic, source, shapes)) expanded = true;
+                // Flow-sensitive inlining runs AFTER the structural expanders (function-inline, unroll,
+                // sroa) so it sees the straight-line code they produce; the compress fixed point then
+                // folds each substituted RHS. Directive-gated like the rest of the tier.
+                if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
+                if (flowInlineVariables(program, semantic, source)) expanded = true;
                 if (expanded) {
                     semantic = createSemantic();
                     analyze(semantic, program);
