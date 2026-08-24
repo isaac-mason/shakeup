@@ -123,7 +123,10 @@ function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
         ctx.remove(); // the declaration is now empty → drop the whole statement
         return;
     }
-    // Rewrite in place with the surviving declarators.
+    // Rewrite in place with the surviving declarators. The dropped ones leave the tree here without
+    // passing through any `ctx` mutation helper, so their references are subtracted explicitly —
+    // otherwise the maintained counts keep counting reads that no longer exist.
+    for (let i = 0; i < decls.length; i++) if (verdicts[i] === DROP_PURE) ctx.dropRefs(decls[i]);
     n.data.declarations = kept;
     ctx.changed = true;
 }

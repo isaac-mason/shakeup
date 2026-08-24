@@ -136,14 +136,20 @@ function collapseIf(stmt: Node): Node[] | null {
 
 /** Rewrite one statement list in place: collapse constant `if`s (flattening safe blocks) and drop
  *  unreachable statements after a terminator. Returns whether anything changed. */
-function rewriteList(body: Node[]): boolean {
+function rewriteList(body: Node[], ctx: TransformCtx): boolean {
     let changed = false;
     const out: Node[] = [];
     for (let i = 0; i < body.length; i++) {
         const stmt = body[i];
         const collapsed = collapseIf(stmt);
         if (collapsed !== null) {
-            for (const s of collapsed) out.push(s);
+            // `collapsed` are subtrees LIFTED OUT of `stmt`, so dropping `stmt` and adding each one
+            // back nets the survivors to zero and subtracts only the discarded branch.
+            ctx.dropRefs(stmt);
+            for (const s of collapsed) {
+                ctx.addRefs(s);
+                out.push(s);
+            }
             changed = true;
         } else {
             out.push(stmt);
@@ -160,6 +166,7 @@ function rewriteList(body: Node[]): boolean {
                 if (anyHoisted(tail)) {
                     for (const s of tail) out.push(s); // hoisting hazard → keep the unreachable tail
                 } else {
+                    for (const s of tail) ctx.dropRefs(s);
                     changed = true; // dead tail dropped
                 }
             }
@@ -176,7 +183,7 @@ function rewriteList(body: Node[]): boolean {
  *  changed so the fixed-point driver re-runs. */
 function listHook(n: Node, ctx: TransformCtx): void {
     const list = statementListOf(n);
-    if (list !== null && rewriteList(list)) ctx.changed = true;
+    if (list !== null && rewriteList(list, ctx)) ctx.changed = true;
 }
 
 export const deadCode: Visitor = {
@@ -188,7 +195,7 @@ export const deadCode: Visitor = {
         [N.StaticBlock]: listHook,
         // A switch case's statement list (`consequent`) is also a same-scope statement list.
         [N.SwitchCase]: (n, ctx) => {
-            if (rewriteList((n.data as SwitchCaseData).consequent)) ctx.changed = true;
+            if (rewriteList((n.data as SwitchCaseData).consequent, ctx)) ctx.changed = true;
         },
         // `if` in a single-child slot (loop body, `else if` chain): can't splice, so replace with the
         // single taken statement, an EmptyStatement when the branch disappears, or a fresh block.

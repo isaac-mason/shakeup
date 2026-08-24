@@ -10,6 +10,7 @@
 //  2. A mutable enter/exit traversal: passes are `Visitor`s with `enter`/`exit` hook tables indexed
 //     by `node.type`; each node fires every visitor's hook in order (fused), and hooks mutate via
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
+import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
 import type { Semantic } from '../analysis/semantic.ts';
 import { CHILD_FIELDS, N, type Node, TYPE_COUNT } from '../ast.ts';
 
@@ -83,6 +84,28 @@ class Ctx {
     }
     /** Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point. */
     changed = false;
+    /**
+     * Per-round reference deltas, or null when the driver is not maintaining counts incrementally.
+     *
+     * oxc's `PassChanges`: every subtree the traversal DROPS has its references subtracted and every
+     * subtree it INSERTS has them added, so the fixed-point loop never re-derives counts from the tree.
+     * We accumulate signed counts rather than oxc's `ReferenceId` bitset because a `ReferenceId` would
+     * have to live on `Node`, and node shape is fixed for monomorphism — see
+     * `llm/notes/incremental-refs-design.md`.
+     *
+     * `shorthand`/`exported` are STICKY sets and are only ever added to: dropping the last shorthand
+     * read of a symbol leaves a stale entry, which merely blocks a substitution. That is the safe
+     * direction; removing one could unblock a substitution that is not actually safe.
+     */
+    refDelta: Map<number, RefDelta> | null = null;
+    /** Subtract every reference under `dropped` from the pending deltas. */
+    dropRefs(dropped: Node): void {
+        if (this.refDelta !== null) accumulate(this.refDelta, dropped, -1);
+    }
+    /** Add every reference under `added` to the pending deltas. */
+    addRefs(added: Node): void {
+        if (this.refDelta !== null) accumulate(this.refDelta, added, 1);
+    }
     /** Replace the current node in its slot. */
     replaceWith(node: Node): void {
         this.op = OP_REPLACE;
@@ -114,8 +137,31 @@ class Ctx {
      * Today this only marks `changed` and splices: behaviour is identical, and the point is that there
      * is now ONE place to record from. See `llm/notes/incremental-refs-design.md` phase B.
      */
+    /**
+     * Replace `list[index]` in place, recording the swap.
+     *
+     * The counterpart to {@link spliceStatements} for a pass that rewrites a statement rather than
+     * removing one. Recording BOTH sides is what makes a MOVE safe without oxc's `take_in` dummy: when
+     * the replacement reuses subtrees from the old statement, those references are subtracted by the
+     * drop and added straight back by the insert, netting zero, while anything genuinely dropped or
+     * genuinely introduced moves by exactly one.
+     */
+    replaceStatement(list: Node[], index: number, next: Node): void {
+        const prev = list[index];
+        if (prev !== undefined && prev !== null) this.dropRefs(prev);
+        this.addRefs(next);
+        list[index] = next;
+        this.changed = true;
+    }
     spliceStatements(list: Node[], start: number, deleteCount: number, ...insert: Node[]): void {
         if (deleteCount === 0 && insert.length === 0) return;
+        if (this.refDelta !== null) {
+            for (let i = 0; i < deleteCount; i++) {
+                const dropped = list[start + i];
+                if (dropped !== null && dropped !== undefined) this.dropRefs(dropped);
+            }
+            for (const ins of insert) this.addRefs(ins);
+        }
         list.splice(start, deleteCount, ...insert);
         this.changed = true;
     }
@@ -132,6 +178,22 @@ class Ctx {
 }
 
 export type TransformCtx = Ctx;
+
+/** Signed per-symbol reference movement for one round. */
+export type RefDelta = { reads: number; writes: number; uses: number };
+
+function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void {
+    emitRefFacts(root, (sym, flags) => {
+        let d = into.get(sym);
+        if (d === undefined) {
+            d = { reads: 0, writes: 0, uses: 0 };
+            into.set(sym, d);
+        }
+        if ((flags & REF.READ) !== 0) d.reads += sign;
+        if ((flags & REF.WRITE) !== 0) d.writes += sign;
+        d.uses += sign;
+    });
+}
 
 function fireEnter(node: Node, ctx: Ctx): void {
     const vs = ctx.visitors;
@@ -174,14 +236,20 @@ function visitSingle(node: Node, ctx: Ctx): Node {
     fireEnter(node, ctx);
     let cur = node;
     if (ctx.op === OP_REPLACE) {
+        ctx.dropRefs(cur);
         cur = ctx.opNode as Node;
+        ctx.addRefs(cur);
         ctx.op = OP_NONE;
     } else if (ctx.op !== OP_NONE) throw new Error('remove()/replaceWithMultiple() not allowed in a single-child slot');
     descend(cur, ctx);
     ctx.op = OP_NONE;
     fireExit(cur, ctx);
     if (ctx.op === OP_REPLACE) {
+        // `cur` here is the CURRENT subtree — any child replaced during `descend` already recorded its
+        // own swap, so dropping `cur` subtracts exactly what is live in it right now.
+        ctx.dropRefs(cur);
         cur = ctx.opNode as Node;
+        ctx.addRefs(cur);
         ctx.op = OP_NONE;
     } else if (ctx.op !== OP_NONE) throw new Error('remove()/replaceWithMultiple() not allowed in a single-child slot');
     return cur;
@@ -201,19 +269,26 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
         ctx.op = OP_NONE;
         fireEnter(el, ctx);
         if (ctx.op === OP_REMOVE) {
+            ctx.dropRefs(el);
             ctx.op = OP_NONE;
             changed = true;
             continue;
         }
         if (ctx.op === OP_MULTI) {
-            for (const m of ctx.opNodes as Node[]) out.push(m);
+            ctx.dropRefs(el);
+            for (const m of ctx.opNodes as Node[]) {
+                ctx.addRefs(m);
+                out.push(m);
+            }
             ctx.op = OP_NONE;
             changed = true;
             continue;
         }
         let cur = el;
         if (ctx.op === OP_REPLACE) {
+            ctx.dropRefs(cur);
             cur = ctx.opNode as Node;
+            ctx.addRefs(cur);
             ctx.op = OP_NONE;
             changed = true;
         }
@@ -221,18 +296,25 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
         ctx.op = OP_NONE;
         fireExit(cur, ctx);
         if (ctx.op === OP_REMOVE) {
+            ctx.dropRefs(cur);
             ctx.op = OP_NONE;
             changed = true;
             continue;
         }
         if (ctx.op === OP_MULTI) {
-            for (const m of ctx.opNodes as Node[]) out.push(m);
+            ctx.dropRefs(cur);
+            for (const m of ctx.opNodes as Node[]) {
+                ctx.addRefs(m);
+                out.push(m);
+            }
             ctx.op = OP_NONE;
             changed = true;
             continue;
         }
         if (ctx.op === OP_REPLACE) {
+            ctx.dropRefs(cur);
             cur = ctx.opNode as Node;
+            ctx.addRefs(cur);
             ctx.op = OP_NONE;
             changed = true;
         }
@@ -246,8 +328,14 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
 /** Run the ordered `visitors` over `program` in one fused mutable traversal (oxc `traverse_mut`).
  *  Returns whether any visitor mutated the tree (replace/remove/multi) — a compress driver loops on
  *  this to reach a fixed point. */
-export function traverse(program: Node, semantic: Semantic, visitors: Visitor[]): boolean {
+export function traverse(
+    program: Node,
+    semantic: Semantic,
+    visitors: Visitor[],
+    refDelta: Map<number, RefDelta> | null = null,
+): boolean {
     const ctx = new Ctx(semantic, visitors);
+    ctx.refDelta = refDelta;
     ctx.op = OP_NONE;
     fireEnter(program, ctx);
     ctx.op = OP_NONE;
