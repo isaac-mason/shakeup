@@ -200,7 +200,9 @@ function foldIfReturnFollow(body: Node[], ctx: TransformCtx): boolean {
             alt = elseX;
         } else continue; // else-form with a non-empty consequent is handled by the node hook (ifReturnBoth)
         const cond = create.ConditionalExpression(stmt.start, next.end, 0, d.test, cons, alt);
-        body[i] = create.ReturnStatement(stmt.start, next.end, 0, cond);
+        // Recorded, not a bare write: `cond` reuses subtrees from BOTH `stmt` and `next`, and `next`
+        // is spliced away below. Drop-then-add nets those moves to zero.
+        ctx.replaceStatement(body, i, create.ReturnStatement(stmt.start, next.end, 0, cond));
         ctx.spliceStatements(body, i + 1, 1); // drop the consumed trailing return
         changed = true;
     }

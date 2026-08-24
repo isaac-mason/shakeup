@@ -142,3 +142,63 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
 
     visit(root);
 }
+
+/** Recompute the four reference facts for `program` from scratch. Ground truth. */
+export function computeRefFacts(program: Node): {
+    refs: Map<number, { reads: number; writes: number }>;
+    uses: Map<number, number>;
+    shorthand: Set<number>;
+    exported: Set<number>;
+} {
+    const refs = new Map<number, { reads: number; writes: number }>();
+    const uses = new Map<number, number>();
+    const shorthand = new Set<number>();
+    const exported = new Set<number>();
+    emitRefFacts(program, (sym, flags) => {
+        if ((flags & (REF.READ | REF.WRITE)) !== 0) {
+            let c = refs.get(sym);
+            if (c === undefined) {
+                c = { reads: 0, writes: 0 };
+                refs.set(sym, c);
+            }
+            if ((flags & REF.READ) !== 0) c.reads++;
+            if ((flags & REF.WRITE) !== 0) c.writes++;
+        }
+        uses.set(sym, (uses.get(sym) ?? 0) + 1);
+        if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
+        if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
+    });
+    return { refs, uses, shorthand, exported };
+}
+
+/**
+ * Compare INCREMENTALLY MAINTAINED counts against ground truth recomputed from `program`.
+ *
+ * oxc's `debug_assert_no_over_prune` / `debug_assert_no_under_prune`. The two directions are NOT
+ * equally serious and the report says which is which: a maintained count that is too HIGH costs an
+ * optimization, a maintained count that is too LOW deletes a binding that is still referenced.
+ */
+export function verifyRefFacts(
+    maintained: { refs: Map<number, { reads: number; writes: number }>; uses: Map<number, number> },
+    program: Node,
+): string[] {
+    const truth = computeRefFacts(program);
+    const out: string[] = [];
+    const syms = new Set<number>([...truth.refs.keys(), ...maintained.refs.keys()]);
+    for (const sym of syms) {
+        const m = maintained.refs.get(sym);
+        const t = truth.refs.get(sym);
+        const mr = m?.reads ?? 0;
+        const tr = t?.reads ?? 0;
+        const mw = m?.writes ?? 0;
+        const tw = t?.writes ?? 0;
+        if (mr !== tr) out.push(`sym ${sym} reads maintained=${mr} truth=${tr} ${mr < tr ? 'UNDER(unsafe)' : 'over(safe)'}`);
+        if (mw !== tw) out.push(`sym ${sym} writes maintained=${mw} truth=${tw} ${mw < tw ? 'UNDER(unsafe)' : 'over(safe)'}`);
+    }
+    for (const sym of new Set<number>([...truth.uses.keys(), ...maintained.uses.keys()])) {
+        const mu = maintained.uses.get(sym) ?? 0;
+        const tu = truth.uses.get(sym) ?? 0;
+        if (mu !== tu) out.push(`sym ${sym} uses maintained=${mu} truth=${tu} ${mu < tu ? 'UNDER(unsafe)' : 'over(safe)'}`);
+    }
+    return out;
+}

@@ -104,7 +104,7 @@ function sameList(kept: readonly Node[], orig: readonly Node[]): boolean {
 
 /** Rewrite one statement list: drop pure ExpressionStatements, and shrink impure ones to just their
  *  effects. */
-function rewriteBody(body: Node[]): boolean {
+function rewriteBody(body: Node[], ctx: TransformCtx): boolean {
     let changed = false;
     const out: Node[] = [];
     for (const stmt of body) {
@@ -115,10 +115,15 @@ function rewriteBody(body: Node[]): boolean {
         const expr = (stmt.data as { expression: Node }).expression;
         const stripped = stripDiscarded(expr);
         if (stripped === null) {
+            ctx.dropRefs(stmt); // leaves the tree here, so its references leave the counts with it
             changed = true; // fully pure → drop the statement
             continue;
         }
         if (stripped !== expr) {
+            // `stripped` is carved OUT of `expr`, so the parts that survive are subtracted by the drop
+            // and added straight back — only what was discarded actually moves.
+            ctx.dropRefs(expr);
+            ctx.addRefs(stripped);
             (stmt.data as { expression: Node }).expression = stripped;
             changed = true;
         }
@@ -132,7 +137,7 @@ function rewriteBody(body: Node[]): boolean {
 
 function bodyHook(n: Node, ctx: TransformCtx): void {
     const list = statementListOf(n);
-    if (list !== null && rewriteBody(list)) ctx.changed = true;
+    if (list !== null && rewriteBody(list, ctx)) ctx.changed = true;
 }
 
 export const removeUnusedExpr: Visitor = {

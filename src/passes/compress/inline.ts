@@ -147,7 +147,19 @@ function inlineBody(body: Node[], refs: Map<number, RefCounts>, ctx: TransformCt
             const cand = candidate(body[u - 1], refs);
             if (cand === null) break;
             if (!readsSym(body[u], cand.sym)) break;
-            if (!substituteInUse(body[u], cand.sym, cand.init, cand.impure, cand.fragile, refs)) break;
+            // Bracket the in-place rewrite of `body[u]`: `substituteInUse` MOVES `cand.init` into it,
+            // and the declaration spliced below still points at that same node. Subtracting the use
+            // statement before and adding it back after makes the move net to zero (init: +1 here, -1
+            // from the splice) while the consumed reference to `cand.sym` moves by exactly -1. Without
+            // this the splice alone subtracts references that are still live — the UNDER-count that
+            // deletes a binding still in use.
+            const use = body[u];
+            ctx.dropRefs(use);
+            if (!substituteInUse(use, cand.sym, cand.init, cand.impure, cand.fragile, refs)) {
+                ctx.addRefs(use); // refused — put back exactly what we took
+                break;
+            }
+            ctx.addRefs(use);
             // the decl is dead — its init moved into the use, which shifts down
             ctx.spliceStatements(body, u - 1, 1);
             u--;
