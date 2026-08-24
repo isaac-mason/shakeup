@@ -134,6 +134,13 @@ const COALESCE_PASSES: Visitor[] = [coalesceVariableNames];
  * Closure/compilecat audit that oxc and esbuild both lack, and because it is the right thing to enable
  * for a target that ships UNCOMPRESSED. It is simply not a win for the web.
  *
+ * ⚠ KNOWN BUG, found the moment a better corpus was added: coalescing CRASHES on crashcat
+ * (`tst/crashcat.corpus.test.ts`'s codebase) with `STALE SYM 65 (table size 64)` in treeshake —
+ * removing a merged declaration shrinks the module's symbol table while some node still holds the old
+ * id, so `sem.symbols[sym]` is undefined. three.js never reached it; 97 modules of real TypeScript did,
+ * immediately. **Fix this before ever flipping the default**, and note that the fix is worth doing only
+ * if the compressed-size result above is first overturned.
+ *
  * COST REDUCTION, for the record — the first implementation cost +28.8% and profiling showed why:
  * coalescing's own analysis (scope walk, candidates, CFG, liveness, interference, colouring, rewrite)
  * totalled **66ms of a 3,538ms build**. The rest was machinery I had wrapped around it — an explicit
