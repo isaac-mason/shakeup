@@ -47,7 +47,31 @@ export type Semantic = {
     names: Map<string, number>;
     bindings: Map<number, number>;
 
+    // ── reference facts (compress prelude, computed here instead of by a separate walk) ───────────
+    // These were `computePrelude`'s job: it ran a full ref-tally walk PLUS a `walkRefIdents` walk at
+    // the start of every compress round, 23.8% of the fixed point's time. This walk already visits
+    // every node and already collects every reference, so the same facts cost a counter bump each.
+    // Identity is deliberately NOT tracked (oxc keys a `ReferenceId` off the AST node; we must not
+    // widen `Node`) — every consumer wants counts and sticky flags, never a reference list.
+    /** Read/write counts per symbol. A compound assign / update counts as BOTH. */
+    refs: Map<number, RefCounts>;
+    /** Reference-node count per symbol — NOT reads+writes (`x += 1` is 2 there, 1 here). */
+    uses: Map<number, number>;
+    /** Symbols read as a shorthand-property VALUE (`{ x }`), which cannot be substituted by span. */
+    shorthand: Set<number>;
+    /** Locals re-exported by a bare `export { X }` — renaming one would rewrite the public name. */
+    exported: Set<number>;
 };
+
+/** Read/write tally for one symbol. */
+export type RefCounts = { reads: number; writes: number };
+
+// Syntactic role of a collected reference, carried on the PENDING record (resolution is deferred, so
+// the role is known when we collect and the symbol only when we resolve).
+const REF_READ = 1;
+const REF_WRITE = 2;
+const REF_SHORTHAND = 4;
+const REF_EXPORTED = 8;
 
 /**
  * Resolve `name` in the VALUE namespace starting at `scope` and walking to the root, returning the
@@ -76,6 +100,10 @@ export function createSemantic(): Semantic {
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
         nodeScope: new Map(),
+        refs: new Map(),
+        uses: new Map(),
+        shorthand: new Set(),
+        exported: new Set(),
         unresolved: [],
         names: new Map(),
         bindings: new Map(),
@@ -87,7 +115,7 @@ export function createSemantic(): Semantic {
  * run holds no module-global state (reentrant). `sem` is the table being filled; `scope`
  * is the current-scope cursor, saved/restored as the walk descends and ascends.
  */
-type RefColl = { node: Node; scope: number; ns: number };
+type RefColl = { node: Node; scope: number; ns: number; flags: number };
 type AnalyseState = { sem: Semantic; scope: number; pending: RefColl[] };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -181,6 +209,10 @@ function resetSem(out: Semantic): void {
     out.names.clear();
     out.bindings.clear();
     out.nodeScope.clear();
+    out.refs.clear();
+    out.uses.clear();
+    out.shorthand.clear();
+    out.exported.clear();
 }
 
 /**
@@ -198,6 +230,24 @@ export function analyze(out: Semantic, program: Node): void {
     for (const p of state.pending) {
         state.scope = p.scope;
         resolveRef(state, p.node, p.ns);
+        // Tally AFTER resolution — the role was recorded when we collected, the symbol is known only
+        // now. Mirrors `computePrelude` exactly, including its quirks: a compound assignment and an
+        // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
+        const sym = p.node.sym;
+        if (sym === 0) continue;
+        const f = p.flags;
+        if ((f & (REF_READ | REF_WRITE)) !== 0) {
+            let c = out.refs.get(sym);
+            if (c === undefined) {
+                c = { reads: 0, writes: 0 };
+                out.refs.set(sym, c);
+            }
+            if ((f & REF_READ) !== 0) c.reads++;
+            if ((f & REF_WRITE) !== 0) c.writes++;
+        }
+        out.uses.set(sym, (out.uses.get(sym) ?? 0) + 1);
+        if ((f & REF_SHORTHAND) !== 0) out.shorthand.add(sym);
+        if ((f & REF_EXPORTED) !== 0) out.exported.add(sym);
     }
 }
 
@@ -245,8 +295,8 @@ function declareInScope(state: AnalyseState, kind: number, node: Node, body: () 
 
 // ─── single-pass traversal: declare + create scopes + COLLECT refs (resolution deferred) ──────────
 
-const collect = (state: AnalyseState, node: Node, ns: number): void => {
-    state.pending.push({ node, scope: state.scope, ns });
+const collect = (state: AnalyseState, node: Node, ns: number, flags: number = REF_READ): void => {
+    state.pending.push({ node, scope: state.scope, ns, flags });
 };
 
 function collectEntityName(state: AnalyseState, node: Node | null, ns: number): void {
@@ -323,6 +373,78 @@ function declareCollectParams(state: AnalyseState, list: Node[]): void {
 }
 
 /** value-context traversal: declares bindings + creates scopes + collects value references. */
+/**
+ * Handle an ObjectProperty that is written SHORTHAND (`{ x }` or `{ x = 1 }`), returning whether it
+ * was consumed. Such a value is a reference that cannot be substituted by span — rewriting it in
+ * place would change the property NAME with it.
+ *
+ * Shared by both walks because shorthand is orthogonal to direction: `const o = { x }` READS x and
+ * `({ x } = o)` WRITES it, and `computePrelude` (via `walkRefIdents`) marks both, so missing the
+ * target case desynchronises the two.
+ */
+function collectShorthandProp(
+    state: AnalyseState,
+    data: { shorthand: boolean; value: Node },
+    base: number,
+): boolean {
+    if (!data.shorthand) return false;
+    const v = data.value;
+    if (v.type === N.IdentifierReference) {
+        collect(state, v, NS_VALUE, base | REF_SHORTHAND);
+        return true;
+    }
+    if (v.type === N.AssignmentPattern) {
+        const l = v.data.left;
+        if (l.type === N.IdentifierReference) collect(state, l, NS_VALUE, base | REF_SHORTHAND);
+        else collectTarget(state, l);
+        visit(state, v.data.right);
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Walk an ASSIGNMENT TARGET, marking the identifiers it binds as WRITES.
+ *
+ * Ported from `computePrelude`'s `visitTarget` so the two agree exactly. The subtle case is a member
+ * target: in `a.b = 1` the assignment sets a PROPERTY, so `a` itself is READ, not written — hence the
+ * member arms hand back to the ordinary value walk.
+ */
+function collectTarget(state: AnalyseState, node: Node | null): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.IdentifierReference:
+            collect(state, node, NS_VALUE, REF_WRITE);
+            return;
+        case N.ArrayExpression:
+            for (const el of node.data.elements) if (el !== null) collectTarget(state, el);
+            return;
+        case N.ObjectExpression:
+            for (const p of node.data.properties) collectTarget(state, p);
+            return;
+        case N.ObjectProperty:
+            if (node.data.computed) visit(state, node.data.key);
+            if (collectShorthandProp(state, node.data, REF_WRITE)) return;
+            collectTarget(state, node.data.value);
+            return;
+        case N.SpreadElement:
+        case N.RestElement:
+            collectTarget(state, node.data.argument);
+            return;
+        case N.AssignmentExpression:
+        case N.AssignmentPattern:
+            collectTarget(state, node.data.left);
+            visit(state, node.data.right);
+            return;
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+            visit(state, node);
+            return;
+        default:
+            visit(state, node);
+    }
+}
+
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
     switch (node.type) {
@@ -342,8 +464,24 @@ function visit(state: AnalyseState, node: Node | null): void {
             return;
         case N.ObjectProperty:
             if (node.data.computed) visit(state, node.data.key);
+            if (collectShorthandProp(state, node.data, REF_READ)) return;
             visit(state, node.data.value);
             return;
+        case N.AssignmentExpression: {
+            const { operator, left, right } = node.data;
+            // `x += 1` READS x as well as writing it; `x = 1` only writes.
+            if (operator !== '=' && left.type === N.IdentifierReference)
+                collect(state, left, NS_VALUE, REF_READ | REF_WRITE);
+            else collectTarget(state, left);
+            visit(state, right);
+            return;
+        }
+        case N.UpdateExpression: {
+            const arg = node.data.argument;
+            if (arg.type === N.IdentifierReference) collect(state, arg, NS_VALUE, REF_READ | REF_WRITE);
+            else visit(state, arg);
+            return;
+        }
         case N.MethodDefinition:
             if (node.data.computed) visit(state, node.data.key);
             visit(state, node.data.value);
@@ -443,7 +581,9 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.ForInStatement:
         case N.ForOfStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
-                visit(state, node.data.left);
+                // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
+                if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
+                else collectTarget(state, node.data.left);
                 visit(state, node.data.right);
                 visit(state, node.data.body);
             });
@@ -485,7 +625,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             for (const s of node.data.specifiers) {
                 if (s.type !== N.ExportSpecifier) continue;
                 const local = s.data.local;
-                if (local.type === N.IdentifierReference) collect(state, local, NS_VALUE);
+                if (local.type === N.IdentifierReference) collect(state, local, NS_VALUE, REF_READ | REF_EXPORTED);
             }
             return;
         }

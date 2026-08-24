@@ -28,7 +28,6 @@
 // function/class — and must additionally have zero writes. `var` is excluded for the reason above, and
 // IMPORT because an ESM import is a LIVE binding: `export let counter` can be reassigned by the
 // exporter, so a captured `const b = counter` is NOT interchangeable with a fresh read of `counter`.
-import { getPrelude } from './prelude.ts';
 import { lookupValue, SYM } from '../../analysis/semantic.ts';
 import { N, type Node, node, walkChildren } from '../../ast.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
@@ -55,9 +54,9 @@ export const aliasInline: Visitor = {
     enter: hookTable({
         [N.Program]: (program, ctx: TransformCtx) => {
             const sem = ctx.semantic;
-            // All three facts come from the SHARED prelude — one walk for the whole traversal instead
-            // of this pass running `tallyRefs` + `walkRefIdents` + its own export scan.
-            const { refs, shorthand, exported } = getPrelude(program);
+            // All three facts are maintained by `analyze` (see `Semantic.refs`) — no pre-pass walk at
+            // all, where this pass once ran `tallyRefs` + `walkRefIdents` + its own export scan.
+            const { refs, shorthand, exported } = sem;
 
             const map = new Map<number, Alias>();
             const scan = (n: Node): void => {
