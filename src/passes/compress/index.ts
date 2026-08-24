@@ -22,6 +22,7 @@ import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
 import { aliasInline } from './alias-inline.ts';
+import { coalesceVariableNames } from './coalesce.ts';
 import { constProp } from './const-prop.ts';
 import { convertToDottedProperties } from './dotted-properties.ts';
 import { deadCode } from './dead-code.ts';
@@ -104,6 +105,31 @@ const FINAL_PASSES: Visitor[] = [substituteAlternateSyntax];
 // descent reaches the child declarations whose `kind` the substitution is about to change.
 const POST_FINAL_PASSES: Visitor[] = [joinVars];
 
+/** Closure's placement for `CoalesceVariableNames`: ONCE, LATE, after everything else has settled —
+ *  never inside the fixed point. It must follow `substituteAlternateSyntax` (which rewrites `const`→
+ *  `let`), because a coalesced binding is assigned after its declaration and `const` forbids that.
+ *  Closure marks the AST un-normalised from this point and runs a peephole cleanup afterwards, since
+ *  coalescing "creates identity assignments and more redundant code"; `COALESCE_CLEANUP` is ours. */
+const COALESCE_PASSES: Visitor[] = [coalesceVariableNames];
+
+/**
+ * Coalescing is OFF by default, on measurement rather than doubt.
+ *
+ * Interleaved A/B on three.core.js (same process, min of 3): **+28.8% build time (4,465 → 5,752ms) for
+ * −463 bytes (−0.12%)**. The pass is correct and the win is real, but that is not a trade worth
+ * shipping. The cost is not inherent: it builds its OWN CFG and liveness per function, duplicating what
+ * dead-store already computes, and then forces a semantic `refresh()` plus a cleanup traversal.
+ *
+ * There are now TWO consumers of per-function CFG+liveness, which is exactly the condition that makes
+ * caching them worthwhile (the migration plan's Phase 3, option B). Once the graph is built once and
+ * shared, coalescing's marginal cost approaches the interference graph alone and this flips on.
+ */
+let COALESCE_ENABLED = false;
+export const setCoalesceEnabled = (on: boolean): void => {
+    COALESCE_ENABLED = on;
+};
+const COALESCE_CLEANUP: Visitor[] = [removeUnusedExpr, dropUnused];
+
 /** The loop passes for `mode`, in their canonical order. */
 const loopPassesFor = (mode: CompressMode): Visitor[] =>
     LOOP_PASSES.filter((t) => mode === 'full' || t.cosmetic !== true).map((t) => t.pass);
@@ -140,6 +166,11 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     if (mode === 'full') {
         let finalChanged = traverse(program, cur, FINAL_PASSES);
         if (traverse(program, cur, POST_FINAL_PASSES)) finalChanged = true;
+        if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) {
+            finalChanged = true;
+            refresh(); // the rewrite moves symbols between bindings — later passes need current ids
+            traverse(program, cur, COALESCE_CLEANUP);
+        }
         if (finalChanged) {
             any = true;
             refresh();

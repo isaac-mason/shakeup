@@ -39,6 +39,19 @@ export type LiveVarsResult = {
     /** `liveOut(stmt)` — the tracked symbols live immediately AFTER `stmt`, or null if not a CFG node. */
     liveOut: (stmt: Node) => ReadonlySet<number> | null;
     steps: number;
+    /** Raw lattice, for consumers that work on bits rather than sets (the interference graph builder
+     *  compares every live PAIR at every node, which is far too hot for `Set` materialisation).
+     *  `inBits[id*words .. +words]` are the symbols live BEFORE CFG node `id`; `outBits` after it. */
+    inBits: Uint32Array;
+    outBits: Uint32Array;
+    /** Words per lattice element. */
+    words: number;
+    /** Bit index → tracked symbol id. */
+    symbolAt: number[];
+    /** `killBits[id*words .. +words]` — symbols this node definitely overwrites. A variable DEFINED at
+     *  a node overlaps everything live across that node, which live-in/live-out pairs alone miss
+     *  (Closure recovers it with `LiveRangeChecker`). */
+    killBits: Uint32Array;
 };
 
 /**
@@ -128,13 +141,26 @@ export function computeLiveVars(
         },
     };
 
-    const { outAt, steps } = solve(cfg, spec);
+    const { inAt, outAt, steps } = solve(cfg, spec);
     const rev: number[] = new Array(index.size);
     for (const [sym, i] of index) rev[i] = sym;
+
+    // Flatten the per-node lattices into one buffer each, so consumers can scan words directly.
+    const inBits = new Uint32Array(n * W);
+    const outBits = new Uint32Array(n * W);
+    for (let id = 0; id < n; id++) {
+        inBits.set(inAt[id], id * W);
+        outBits.set(outAt[id], id * W);
+    }
 
     return {
         index,
         steps,
+        inBits,
+        outBits,
+        words: W,
+        symbolAt: rev,
+        killBits: nodeKill,
         liveOut: (stmt: Node) => {
             const id = cfg.idOf.get(stmt);
             if (id === undefined) return null;
