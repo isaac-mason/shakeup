@@ -18,7 +18,7 @@
 //     structured function typically converges in two sweeps: one to compute, one to confirm.
 //     Both are worklist algorithms over the same lattice — this changes only the visit ORDER, which
 //     affects how fast the fixed point is reached and never what it is.
-import { type Cfg, IMPLICIT_RETURN } from './cfg.ts';
+import { type Branch, type Cfg, IMPLICIT_RETURN } from './cfg.ts';
 import type { Node } from '../ast.ts';
 
 /** Divergence guard (Closure's `MAX_STEPS_PER_NODE`), expressed as whole sweeps. */
@@ -49,6 +49,18 @@ export type DataflowSpec<L> = {
      * that repeats it.
      */
     transfer: (dst: L, src: L, node: Node, id: number) => boolean;
+    /**
+     * BRANCHED analyses (Closure `isBranched()` + `createFlowBrancher`): refine a node's output into a
+     * DISTINCT value per outgoing edge. `dst := refine(out, branch)`, returning whether `dst` changed.
+     *
+     * This is the capability a structural walk fundamentally cannot express, and the reason an explicit
+     * CFG earns its place: on `if (x)` the ON_TRUE edge can carry "x is truthy" while ON_FALSE carries
+     * "x is falsy". A recursion over the AST has no per-edge place to put that — it only ever has one
+     * value flowing into each branch's subtree. Closure's `TypeInference` is built entirely on this.
+     *
+     * Omit for an ordinary (unbranched) analysis: every successor then sees the node's single output.
+     */
+    branch?: (dst: L, out: L, node: Node, id: number, edge: Branch) => boolean;
 };
 
 export type DataflowResult<L> = {
@@ -110,6 +122,54 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
         inAt[i] = spec.alloc();
         outAt[i] = spec.alloc();
     }
+
+    const branched = spec.branch !== undefined;
+    // Per-EDGE lattice values, indexed [nodeId][k] alongside `cfg.succ[nodeId][k]`. Only allocated for
+    // a branched analysis, which is the only kind that reads them.
+    const edgeVal: L[][] = [];
+    // For a FORWARD branched analysis the value on an incoming edge lives on the SOURCE's succ list, so
+    // each pred entry needs the index of its mirror edge. Precomputed once rather than searched per
+    // visit. (A backward analysis reads `succ` directly and needs no mapping.)
+    const predEdgeIdx: Int32Array[] = [];
+    if (branched) {
+        for (let i = 0; i < n; i++) {
+            const row: L[] = new Array(cfg.succ[i].length);
+            for (let k = 0; k < row.length; k++) row[k] = spec.alloc();
+            edgeVal.push(row);
+        }
+        if (spec.forward) {
+            for (let i = 0; i < n; i++) {
+                const row = new Int32Array(cfg.pred[i].length);
+                for (let k = 0; k < row.length; k++) {
+                    const src = cfg.pred[i][k];
+                    const b = cfg.predBranch[i][k];
+                    row[k] = -1;
+                    for (let j = 0; j < cfg.succ[src].length; j++)
+                        if (cfg.succ[src][j] === i && cfg.succBranch[src][j] === b) {
+                            row[k] = j;
+                            break;
+                        }
+                }
+                predEdgeIdx.push(row);
+            }
+        }
+    }
+
+    /** Closure `getInputFromEdge`: a branched analysis reads the EDGE, others read the adjacent node. */
+    const inputFrom = (id: number, k: number): L => {
+        if (spec.forward) {
+            const src = cfg.pred[id][k];
+            if (branched) {
+                const j = predEdgeIdx[id][k];
+                if (j >= 0) return edgeVal[src][j];
+            }
+            return outAt[src];
+        }
+        if (branched) return edgeVal[id][k];
+        const dst = cfg.succ[id][k];
+        return inAt[dst];
+    };
+
     const rpo = reversePostorder(cfg);
     // A backward analysis propagates against the edges, so it visits in postorder.
     const order = spec.forward ? rpo : Int32Array.from(rpo).reverse();
@@ -119,8 +179,8 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
 
     for (let sweep = 0; sweep < MAX_SWEEPS; sweep++) {
         let changed = false;
-        for (let k = 0; k < order.length; k++) {
-            const id = order[k];
+        for (let k0 = 0; k0 < order.length; k0++) {
+            const id = order[k0];
             if (id === IMPLICIT_RETURN) continue;
             steps++;
 
@@ -128,20 +188,17 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
             if (spec.forward && id === cfg.entry) {
                 spec.boundary(inAt[id]);
             } else {
-                const incoming = spec.forward ? cfg.pred[id] : cfg.succ[id];
+                const degree = spec.forward ? cfg.pred[id].length : cfg.succ[id].length;
                 const target = spec.forward ? inAt[id] : outAt[id];
-                if (incoming.length === 0) {
+                if (degree === 0) {
                     if (!spec.forward) spec.boundary(target);
-                } else if (incoming.length === 1) {
+                } else if (degree === 1) {
                     // The common case in structured code — join straight into the target instead of
                     // through the scratch buffer, halving the copies.
-                    spec.copy(target, spec.forward ? outAt[incoming[0]] : inAt[incoming[0]]);
+                    spec.copy(target, inputFrom(id, 0));
                 } else {
-                    spec.copy(scratch, spec.forward ? outAt[incoming[0]] : inAt[incoming[0]]);
-                    for (let j = 1; j < incoming.length; j++) {
-                        const src = incoming[j];
-                        spec.joinInto(scratch, spec.forward ? outAt[src] : inAt[src]);
-                    }
+                    spec.copy(scratch, inputFrom(id, 0));
+                    for (let j = 1; j < degree; j++) spec.joinInto(scratch, inputFrom(id, j));
                     spec.copy(target, scratch);
                 }
             }
@@ -152,6 +209,15 @@ export function solve<L>(cfg: Cfg, spec: DataflowSpec<L>): DataflowResult<L> {
             const target = spec.forward ? outAt[id] : inAt[id];
             const source = spec.forward ? inAt[id] : outAt[id];
             if (spec.transfer(target, source, value, id)) changed = true;
+
+            // Refine the node's output onto each outgoing edge (Closure `flow`'s branched arm). A
+            // change on ANY edge is a change, or the fixed point could settle with stale edge values.
+            if (branched) {
+                const brancher = spec.branch as NonNullable<DataflowSpec<L>['branch']>;
+                const out = spec.forward ? outAt[id] : inAt[id];
+                for (let e = 0; e < cfg.succ[id].length; e++)
+                    if (brancher(edgeVal[id][e], out, value, id, cfg.succBranch[id][e])) changed = true;
+            }
         }
         if (!changed) break;
     }
