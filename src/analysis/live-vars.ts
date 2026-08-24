@@ -19,8 +19,9 @@
 // dropped and only the gen survives. A structural analysis that bails on `try` cannot express this at
 // all; it is the concrete capability the graph buys.
 import { BRANCH, type Cfg } from './cfg.ts';
+import { genKill } from './gen-kill.ts';
 import { type DataflowSpec, solve } from './dataflow.ts';
-import { N, type Node, walkChildren } from '../ast.ts';
+import type { Node } from '../ast.ts';
 
 /** A dense bitset over the tracked-variable index space. */
 export type LiveSet = Uint32Array;
@@ -39,152 +40,6 @@ export type LiveVarsResult = {
     liveOut: (stmt: Node) => ReadonlySet<number> | null;
     steps: number;
 };
-
-/**
- * GEN/KILL for one CFG node — a port of Closure's `computeGenKill`
- * (LiveVariablesAnalysis.java:252). The node-role awareness here is essential and is what a naive
- * "walk the whole subtree" version gets wrong: a CFG node for an `if` or a loop represents ONLY its
- * condition (the branches are their own CFG nodes), and a block represents nothing at all.
- *
- * `conditional` means the assignments encountered might not actually happen, so they gen but do not
- * kill. It starts true when the node has an exception edge out, and is turned on when descending into
- * a short-circuit right operand or a conditional arm.
- */
-function computeGenKill(
-    n: Node | null,
-    tracked: ReadonlySet<number>,
-    conditional: boolean,
-    gen: (s: number) => void,
-    kill: (s: number) => void,
-): void {
-    if (n === null) return;
-    switch (n.type) {
-        // Containers contribute nothing — their contents are separate CFG nodes.
-        case N.Program:
-        case N.BlockStatement:
-        case N.StaticBlock:
-        case N.FunctionDeclaration:
-        case N.FunctionExpression:
-        case N.ArrowFunctionExpression:
-            return;
-        // A loop/if CFG node IS its condition.
-        case N.IfStatement:
-        case N.WhileStatement:
-            computeGenKill((n.data as { test: Node }).test, tracked, conditional, gen, kill);
-            return;
-        case N.DoWhileStatement:
-            computeGenKill((n.data as { test: Node }).test, tracked, conditional, gen, kill);
-            return;
-        case N.ForStatement:
-            computeGenKill((n.data as { test: Node | null }).test, tracked, conditional, gen, kill);
-            return;
-        case N.SwitchStatement:
-            computeGenKill((n.data as { discriminant: Node }).discriminant, tracked, conditional, gen, kill);
-            return;
-        case N.SwitchCase:
-            computeGenKill((n.data as { test: Node | null }).test, tracked, conditional, gen, kill);
-            return;
-        case N.ForInStatement:
-        case N.ForOfStatement: {
-            // Closure: the LHS "may never be assigned to or evaluated, like in `for (x in []) {}`, so
-            // should not be killed"; and the RHS "is executed only once so we don't go into it every
-            // loop" (it has its own CFG node).
-            let lhs = (n.data as { left: Node }).left;
-            if (lhs.type === N.VariableDeclaration) {
-                const decls = (lhs.data as { declarations: Node[] }).declarations;
-                if (decls.length > 0) lhs = (decls[decls.length - 1].data as { id: Node }).id;
-            }
-            computeGenKill(lhs, tracked, conditional, gen, kill);
-            return;
-        }
-        case N.VariableDeclaration: {
-            for (const d of (n.data as { declarations: Node[] }).declarations) {
-                const dd = d.data as { id: Node; init: Node | null };
-                if (dd.id.type === N.BindingIdentifier) {
-                    if (dd.init !== null) {
-                        computeGenKill(dd.init, tracked, conditional, gen, kill);
-                        if (!conditional) {
-                            const s = (dd.id as { sym: number }).sym;
-                            if (tracked.has(s)) kill(s);
-                        }
-                    }
-                } else {
-                    // Destructuring: every bound name is killed, and the init is read.
-                    if (!conditional) lhsNames(dd.id, tracked, kill);
-                    computeGenKill(dd.init, tracked, conditional, gen, kill);
-                }
-            }
-            return;
-        }
-        case N.LogicalExpression: {
-            const d = n.data as { left: Node; right: Node };
-            computeGenKill(d.left, tracked, conditional, gen, kill);
-            computeGenKill(d.right, tracked, true, gen, kill); // may short circuit
-            return;
-        }
-        case N.ConditionalExpression: {
-            const d = n.data as { test: Node; consequent: Node; alternate: Node };
-            computeGenKill(d.test, tracked, conditional, gen, kill);
-            computeGenKill(d.consequent, tracked, true, gen, kill);
-            computeGenKill(d.alternate, tracked, true, gen, kill);
-            return;
-        }
-        case N.IdentifierReference: {
-            const s = (n as { sym: number }).sym;
-            if (tracked.has(s)) gen(s);
-            return;
-        }
-        case N.BindingIdentifier:
-            return; // a declaration site is neither a read nor, by itself, a kill
-        case N.AssignmentExpression: {
-            const d = n.data as { operator: string; left: Node; right: Node };
-            if (d.left.type === N.IdentifierReference) {
-                const s = (d.left as { sym: number }).sym;
-                if (tracked.has(s)) {
-                    if (!conditional) kill(s);
-                    if (d.operator !== '=') gen(s); // `a += 1` READS a first
-                }
-                computeGenKill(d.right, tracked, conditional, gen, kill);
-                return;
-            }
-            if (d.left.type === N.ArrayPattern || d.left.type === N.ObjectPattern) {
-                if (!conditional) lhsNames(d.left, tracked, kill);
-                computeGenKill(d.right, tracked, conditional, gen, kill);
-                return;
-            }
-            break; // member target etc. — fall through to the generic walk
-        }
-        case N.UpdateExpression: {
-            const arg = (n.data as { argument: Node }).argument;
-            if (arg.type === N.IdentifierReference) {
-                const s = (arg as { sym: number }).sym;
-                if (tracked.has(s)) {
-                    gen(s); // `a++` reads then writes
-                    if (!conditional) kill(s);
-                }
-                return;
-            }
-            break;
-        }
-        default:
-            break;
-    }
-    walkChildren(n, (c) => {
-        computeGenKill(c, tracked, conditional, gen, kill);
-    });
-}
-
-/** Every tracked name bound by a destructuring pattern. */
-function lhsNames(pattern: Node, tracked: ReadonlySet<number>, kill: (s: number) => void): void {
-    if (pattern.type === N.BindingIdentifier || pattern.type === N.IdentifierReference) {
-        const s = (pattern as { sym: number }).sym;
-        if (tracked.has(s)) kill(s);
-        return;
-    }
-    walkChildren(pattern, (c) => {
-        lhsNames(c, tracked, kill);
-    });
-}
 
 /**
  * Live-out sets for every CFG node of `cfg`, over `tracked`. `alwaysLive` (escaped/captured symbols)
@@ -232,7 +87,7 @@ export function computeLiveVars(
                 break;
             }
         const base = id * W;
-        computeGenKill(
+        genKill(
             node,
             tracked,
             conditional,

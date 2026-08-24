@@ -157,38 +157,28 @@ describe('CFG liveness vs structural liveness — equivalence', () => {
         });
     }
 
-    // CHARACTERISATION on real code. The two implementations do NOT agree everywhere on three.core.js,
-    // and the differences are informative rather than alarming — every sample inspected was explained:
+    // EXACT AGREEMENT on real code — the result of Phase 1 (shared gen/kill).
     //
-    //   CFG more PRECISE (structural keeps something live that is provably dead). Cause: Closure's
-    //     gen/kill is richer than `liveness.ts`'s `killOf`, which only recognises a kill for a
-    //     single-declarator declaration or a statement-level `x = expr`. Closure additionally kills
-    //     destructured bindings, multi-declarator inits, and assignments nested inside expressions.
-    //     VERIFIED by hand: in `_initializeGeometry`, `const { array, itemSize, normalized } = src` is
-    //     re-bound every `for...in` iteration, so those three are genuinely dead after the loop's last
-    //     statement; `liveness.ts` cannot kill them because the id is a pattern, not an identifier.
+    // Before the two drivers shared `analysis/gen-kill.ts` they differed on ~3.4% of comparable
+    // statements on three.core.js (164 where the CFG was more conservative, 175 where it was more
+    // precise). Every one of those turned out to be SEMANTIC-COPY DIVERGENCE — two private
+    // implementations of "what is a kill" — and NONE of it was a control-flow difference: unifying the
+    // semantics took the count to zero without touching either driver's flow logic.
     //
-    //   CFG more CONSERVATIVE (CFG keeps something live that structural drops). The SAFE direction for
-    //     a backward liveness. One sample traced to `Color.getHSL`'s `hue`, where a `switch (max)` with
-    //     no default is followed by `hue /= 6` — a compound assignment READS first, and the no-case
-    //     path reaches it without a definite assignment. Which analysis is right there was not settled;
-    //     the CFG's answer is the safe one either way.
-    //
-    // The counts are asserted so a REGRESSION in either implementation shows up as a change, while the
-    // known difference does not read as a failure.
-    it('characterises the differences on three.core.js', () => {
+    // That is the strongest evidence available that the CFG models JS control flow exactly as the
+    // structural walker does, over ~9.9k statements of real code. It also makes this a sharp oracle
+    // going forward: any future difference here is now PROVABLY a flow bug in one driver or the other.
+    it('agrees EXACTLY with the structural analysis across three.core.js', () => {
         const src = readFileSync(
             '/Users/isaacmason/Development/shakeup/llm/spikes/node_modules/three/build/three.core.js',
             'utf8',
         );
-        // Capped at 400 functions: the full 697 still agrees, but this file runs alongside several
-        // other three.core.js corpus tests and the shared 5s per-test timeout is a real budget.
         const r = compare(src, 400);
         expect(r.checked).toBeGreaterThan(1_000);
-        // Both directions exist; neither should silently explode.
-        expect(r.precise.length).toBeGreaterThan(0);
-        expect(r.conservative.length).toBeGreaterThan(0);
-        expect(r.precise.length + r.conservative.length).toBeLessThan(r.checked / 4);
+        expect({ conservative: r.conservative.slice(0, 5), precise: r.precise.slice(0, 5) }).toEqual({
+            conservative: [],
+            precise: [],
+        });
     }, 30000);
 });
 

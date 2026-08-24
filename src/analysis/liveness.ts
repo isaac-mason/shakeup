@@ -17,40 +17,38 @@
 // initialiser). Everything else contributes reads only. Never killing where a kill is uncertain means
 // the analysis can only ever report a variable MORE live than it is — which loses optimizations,
 // never correctness.
-import { N, type Node, walk } from '../ast.ts';
+import { N, type Node } from '../ast.ts';
+import { genKill } from './gen-kill.ts';
 
 /** Symbols live immediately AFTER each statement. */
 export type LiveOut = Map<Node, ReadonlySet<number>>;
 
-const isFn = (n: Node): boolean =>
-    n.type === N.FunctionDeclaration || n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression;
 
-/** Every tracked symbol read anywhere in `n` (not descending into nested functions). */
-function reads(n: Node | null, tracked: ReadonlySet<number>, into: Set<number>): void {
-    if (n === null) return;
-    walk(n, (c) => {
-        if (isFn(c)) return false; // a nested function's reads are handled by the escape rule
-        if (c.type === N.IdentifierReference) {
-            const s = (c as { sym: number }).sym;
-            if (tracked.has(s)) into.add(s);
-        }
-        return undefined;
-    });
+/**
+ * Apply one node's GEN/KILL to a live set, in place: `live := (live − KILL) ∪ GEN`.
+ *
+ * The rules themselves live in `analysis/gen-kill.ts`, SHARED with the CFG driver. This file owns only
+ * the control flow. They used to be separate implementations that disagreed — see that file's header
+ * for the miscompile that cost.
+ *
+ * Kills are collected and applied BEFORE gens so a node that both reads and writes a symbol
+ * (`a = a + 1`) leaves it live, as it must.
+ */
+function applyGenKill(node: Node | null, tracked: ReadonlySet<number>, live: Set<number>): void {
+    if (node === null) return;
+    const kills: number[] = [];
+    const gens: number[] = [];
+    genKill(
+        node,
+        tracked,
+        false,
+        (s) => gens.push(s),
+        (s) => kills.push(s),
+    );
+    for (const s of kills) live.delete(s);
+    for (const s of gens) live.add(s);
 }
 
-/** The variable a statement DEFINITELY overwrites, plus the expression evaluated first. */
-function killOf(stmt: Node, tracked: ReadonlySet<number>): { kill: number; value: Node | null } | null {
-    if (stmt.type === N.ExpressionStatement) {
-        const e = (stmt.data as { expression: Node }).expression;
-        if (e.type !== N.AssignmentExpression) return null;
-        const a = e.data as { operator: string; left: Node; right: Node };
-        // Only a plain `=` kills; `+=` reads the old value first.
-        if (a.operator !== '=' || a.left.type !== N.IdentifierReference) return null;
-        const s = (a.left as { sym: number }).sym;
-        return tracked.has(s) ? { kill: s, value: a.right } : null;
-    }
-    return null;
-}
 
 const union = (a: ReadonlySet<number>, b: ReadonlySet<number>): Set<number> => new Set([...a, ...b]);
 const same = (a: ReadonlySet<number>, b: ReadonlySet<number>): boolean =>
@@ -94,7 +92,20 @@ export function computeLiveness(
             case N.ReturnStatement: {
                 // Nothing after a `return` but the escaped set.
                 const live = new Set(alwaysLive);
-                reads((stmt.data as { argument: Node | null }).argument, tracked, live);
+                applyGenKill((stmt.data as { argument: Node | null }).argument, tracked, live);
+                out.set(stmt, live);
+                return live;
+            }
+            case N.ThrowStatement: {
+                // A `throw` terminates this flow exactly as `return` does — the statements after it are
+                // not reachable from here. Without this arm a throw fell into `default` and was treated
+                // as FALLING THROUGH, which kept variables live along a path that cannot reach their
+                // reads (e.g. `let c, d; if (…) c = …; else throw …; use(c)`), making the analysis
+                // needlessly conservative. Safe, but it was the last remaining disagreement with the CFG
+                // driver. A throw INSIDE a `try` goes to the handler instead — this function bails on
+                // `try` wholesale, so that case never reaches here.
+                const live = new Set(alwaysLive);
+                applyGenKill((stmt.data as { argument: Node }).argument, tracked, live);
                 out.set(stmt, live);
                 return live;
             }
@@ -124,7 +135,7 @@ export function computeLiveness(
                 const thenIn = liveIn(d.consequent, after, t);
                 const elseIn = d.alternate === null ? after : liveIn(d.alternate, after, t);
                 const live = union(thenIn, elseIn);
-                reads(d.test, tracked, live as Set<number>);
+                applyGenKill(d.test, tracked, live as Set<number>);
                 return live;
             }
             case N.LabeledStatement: {
@@ -153,47 +164,25 @@ export function computeLiveness(
                         caseLive = liveIn(cd.consequent[i], caseLive, inner);
                     }
                     live = union(live, caseLive);
-                    if (cd.test !== null) reads(cd.test, tracked, live as Set<number>);
+                    if (cd.test !== null) applyGenKill(cd.test, tracked, live as Set<number>);
                 }
-                reads(d.discriminant, tracked, live as Set<number>);
+                applyGenKill(d.discriminant, tracked, live as Set<number>);
                 return live;
             }
             case N.VariableDeclaration: {
-                const decls = (stmt.data as { declarations: Node[] }).declarations;
-                let live: ReadonlySet<number> = after;
-                for (let i = decls.length - 1; i >= 0; i--) {
-                    const d = decls[i].data as { id: Node; init: Node | null };
-                    const next = new Set(live);
-                    // Only an INITIALISED declarator kills. A bare `var h;` does NOT reset the binding —
-                    // `var` is hoisted, so a store can textually PRECEDE the declaration and still be
-                    // live through it: `h = 7; var h; return h` must return 7. Treating the bare
-                    // declaration as a kill made that store look dead and dead-store DELETED it, which
-                    // returned `undefined`. (Closure's `computeGenKill` kills only when the declarator
-                    // `hasChildren()`, i.e. has an init; the CFG port matches. This arm did not.)
-                    if (d.id.type === N.BindingIdentifier) {
-                        if (d.init !== null) next.delete((d.id as { sym: number }).sym);
-                    } else {
-                        reads(d.id, tracked, next); // destructuring — treat as reads, never a kill
-                    }
-                    reads(d.init, tracked, next);
-                    live = next;
-                }
-                return live;
+                const next = new Set(after);
+                applyGenKill(stmt, tracked, next);
+                return next;
             }
             case N.TryStatement:
                 bailed = true; // exception edges are not modelled
                 return after;
             default: {
-                const k = killOf(stmt, tracked);
                 const live = new Set(after);
-                if (k !== null) {
-                    live.delete(k.kill);
-                    reads(k.value, tracked, live);
-                } else {
-                    reads(stmt, tracked, live);
-                }
+                applyGenKill(stmt, tracked, live);
                 return live;
             }
+
         }
     };
 
@@ -208,20 +197,20 @@ export function computeLiveness(
             let bodyIn = liveIn(d.body, header, inner);
             if (d.update != null) {
                 const u = new Set(bodyIn);
-                reads(d.update, tracked, u);
+                applyGenKill(d.update, tracked, u);
                 bodyIn = u;
             }
             const next = union(bodyIn, after);
-            if (d.test != null) reads(d.test, tracked, next as Set<number>);
-            if (d.right != null) reads(d.right, tracked, next as Set<number>); // for-in/of subject
-            if (d.left != null && d.left.type !== N.VariableDeclaration) reads(d.left, tracked, next as Set<number>);
+            if (d.test != null) applyGenKill(d.test, tracked, next as Set<number>);
+            if (d.right != null) applyGenKill(d.right, tracked, next as Set<number>); // for-in/of subject
+            if (d.left != null && d.left.type !== N.VariableDeclaration) applyGenKill(d.left, tracked, next as Set<number>);
             if (same(next, header)) break;
             header = next;
         }
         const live = new Set(header);
         if (d.init != null) {
             if (d.init.type === N.VariableDeclaration) return liveIn(d.init, live, t);
-            reads(d.init, tracked, live);
+            applyGenKill(d.init, tracked, live);
         }
         return live;
     };
