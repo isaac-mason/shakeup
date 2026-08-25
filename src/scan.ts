@@ -711,7 +711,12 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
 
             // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
             // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
-            srcHash = hashSource(source);
+            // Only when there is a cache to compare against or write to. `srcHash` is read at exactly
+            // two places — the `reuse` test just below and the `cache?.set` at the end of this block —
+            // so with no cache configured this hashed every module's source and threw the result away.
+            // 1.21% of a crashcat bundling profile, and one-shot builds (CI, this benchmark) never
+            // supply a cache; it is the watch loop that does.
+            if (cache !== undefined) srcHash = hashSource(source);
             hit = cache?.get(id);
             reuse = hit !== undefined && hit.srcHash === srcHash && hit.compress === compress && hit.optimize === optimizeTier;
             if (reuse && hit !== undefined) {
