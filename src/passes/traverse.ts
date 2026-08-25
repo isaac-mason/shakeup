@@ -66,6 +66,48 @@ const OP_REPLACE = 1;
 const OP_MULTI = 2;
 const OP_REMOVE = 3;
 
+/** Per-visitor-set dispatch tables: for each node type, the hooks that ACTUALLY exist, in pass order.
+ *
+ *  `fireEnter`/`fireExit` used to ask every visitor about every node. Measured over a crashcat
+ *  bundle: 1,541,801 `fireEnter` calls issued 11,701,596 visitor probes to make 608,648 hook calls —
+ *  **94.8% of the probing hit nothing**, 7.6 probes per node to land 0.39 calls. Indexing by node
+ *  type first turns that into one array load plus exactly the hooks that exist.
+ *
+ *  This is NOT the fused dispatch table that regressed the traversal 11.6% -> 16.2% earlier. That
+ *  one collapsed 18 separate call sites into a single megamorphic call; here the call site is
+ *  unchanged — `h(node, ctx)` was already one shared, already-megamorphic site inside the loop — and
+ *  only the iterations that call nothing are removed. Measured 2.565x on hook selection over a real
+ *  AST with the real 19-pass compress visitor set (`benches/micro/fire-hooks.paired.ts`).
+ *
+ *  Cached on the visitor ARRAY, which every driver holds for the life of the process (the compress
+ *  loop reuses one `loop` array across every module and round), so the tables are built once. */
+type HookTables = { enter: (Hook[] | null)[]; exit: (Hook[] | null)[] };
+const HOOK_TABLES = new WeakMap<Visitor[], HookTables>();
+
+function hookTablesFor(visitors: Visitor[]): HookTables {
+    const cached = HOOK_TABLES.get(visitors);
+    if (cached !== undefined) return cached;
+    const enter: (Hook[] | null)[] = new Array(TYPE_COUNT).fill(null);
+    const exit: (Hook[] | null)[] = new Array(TYPE_COUNT).fill(null);
+    for (let t = 0; t < TYPE_COUNT; t++) {
+        let e: Hook[] | null = null;
+        let x: Hook[] | null = null;
+        // Pass ORDER is load-bearing (the compress passes are ordered deliberately), so append in
+        // visitor order rather than grouping by type.
+        for (let i = 0; i < visitors.length; i++) {
+            const eh = visitors[i].enter?.[t];
+            if (eh !== null && eh !== undefined) (e ??= []).push(eh);
+            const xh = visitors[i].exit?.[t];
+            if (xh !== null && xh !== undefined) (x ??= []).push(xh);
+        }
+        enter[t] = e;
+        exit[t] = x;
+    }
+    const tables: HookTables = { enter, exit };
+    HOOK_TABLES.set(visitors, tables);
+    return tables;
+}
+
 class Ctx {
     semantic: Semantic;
     visitors: Visitor[];
@@ -86,9 +128,15 @@ class Ctx {
      *  Tracked across the child-descent (see {@link descend}) so lowering passes can parent a
      *  synthesized scope (`createScope`) to the correct lexical scope. */
     currentScope = 0;
+    /** Per-node-type hook lists for this visitor set — see {@link hookTablesFor}. */
+    enterByType: (Hook[] | null)[];
+    exitByType: (Hook[] | null)[];
     constructor(semantic: Semantic, visitors: Visitor[]) {
         this.semantic = semantic;
         this.visitors = visitors;
+        const t = hookTablesFor(visitors);
+        this.enterByType = t.enter;
+        this.exitByType = t.exit;
     }
     /** Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point. */
     changed = false;
@@ -226,24 +274,14 @@ function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void
 }
 
 function fireEnter(node: Node, ctx: Ctx): void {
-    const vs = ctx.visitors;
-    for (let i = 0; i < vs.length; i++) {
-        const e = vs[i].enter;
-        if (e !== null) {
-            const h = e[node.type];
-            if (h !== null && h !== undefined) h(node, ctx);
-        }
-    }
+    const hooks = ctx.enterByType[node.type];
+    if (hooks === null) return;
+    for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
 function fireExit(node: Node, ctx: Ctx): void {
-    const vs = ctx.visitors;
-    for (let i = 0; i < vs.length; i++) {
-        const x = vs[i].exit;
-        if (x !== null) {
-            const h = x[node.type];
-            if (h !== null && h !== undefined) h(node, ctx);
-        }
-    }
+    const hooks = ctx.exitByType[node.type];
+    if (hooks === null) return;
+    for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
 
 /** Walk `node`'s children, tracking `ctx.currentScope` across the descent: if `node` owns a scope
