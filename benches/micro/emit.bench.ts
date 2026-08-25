@@ -89,3 +89,48 @@ group('printer output buffer @micro @emit', () => {
         };
     }).gc(true);
 });
+
+// ── `parens(p, cond, body)` — closure wrapper vs inlined ──────────────────────────────────────────
+// `printExpr` is `parens(p, precOf(n) < minPrec, () => emitExpr(p, n))` — a closure allocated per
+// EXPRESSION, handed to a wrapper that calls it immediately. Inlining it removes the closure and a
+// call layer.
+//
+// Benched rather than assumed, because the same shape measured ZERO for `declareInScope` earlier
+// (V8 escape-analyses a non-escaping callback). The difference here is frequency — per expression, not
+// per scope — and that an extra function-call layer is removed as well as the closure.
+const CALLS = 500_000;
+
+function wrapper(cond: boolean, body: () => void): void {
+    if (cond) SINK.n++;
+    body();
+    if (cond) SINK.n++;
+}
+const SINK = { n: 0 };
+
+group('parens: closure wrapper vs inlined @micro @parens', () => {
+    bench('parens(cond, () => work())', function* () {
+        yield () => {
+            SINK.n = 0;
+            for (let i = 0; i < CALLS; i++) {
+                const v = i;
+                wrapper((i & 3) === 0, () => {
+                    SINK.n += v & 1;
+                });
+            }
+            return SINK.n;
+        };
+    }).gc(true);
+
+    bench('inlined condition, no closure', function* () {
+        yield () => {
+            SINK.n = 0;
+            for (let i = 0; i < CALLS; i++) {
+                const cond = (i & 3) === 0;
+                if (cond) SINK.n++;
+                SINK.n += i & 1;
+                if (cond) SINK.n++;
+            }
+            return SINK.n;
+        };
+    }).gc(true);
+});
