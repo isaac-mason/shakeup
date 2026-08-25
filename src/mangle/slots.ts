@@ -69,20 +69,6 @@ export function assignSlots(input: SlotInput): SlotResult {
     // declaration, exclusive of the declaration scope).
     const slotLiveness: Set<number>[] = [];
 
-    // Ancestors of `scope`, INCLUDING `scope` itself first, up to and including `root`.
-    const ancestors = (scope: number): number[] => {
-        const out: number[] = [];
-        let s = scope;
-        for (;;) {
-            out.push(s);
-            if (s === root) break;
-            const p = parent[s];
-            if (p === s) break;
-            s = p;
-        }
-        return out;
-    };
-
     // Top-down: ascending id order is topological (ancestors have smaller ids).
     for (let scopeId = 0; scopeId < scopeCount; scopeId++) {
         const bindings = bindingsByScope[scopeId];
@@ -100,8 +86,18 @@ export function assignSlots(input: SlotInput): SlotResult {
             slotLiveness.push(new Set());
         }
 
-        // Ancestors of scopeId, EXCLUDING scopeId (the marking walk stops at these).
-        const ancSet = new Set(ancestors(scopeId).slice(1));
+        // Ancestors of scopeId, EXCLUDING scopeId (the marking walk stops at these). Built by walking
+        // `parent` straight into the Set: `ancestors()` would allocate the chain array, `.slice(1)`
+        // a second array to drop the head, and the Set a third — three allocations per scope to hold
+        // ~3 ids.
+        const ancSet = new Set<number>();
+        for (let a = scopeId; a !== root; ) {
+            const p = parent[a];
+            if (p === a) break;
+            a = p;
+            ancSet.add(a);
+            if (a === root) break;
+        }
 
         for (let i = 0; i < bindings.length; i++) {
             const sym = bindings[i];
@@ -110,11 +106,24 @@ export function assignSlots(input: SlotInput): SlotResult {
             const liveness = slotLiveness[slot];
 
             // Mark the slot live from each use up to (excluding) the declaration scope.
+            //
+            // The ancestor walk is INLINED rather than going through `ancestors()`. That helper
+            // materialises the whole chain into a fresh `number[]`, but this loop almost always
+            // breaks after a step or two (at the declaration scope, or at an already-marked chain),
+            // so the array was allocated and mostly discarded: 64,846 calls over a crashcat bundle,
+            // averaging 3.0 links each. Walking `parent` directly allocates nothing and stops the
+            // moment the condition hits. Termination is `ancestors`' own: stop at `root`, or where a
+            // scope is its own parent.
             const mark = (useScope: number): void => {
-                for (const anc of ancestors(useScope)) {
+                let anc = useScope;
+                for (;;) {
                     if (anc === scopeId || ancSet.has(anc)) break; // reached declaration scope / above
                     if (liveness.has(anc)) break; // chain already marked
                     liveness.add(anc);
+                    if (anc === root) break;
+                    const p = parent[anc];
+                    if (p === anc) break;
+                    anc = p;
                 }
             };
             // oxc marks: referenced ∪ redeclared ∪ {scope_id, declared_scope_id} (lib.rs:671-702).
