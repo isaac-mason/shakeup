@@ -76,7 +76,34 @@ const ERROR_CTORS = new Set([
  *
  *  Skipped: BigInt (a different node type), and anything that looks like a LEGACY OCTAL (`017`), whose
  *  value depends on sloppy-vs-strict mode and which `Number()` would misread as decimal. */
+/** A plain decimal integer of 1-3 digits (`0`, `7`, `42`, `255`) — the overwhelmingly common literal.
+ *
+ *  None of them can be shortened, so they can skip the whole candidate machinery below:
+ *    · `String(value)` already equals `raw`;
+ *    · the exponential form ties at best (`100` -> `1e2`, both 3) and the candidate loop demands
+ *      STRICTLY shorter, so a tie is rejected;
+ *    · hex is always longer (`255` -> `0xff` is 4 vs 3);
+ *    · the `0.x -> .x` candidate needs a `0.` prefix, which a leading zero here excludes.
+ *
+ *  Worth a fast path because `shortestNumber` runs on every numeric literal of every compress round
+ *  and 91.5% of its calls (crashcat) return unchanged — 90.4% of ALL calls are exactly this shape.
+ *  Each of those otherwise allocated a `_`-stripped copy, `String(value)`, `toExponential()`, often
+ *  `toString(16)`, and a candidate array. Character tests, no regex, no allocation. */
+function isShortDecimalInt(raw: string): boolean {
+    const n = raw.length;
+    if (n === 0 || n > 3) return false;
+    const c0 = raw.charCodeAt(0);
+    if (c0 < 48 || c0 > 57) return false;
+    if (c0 === 48 && n > 1) return false; // leading zero: legacy octal / `0.x` — handled below
+    for (let i = 1; i < n; i++) {
+        const c = raw.charCodeAt(i);
+        if (c < 48 || c > 57) return false; // covers `_`, `.`, `e`, `x`
+    }
+    return true;
+}
+
 function shortestNumber(raw: string): string | null {
+    if (isShortDecimalInt(raw)) return null;
     if (/^0[0-9]/.test(raw)) return null; // legacy octal — never touch
     const value = Number(raw.replace(/_/g, ''));
     if (!Number.isFinite(value) || value < 0) return null;
