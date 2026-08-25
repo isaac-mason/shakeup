@@ -101,3 +101,146 @@ for (const S of SCALES) {
         }).gc(true);
     });
 }
+
+// ── REPRESENTATION AND RESIZING ───────────────────────────────────────────────────────────────────
+// Two open questions before any of this reaches `src/`:
+//
+//  1. Is a plain `number[]` as good as `Int32Array`? V8 backs an all-smi array with PACKED_SMI_ELEMENTS
+//     — unboxed machine words, so in principle it should match. It also GROWS, which `Int32Array` does
+//     not. If it matches, the resizing question mostly evaporates.
+//
+//  2. What does RESIZING cost? The tally currently runs after `visit`, when `symbols.length` is final,
+//     so an exact allocation is possible TODAY. But that is a fragile precondition to build on: any
+//     future pass that mints a symbol mid-flight would need growth. So measure the pessimistic case —
+//     start small and grow — against the exact-size case, and find out what the precondition is worth.
+const GROW_FROM = 16;
+
+group('representation: Int32Array vs number[] @micro @soa @repr', () => {
+    const S = { symbols: 7_332, refs: 26_000 };
+
+    bench('Int32Array, exact size', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const uses = new Int32Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) uses[stream[i]]++;
+            return uses.length;
+        };
+    }).gc(true);
+
+    bench('number[] fill(0), exact size', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const uses = new Array<number>(S.symbols).fill(0);
+            for (let i = 0; i < stream.length; i++) uses[stream[i]]++;
+            return uses.length;
+        };
+    }).gc(true);
+
+    bench('number[] grown by push (no preallocation)', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const uses: number[] = [];
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                while (uses.length <= sym) uses.push(0);
+                uses[sym]++;
+            }
+            return uses.length;
+        };
+    }).gc(true);
+
+    bench('Int32Array grown by doubling + copy', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            let uses = new Int32Array(GROW_FROM);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                if (sym >= uses.length) {
+                    let cap = uses.length;
+                    while (cap <= sym) cap *= 2;
+                    const next = new Int32Array(cap);
+                    next.set(uses);
+                    uses = next;
+                }
+                uses[sym]++;
+            }
+            return uses.length;
+        };
+    }).gc(true);
+});
+
+// ── DECOMPOSING THE WIN: is it dropping the MAP, or dropping the OBJECTS? ──────────────────────────
+// The comparison above changes TWO things at once — hashing becomes indexing, AND a per-symbol object
+// becomes a primitive slot. That conflation would have justified a bigger refactor than the evidence
+// supports, so isolate the middle ground: an ARRAY of monomorphic records indexed by symbol id. Same
+// `{reads, writes}` shape the consumers already destructure, no hashing.
+//
+// Every object here is built by the SAME constructor path so V8 sees one hidden class — a
+// deliberately monomorphic comparison, since a polymorphic version would be measuring the wrong thing.
+group('decompose: Map vs record-array vs SoA @micro @soa @decompose', () => {
+    const S = { symbols: 7_332, refs: 26_000 };
+
+    bench('Map<number, {reads,writes}>', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs = new Map<number, { reads: number; writes: number }>();
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                let c = refs.get(sym);
+                if (c === undefined) {
+                    c = { reads: 0, writes: 0 };
+                    refs.set(sym, c);
+                }
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.size;
+        };
+    }).gc(true);
+
+    bench('record[] indexed by sym, PREFILLED', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs: { reads: number; writes: number }[] = new Array(S.symbols);
+            for (let i = 0; i < S.symbols; i++) refs[i] = { reads: 0, writes: 0 };
+            for (let i = 0; i < stream.length; i++) {
+                const c = refs[stream[i]];
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.length;
+        };
+    }).gc(true);
+
+    bench('record[] indexed by sym, LAZY (holes)', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs: ({ reads: number; writes: number } | undefined)[] = new Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                let c = refs[sym];
+                if (c === undefined) {
+                    c = { reads: 0, writes: 0 };
+                    refs[sym] = c;
+                }
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.length;
+        };
+    }).gc(true);
+
+    bench('two Int32Arrays (SoA)', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const reads = new Int32Array(S.symbols);
+            const writes = new Int32Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                reads[sym]++;
+                if ((i & 7) === 0) writes[sym]++;
+            }
+            return reads.length;
+        };
+    }).gc(true);
+});
