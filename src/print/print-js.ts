@@ -46,7 +46,15 @@ function precOf(n: Node): Prec {
 
 /** Print an expression, wrapping in parens iff its precedence is below `minPrec`. */
 export function printExpr(p: Printer, n: Node, minPrec: Prec): void {
-    parens(p, precOf(n) < minPrec, () => emitExpr(p, n));
+    // `parens(p, cond, () => …)` inlined: this runs once per EXPRESSION, and the wrapper cost a
+    // closure plus a call layer on every one. Benched in isolation at 2.33x
+    // (`benches/micro/emit.bench.ts` @parens). Note the same shape measured ZERO for `declareInScope`
+    // — V8 escape-analyses a non-escaping callback — so what pays here is removing the CALL, and the
+    // frequency. The remaining `parens` call sites are cold and keep the helper.
+    const wrap = precOf(n) < minPrec;
+    if (wrap) write(p, '(');
+    emitExpr(p, n);
+    if (wrap) write(p, ')');
 }
 
 /** `??` cannot be mixed with `||`/`&&` without parentheses (a syntax error otherwise). */
@@ -135,7 +143,10 @@ function emitLogical(p: Printer, n: Node): void {
     const prec = LOGICAL_PREC[op];
     const operand = (child: Node, minPrec: Prec): void => {
         const force = child.type === N.LogicalExpression && isNullishMix(op, data(child).operator as string);
-        parens(p, force || precOf(child) < minPrec, () => emitExpr(p, child));
+        const wrap = force || precOf(child) < minPrec;
+        if (wrap) write(p, '(');
+        emitExpr(p, child);
+        if (wrap) write(p, ')');
     };
     operand(d.left as Node, prec);
     softSpace(p);
