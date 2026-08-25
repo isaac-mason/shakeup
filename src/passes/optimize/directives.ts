@@ -108,6 +108,12 @@ export function directiveSpans(source: string, program: Node, want: number): Set
     const hits = scanDirectives(source);
     if (hits.size === 0) return out;
     for (const [at, mask] of hits) if (opts(mask, want)) out.add(at);
+    // The walk below only ever propagates an annotation from an `export` to the declaration it wraps,
+    // and it does that by testing `out.has(n.start)`. With nothing in `out` it cannot add anything, so
+    // the walk is pure waste. The existing `hits.size === 0` guard above does not cover this: a module
+    // that carries `@inline` but no `@optimize` has hits, yet an empty `out` for the `@optimize` query.
+    // Measured on a crashcat bundle: 27 of 55 walks (49.1%) start from an empty set.
+    if (out.size === 0) return out;
     walk(program, (n) => {
         if (n.type !== N.ExportNamedDeclaration && n.type !== N.ExportDefaultDeclaration) return;
         if (!out.has(n.start)) return;

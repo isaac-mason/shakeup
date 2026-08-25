@@ -184,6 +184,19 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
         expect((await bundleErr('import fs = require("fs");\nexport const x = fs;')).join('\n')).toMatch(/require\(\)/);
     });
 
+    // `collectUnsupported` is now SKIPPED unless the lowering reports that one of the two constructs
+    // it diagnoses survived (`sawUnloweredTs`) — it used to walk every TS module to look. A wrong flag
+    // silences a diagnostic rather than changing output, so byte-identical bundles would NOT catch it;
+    // these cases are the gate.
+    it('a value namespace the lowering cannot handle is still rejected loudly', async () => {
+        const errs = await bundleErr('const a = 1;\nnamespace NS { export { a }; }\nexport const y = 1;');
+        expect(errs.join('\n')).toMatch(/value namespaces are not supported/);
+    });
+
+    it('a value namespace the lowering DOES handle produces no error', async () => {
+        expect(await bundleErr('namespace NS { export const v = 1; }\nexport const y = NS.v;')).toEqual([]);
+    });
+
     it('declare namespace / declare global still erase cleanly (no error)', async () => {
         expect(await bundleErr('declare namespace Foo { const x: number; }\nexport const y = 1;')).toEqual([]);
         expect(await bundleErr('declare global { const G: number; }\nexport const z = 2;')).toEqual([]);

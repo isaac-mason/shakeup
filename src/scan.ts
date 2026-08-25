@@ -21,7 +21,7 @@ import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
-import { tsLower } from './passes/lower-ts';
+import { tsLower, sawUnloweredTs } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from './passes/traverse';
 import {
@@ -836,7 +836,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 // Only a TS module can contain the construct this looks for (a value
                 // `namespace`), so a `.js`/`.jsx` module skips the walk entirely.
-                if (isTs) collectUnsupported(program, id, graph.errors);
+                // Only when the lowering left one of the two constructs this diagnoses behind — it walks every
+                // node otherwise, and on a clean TS corpus finds nothing (97 walks, 178,021 nodes, 0 errors).
+                if (isTs && sawUnloweredTs()) collectUnsupported(program, id, graph.errors);
                 // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
                 // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
                 // and the (compress-aware) cache stores the already-compressed AST.
