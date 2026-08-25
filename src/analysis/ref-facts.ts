@@ -299,10 +299,24 @@ export function verifyLowerSemantic(maintained: Semantic, program: Node): string
         }
     }
     if (VERIFY_SYMBOL_INIT) {
+        // What `Semantic.unresolved` is FOR is name reservation: `deconflict` seeds its taken set
+        // from it. So compare RESERVATION, not list membership — a name can legitimately be reserved
+        // through the symbol table in one build and through `unresolved` in the other. `declare const
+        // g` is exactly that: the maintained build still has `g` declared (so the reference resolved
+        // and never entered the list), while a rebuild on the stripped tree has no declaration and
+        // reserves `g` as unresolved instead. Both reserve it; only the route differs.
+        const declared = new Set<string>();
+        for (let i = 1; i < maintained.symbols.length; i++) {
+            const nm = maintained.symbols[i].decl?.name;
+            if (nm !== undefined) declared.add(nm);
+        }
+        // Only UNDER-reservation is reported. A name the maintained build reserves and the rebuild
+        // does not costs at most a rename; a name NEITHER route reserves is free for capture, which
+        // is the direction that breaks code.
         const mNames = new Set(maintained.unresolved.map((n) => n.name));
-        const tNames = new Set(truth.unresolved.map((n) => n.name));
-        for (const n of mNames) if (!tNames.has(n)) out.push(`unresolved name '${n}' is stale in maintained (truth has none)`);
-        for (const n of tNames) if (!mNames.has(n)) out.push(`unresolved name '${n}' missing in maintained`);
+        for (const n of truth.unresolved)
+            if (!mNames.has(n.name) && !declared.has(n.name))
+                out.push(`name '${n.name}' is reserved by neither unresolved nor a symbol in maintained (UNSAFE: free for capture)`);
     }
     return out;
 }

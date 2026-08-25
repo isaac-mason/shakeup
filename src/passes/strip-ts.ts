@@ -6,7 +6,7 @@
 // A1a (this file): the functional strip — unwrap type-assertion expressions, remove type-only
 // statements + class members, filter type-only import/export specifiers, and lower constructor
 // parameter properties. A1b (annotation-field clearing, for a fully plain-JS AST) is layered on top.
-import { N, type Node, node, walkChildren } from '../ast.ts';
+import { N, type Node, node } from '../ast.ts';
 import * as create from '../parser/create.ts';
 import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
@@ -130,16 +130,6 @@ function stripImport(n: Node, ctx: TransformCtx): boolean {
  *  it, emitting a duplicate top-level declaration. */
 function evictSymbol(ctx: TransformCtx, specifier: Node): void {
     evictSym(ctx, ((specifier.data as { local?: Node }).local as { sym: number } | undefined)?.sym ?? 0);
-}
-
-/** Evict every binding a declarator pattern introduces (`declare const { a, b } = ...`). */
-function evictPatternSymbols(ctx: TransformCtx, pat: Node | null): void {
-    if (pat === null) return;
-    if (pat.type === N.BindingIdentifier) {
-        evictSym(ctx, (pat as { sym: number }).sym);
-        return;
-    }
-    walkChildren(pat, (c) => evictPatternSymbols(ctx, c));
 }
 
 /** Same eviction for a type declaration erased whole (`interface` / `type X =`). */
@@ -280,25 +270,22 @@ export const tsStrip: Visitor = {
             evictDeclSymbol(ctx, n);
             ctx.remove();
         },
+        // NOTE: `declare` forms are erased but their symbols are deliberately NOT evicted. A
+        // TYPE-ONLY declaration (`interface` / `type X =` / `import type`) leaves no reference behind,
+        // so a rebuilt semantic reserves nothing for it and the maintained one must not either. A
+        // `declare const g` is the opposite: references to `g` SURVIVE the strip as unresolved, so a
+        // rebuild reserves the name via `Semantic.unresolved` — and keeping the symbol reserves it
+        // exactly the same way. Evicting here instead left the name free for capture.
         [N.FunctionDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) {
-                evictDeclSymbol(ctx, n);
-                ctx.remove();
-            } else clearTypes(n, ctx);
+            if (isErasedStmt(n)) ctx.remove();
+            else clearTypes(n, ctx);
         },
         [N.ClassDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) {
-                evictDeclSymbol(ctx, n);
-                ctx.remove();
-            } else clearTypes(n, ctx);
+            if (isErasedStmt(n)) ctx.remove();
+            else clearTypes(n, ctx);
         },
         [N.VariableDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) {
-                // `declare const g` binds nothing at runtime; a rebuilt semantic leaves references
-                // to it unresolved, so the maintained one must too.
-                for (const decl of (n.data as { declarations: Node[] }).declarations) evictPatternSymbols(ctx, (decl.data as { id: Node }).id);
-                ctx.remove();
-            }
+            if (isErasedStmt(n)) ctx.remove();
         },
         // Pure type-field clearing (A1b — plain-JS AST).
         [N.VariableDeclarator]: (n, ctx) => clearTypes(n, ctx),
@@ -354,11 +341,20 @@ export const tsStrip: Visitor = {
         // to fire. Repairing is O(symbols-with-inits) (median 94 per module), not a tree walk,
         // because the replacement is always a DESCENDANT reachable by the same unwrap.
         [N.Program]: (_n, ctx) => {
-            const si = ctx.semantic.symbolInit;
+            const sem = ctx.semantic;
+            const si = sem.symbolInit;
             for (const [sym, init] of si) {
                 const inner = unwrapAssertions(init);
                 if (inner !== init) si.set(sym, inner);
             }
+            // `Semantic.unresolved` holds the reference NODES that resolved to nothing; `deconflict`
+            // seeds its taken-name set from them. `lowerEnum`'s `qualifyMemberRefs` rewrites a bare
+            // member reference (`C = B`) into `_E.B` by RETYPING the node in place, so an entry here
+            // can be left pointing at something that is no longer an identifier at all — and its
+            // stale name then reserves a name nothing uses. Dropping the retyped ones is
+            // O(unresolved), and it generalises to any in-place retype a lowering performs.
+            const live = sem.unresolved.filter((n) => n.type === N.IdentifierReference && n.sym === 0);
+            if (live.length !== sem.unresolved.length) sem.unresolved.length = 0, sem.unresolved.push(...live);
         },
     }),
 };
