@@ -96,8 +96,13 @@ group('printer output buffer @micro @emit', () => {
 // call layer.
 //
 // Benched rather than assumed, because the same shape measured ZERO for `declareInScope` earlier
-// (V8 escape-analyses a non-escaping callback). The difference here is frequency — per expression, not
-// per scope — and that an extra function-call layer is removed as well as the closure.
+// (V8 escape-analyses a non-escaping callback).
+//
+// !! THIS BENCH OVERSTATES THE WIN — 2.33x here, ZERO in situ (print-js 158ms -> 160ms). The body
+// below is `SINK.n += i & 1`, so wrapper overhead is most of each call; the real body is
+// `emitExpr(p, n)`, which does far more work, leaving the overhead a small fraction. Same defect as
+// the first `walkChildren` arm: a SIMPLIFIED BODY makes a wrapper look expensive. Kept as a worked
+// example — if you extend it, give the body realistic work first.
 const CALLS = 500_000;
 
 function wrapper(cond: boolean, body: () => void): void {
