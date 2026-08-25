@@ -1,4 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
+import { verifyLowerSemantic } from './analysis/ref-facts';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
@@ -22,7 +23,7 @@ import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
-import { traverse } from './passes/traverse';
+import { applyRefDelta, type RefDelta, traverse } from './passes/traverse';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -40,6 +41,23 @@ import {
     runTransform,
 } from './plugin';
 import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve';
+
+/** How the semantic reaches the passes that run AFTER the TS/JSX lowering.
+ *
+ *  'rebuild'  — throw the pre-lowering semantic away and `analyze()` the lowered tree from scratch.
+ *  'maintain' — keep the pre-lowering semantic, kept current by `attachScopeNode` (scope-owning
+ *               nodes the lowerings mint) and the `RefDelta` their traversals record. Skips a full
+ *               `analyze()` per TS module, measured at 33.4% of ALL semantic walking in a crashcat
+ *               bundle (129,977 of 388,787 `visit()` calls).
+ *  'verify'   — 'rebuild', plus assert the maintained semantic would have been equivalent.
+ *
+ *  Env-selectable so the whole suite can run under verification with
+ *  `LOWER_SEMANTIC_MODE=verify pnpm test`. */
+export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
+let LOWER_SEMANTIC_MODE: LowerSemanticMode = (process.env.LOWER_SEMANTIC_MODE as LowerSemanticMode | undefined) ?? 'maintain';
+export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
+    LOWER_SEMANTIC_MODE = m;
+};
 
 /** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
  * (non-`declare`) namespace has no runtime lowering, so the walk would leave `namespace X {`
@@ -749,7 +767,12 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
                     passes.push(makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt));
                 }
-                if (passes.length > 0) traverse(program, semantic, passes);
+                // Reference movement from the lowering traversals, folded into `semantic` below.
+                // `replaceWith`/`spliceStatements` already record it via `dropRefs`/`addRefs`; they
+                // are inert unless a delta map is threaded in, which is why the lowerings used to
+                // leave `semantic.refs` describing the PRE-lowering tree.
+                const lowerDelta = new Map<number, RefDelta>();
+                if (passes.length > 0) traverse(program, semantic, passes, lowerDelta);
                 // 2nd traverse: strip residual TS types (assertions, type-only stmts/members, param
                 // properties) after value lowering. Separate traverse so tsStrip never races tsLower's
                 // replaceWith on a shared node (see ts-strip-pass-plan.md).
@@ -758,7 +781,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // `captureShapes` reads WRITTEN type annotations for SROA's oracle, and `tsStrip`
                 // erases TS-only syntax — neither can find anything in a JavaScript module.
                 const shapes = isTs ? captureShapes(program) : new Map();
-                if (isTs) traverse(program, semantic, [tsStrip]);
+                if (isTs) traverse(program, semantic, [tsStrip], lowerDelta);
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
@@ -773,8 +796,16 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // bundling profile (13%) and runs ~3x per module; this removes one of those for every
                 // JavaScript module, which in a real graph is most of `node_modules`.
                 if (isTs || passes.length > 0) {
-                    semantic = createSemantic();
-                    analyze(semantic, program);
+                    applyRefDelta(semantic, lowerDelta);
+                    if (LOWER_SEMANTIC_MODE === 'verify') {
+                        const problems = verifyLowerSemantic(semantic, program);
+                        if (problems.length > 0)
+                            throw new Error(`maintained semantic diverged after lowering in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                    }
+                    if (LOWER_SEMANTIC_MODE !== 'maintain') {
+                        semantic = createSemantic();
+                        analyze(semantic, program);
+                    }
                 }
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.

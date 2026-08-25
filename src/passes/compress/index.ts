@@ -19,7 +19,7 @@ import { emitRefFacts, REF, verifyRefFacts } from '../../analysis/ref-facts.ts';
 import type { RefCounts } from '../../analysis/movement.ts';
 import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
-import { type RefDelta, traverse, type Visitor } from '../traverse.ts';
+import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { blockFlatten } from './block-flatten.ts';
 import { booleanContext } from './boolean-context.ts';
@@ -249,20 +249,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
      * hash). Between rounds nothing reads that; `refreshRefs` is enough there.
      */
     /** Fold one round's signed movements into the maintained counts. */
-    const applyDeltas = (delta: Map<number, RefDelta>): void => {
-        for (const [sym, d] of delta) {
-            if (d.reads !== 0 || d.writes !== 0) {
-                let c = cur.refs.get(sym);
-                if (c === undefined) {
-                    c = { reads: 0, writes: 0 };
-                    cur.refs.set(sym, c);
-                }
-                c.reads += d.reads;
-                c.writes += d.writes;
-            }
-            if (d.uses !== 0) cur.uses.set(sym, (cur.uses.get(sym) ?? 0) + d.uses);
-        }
-    };
+    const applyDeltas = (delta: Map<number, RefDelta>): void => applyRefDelta(cur, delta);
 
     const refreshFull = (): void => {
         cur = createSemantic();

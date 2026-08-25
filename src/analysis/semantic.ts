@@ -840,6 +840,20 @@ export function createScope(semantic: Semantic, parent: number, flags: number): 
     return id;
 }
 
+/** Associate a scope-owning NODE with an existing scope, exactly as `newScope` does during
+ *  `analyze` (`scopes[id].node` + the `nodeScope` reverse index). A lowering that mints a scope —
+ *  or reuses one — for a node it has just BUILT must call this: `createScope` cannot, because the
+ *  node does not exist yet at the point the scope is needed (an enum's IIFE param is declared
+ *  before the `FunctionExpression` wrapping it is constructed).
+ *
+ *  Without it the scope is invisible to `scopeOf`/`ctx.currentScope`, so every name resolved inside
+ *  that region silently resolves from the WRONG scope — the defect that forced a full post-lowering
+ *  `analyze()` rebuild. */
+export function attachScopeNode(semantic: Semantic, scope: number, node: Node): void {
+    semantic.scopes[scope].node = node;
+    semantic.nodeScope.set(node, scope);
+}
+
 /** Declare a local binding into an already-analyzed module's semantic at `scope` (e.g. an IIFE
  *  param a lowering pass mints via `generateUid`). Appends a symbol record, associates the decl
  *  node, and returns the new SymbolId — the general-scope counterpart to
