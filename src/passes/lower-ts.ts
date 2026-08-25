@@ -350,9 +350,25 @@ const isValueNamespace = (n: Node): boolean =>
 /** The TS lowering pass. Currently: value `enum` → IIFE (bare and `export enum`). Fires on `enter`
  *  and `replaceWithMultiple` — which short-circuits the child recursion (so `export enum`'s inner
  *  enum, sitting in a single-child slot, is never independently visited). */
+/** Did a TS construct that `collectUnsupported` diagnoses SURVIVE this module's lowering?
+ *
+ *  `collectUnsupported` errors on exactly two node types — a non-`declare` `TSModuleDeclaration` and
+ *  an `import X = require(...)` — and it used to walk every TS module to look for them (178,021 nodes
+ *  over a crashcat bundle, finding nothing). This traversal already visits every one of those nodes,
+ *  so it records whether any survived; when none did, there is provably nothing for that walk to find.
+ *
+ *  Deliberately CONSERVATIVE: the flag is set whenever such a node is left in place, including forms
+ *  the check would not have complained about. A false positive costs one walk; a false negative would
+ *  silence a diagnostic, so the bias is one-directional. */
+let SAW_UNLOWERED = false;
+export const sawUnloweredTs = (): boolean => SAW_UNLOWERED;
+
 export const tsLower: Visitor = {
     name: 'tsLower',
     enter: hookTable({
+        [N.Program]: () => {
+            SAW_UNLOWERED = false;
+        },
         [N.TSEnumDeclaration]: (node, ctx) => {
             if (isValueEnum(node)) ctx.replaceWith(lowerEnum(node, ctx, ctx.currentScope));
         },
@@ -362,6 +378,7 @@ export const tsLower: Visitor = {
             else {
                 const lowered = lowerImportEquals(node, ctx.semantic);
                 if (lowered !== null) ctx.replaceWith(lowered);
+                else SAW_UNLOWERED = true; // `= require(...)` — left for the diagnostic
             }
         },
         [N.ExportNamedDeclaration]: (node, ctx) => {
@@ -375,6 +392,7 @@ export const tsLower: Visitor = {
                 else {
                     const lowered = lowerImportEquals(decl, ctx.semantic);
                     if (lowered !== null) ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, lowered, null, null) as Node);
+                    else SAW_UNLOWERED = true; // `export import X = require(...)` — left for the diagnostic
                 }
             } else if (decl !== null && isValueNamespace(decl)) {
                 const varDecl = lowerNamespace(decl, ctx, null);
@@ -389,7 +407,8 @@ export const tsLower: Visitor = {
                 if (varDecl === ERASE)
                     ctx.remove(); // type-only namespace → nothing
                 else if (varDecl !== null) ctx.replaceWith(varDecl);
-            }
+                else SAW_UNLOWERED = true; // nested/merged/re-export — left for the diagnostic
+            } else SAW_UNLOWERED = true; // `declare` namespace: survives, so let the check look
         },
     }),
     exit: null,
