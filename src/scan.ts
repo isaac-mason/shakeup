@@ -53,6 +53,10 @@ import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, norma
  *
  *  Env-selectable so the whole suite can run under verification with
  *  `LOWER_SEMANTIC_MODE=verify pnpm test`. */
+/** Hoisted so `traverse`'s per-node-type hook-table cache (keyed on the visitor ARRAY) hits
+ *  instead of rebuilding for every module. */
+const TS_STRIP_PASSES = [tsStrip];
+
 export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
 let LOWER_SEMANTIC_MODE: LowerSemanticMode = (process.env.LOWER_SEMANTIC_MODE as LowerSemanticMode | undefined) ?? 'maintain';
 export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
@@ -781,7 +785,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // `captureShapes` reads WRITTEN type annotations for SROA's oracle, and `tsStrip`
                 // erases TS-only syntax — neither can find anything in a JavaScript module.
                 const shapes = isTs ? captureShapes(program) : new Map();
-                if (isTs) traverse(program, semantic, [tsStrip], lowerDelta);
+                if (isTs) traverse(program, semantic, TS_STRIP_PASSES, lowerDelta);
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know

@@ -153,8 +153,18 @@ export const setCoalesceEnabled = (on: boolean): void => {
 };
 
 /** The loop passes for `mode`, in their canonical order. */
-const loopPassesFor = (mode: CompressMode): Visitor[] =>
-    LOOP_PASSES.filter((t) => mode === 'full' || t.cosmetic !== true).map((t) => t.pass);
+// MEMOISED PER MODE. `traverse` caches its per-node-type hook tables on the visitor ARRAY, so
+// handing it a freshly-built array call (this runs once per module) would miss that cache every
+// time. There are only a handful of modes, so one array each is kept for the process.
+const LOOP_PASSES_BY_MODE = new Map<CompressMode, Visitor[]>();
+const loopPassesFor = (mode: CompressMode): Visitor[] => {
+    let v = LOOP_PASSES_BY_MODE.get(mode);
+    if (v === undefined) {
+        v = LOOP_PASSES.filter((t) => mode === 'full' || t.cosmetic !== true).map((t) => t.pass);
+        LOOP_PASSES_BY_MODE.set(mode, v);
+    }
+    return v;
+};
 
 /** Safety cap on the fixed-point loop (terser uses a similar bound) — a pass pair that oscillates
  *  never hangs the build. */
