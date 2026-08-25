@@ -94,7 +94,10 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         linkModule: cfg.linkModule ?? false,
         defaultName: cfg.defaultName ?? null,
         live: cfg.live ?? null,
-        overrides: cfg.overrides ?? null,
+        // An EMPTY map is normalised to null. `emitExpr` guards on `overrides !== null` and then does
+        // a `Map.get` PER EXPRESSION NODE; a module with no dynamic imports and no asset URLs supplies
+        // an empty map, which is not null, so every node paid a lookup that could never hit.
+        overrides: cfg.overrides !== undefined && cfg.overrides !== null && cfg.overrides.size > 0 ? cfg.overrides : null,
         map: wantMap ? newMappings() : null,
         line: 0,
         col: 0,
