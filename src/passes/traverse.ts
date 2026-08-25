@@ -81,31 +81,35 @@ const OP_REMOVE = 3;
  *
  *  Cached on the visitor ARRAY, which every driver holds for the life of the process (the compress
  *  loop reuses one `loop` array across every module and round), so the tables are built once. */
-type HookTables = { enter: (Hook[] | null)[]; exit: (Hook[] | null)[] };
+type HookTables = { enter: (Hook[] | null | undefined)[]; exit: (Hook[] | null | undefined)[] };
 const HOOK_TABLES = new WeakMap<Visitor[], HookTables>();
 
 function hookTablesFor(visitors: Visitor[]): HookTables {
-    const cached = HOOK_TABLES.get(visitors);
-    if (cached !== undefined) return cached;
-    const enter: (Hook[] | null)[] = new Array(TYPE_COUNT).fill(null);
-    const exit: (Hook[] | null)[] = new Array(TYPE_COUNT).fill(null);
-    for (let t = 0; t < TYPE_COUNT; t++) {
-        let e: Hook[] | null = null;
-        let x: Hook[] | null = null;
-        // Pass ORDER is load-bearing (the compress passes are ordered deliberately), so append in
-        // visitor order rather than grouping by type.
-        for (let i = 0; i < visitors.length; i++) {
-            const eh = visitors[i].enter?.[t];
-            if (eh !== null && eh !== undefined) (e ??= []).push(eh);
-            const xh = visitors[i].exit?.[t];
-            if (xh !== null && xh !== undefined) (x ??= []).push(xh);
-        }
-        enter[t] = e;
-        exit[t] = x;
+    let t = HOOK_TABLES.get(visitors);
+    if (t === undefined) {
+        // `undefined` = not yet computed for that type, `null` = computed, no hooks. Filling LAZILY
+        // matters because several drivers hand `traverse` a freshly-built array every call
+        // (`loopPassesFor(mode)`, `[tsStrip]`), which misses this cache; an eager build would then
+        // walk all 151 types x every visitor per module. Lazily, a miss costs only the types the
+        // module actually contains, and the common arrays are memoised at their call sites anyway.
+        t = { enter: new Array(TYPE_COUNT), exit: new Array(TYPE_COUNT) };
+        HOOK_TABLES.set(visitors, t);
     }
-    const tables: HookTables = { enter, exit };
-    HOOK_TABLES.set(visitors, tables);
-    return tables;
+    return t;
+}
+
+/** Hooks of one phase for one node type, computed on first sight and cached. Pass ORDER is
+ *  load-bearing (the compress passes are deliberately ordered), so hooks append in visitor order. */
+function hooksOf(visitors: Visitor[], table: (Hook[] | null | undefined)[], type: number, phase: 'enter' | 'exit'): Hook[] | null {
+    let hooks: Hook[] | null = null;
+    for (let i = 0; i < visitors.length; i++) {
+        const tbl = visitors[i][phase];
+        if (tbl === null) continue;
+        const h = tbl[type];
+        if (h !== null && h !== undefined) (hooks ??= []).push(h);
+    }
+    table[type] = hooks;
+    return hooks;
 }
 
 class Ctx {
@@ -129,8 +133,8 @@ class Ctx {
      *  synthesized scope (`createScope`) to the correct lexical scope. */
     currentScope = 0;
     /** Per-node-type hook lists for this visitor set — see {@link hookTablesFor}. */
-    enterByType: (Hook[] | null)[];
-    exitByType: (Hook[] | null)[];
+    enterByType: (Hook[] | null | undefined)[];
+    exitByType: (Hook[] | null | undefined)[];
     constructor(semantic: Semantic, visitors: Visitor[]) {
         this.semantic = semantic;
         this.visitors = visitors;
@@ -274,12 +278,14 @@ function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void
 }
 
 function fireEnter(node: Node, ctx: Ctx): void {
-    const hooks = ctx.enterByType[node.type];
+    const t = node.type;
+    const hooks = ctx.enterByType[t] ?? hooksOf(ctx.visitors, ctx.enterByType, t, 'enter');
     if (hooks === null) return;
     for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
 function fireExit(node: Node, ctx: Ctx): void {
-    const hooks = ctx.exitByType[node.type];
+    const t = node.type;
+    const hooks = ctx.exitByType[t] ?? hooksOf(ctx.visitors, ctx.exitByType, t, 'exit');
     if (hooks === null) return;
     for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
