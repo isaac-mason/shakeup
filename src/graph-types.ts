@@ -87,6 +87,10 @@ export type Module = {
     execOrder: number;
     /** Module uses JSX (set by the parser; gates JSX-runtime injection without a detection walk). */
     hasJSX: boolean;
+    /** Module contains `import(...)` or `import.meta` (set by the parser). Gates `extractRecords`'
+     *  whole-program walk for dynamic-import edges and `new URL(…, import.meta.url)` assets — both
+     *  nest arbitrarily deep, so they need a walk, and both are absent from most modules. */
+    hasImportSyntax: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
     sideEffects: ModuleSideEffects;
@@ -151,6 +155,7 @@ export type CachedParse = {
     namedExports: Map<string, NamedExport>;
     starExports: number[];
     hasJSX: boolean;
+    hasImportSyntax: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Stable digest of the module's export surface (named-export keys + `export *`
      *  specifiers). A change here means importers' link/shake/render is stale. */

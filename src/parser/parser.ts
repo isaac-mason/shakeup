@@ -118,6 +118,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sp: 0,
         speculating: 0,
         sawJSX: false,
+        sawImportSyntax: false,
         chainSawOptional: false,
         noCondType: false,
     };
@@ -1016,6 +1017,7 @@ function parsePrimary(state: ParserState): Node {
                 if (isP(state, P.DOT)) {
                     nextToken(state);
                     parseNameAsIdent(state, R_NAME);
+                    state.sawImportSyntax = true;
                     return create.ImportMeta(start, state.tokStart, 0) as Node;
                 }
                 expectP(state, P.LPAREN, "'('");
@@ -1024,6 +1026,7 @@ function parsePrimary(state: ParserState): Node {
                 if (eatP(state, P.COMMA) && !isP(state, P.RPAREN)) options = parseAssign(state);
                 eatP(state, P.COMMA);
                 expectP(state, P.RPAREN, "')'");
+                state.sawImportSyntax = true;
                 return create.ImportExpression(start, state.tokStart, 0, source, options) as Node;
             }
             case K.NEW:
@@ -3143,6 +3146,16 @@ export type ParseResult = {
     nodeCount: number;
     /** Module uses JSX (set during parse; avoids a JSX-detection walk). */
     hasJSX: boolean;
+    /** Did the module contain `import(...)` or `import.meta`?
+     *
+     *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
+     *  import.meta.url)` asset references, because both nest arbitrarily deep in expressions. Both
+     *  are also RARE: on a crashcat bundle all 97 modules contained neither, so every one of those
+     *  walks (167,349 nodes) found nothing. The parser already visits these nodes, so it records the
+     *  fact for free — the same trick `hasJSX` uses. `new URL` asset detection additionally requires
+     *  `import.meta.url`, so `import.meta` is the discriminating marker there (a bare `NewExpression`
+     *  is far too common to gate on). */
+    hasImportSyntax: boolean;
 };
 export type ParseOptions = { ts: boolean; jsx: boolean };
 
@@ -3165,7 +3178,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     const body = finishList(state, from);
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;
-    return { program, errors: state.errors, nodeCount, hasJSX: state.sawJSX };
+    return { program, errors: state.errors, nodeCount, hasJSX: state.sawJSX, hasImportSyntax: state.sawImportSyntax };
 }
 
 export function parseProgram(source: string, options: ParseOptions): Program {
