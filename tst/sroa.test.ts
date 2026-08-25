@@ -142,6 +142,28 @@ describe('sroa — typed shapes (in-file)', () => {
         expect(code).not.toMatch(/v\.x/);
     });
 
+    // Pins the invariant the shape collector's DEFERRED resolution exists for. Shape capture used to
+    // be a standalone pre-pass that walked the whole program to gather aliases before resolving any
+    // of them; it is now folded into the single lowering traversal, which meets a declaration BEFORE
+    // it has necessarily seen the alias. Resolution therefore happens after the walk. Without that,
+    // this case silently loses its shape and SROA declines to fire — output stays correct, just
+    // bigger, which is exactly the kind of regression a correctness suite would not catch.
+    it('resolves an alias declared AFTER the declaration that uses it', async () => {
+        const src = [
+            'export function len2() {',
+            '  /* @sroa */ const v: Vec2 = mk();',
+            '  return v.x * v.x + v.y * v.y;',
+            '}',
+            'function mk(): Vec2 { return { x: 3, y: 4 }; }',
+            'type Vec2 = { x: number; y: number };', // declared LAST, used above
+            'export const out = len2();',
+        ].join('\n');
+        const code = await parityTs(src);
+        expect((await runModule(code)).out).toBe(25);
+        expect(code).toMatch(/\{\s*x:\s*v_x,\s*y:\s*v_y\s*\}\s*=\s*mk\(\)/); // shape was found
+        expect(code).not.toMatch(/v\.x/);
+    });
+
     it('works from an `interface`', async () => {
         const src = [
             'interface P { a: number; b: number }',

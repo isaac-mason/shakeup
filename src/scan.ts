@@ -17,7 +17,7 @@ import { runCompress } from './passes/compress';
 import { eliminateDeadStores } from './passes/optimize/dead-store';
 import { flowInlineVariables } from './passes/optimize/flow-inline';
 import { inlineFunctions } from './passes/optimize/inline-functions';
-import { captureShapes } from './passes/optimize/shapes';
+import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
@@ -54,8 +54,14 @@ import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, norma
  *  Env-selectable so the whole suite can run under verification with
  *  `LOWER_SEMANTIC_MODE=verify pnpm test`. */
 /** Hoisted so `traverse`'s per-node-type hook-table cache (keyed on the visitor ARRAY) hits instead
- *  of rebuilding for every module. Lower first, strip second — oxc's statement-level order. */
+ *  of rebuilding for every module. Lower first, strip second — oxc's statement-level order.
+ *
+ *  `shapeCollector` goes FIRST when the optimize tier will consume its table: it reads written type
+ *  annotations, and `tsStrip` (last) erases them, so within a node's enter phase it must run before
+ *  the strip. Its output is only ever read by `scalarReplaceAggregates`, so without the tier there is
+ *  nothing to collect for. */
 const TS_PASSES: Visitor[] = [tsLower, tsStrip];
+const TS_PASSES_WITH_SHAPES: Visitor[] = [shapeCollector, tsLower, tsStrip];
 const EMPTY_PASSES: Visitor[] = [];
 
 export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
@@ -767,13 +773,6 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // rather than time made it obvious: a build of three.core.js (plain JS) ran 12 full
                 // traversals, and these were 2 of them, ~17% of all 1.59M node visits, for zero
                 // mutations. A profile cannot show this; it looks like ordinary traversal cost.
-                // SROA's type-shape oracle reads WRITTEN type annotations, so it must run BEFORE
-                // `tsStrip` erases them. It used to sit between two traversals for that reason; it
-                // now runs first instead. Nothing it reads is produced or altered by lowering — it
-                // collects in-module `type`/`interface` declarations and annotations on declarations,
-                // while lowering only rewrites enum/namespace/import-equals declarations (which carry
-                // no shape SROA models) and JSX expressions.
-                const shapes = isTs ? captureShapes(program) : new Map();
                 // ONE traversal for the whole transform, which is oxc's model: a single
                 // `traverse_mut_with_ctx` drives annotations + enum + namespace + module + JSX
                 // (`oxc_transformer/src/lib.rs:190`). `tsStrip` used to need a second walk because
@@ -787,16 +786,17 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 //
                 // GATED ON THE MODULE'S LANGUAGE. A `.js` file runs none of this; the lowering used
                 // to walk every JavaScript module to find nothing.
+                const wantShapes = isTs && optimizeTier;
                 let passes: Visitor[];
                 if (jsx && hasJSX) {
                     jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
                     const jsxPass = makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt);
                     // jsxLower carries per-module state, so this array cannot be shared.
-                    passes = isTs ? [tsLower, jsxPass, tsStrip] : [jsxPass];
+                    passes = isTs ? (wantShapes ? [shapeCollector, tsLower, jsxPass, tsStrip] : [tsLower, jsxPass, tsStrip]) : [jsxPass];
                 } else {
                     // Shared constants: `traverse` caches its per-node-type hook tables on the visitor
                     // ARRAY, so a fresh array per module would miss that cache every time.
-                    passes = isTs ? TS_PASSES : EMPTY_PASSES;
+                    passes = isTs ? (wantShapes ? TS_PASSES_WITH_SHAPES : TS_PASSES) : EMPTY_PASSES;
                 }
                 // Reference movement from the lowering traversal, folded into `semantic` below.
                 // `replaceWith`/`spliceStatements` already record it via `dropRefs`/`addRefs`; they
@@ -804,6 +804,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // leave `semantic.refs` describing the PRE-lowering tree.
                 const lowerDelta = new Map<number, RefDelta>();
                 if (passes.length > 0) traverse(program, semantic, passes, lowerDelta);
+                // Resolved AFTER the walk: a `type`/`interface` may be declared after the declaration
+                // that references it, so the alias table is only complete once the traversal ends.
+                const shapes = wantShapes ? resolveShapes() : new Map<number, string[]>();
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
