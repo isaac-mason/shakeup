@@ -13,7 +13,7 @@ import { N, type Node, node } from '../ast.ts';
 import { attrKeyText, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../jsx-text.ts';
 import * as create from '../parser/create.ts';
 import { FL } from '../parser/create.ts';
-import { hookTable, type Visitor } from './traverse.ts';
+import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the JSX site)
 
@@ -36,7 +36,27 @@ type Runtime = {
     pure: boolean;
     minted: Map<string, Node>; // name → the specifier's local BindingIdentifier (carries the sym)
     out: JsxRuntimeSyms;
+    /** Inverse of `Semantic.symbolInit` (init NODE → symbol), built lazily once per module. */
+    initOf: Map<Node, number> | null;
 };
+
+/** Which symbol, if any, records `n` as its declarator's init.
+ *
+ *  `analyze` files `const x = <div/>`'s init under `x` (`Semantic.symbolInit`, oxc's `SymbolValue`),
+ *  and compress reads it. Lowering replaces that JSXElement with a `jsx(...)` call, so without this
+ *  the entry still points at the detached JSX node and `alias-inline`/`const-prop` see a shape the
+ *  tree no longer has. Unlike the assertion unwrap `tsStrip` repairs at exit, the replacement here is
+ *  a NEW node rather than a descendant, so it has to be recorded AT the swap. The inverse map costs
+ *  O(symbols-with-inits) — median 94 per module — not a tree walk. */
+function initOwner(rt: Runtime, n: Node): number | undefined {
+    let m = rt.initOf;
+    if (m === null) {
+        m = new Map();
+        for (const [sym, init] of rt.semantic.symbolInit) m.set(init, sym);
+        rt.initOf = m;
+    }
+    return m.get(n);
+}
 
 /** A reference to a runtime callee, minting its import symbol on first use. */
 function runtimeRef(rt: Runtime, name: keyof JsxRuntimeSyms): Node {
@@ -185,7 +205,13 @@ export function makeJsxLower(
     pure: boolean,
     out: JsxRuntimeSyms = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 },
 ): Visitor {
-    const rt: Runtime = { semantic: null as unknown as Semantic, importSource, pure, minted: new Map(), out };
+    const rt: Runtime = { semantic: null as unknown as Semantic, importSource, pure, minted: new Map(), out, initOf: null };
+    /** Swap `n` for its lowered form, keeping `symbolInit` pointing at the node that now exists. */
+    const swap = (n: Node, lowered: Node, ctx: TransformCtx): void => {
+        const sym = initOwner(rt, n);
+        if (sym !== undefined) rt.semantic.symbolInit.set(sym, lowered);
+        ctx.replaceWith(lowered);
+    };
     return {
         name: 'jsxLower',
         enter: null,
@@ -194,11 +220,11 @@ export function makeJsxLower(
                 rt.semantic = ctx.semantic;
                 const d = n.data as { openingElement: Node; children: Node[] };
                 const opening = d.openingElement.data as { name: Node; attributes: Node[] };
-                ctx.replaceWith(lowerJsx(rt, opening.name, opening.attributes, d.children));
+                swap(n, lowerJsx(rt, opening.name, opening.attributes, d.children), ctx);
             },
             [N.JSXFragment]: (n, ctx) => {
                 rt.semantic = ctx.semantic;
-                ctx.replaceWith(lowerJsx(rt, null, [], (n.data as { children: Node[] }).children));
+                swap(n, lowerJsx(rt, null, [], (n.data as { children: Node[] }).children), ctx);
             },
             [N.Program]: (n) => {
                 if (rt.minted.size === 0) return;
