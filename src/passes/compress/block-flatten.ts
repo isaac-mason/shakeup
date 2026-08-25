@@ -18,7 +18,7 @@
 // and any block that is a control-flow body rather than a list element (`if (c) { … }` — `normalize`
 // owns that case, and unwrapping it there is subject to the dangling-`else` rule).
 import { N, type Node, statementListOf, walk } from '../../ast.ts';
-import type { Semantic } from '../../analysis/semantic.ts';
+import { scopeOf, type Semantic } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** Lexical (`let`/`const`) bindings declared DIRECTLY in a block, as `[sym, name]`. */
@@ -94,7 +94,7 @@ export function makeBlockFlatten(): Visitor {
                 set.add(nm);
             }
         }
-        const target = sem.nodeScope.get(n) ?? ctx.currentScope;
+        const target = scopeOf(sem, n) || ctx.currentScope;
         // LIVE, not a copy. A lift genuinely moves a binding into `target`, so the name must stay
         // visible to every LATER list that flattens into the SAME scope — otherwise two sibling
         // blocks lifted into one scope cannot see each other.

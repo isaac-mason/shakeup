@@ -29,7 +29,7 @@ import { buildCfg, type Cfg } from '../../analysis/cfg.ts';
 import { computeReachingDefs, TOP } from '../../analysis/reaching-defs.ts';
 import { computeReachingUses } from '../../analysis/reaching-uses.ts';
 import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast.ts';
-import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
+import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
 
@@ -370,8 +370,8 @@ export function flowInlineVariables(program: Node, semantic: Semantic, source: s
     if (spans.size === 0) return false;
     const gate = Gate.gated(spans);
 
-    // Scope-of-node lookup: reuse the semantic's nodeScope for scope-owning nodes, walking up otherwise.
-    const scopeOfUse = (n: Node): number => semantic.nodeScope.get(n) ?? 0;
+    // Scope-of-node lookup: reads the scope a node OWNS (`data.scopeId`); 0 when it owns none.
+    const scopeOfUse = (n: Node): number => scopeOf(semantic, n);
 
     let changed = false;
     // Manual DFS so the gate's active state is restored on the way out of each function (the shared

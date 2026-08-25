@@ -211,6 +211,10 @@ function defaultConstDecl(decl: Node, dflt: string, s: number, e: number): Node 
             body: d.body,
             async: d.async,
             generator: d.generator,
+        
+            // A function EXPRESSION built from a declaration owns its own scope slot; `analyze`
+            // fills it. Must be present at construction so the hidden class is stable.
+            scopeId: 0,
         });
     } else if (decl.type === N.ClassDeclaration) {
         const d = decl.data;

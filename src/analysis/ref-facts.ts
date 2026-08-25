@@ -232,11 +232,17 @@ export function verifyLowerSemantic(maintained: Semantic, program: Node): string
     // Snapshot before the rebuild — `analyze` overwrites `node.sym` with ITS OWN ids.
     const nodes: Node[] = [];
     const before = new Map<Node, number>();
+    // Scope ids now live ON THE NODE (`data.scopeId`), so the ground-truth build below OVERWRITES the
+    // maintained ones. They must be snapshotted and restored, exactly like `sym` — the Semantic is no
+    // longer self-contained, which is the price of oxc's placement.
+    const beforeScope = new Map<Node, number>();
     walk(program, (n) => {
         nodes.push(n);
         before.set(n, n.sym);
+        const d = n.data as { scopeId?: number } | null;
+        if (d !== null && d.scopeId !== undefined) beforeScope.set(n, d.scopeId);
     });
-    const maintainedScopeNodes = new Set(maintained.nodeScope.keys());
+    const maintainedScopeNodes = new Set([...beforeScope].filter(([, id]) => id !== 0).map(([n]) => n));
 
     // Clear every association BEFORE building ground truth. `analyze` only WRITES `node.sym` when it
     // resolves a reference — an unresolved one keeps whatever it already held, so without this the
@@ -244,12 +250,23 @@ export function verifyLowerSemantic(maintained: Semantic, program: Node): string
     // (a reference whose declaration the lowering erased), making the two look equal when they are
     // not.
     for (const n of nodes) n.sym = 0;
+    // Same reasoning for scope ids: a node that owns a scope in the MAINTAINED build but not in truth
+    // would otherwise keep its stale id and read back as truth's, hiding exactly the divergence this
+    // is looking for.
+    for (const n of nodes) {
+        const d = n.data as { scopeId?: number } | null;
+        if (d !== null && d.scopeId !== undefined) d.scopeId = 0;
+    }
 
     const truth = createSemantic();
     analyze(truth, program);
 
-    for (const n of truth.nodeScope.keys())
-        if (!maintainedScopeNodes.has(n)) out.push(`scope-owning node ${n.type} @${n.start} has no nodeScope entry (UNSAFE: resolves from the wrong scope)`);
+    for (const n of nodes) {
+        const d = n.data as { scopeId?: number } | null;
+        if (d === null || d.scopeId === undefined || d.scopeId === 0) continue; // truth says: owns none
+        if (!maintainedScopeNodes.has(n))
+            out.push(`scope-owning node ${n.type} @${n.start} has no scopeId in maintained (UNSAFE: resolves from the wrong scope)`);
+    }
 
     // Symbol ids differ between builds; the PARTITION they induce must not.
     const mToT = new Map<number, number>();
@@ -273,9 +290,14 @@ export function verifyLowerSemantic(maintained: Semantic, program: Node): string
         }
     }
 
-    // Restore the maintained association BEFORE deriving ref facts — they must be keyed by the
-    // maintained symbol ids, not the throwaway rebuild's.
+    // Restore the maintained associations BEFORE deriving ref facts — they must be keyed by the
+    // maintained symbol ids, not the throwaway rebuild's. Scope ids are restored for the same reason:
+    // the truth build wrote its own into the shared tree.
     for (const n of nodes) n.sym = before.get(n) ?? 0;
+    for (const n of nodes) {
+        const d = n.data as { scopeId?: number } | null;
+        if (d !== null && d.scopeId !== undefined) d.scopeId = beforeScope.get(n) ?? 0;
+    }
 
     for (const p of verifyRefFacts(maintained, program)) if (p.includes('UNDER(unsafe)')) out.push(p);
 
