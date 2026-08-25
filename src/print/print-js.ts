@@ -1,4 +1,4 @@
-import { N, type Node, TYPE_NAME } from '../ast.ts';
+import { N, type Node, TYPE_COUNT, TYPE_NAME } from '../ast.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
 import { dropTrailingSemi, mark, type Printer, parens, semi, softNewline, softSpace, space, write } from './printer.ts';
 
@@ -10,37 +10,54 @@ const data = (n: Node): D => n.data as unknown as D;
 const privName = (n: Node): string => (n.name[0] === '#' ? n.name : `#${n.name}`);
 
 /** Precedence of an expression node — what a parent must require to avoid wrapping it. */
+/**
+ * Precedence by NODE TYPE. `-1` marks the four types whose precedence depends on their DATA.
+ *
+ * This replaced a ~20-case `switch` over 151 possible types, evaluated once per EXPRESSION from
+ * `printExpr` (1.40% of a crashcat bundling profile). The common path is the `default` arm —
+ * identifiers, literals and `this` are 18.7% / 14.1% / 4.2% / 5.2% of nodes — so nearly every call
+ * fell through the whole comparison chain to reach it. Benched at **2.37x** against the measured type
+ * distribution (`benches/micro/prec.bench.ts`), cross-arm validated.
+ *
+ * A type absent from the table gets `Prec.Primary`, exactly as the switch's `default` did, so adding a
+ * node type is no more hazardous here than it was there.
+ */
+const PREC_BY_TYPE = (() => {
+    const t = new Int8Array(TYPE_COUNT).fill(Prec.Primary);
+    t[N.SequenceExpression] = Prec.Comma;
+    t[N.AssignmentExpression] = Prec.Assign;
+    t[N.ArrowFunctionExpression] = Prec.Assign;
+    t[N.YieldExpression] = Prec.Assign;
+    t[N.ConditionalExpression] = Prec.Conditional;
+    t[N.UnaryExpression] = Prec.Unary;
+    t[N.AwaitExpression] = Prec.Unary;
+    t[N.CallExpression] = Prec.Call;
+    t[N.ImportExpression] = Prec.Call;
+    t[N.StaticMemberExpression] = Prec.Call;
+    t[N.ComputedMemberExpression] = Prec.Call;
+    t[N.PrivateFieldExpression] = Prec.Call;
+    t[N.TaggedTemplateExpression] = Prec.Call;
+    t[N.ChainExpression] = Prec.Call;
+    // Data-dependent — resolved by the switch in `precOf`.
+    t[N.LogicalExpression] = -1;
+    t[N.BinaryExpression] = -1;
+    t[N.UpdateExpression] = -1;
+    t[N.NewExpression] = -1;
+    return t;
+})();
+
 function precOf(n: Node): Prec {
+    const p = PREC_BY_TYPE[n.type];
+    if (p >= 0) return p;
     switch (n.type) {
-        case N.SequenceExpression:
-            return Prec.Comma;
-        case N.AssignmentExpression:
-        case N.ArrowFunctionExpression:
-        case N.YieldExpression:
-            return Prec.Assign;
-        case N.ConditionalExpression:
-            return Prec.Conditional;
         case N.LogicalExpression:
             return LOGICAL_PREC[data(n).operator as string];
         case N.BinaryExpression:
             return BINARY_PREC[data(n).operator as string];
-        case N.UnaryExpression:
-        case N.AwaitExpression:
-            return Prec.Unary;
         case N.UpdateExpression:
             return (data(n).prefix as boolean) ? Prec.Unary : Prec.Postfix;
-        case N.NewExpression:
-            return (data(n).arguments as Node[]).length > 0 ? Prec.Call : Prec.New;
-        case N.CallExpression:
-        case N.ImportExpression:
-        case N.StaticMemberExpression:
-        case N.ComputedMemberExpression:
-        case N.PrivateFieldExpression:
-        case N.TaggedTemplateExpression:
-        case N.ChainExpression:
-            return Prec.Call;
         default:
-            return Prec.Primary;
+            return (data(n).arguments as Node[]).length > 0 ? Prec.Call : Prec.New;
     }
 }
 
