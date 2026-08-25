@@ -350,17 +350,15 @@ function fireExit(node: Node, ctx: Ctx): void {
 /** Walk `node`'s children, tracking `ctx.currentScope` across the descent: if `node` owns a scope
  *  (`nodeScope`), children see it as their enclosing scope; restored on the way out. */
 function descend(node: Node, ctx: Ctx): void {
-    const sem = ctx.semantic;
-    // `nodeScope` is keyed by node OBJECT, and 98.14% of the lookups this used to do found nothing —
-    // only 12 of ~151 node types ever own a scope. The type gate turns the common case into one
-    // typed-array load; it is a superset by construction (set wherever a node enters `nodeScope`),
-    // so a `0` is a real "no scope here" and never a missed one.
-    if (sem.scopeOwnerTypes[node.type] === 0) {
-        WALKERS[node.type](node, ctx, visitSingle, visitList);
-        return;
-    }
-    const s = sem.nodeScope.get(node);
-    if (s === undefined) {
+    // The scope a node owns is carried ON THE NODE (`data.scopeId`, oxc's model) rather than looked
+    // up in a `Map<Node, number>`. That map was consulted for every node walked and found nothing
+    // 98.14% of the time, since only ~12 of ~151 node types can own a scope; the field is simply
+    // absent on the rest.
+    // 0 means "owns no scope": the field is initialised to 0 at construction and `analyze` overwrites
+    // it, and scope 0 is the table's root sentinel which is never owned by a node. A node type that
+    // cannot own a scope has no field at all, which `?? 0` folds into the same case.
+    const s = (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
+    if (s === 0) {
         WALKERS[node.type](node, ctx, visitSingle, visitList);
         return;
     }

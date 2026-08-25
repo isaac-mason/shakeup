@@ -50,7 +50,7 @@ const def = <const Name extends string, const D extends NodeDef>(name: Name, fie
 });
 
 const DEFS = [
-    def('Program', { body: list(child) }),
+    def('Program', { body: list(child), scopeId: scalar<number>() }),
     def('BindingIdentifier', null),
     def('IdentifierReference', null),
     def('IdentifierName', null),
@@ -104,8 +104,7 @@ const DEFS = [
         returnType: nullable(child),
         body: child,
         async: boolean,
-        expression: boolean,
-    }),
+        expression: boolean, scopeId: scalar<number>() }),
     def('FunctionExpression', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -113,8 +112,7 @@ const DEFS = [
         returnType: nullable(child),
         body: nullable(child),
         async: boolean,
-        generator: boolean,
-    }),
+        generator: boolean, scopeId: scalar<number>() }),
     def('ClassExpression', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -129,14 +127,14 @@ const DEFS = [
     def('ExpressionStatement', { expression: child }),
     def('VariableDeclaration', { declarations: list(child), kind: scalar<'var' | 'let' | 'const'>(), declare: boolean }),
     def('VariableDeclarator', { id: child, typeAnnotation: nullable(child), init: nullable(child), definite: boolean }),
-    def('BlockStatement', { body: list(child) }),
+    def('BlockStatement', { body: list(child), scopeId: scalar<number>() }),
     def('IfStatement', { test: child, consequent: child, alternate: nullable(child) }),
-    def('ForStatement', { init: nullable(child), test: nullable(child), update: nullable(child), body: child }),
-    def('ForInStatement', { left: child, right: child, body: child }),
-    def('ForOfStatement', { left: child, right: child, body: child, await: boolean }),
+    def('ForStatement', { init: nullable(child), test: nullable(child), update: nullable(child), body: child, scopeId: scalar<number>() }),
+    def('ForInStatement', { left: child, right: child, body: child, scopeId: scalar<number>() }),
+    def('ForOfStatement', { left: child, right: child, body: child, await: boolean, scopeId: scalar<number>() }),
     def('WhileStatement', { test: child, body: child }),
     def('DoWhileStatement', { body: child, test: child }),
-    def('SwitchStatement', { discriminant: child, cases: list(child) }),
+    def('SwitchStatement', { discriminant: child, cases: list(child), scopeId: scalar<number>() }),
     def('SwitchCase', { test: nullable(child), consequent: list(child) }),
     def('TryStatement', { block: child, handler: nullable(child), finalizer: nullable(child) }),
     def('CatchClause', { param: nullable(child), body: child }),
@@ -155,8 +153,7 @@ const DEFS = [
         body: nullable(child),
         async: boolean,
         generator: boolean,
-        declare: boolean,
-    }),
+        declare: boolean, scopeId: scalar<number>() }),
     def('ClassDeclaration', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -165,8 +162,7 @@ const DEFS = [
         implements: list(child),
         body: list(child),
         abstract: boolean,
-        declare: boolean,
-    }),
+        declare: boolean, scopeId: scalar<number>() }),
     def('MethodDefinition', {
         key: child,
         value: child,
@@ -295,11 +291,10 @@ const DEFS = [
         typeParameters: nullable(child),
         extends: list(child),
         body: list(child),
-        declare: boolean,
-    }),
+        declare: boolean, scopeId: scalar<number>() }),
     def('TSClassImplements', { expression: child, typeArguments: nullable(child) }),
     def('TSInterfaceHeritage', { expression: child, typeArguments: nullable(child) }),
-    def('TSTypeAliasDeclaration', { id: child, typeParameters: nullable(child), typeAnnotation: child, declare: boolean }),
+    def('TSTypeAliasDeclaration', { id: child, typeParameters: nullable(child), typeAnnotation: child, declare: boolean, scopeId: scalar<number>() }),
     def('TSEnumDeclaration', { id: child, members: list(child), const: boolean, declare: boolean }),
     def('TSEnumMember', { id: child, initializer: nullable(child) }),
     def('TSAsExpression', { expression: child, typeAnnotation: child }),
@@ -579,6 +574,13 @@ export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null)
     if (srcData === null) return rebuild(id, n.start, n.end, n.name, n.sym, null);
     const fields = FIELDS[id];
     const outData: Record<string, unknown> = { ...srcData };
+    // A CLONE IS A FRESH NODE — it carries no scope association, the same rule `set()` applies to
+    // `sym`. Without this the spread would copy `scopeId` and the clone would claim the ORIGINAL's
+    // scope, which belongs to a different lexical region. It matters: `optimize/unroll.ts` clones a
+    // loop body (a scope-owning `BlockStatement`), and `inline-functions`/`flow-inline` clone bodies
+    // and initialisers. Under the old `Map<Node, number>` a clone simply had no entry, and every
+    // reader fell back to the enclosing scope; resetting to 0 reproduces that exactly.
+    if ('scopeId' in outData) outData.scopeId = 0;
     for (let i = 0; i < fields.length; i++) {
         const spec = fields[i];
         const v = srcData[spec.name];

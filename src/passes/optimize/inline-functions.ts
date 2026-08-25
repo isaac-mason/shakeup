@@ -28,7 +28,7 @@
 //     variable is re-resolved with `lookupValue` at the call site and the inline is refused on any
 //     mismatch. This also covers globals (`Math`), which a local binding at the call site can shadow.
 import { isPureExpr } from '../../analysis/effects.ts';
-import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
+import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
 import { cloneNode, N, type Node, node, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { VAR_KIND } from '../../parser/create.ts';
@@ -363,7 +363,7 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
         const list = (n.data as Record<string, Node[]>)[field];
         if (!Array.isArray(list)) return;
         // Statements in this container live in the container's OWN scope, not the enclosing one.
-        const scope = semantic.nodeScope.get(n) ?? ctx.currentScope;
+        const scope = scopeOf(semantic, n) || ctx.currentScope;
         for (let i = 0; i < list.length; i++) {
             const st = list[i];
             if (st.type !== N.VariableDeclaration) continue;

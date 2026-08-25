@@ -1,4 +1,4 @@
-import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren, TYPE_COUNT } from '../ast.ts';
+import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast.ts';
 import { enumeration } from '../util/enumeration';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */
@@ -40,15 +40,7 @@ export type Semantic = {
     symbols: SymbolRec[];
 
     // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
-    nodeScope: Map<Node, number>;
-    /** `1` for every node TYPE that owns a scope in this semantic, `0` otherwise.
-     *
-     *  A gate in front of `nodeScope`, which is keyed by node OBJECT: `traverse`'s `descend` asks it
-     *  about every node it walks, and measured over a crashcat bundle 1,512,512 of 1,541,155 lookups
-     *  (98.14%) found nothing — only 12 of ~151 node types ever own a scope. Marked wherever a node
-     *  is registered below, so it is derived from the data rather than a hand-maintained list, and
-     *  can only ever be a SUPERSET of the owning types (never a false negative). */
-    scopeOwnerTypes: Uint8Array;
+
 
     unresolved: Node[];
 
@@ -122,8 +114,6 @@ export function createSemantic(): Semantic {
     return {
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
-        nodeScope: new Map(),
-        scopeOwnerTypes: new Uint8Array(TYPE_COUNT),
         refs: new Map(),
         uses: new Map(),
         shorthand: new Set(),
@@ -161,10 +151,7 @@ type AnalyseState = {
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
     const id = state.sem.scopes.length;
     state.sem.scopes.push({ parent: state.scope, flags, node });
-    if (node !== null) {
-        state.sem.nodeScope.set(node, id);
-        state.sem.scopeOwnerTypes[node.type] = 1;
-    }
+    if (node !== null) (node.data as { scopeId: number }).scopeId = id;
     return id;
 }
 
@@ -251,8 +238,6 @@ function resetSem(out: Semantic): void {
     out.unresolved.length = 0;
     out.names.clear();
     out.bindings.clear();
-    out.nodeScope.clear();
-    out.scopeOwnerTypes.fill(0);
     out.refs.clear();
     out.uses.clear();
     out.shorthand.clear();
@@ -864,8 +849,7 @@ export function createScope(semantic: Semantic, parent: number, flags: number): 
  *  `analyze()` rebuild. */
 export function attachScopeNode(semantic: Semantic, scope: number, node: Node): void {
     semantic.scopes[scope].node = node;
-    semantic.nodeScope.set(node, scope);
-    semantic.scopeOwnerTypes[node.type] = 1;
+    (node.data as { scopeId: number }).scopeId = scope;
 }
 
 /** Declare a local binding into an already-analyzed module's semantic at `scope` (e.g. an IIFE
@@ -886,4 +870,13 @@ export const symbolName = (semantic: Semantic, symbolId: number): string => sema
 /** Resolved symbol id for an Ident node (0 = unresolved/global). The link lives on the node. */
 export const symbolOf = (_semantic: Semantic, node: Node): number => node.sym;
 /** Scope owned by a scope-bearing node (0 = none). */
-export const scopeOf = (semantic: Semantic, node: Node): number => semantic.nodeScope.get(node) ?? 0;
+/** The scope a scope-OWNING node introduces, or 0 if it owns none.
+ *
+ *  The id lives on the node, in the `data` of the ~12 types that can own a scope — oxc's model
+ *  (`scope_id: Cell<Option<ScopeId>>`, carried by 12 structs in `oxc_ast/ast/js.rs` and 13 in
+ *  `ts.rs`). It used to be a `Map<Node, number>` consulted by `descend` for EVERY node walked:
+ *  1,512,512 of 1,541,155 object-keyed lookups (98.14%) found nothing, because only 1.86% of nodes
+ *  own a scope. Reading a field costs nothing on the nodes that do not have one — `data.scopeId` is
+ *  simply absent, and `?? 0` covers it. The `semantic` parameter is kept so call sites need no change
+ *  and so the signature still reads as a question about a Semantic. */
+export const scopeOf = (_semantic: Semantic, node: Node): number => (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
