@@ -1,4 +1,4 @@
-import { isIdentifier, N, type Node, walkChildren } from '../ast.ts';
+import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast.ts';
 import { enumeration } from '../util/enumeration';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */
@@ -497,6 +497,46 @@ function collectTarget(state: AnalyseState, node: Node | null): void {
  * free to take its slot — emitting `onBeforeRender(e,t,n,r,i){ … let e = … }` and a bundle Node
  * refuses to parse. The mangler was right; the scope tree it was given was wrong.
  */
+
+/**
+ * Codegen'd child descent for {@link visit} — one generated `switch (n.type)` reading each child field
+ * by NAME and recursing DIRECTLY, mirroring `ast.ts`'s `buildWalkBody`.
+ *
+ * It replaces `walkChildren(node, (c) => visit(state, c))`, which cost two things on every node without
+ * a specific case (most of them): a CLOSURE capturing `state`, and `walkChildren`'s DYNAMIC key
+ * `data[fields[i].name]` across ~151 hidden classes. `visit` is 7.68% of a crashcat bundling profile —
+ * half of this file, which is the largest in it.
+ *
+ * Note this is NOT the same proposition as codegen'ing `walkChildren` itself, which measured only 1.04%
+ * and was rejected: that has to keep its `(child, fieldName, listIndex)` callback and early exit, and
+ * the indirect call dominates. `visit` needs none of that, so the callback disappears. Benched at
+ * **1.20x** with a realistic per-node body (`benches/micro/visit-descend.bench.ts`) — the simplified
+ * arm claimed 1.52x, which is why the bench body does real work.
+ *
+ * `V` is passed in rather than closed over because a `new Function` body runs in global scope.
+ */
+function buildDescendBody(): string {
+    let s = 'const d=n.data;if(d===null)return;switch(n.type){';
+    for (const [name, fields] of Object.entries(CHILD_FIELDS) as [keyof typeof N, { name: string; list: boolean }[]][]) {
+        if (fields.length === 0) continue;
+        s += `case ${N[name]}:{`;
+        for (const f of fields) {
+            const key = JSON.stringify(f.name);
+            s += f.list
+                ? `{const a=d[${key}];if(a!=null){for(let i=0;i<a.length;i++){const c=a[i];if(c!=null)V(state,c);}}}`
+                : `{const c=d[${key}];if(c!=null)V(state,c);}`;
+        }
+        s += 'return;}';
+    }
+    return `${s}}`;
+}
+
+const descendVisit = new Function('state', 'n', 'V', buildDescendBody()) as (
+    state: AnalyseState,
+    n: Node,
+    V: (state: AnalyseState, node: Node | null) => void,
+) => void;
+
 function visitFunctionBody(state: AnalyseState, body: Node | null): void {
     if (body === null) return;
     if (body.type !== N.BlockStatement) {
@@ -765,7 +805,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             for (const a of node.data.arguments) visit(state, a);
             return;
     }
-    walkChildren(node, (c) => visit(state, c));
+    descendVisit(state, node, visit);
 }
 
 /**
