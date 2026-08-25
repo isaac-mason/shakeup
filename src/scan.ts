@@ -23,7 +23,7 @@ import { unrollLoops } from './passes/optimize/unroll';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
-import { applyRefDelta, type RefDelta, traverse } from './passes/traverse';
+import { applyRefDelta, type RefDelta, traverse, type Visitor } from './passes/traverse';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -53,9 +53,10 @@ import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, norma
  *
  *  Env-selectable so the whole suite can run under verification with
  *  `LOWER_SEMANTIC_MODE=verify pnpm test`. */
-/** Hoisted so `traverse`'s per-node-type hook-table cache (keyed on the visitor ARRAY) hits
- *  instead of rebuilding for every module. */
-const TS_STRIP_PASSES = [tsStrip];
+/** Hoisted so `traverse`'s per-node-type hook-table cache (keyed on the visitor ARRAY) hits instead
+ *  of rebuilding for every module. Lower first, strip second — oxc's statement-level order. */
+const TS_PASSES: Visitor[] = [tsLower, tsStrip];
+const EMPTY_PASSES: Visitor[] = [];
 
 export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
 let LOWER_SEMANTIC_MODE: LowerSemanticMode = (process.env.LOWER_SEMANTIC_MODE as LowerSemanticMode | undefined) ?? 'maintain';
@@ -766,26 +767,43 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // rather than time made it obvious: a build of three.core.js (plain JS) ran 12 full
                 // traversals, and these were 2 of them, ~17% of all 1.59M node visits, for zero
                 // mutations. A profile cannot show this; it looks like ordinary traversal cost.
-                const passes = isTs ? [tsLower] : [];
+                // SROA's type-shape oracle reads WRITTEN type annotations, so it must run BEFORE
+                // `tsStrip` erases them. It used to sit between two traversals for that reason; it
+                // now runs first instead. Nothing it reads is produced or altered by lowering — it
+                // collects in-module `type`/`interface` declarations and annotations on declarations,
+                // while lowering only rewrites enum/namespace/import-equals declarations (which carry
+                // no shape SROA models) and JSX expressions.
+                const shapes = isTs ? captureShapes(program) : new Map();
+                // ONE traversal for the whole transform, which is oxc's model: a single
+                // `traverse_mut_with_ctx` drives annotations + enum + namespace + module + JSX
+                // (`oxc_transformer/src/lib.rs:190`). `tsStrip` used to need a second walk because
+                // `fireEnter` consumes `ctx.op` only AFTER every hook for a node has run, so two
+                // visitors acting on one node would clobber each other (`ts-strip-pass-plan.md`).
+                // That hazard is real in the mechanism but cannot arise between these passes: they
+                // share exactly three node types and their predicates are exact complements —
+                // `tsLower` takes the VALUE form (`declare !== true`), `tsStrip` the `declare` form.
+                // `LOWER_SEMANTIC_MODE=verify` asserts it (see `fireEnter`'s conflict check) rather
+                // than leaving it to a comment.
+                //
+                // GATED ON THE MODULE'S LANGUAGE. A `.js` file runs none of this; the lowering used
+                // to walk every JavaScript module to find nothing.
+                let passes: Visitor[];
                 if (jsx && hasJSX) {
                     jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
-                    passes.push(makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt));
+                    const jsxPass = makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt);
+                    // jsxLower carries per-module state, so this array cannot be shared.
+                    passes = isTs ? [tsLower, jsxPass, tsStrip] : [jsxPass];
+                } else {
+                    // Shared constants: `traverse` caches its per-node-type hook tables on the visitor
+                    // ARRAY, so a fresh array per module would miss that cache every time.
+                    passes = isTs ? TS_PASSES : EMPTY_PASSES;
                 }
-                // Reference movement from the lowering traversals, folded into `semantic` below.
+                // Reference movement from the lowering traversal, folded into `semantic` below.
                 // `replaceWith`/`spliceStatements` already record it via `dropRefs`/`addRefs`; they
                 // are inert unless a delta map is threaded in, which is why the lowerings used to
                 // leave `semantic.refs` describing the PRE-lowering tree.
                 const lowerDelta = new Map<number, RefDelta>();
                 if (passes.length > 0) traverse(program, semantic, passes, lowerDelta);
-                // 2nd traverse: strip residual TS types (assertions, type-only stmts/members, param
-                // properties) after value lowering. Separate traverse so tsStrip never races tsLower's
-                // replaceWith on a shared node (see ts-strip-pass-plan.md).
-                // SROA's type-shape oracle reads WRITTEN annotations, so it must run before the
-                // strip erases them; the table is handed to the optimizer below.
-                // `captureShapes` reads WRITTEN type annotations for SROA's oracle, and `tsStrip`
-                // erases TS-only syntax — neither can find anything in a JavaScript module.
-                const shapes = isTs ? captureShapes(program) : new Map();
-                if (isTs) traverse(program, semantic, TS_STRIP_PASSES, lowerDelta);
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
