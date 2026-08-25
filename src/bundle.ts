@@ -780,10 +780,25 @@ function renderChunk(
             const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
+            const renameCache: (string | null | undefined)[] = [];
             const printer = createPrinter(
                 { minify: naming.minify },
                 {
-                    nameOf: (idNode: Node) => renameOf(ctx, idNode) ?? idNode.name,
+                    // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
+                    // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
+                    // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
+                    // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
+                    // collapses that to one. Correct per printer because the answer depends on
+                    // `ctx.chunk`, and a printer is created per module PER CHUNK render.
+                    nameOf: (idNode: Node) => {
+                        const sym = idNode.sym;
+                        if (sym === 0) return idNode.name; // unresolved: the name varies per node
+                        const hit = renameCache[sym];
+                        if (hit !== undefined) return hit ?? idNode.name;
+                        const v = renameOf(ctx, idNode) ?? null;
+                        renameCache[sym] = v;
+                        return v ?? idNode.name;
+                    },
                     linkModule: true,
                     defaultName: () => {
                         const ref = linked.defaultRefs.get(mod.idx);
