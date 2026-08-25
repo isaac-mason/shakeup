@@ -126,6 +126,9 @@ class Ctx {
      */
     private used: Set<string> | null = null;
     op = OP_NONE;
+    /** Number of mutation-API calls made. Only read by the hook-conflict check; incrementing it is a
+     *  field bump on a path that runs a few thousand times per bundle. */
+    mutCount = 0;
     opNode: Node | null = null;
     opNodes: Node[] | null = null;
     /** The scope enclosing the node currently being visited (oxc `TraverseCtx.current_scope_id`).
@@ -168,18 +171,21 @@ class Ctx {
     }
     /** Replace the current node in its slot. */
     replaceWith(node: Node): void {
+        this.mutCount++;
         this.op = OP_REPLACE;
         this.opNode = node;
         this.changed = true;
     }
     /** Replace the current statement with several (list slots only). */
     replaceWithMultiple(nodes: Node[]): void {
+        this.mutCount++;
         this.op = OP_MULTI;
         this.opNodes = nodes;
         this.changed = true;
     }
     /** Remove the current statement (list slots only). */
     remove(): void {
+        this.mutCount++;
         this.op = OP_REMOVE;
         this.changed = true;
     }
@@ -277,16 +283,67 @@ function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void
     });
 }
 
+/** Verification-only: catch two visitors mutating the SAME node in one phase.
+ *
+ *  `replaceWith`/`remove`/`replaceWithMultiple` only record an intent on `ctx.op`; the traversal
+ *  consumes it AFTER every hook for the node has run. So if two visitors both act on one node, the
+ *  second overwrites the first and the first's rewrite is silently lost. oxc cannot hit this because
+ *  its sub-transforms mutate in place (`*stmt = new_stmt`), so the next one sees the updated node.
+ *
+ *  Fusing the TS lowering and strip passes into one traversal relies on their predicates being exact
+ *  complements on the three node types they share (`TSEnumDeclaration` / `TSModuleDeclaration` /
+ *  `ExportNamedDeclaration`: value form vs `declare` form). That is a property of the PREDICATES, not
+ *  of the structure, so it is asserted rather than assumed — and the same hazard exists, unchecked,
+ *  across the 19 fused compress passes.
+ *
+ *  `LOWER_SEMANTIC_MODE=verify pnpm test` turns it on. */
+const HOOK_CONFLICT_CHECK = process.env.LOWER_SEMANTIC_MODE === 'verify' || process.env.TRAVERSE_VERIFY === '1';
+
+function conflict(node: Node, phase: string, ctx: Ctx, first: number, second: number): never {
+    const name = Object.keys(N).find((k) => N[k as keyof typeof N] === node.type) ?? String(node.type);
+    // Hook index maps to the visitor that contributed it, in the same order `hooksOf` appended them.
+    const owners = ctx.visitors.filter((v) => (phase === 'enter' ? v.enter : v.exit)?.[node.type] != null).map((v) => v.name);
+    throw new Error(
+        `two visitors mutated the same ${name} @${node.start} in one ${phase} phase — ` +
+            `'${owners[first] ?? first}' then '${owners[second] ?? second}'. The second silently ` +
+            `discards the first's rewrite, because ctx.op is consumed only after ALL hooks have run.`,
+    );
+}
+
 function fireEnter(node: Node, ctx: Ctx): void {
     const t = node.type;
     const hooks = ctx.enterByType[t] ?? hooksOf(ctx.visitors, ctx.enterByType, t, 'enter');
     if (hooks === null) return;
+    if (HOOK_CONFLICT_CHECK) {
+        let mutated = -1;
+        for (let i = 0; i < hooks.length; i++) {
+            const before = ctx.mutCount;
+            hooks[i](node, ctx);
+            if (ctx.mutCount !== before) {
+                if (mutated >= 0) conflict(node, 'enter', ctx, mutated, i);
+                mutated = i;
+            }
+        }
+        return;
+    }
     for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
 function fireExit(node: Node, ctx: Ctx): void {
     const t = node.type;
     const hooks = ctx.exitByType[t] ?? hooksOf(ctx.visitors, ctx.exitByType, t, 'exit');
     if (hooks === null) return;
+    if (HOOK_CONFLICT_CHECK) {
+        let mutated = -1;
+        for (let i = 0; i < hooks.length; i++) {
+            const before = ctx.mutCount;
+            hooks[i](node, ctx);
+            if (ctx.mutCount !== before) {
+                if (mutated >= 0) conflict(node, 'exit', ctx, mutated, i);
+                mutated = i;
+            }
+        }
+        return;
+    }
     for (let i = 0; i < hooks.length; i++) hooks[i](node, ctx);
 }
 
