@@ -6,9 +6,9 @@
 // A1a (this file): the functional strip — unwrap type-assertion expressions, remove type-only
 // statements + class members, filter type-only import/export specifiers, and lower constructor
 // parameter properties. A1b (annotation-field clearing, for a fully plain-JS AST) is layered on top.
-import { N, type Node, node } from '../ast.ts';
+import { N, type Node, node, walkChildren } from '../ast.ts';
 import * as create from '../parser/create.ts';
-import { hookTable, type Visitor } from './traverse.ts';
+import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim)
 
@@ -67,7 +67,7 @@ const isSuperCall = (n: Node): boolean =>
 /** Lower constructor parameter properties (`constructor(private x)`) → `this.x = x;` prepended to the
  *  body (after a leading `super(...)`). The field name is the original param name; the RHS references
  *  the param binding (same symbol, so it renames consistently). oxc's `class.rs`. */
-function lowerParamProps(ctor: Node): void {
+function lowerParamProps(ctor: Node, ctx: TransformCtx): void {
     const value = (ctor.data as { value: Node }).value;
     if (value === null || value.type !== N.FunctionExpression) return;
     const body = (value.data as { body: Node | null }).body;
@@ -91,20 +91,69 @@ function lowerParamProps(ctor: Node): void {
     if (assigns.length === 0) return;
     const stmts = (body.data as { body: Node[] }).body;
     const at = stmts.length > 0 && isSuperCall(stmts[0]) ? 1 : 0;
+    // These statements are installed by REPLACING the body array rather than through
+    // `ctx.spliceStatements` (an empty body is the shared frozen EMPTY_LIST, which cannot be spliced
+    // in place), so the traversal's automatic `addRefs` never sees them. Each `this.x = x` introduces
+    // a genuinely NEW read of the parameter, so record it explicitly — without this the parameter
+    // looks less referenced than it is, which is the unsafe direction (`dropUnused` could delete a
+    // binding that is still read).
+    for (const a of assigns) ctx.addRefs(a);
     // Build a fresh array — an empty body is the shared frozen EMPTY_LIST (can't splice in place).
     (body.data as { body: Node[] }).body = [...stmts.slice(0, at), ...assigns, ...stmts.slice(at)];
 }
 
 /** Drop type-only specifiers from an import/export; returns true if the whole statement should be
  *  removed (type-kind, or nothing runtime-bearing survives). */
-function stripImport(n: Node): boolean {
+function stripImport(n: Node, ctx: TransformCtx): boolean {
     const d = n.data as { importKind: string; specifiers: Node[] };
-    if (d.importKind === 'type') return true;
+    if (d.importKind === 'type') {
+        for (const sp of d.specifiers) evictSymbol(ctx, sp);
+        return true;
+    }
     if (d.specifiers.length === 0) return false; // side-effect import `import 'x'` — keep
-    d.specifiers = d.specifiers.filter(
-        (s) => !(s.type === N.ImportSpecifier && (s.data as { importKind: string }).importKind === 'type'),
-    );
+    d.specifiers = d.specifiers.filter((s) => {
+        const typeOnly = s.type === N.ImportSpecifier && (s.data as { importKind: string }).importKind === 'type';
+        if (typeOnly) evictSymbol(ctx, s);
+        return !typeOnly;
+    });
     return d.specifiers.length === 0; // everything was type-only → erase
+}
+
+/** An erased `import type { X }` leaves a symbol record behind in a MAINTAINED semantic, where a
+ *  rebuilt one would simply never have created it. Left in module scope it still claims its name
+ *  during deconfliction, so the VALUE that legitimately owns that name is pushed to `X$1`.
+ *
+ *  Evicting it by scope (rather than filtering at the claim site) is what keeps the two paths
+ *  identical: `deconflict` skips it because it is no longer module-scoped, while the real binding
+ *  still claims the name normally — so the name stays RESERVED and the chunk mangler cannot hand it
+ *  to a local. Filtering in `deconflict` instead left the name looking free and the mangler reissued
+ *  it, emitting a duplicate top-level declaration. */
+function evictSymbol(ctx: TransformCtx, specifier: Node): void {
+    evictSym(ctx, ((specifier.data as { local?: Node }).local as { sym: number } | undefined)?.sym ?? 0);
+}
+
+/** Evict every binding a declarator pattern introduces (`declare const { a, b } = ...`). */
+function evictPatternSymbols(ctx: TransformCtx, pat: Node | null): void {
+    if (pat === null) return;
+    if (pat.type === N.BindingIdentifier) {
+        evictSym(ctx, (pat as { sym: number }).sym);
+        return;
+    }
+    walkChildren(pat, (c) => evictPatternSymbols(ctx, c));
+}
+
+/** Same eviction for a type declaration erased whole (`interface` / `type X =`). */
+function evictDeclSymbol(ctx: TransformCtx, decl: Node): void {
+    evictSym(ctx, ((decl.data as { id?: Node }).id as { sym: number } | undefined)?.sym ?? 0);
+}
+
+function evictSym(ctx: TransformCtx, sym: number): void {
+    if (sym === 0) return; // unresolved / no symbol — symbols[0] is the table's own sentinel
+    const rec = ctx.semantic.symbols[sym];
+    // Scope 0 is the root sentinel `createSemantic` seeds and is never a module scope, so this
+    // reads as "owned by no lexical scope" while staying a VALID index for anything that does
+    // `scopes[rec.scope]` (an out-of-range sentinel crashed chunk-graph).
+    if (rec !== undefined) rec.scope = 0;
 }
 
 function stripExport(n: Node): boolean {
@@ -138,14 +187,32 @@ function unwrapAssertions(n: Node): Node {
  *  plain JS — oxc `annotations.rs`. The printer already ignores these; clearing them is for consumers
  *  of the plain AST (compilecat). Done on ENTER, so the traverse also skips descending into the (now
  *  null/empty) type subtrees. */
-function clearTypes(n: Node): void {
+/** Subtract the references held by a type subtree that is about to be erased.
+ *
+ *  Type annotations DO carry resolved references — `analyze` resolves a `TSTypeReference`'s entity
+ *  name in the type namespace and tallies it like any other. Nulling the field without subtracting
+ *  them leaves those symbols looking referenced by code that no longer exists, so `dropUnused` keeps
+ *  declarations it should drop. That direction is SAFE (it cannot miscompile) but it costs bytes:
+ *  measured at +188 bytes on a minified crashcat bundle before this was added. */
+function dropTypeRefs(ctx: TransformCtx, t: unknown): void {
+    if (t === null || t === undefined) return;
+    if (Array.isArray(t)) {
+        for (const x of t) if (x !== null && x !== undefined) ctx.dropRefs(x as Node);
+        return;
+    }
+    ctx.dropRefs(t as Node);
+}
+
+function clearTypes(n: Node, ctx: TransformCtx): void {
     const d = n.data as Record<string, unknown>;
     switch (n.type) {
         case N.VariableDeclarator:
+            dropTypeRefs(ctx, d.typeAnnotation);
             d.typeAnnotation = null;
             d.definite = false;
             break;
         case N.PropertyDefinition:
+            dropTypeRefs(ctx, d.typeAnnotation);
             d.typeAnnotation = null;
             d.optional = false;
             d.definite = false;
@@ -154,12 +221,14 @@ function clearTypes(n: Node): void {
             d.accessibility = null;
             break;
         case N.FormalParameter:
+            dropTypeRefs(ctx, d.typeAnnotation);
             d.typeAnnotation = null;
             d.optional = false;
             d.readonly = false;
             d.accessibility = null;
             break;
         case N.RestElement:
+            dropTypeRefs(ctx, d.typeAnnotation);
             d.typeAnnotation = null;
             break;
         case N.MethodDefinition:
@@ -170,11 +239,16 @@ function clearTypes(n: Node): void {
         case N.FunctionDeclaration:
         case N.FunctionExpression:
         case N.ArrowFunctionExpression:
+            dropTypeRefs(ctx, d.typeParameters);
+            dropTypeRefs(ctx, d.returnType);
             d.typeParameters = null;
             d.returnType = null;
             break;
         case N.ClassDeclaration:
         case N.ClassExpression:
+            dropTypeRefs(ctx, d.typeParameters);
+            dropTypeRefs(ctx, d.superTypeArguments);
+            dropTypeRefs(ctx, d.implements);
             d.typeParameters = null;
             d.superTypeArguments = null;
             d.implements = [];
@@ -182,6 +256,7 @@ function clearTypes(n: Node): void {
             break;
         case N.CallExpression:
         case N.NewExpression:
+            dropTypeRefs(ctx, d.typeArguments);
             d.typeArguments = null;
             break;
     }
@@ -197,28 +272,43 @@ export const tsStrip: Visitor = {
         [N.TSNonNullExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         [N.TSInstantiationExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         // Type-only statements → removed.
-        [N.TSInterfaceDeclaration]: (_n, ctx) => ctx.remove(),
-        [N.TSTypeAliasDeclaration]: (_n, ctx) => ctx.remove(),
+        [N.TSInterfaceDeclaration]: (n, ctx) => {
+            evictDeclSymbol(ctx, n);
+            ctx.remove();
+        },
+        [N.TSTypeAliasDeclaration]: (n, ctx) => {
+            evictDeclSymbol(ctx, n);
+            ctx.remove();
+        },
         [N.FunctionDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
-            else clearTypes(n);
+            if (isErasedStmt(n)) {
+                evictDeclSymbol(ctx, n);
+                ctx.remove();
+            } else clearTypes(n, ctx);
         },
         [N.ClassDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
-            else clearTypes(n);
+            if (isErasedStmt(n)) {
+                evictDeclSymbol(ctx, n);
+                ctx.remove();
+            } else clearTypes(n, ctx);
         },
         [N.VariableDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
+            if (isErasedStmt(n)) {
+                // `declare const g` binds nothing at runtime; a rebuilt semantic leaves references
+                // to it unresolved, so the maintained one must too.
+                for (const decl of (n.data as { declarations: Node[] }).declarations) evictPatternSymbols(ctx, (decl.data as { id: Node }).id);
+                ctx.remove();
+            }
         },
         // Pure type-field clearing (A1b — plain-JS AST).
-        [N.VariableDeclarator]: (n) => clearTypes(n),
-        [N.FormalParameter]: (n) => clearTypes(n),
-        [N.RestElement]: (n) => clearTypes(n),
-        [N.FunctionExpression]: (n) => clearTypes(n),
-        [N.ArrowFunctionExpression]: (n) => clearTypes(n),
-        [N.ClassExpression]: (n) => clearTypes(n),
-        [N.CallExpression]: (n) => clearTypes(n),
-        [N.NewExpression]: (n) => clearTypes(n),
+        [N.VariableDeclarator]: (n, ctx) => clearTypes(n, ctx),
+        [N.FormalParameter]: (n, ctx) => clearTypes(n, ctx),
+        [N.RestElement]: (n, ctx) => clearTypes(n, ctx),
+        [N.FunctionExpression]: (n, ctx) => clearTypes(n, ctx),
+        [N.ArrowFunctionExpression]: (n, ctx) => clearTypes(n, ctx),
+        [N.ClassExpression]: (n, ctx) => clearTypes(n, ctx),
+        [N.CallExpression]: (n, ctx) => clearTypes(n, ctx),
+        [N.NewExpression]: (n, ctx) => clearTypes(n, ctx),
         // `declare enum`/`declare namespace` — tsLower only lowers the VALUE forms, so the declare
         // (ambient) ones reach here and erase.
         [N.TSEnumDeclaration]: (n, ctx) => {
@@ -228,10 +318,18 @@ export const tsStrip: Visitor = {
             if ((n.data as { declare: boolean }).declare === true) ctx.remove();
         },
         [N.ImportDeclaration]: (n, ctx) => {
-            if (stripImport(n)) ctx.remove();
+            if (stripImport(n, ctx)) ctx.remove();
         },
         [N.ExportNamedDeclaration]: (n, ctx) => {
-            if (stripExport(n)) ctx.remove();
+            if (stripExport(n)) {
+                // The wrapper is erased WITHOUT descending, so the inner declaration's own hook
+                // never runs — `export interface X {}` must be evicted from here or its symbol
+                // survives at module scope and claims `X` during deconfliction.
+                const inner = (n.data as { declaration?: Node }).declaration;
+                if (inner !== null && inner !== undefined) evictDeclSymbol(ctx, inner);
+                for (const sp of ((n.data as { specifiers?: Node[] }).specifiers ?? [])) evictSymbol(ctx, sp);
+                ctx.remove();
+            }
         },
         // Class-body type-only members → removed.
         [N.TSIndexSignature]: (_n, ctx) => ctx.remove(),
@@ -240,13 +338,27 @@ export const tsStrip: Visitor = {
                 ctx.remove();
                 return;
             }
-            if ((n.data as { kind: string }).kind === 'constructor') lowerParamProps(n);
-            clearTypes(n);
+            if ((n.data as { kind: string }).kind === 'constructor') lowerParamProps(n, ctx);
+            clearTypes(n, ctx);
         },
         [N.PropertyDefinition]: (n, ctx) => {
             if (isErasedClassMember(n)) ctx.remove();
-            else clearTypes(n);
+            else clearTypes(n, ctx);
         },
     }),
-    exit: null,
+    exit: hookTable({
+        // `Semantic.symbolInit` holds the declarator init NODE per symbol, recorded by `analyze`
+        // before this pass ran. Unwrapping `x!` / `x as T` replaces that node, leaving the entry
+        // pointing at a detached wrapper — so `alias-inline` and `const-prop` see a
+        // `TSNonNullExpression` where the tree now has the `CallExpression` it wrapped, and decline
+        // to fire. Repairing is O(symbols-with-inits) (median 94 per module), not a tree walk,
+        // because the replacement is always a DESCENDANT reachable by the same unwrap.
+        [N.Program]: (_n, ctx) => {
+            const si = ctx.semantic.symbolInit;
+            for (const [sym, init] of si) {
+                const inner = unwrapAssertions(init);
+                if (inner !== init) si.set(sym, inner);
+            }
+        },
+    }),
 };

@@ -2,7 +2,7 @@
 // print-time `emitEnum` (print-js.ts) to a mutation pass that emits real AST. Namespace lowering and
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
 import { isPureExpr } from '../analysis/effects.ts';
-import { createScope, declareLocal, SCOPE, SYM, scopeOf } from '../analysis/semantic.ts';
+import { attachScopeNode, createScope, declareLocal, SCOPE, SYM, scopeOf, type Semantic } from '../analysis/semantic.ts';
 import { N, type Node, node, set, walk } from '../ast.ts';
 import * as create from '../parser/create.ts';
 import { FL, VAR_KIND } from '../parser/create.ts';
@@ -83,6 +83,7 @@ function iifeVarDecl(
     bodyStmts: Node[],
     sideEffect: boolean,
     parent: Uid | null,
+    semantic: Semantic,
 ): Node {
     const fn = create.FunctionExpression(
         S,
@@ -94,6 +95,10 @@ function iifeVarDecl(
         null,
         create.BlockStatement(S, S, 0, bodyStmts) as Node,
     ) as Node;
+    // `param` was declared into `param.scope`; this FunctionExpression is the node that OWNS that
+    // scope, and only now does it exist. Registering it keeps `scopeOf`/`ctx.currentScope` correct
+    // inside the IIFE without a post-lowering `analyze()` rebuild.
+    attachScopeNode(semantic, param.scope, fn);
     const arg =
         parent === null
             ? (create.LogicalExpression(S, S, '||', idRef(name, sym), obj()) as Node)
@@ -106,6 +111,11 @@ function iifeVarDecl(
                   assign(member(idRef(parent.name, parent.sym), idName(name)), obj()),
               ) as Node);
     const call = create.CallExpression(S, S, sideEffect ? 0 : FL.PURE, fn, [arg], null) as Node;
+    // `analyze` files a declarator's init under its symbol (`Semantic.symbolInit`, oxc's
+    // `SymbolValue`); compress reads it (alias-inline, const-prop). This declaration is minted
+    // AFTER that walk, so record it here or the symbol looks initialiser-less and those passes
+    // decline to fire — a size regression, not a miscompile.
+    if (sym !== 0) semantic.symbolInit.set(sym, call);
     return create.VariableDeclaration(S, S, VAR_KIND.VAR, [create.VariableDeclarator(S, S, 0, id, null, call) as Node]) as Node;
 }
 
@@ -157,7 +167,16 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
             autoNext++;
         } else {
             if (init.type === N.NewExpression || init.type === N.CallExpression) sideEffect = true;
+            // `qualifyMemberRefs` rewrites `A` -> `_E.A` IN PLACE, inside a subtree the enclosing
+            // `ctx.replaceWith` will later walk as its `prev`. That walk assumes `prev` is the tree
+            // the semantic still describes, so mutating first makes it decrement the NEW `_E`
+            // references (which were never counted) and re-add them — netting zero where the truth
+            // is +1 each, i.e. an UNDER-count, which is the unsafe direction. Bracketing the
+            // rewrite settles the initializer's own accounting before/after, exactly as
+            // `compress/inline.ts` brackets a moved body.
+            ctx.dropRefs(init);
             qualifyMemberRefs(init, prior, param);
+            ctx.addRefs(init);
             if (init.type === N.StringLiteral) {
                 stmts.push(exprStmt(assign(computed(pRef(), str(keyLit)), init)));
                 autoOk = false;
@@ -177,7 +196,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
         prior.add(key);
     }
     stmts.push(create.ReturnStatement(S, S, 0, pRef()) as Node); // `return _E;`
-    return iifeVarDecl(enumId, enumName, enumSym, param, stmts, sideEffect, null);
+    return iifeVarDecl(enumId, enumName, enumSym, param, stmts, sideEffect, null, ctx.semantic);
 }
 
 /** Convert a value entity name (`A` / `A.B.C`) to the equivalent value expression: an
@@ -194,10 +213,12 @@ function entityToValue(ref: Node): Node {
  *  `import X = require("m")` external form — CommonJS interop is out of scope for an ESM browser
  *  bundler, so it's left un-lowered to reject loudly. Type-only (`import type X =`) is erased by the
  *  caller before this. */
-function lowerImportEquals(node: Node): Node | null {
+function lowerImportEquals(node: Node, semantic: Semantic): Node | null {
     const d = node.data as { id: Node; moduleReference: Node };
     if (d.moduleReference.type === N.TSExternalModuleReference) return null; // require() — reject
     const init = entityToValue(d.moduleReference);
+    const sym = (d.id as { sym: number }).sym;
+    if (sym !== 0) semantic.symbolInit.set(sym, init); // see the note in `iifeVarDecl`
     return create.VariableDeclaration(S, S, VAR_KIND.VAR, [create.VariableDeclarator(S, S, 0, d.id, null, init) as Node]) as Node;
 }
 
@@ -212,7 +233,7 @@ function lowerNsMember(stmt: Node, thisParam: Uid, ctx: TransformCtx): Node[] | 
     // bare (non-exported) `import X = A.B` → `var X = A.B` (no mirror); `import type X =` erased.
     if (stmt.type === N.TSImportEqualsDeclaration) {
         if ((stmt.data as { importKind: string }).importKind === 'type') return [];
-        const lowered = lowerImportEquals(stmt);
+        const lowered = lowerImportEquals(stmt, ctx.semantic);
         return lowered === null ? null : [lowered];
     }
     // bare (non-exported) nested namespace → a local `var M = (…)(M || {})`, not on `_N`.
@@ -234,7 +255,7 @@ function lowerNsMember(stmt: Node, thisParam: Uid, ctx: TransformCtx): Node[] | 
     // `export import X = A.B` → `var X = A.B` + mirror `_N.X = X`; `export import type X =` erased.
     if (decl.type === N.TSImportEqualsDeclaration) {
         if ((decl.data as { importKind: string }).importKind === 'type') return [];
-        const lowered = lowerImportEquals(decl);
+        const lowered = lowerImportEquals(decl, ctx.semantic);
         if (lowered === null) return null;
         const id = (decl.data as { id: Node }).id;
         return [lowered, exprStmt(assign(member(pRef(), idName(id.name)), idRef(id.name, (id as { sym: number }).sym)))];
@@ -300,7 +321,7 @@ function lowerNamespace(nsNode: Node, ctx: TransformCtx, parent: Uid | null): No
     }
     if (body.length === 0) return ERASE; // type-only namespace → emits nothing
     body.push(create.ReturnStatement(S, S, 0, pRef()) as Node);
-    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parent);
+    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parent, ctx.semantic);
 }
 
 /** A lowered namespace body statement with no side effects (declarations + member mirrors of pure
@@ -339,7 +360,7 @@ export const tsLower: Visitor = {
             // `import X = A.B` → `var X = A.B`; `import type X =` erased; `= require()` left to reject.
             if ((node.data as { importKind: string }).importKind === 'type') ctx.remove();
             else {
-                const lowered = lowerImportEquals(node);
+                const lowered = lowerImportEquals(node, ctx.semantic);
                 if (lowered !== null) ctx.replaceWith(lowered);
             }
         },
@@ -352,7 +373,7 @@ export const tsLower: Visitor = {
                 // `export import X = A.B` → `export var X = A.B`; type-only erased; require() rejects.
                 if ((decl.data as { importKind: string }).importKind === 'type') ctx.remove();
                 else {
-                    const lowered = lowerImportEquals(decl);
+                    const lowered = lowerImportEquals(decl, ctx.semantic);
                     if (lowered !== null) ctx.replaceWith(create.ExportNamedDeclaration(S, S, 0, lowered, null, null) as Node);
                 }
             } else if (decl !== null && isValueNamespace(decl)) {

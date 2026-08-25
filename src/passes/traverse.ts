@@ -191,6 +191,27 @@ export type TransformCtx = Ctx;
 /** Signed per-symbol reference movement for one round. */
 export type RefDelta = { reads: number; writes: number; uses: number };
 
+/** Fold a round's {@link RefDelta} into a Semantic's `refs`/`uses`.
+ *
+ *  The counterpart to `dropRefs`/`addRefs`: those RECORD movement while a traversal mutates, this
+ *  APPLIES it once the traversal is done. Shared by the compress fixed point and the TS/JSX
+ *  lowering traversals so both maintain reference counts the same way instead of each re-deriving
+ *  them with a full `analyze()`. */
+export function applyRefDelta(semantic: Semantic, delta: Map<number, RefDelta>): void {
+    for (const [sym, d] of delta) {
+        if (d.reads !== 0 || d.writes !== 0) {
+            let c = semantic.refs.get(sym);
+            if (c === undefined) {
+                c = { reads: 0, writes: 0 };
+                semantic.refs.set(sym, c);
+            }
+            c.reads += d.reads;
+            c.writes += d.writes;
+        }
+        if (d.uses !== 0) semantic.uses.set(sym, (semantic.uses.get(sym) ?? 0) + d.uses);
+    }
+}
+
 function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void {
     emitRefFacts(root, (sym, flags) => {
         let d = into.get(sym);

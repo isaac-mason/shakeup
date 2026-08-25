@@ -12,7 +12,8 @@
 // classification that added it. Getting `writes` wrong in particular is not a size regression — an
 // under-counted write makes `aliasInline` believe a binding is never reassigned, and it will happily
 // substitute across the reassignment.
-import { N, type Node, walkChildren } from '../ast.ts';
+import { N, type Node, walk, walkChildren } from '../ast.ts';
+import { analyze, createSemantic, type Semantic } from './semantic.ts';
 
 /** Syntactic role of a reference. Mirrors the private flags in `semantic.ts` deliberately. */
 export const REF = {
@@ -202,3 +203,111 @@ export function verifyRefFacts(
     }
     return out;
 }
+
+/**
+ * Differential check for the TS/JSX lowering stage: does the MAINTAINED semantic (built before the
+ * lowerings, then kept current by `attachScopeNode` + the `RefDelta` the lowering traversals record)
+ * still describe the tree well enough to replace a from-scratch `analyze()`?
+ *
+ * Reports only UNSAFE divergences, following oxc's own rule for its `PassChanges` bookkeeping: a
+ * STALE EXTRA reference costs an optimization but stays correct, whereas a reference the tree
+ * contains and the table does NOT know about produces incorrect output. Concretely:
+ *
+ *   - under-counted refs   -> a live symbol looks dead, `dropUnused` deletes a declaration still in
+ *                             use. MISCOMPILE.
+ *   - missing `nodeScope`  -> `scopeOf`/`ctx.currentScope` resolve names from the wrong scope, so
+ *                             every hygiene check inside that region works from bad data.
+ *   - partition mismatch   -> two nodes share a symbol in one build and not the other; renaming or
+ *                             substitution would then bind the wrong thing.
+ *
+ * Over-counts are deliberately NOT reported: they are safe by the rule above, and the real gate for
+ * them is byte-identical output, which catches any that actually cost bytes.
+ *
+ * Builds its own ground truth and RESTORES the maintained `node.sym` association afterwards, so it
+ * is side-effect free on the tree and safe to run inside a normal build.
+ */
+export function verifyLowerSemantic(maintained: Semantic, program: Node): string[] {
+    const out: string[] = [];
+
+    // Snapshot before the rebuild — `analyze` overwrites `node.sym` with ITS OWN ids.
+    const nodes: Node[] = [];
+    const before = new Map<Node, number>();
+    walk(program, (n) => {
+        nodes.push(n);
+        before.set(n, n.sym);
+    });
+    const maintainedScopeNodes = new Set(maintained.nodeScope.keys());
+
+    // Clear every association BEFORE building ground truth. `analyze` only WRITES `node.sym` when it
+    // resolves a reference — an unresolved one keeps whatever it already held, so without this the
+    // truth build silently inherits the maintained ids for exactly the nodes most likely to differ
+    // (a reference whose declaration the lowering erased), making the two look equal when they are
+    // not.
+    for (const n of nodes) n.sym = 0;
+
+    const truth = createSemantic();
+    analyze(truth, program);
+
+    for (const n of truth.nodeScope.keys())
+        if (!maintainedScopeNodes.has(n)) out.push(`scope-owning node ${n.type} @${n.start} has no nodeScope entry (UNSAFE: resolves from the wrong scope)`);
+
+    // Symbol ids differ between builds; the PARTITION they induce must not.
+    const mToT = new Map<number, number>();
+    const tToM = new Map<number, number>();
+    for (const n of nodes) {
+        const m = before.get(n) ?? 0;
+        const t = n.sym;
+        if (m === 0 && t === 0) continue;
+        if (m === 0) {
+            out.push(`node ${n.type} @${n.start} unbound in maintained, bound in truth (UNSAFE)`);
+            continue;
+        }
+        if (t === 0) continue; // bound in maintained only — stale extra, safe
+        const pm = mToT.get(m);
+        const pt = tToM.get(t);
+        if (pm === undefined && pt === undefined) {
+            mToT.set(m, t);
+            tToM.set(t, m);
+        } else if (pm !== t || pt !== m) {
+            out.push(`node ${n.type} @${n.start} '${n.name}' symbol partition mismatch (UNSAFE): maintained ${m} -> truth ${t}, but maintained ${m} already maps to ${pm} and truth ${t} maps back to ${pt}`);
+        }
+    }
+
+    // Restore the maintained association BEFORE deriving ref facts — they must be keyed by the
+    // maintained symbol ids, not the throwaway rebuild's.
+    for (const n of nodes) n.sym = before.get(n) ?? 0;
+
+    for (const p of verifyRefFacts(maintained, program)) if (p.includes('UNDER(unsafe)')) out.push(p);
+
+    // `symbolInit` / `shorthand` / `exported` are read by compress passes (alias-inline, const-prop)
+    // and are NOT covered by the RefDelta, which carries only reads/writes/uses. A stale entry here
+    // points at a node the lowering may have detached, so it is reported as unsafe.
+    if (VERIFY_SYMBOL_INIT) {
+        // Symbol IDS differ between the two builds — compare THROUGH the partition map established
+        // above, or every entry looks divergent for no reason.
+        for (const [mSym, mInit] of maintained.symbolInit) {
+            const tSym = mToT.get(mSym);
+            if (tSym === undefined) continue; // symbol absent from truth (stale decl) — safe
+            const tInit = truth.symbolInit.get(tSym);
+            if (tInit === undefined) out.push(`sym ${mSym} symbolInit is stale in maintained (truth has none)`);
+            else if (tInit !== mInit) out.push(`sym ${mSym} symbolInit points at a DIFFERENT node (maintained ${mInit.type} vs truth ${tInit.type})`);
+        }
+        for (const [tSym, tInit] of truth.symbolInit) {
+            const mSym = tToM.get(tSym);
+            if (mSym !== undefined && !maintained.symbolInit.has(mSym))
+                out.push(`sym ${mSym} symbolInit missing in maintained (truth has ${tInit.type})`);
+        }
+    }
+    if (VERIFY_SYMBOL_INIT) {
+        const mNames = new Set(maintained.unresolved.map((n) => n.name));
+        const tNames = new Set(truth.unresolved.map((n) => n.name));
+        for (const n of mNames) if (!tNames.has(n)) out.push(`unresolved name '${n}' is stale in maintained (truth has none)`);
+        for (const n of tNames) if (!mNames.has(n)) out.push(`unresolved name '${n}' missing in maintained`);
+    }
+    return out;
+}
+
+/** `symbolInit` divergence is reported separately: it is real, but it is a SIZE effect (compress
+ *  passes decline to fire), not a miscompile, so gating the default flip on it would be wrong.
+ *  Set `VERIFY_SYMBOL_INIT=1` to include it. */
+const VERIFY_SYMBOL_INIT = process.env.VERIFY_SYMBOL_INIT === '1';
