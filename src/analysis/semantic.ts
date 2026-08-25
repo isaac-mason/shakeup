@@ -131,8 +131,23 @@ export function createSemantic(): Semantic {
  * run holds no module-global state (reentrant). `sem` is the table being filled; `scope`
  * is the current-scope cursor, saved/restored as the walk descends and ascends.
  */
-type RefColl = { node: Node; scope: number; ns: number; flags: number };
-type AnalyseState = { sem: Semantic; scope: number; pending: RefColl[] };
+/**
+ * Deferred references, held as PARALLEL ARRAYS rather than an array of records.
+ *
+ * Resolution is deferred to after the walk (so forward/hoisted references see every binding), which
+ * means every reference in the module is queued. As `{ node, scope, ns, flags }` records that was one
+ * OBJECT ALLOCATION PER REFERENCE — tens of thousands per module, on a path where GC is 38% of a
+ * crashcat bundle. Four arrays hold the same data with no per-entry object, and the consume loop reads
+ * them by index.
+ */
+type AnalyseState = {
+    sem: Semantic;
+    scope: number;
+    pendNode: Node[];
+    pendScope: number[];
+    pendNs: number[];
+    pendFlags: number[];
+};
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
     const id = state.sem.scopes.length;
@@ -240,19 +255,21 @@ function resetSem(out: Semantic): void {
  */
 export function analyze(out: Semantic, program: Node): void {
     resetSem(out);
-    const state: AnalyseState = { sem: out, scope: 0, pending: [] };
+    const state: AnalyseState = { sem: out, scope: 0, pendNode: [], pendScope: [], pendNs: [], pendFlags: [] };
     const moduleScope = newScope(state, SCOPE.MODULE, program);
     state.scope = moduleScope;
     visit(state, program);
-    for (const p of state.pending) {
-        state.scope = p.scope;
-        resolveRef(state, p.node, p.ns);
+    const pn = state.pendNode;
+    for (let i = 0; i < pn.length; i++) {
+        const node = pn[i];
+        state.scope = state.pendScope[i];
+        resolveRef(state, node, state.pendNs[i]);
         // Tally AFTER resolution — the role was recorded when we collected, the symbol is known only
         // now. Mirrors `computePrelude` exactly, including its quirks: a compound assignment and an
         // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
-        const sym = p.node.sym;
+        const sym = node.sym;
         if (sym === 0) continue;
-        const f = p.flags;
+        const f = state.pendFlags[i];
         if ((f & (REF_READ | REF_WRITE)) !== 0) {
             let c = out.refs.get(sym);
             if (c === undefined) {
@@ -313,7 +330,10 @@ function declareInScope(state: AnalyseState, kind: number, node: Node, body: () 
 // ─── single-pass traversal: declare + create scopes + COLLECT refs (resolution deferred) ──────────
 
 const collect = (state: AnalyseState, node: Node, ns: number, flags: number = REF_READ): void => {
-    state.pending.push({ node, scope: state.scope, ns, flags });
+    state.pendNode.push(node);
+    state.pendScope.push(state.scope);
+    state.pendNs.push(ns);
+    state.pendFlags.push(flags);
 };
 
 function collectEntityName(state: AnalyseState, node: Node | null, ns: number): void {
