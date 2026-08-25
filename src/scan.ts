@@ -761,8 +761,16 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // no `nodeScope` entry. Left stale, `ctx.currentScope` is wrong inside those regions
                 // and anything resolving names against it (inline's hygiene check, block-flatten's
                 // collision check, SROA's target scope) silently works from bad data.
-                semantic = createSemantic();
-                analyze(semantic, program);
+                // ...but ONLY when a lowering actually ran. `tsLower`, `captureShapes` and `tsStrip`
+                // are all gated above, so a plain-JS module without JSX mutates nothing here — and
+                // rebuilding the semantic to observe changes that were never made cost a full
+                // `analyze()` of every node, per module. `analyze` is the largest single file in a
+                // bundling profile (13%) and runs ~3x per module; this removes one of those for every
+                // JavaScript module, which in a real graph is most of `node_modules`.
+                if (isTs || passes.length > 0) {
+                    semantic = createSemantic();
+                    analyze(semantic, program);
+                }
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 // Only a TS module can contain the construct this looks for (a value
