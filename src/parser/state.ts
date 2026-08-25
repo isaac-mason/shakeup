@@ -68,6 +68,8 @@ export type ParserState = {
      * free during parse (esbuild's `p.jsxRuntimeImports` model), so consumers don't re-walk the AST
      * just to detect JSX. */
     sawJSX: boolean;
+    /** Saw `import(...)` or `import.meta` — see `ParseResult.hasImportSyntax`. */
+    sawImportSyntax: boolean;
 };
 
 /** Push a formatted diagnostic (capped, so a runaway parse can't allocate forever). */

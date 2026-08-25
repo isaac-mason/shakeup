@@ -344,6 +344,10 @@ function extractRecords(mod: Module): void {
     // walk the whole program. Literal-only: non-literal import() (import(x), import(`./${x}`),
     // import('a'+b)) has a non-StringLiteral source → skipped → no edge, left as a runtime
     // import in the emit.
+    // Both shapes below require `import(` or `import.meta`, which the parser already noted. Without
+    // either, this whole-program walk cannot match — 97 of 97 modules on a crashcat bundle, 167,349
+    // nodes for nothing.
+    if (!mod.hasImportSyntax) return;
     walk(mod.program, (n) => {
         if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) {
             addRecord(mod, strValue(source, n.data.source), 'dynamic');
@@ -703,6 +707,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let nodeCount: number;
         let semantic: Semantic;
         let hasJSX: boolean;
+        let hasImportSyntax: boolean;
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -717,6 +722,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             nodeCount = signalHit.nodeCount;
             semantic = signalHit.semantic;
             hasJSX = signalHit.hasJSX;
+            hasImportSyntax = signalHit.hasImportSyntax;
             sideEffects = signalHit.sideEffects;
             metaVal = signalHit.meta;
             moduleTypeVal = signalHit.moduleType;
@@ -751,6 +757,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (reuse && hit !== undefined) {
                 ({ program, nodeCount, semantic } = hit);
                 hasJSX = hit.hasJSX;
+                hasImportSyntax = hit.hasImportSyntax;
                 graph.parseStats.reused++;
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
@@ -762,6 +769,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
                 hasJSX = parsed.hasJSX;
+                hasImportSyntax = parsed.hasImportSyntax;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
@@ -885,6 +893,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             starExports: [],
             execOrder: -1,
             hasJSX,
+            hasImportSyntax,
             jsxRuntime: null,
             sideEffects,
             meta: metaVal,
@@ -934,6 +943,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 namedExports: mod.namedExports,
                 starExports: mod.starExports,
                 hasJSX: mod.hasJSX,
+                hasImportSyntax: mod.hasImportSyntax,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
                 source,
