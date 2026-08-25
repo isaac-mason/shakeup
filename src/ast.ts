@@ -494,22 +494,42 @@ export function statementListOf(n: Node): Node[] | null {
 }
 
 /** index-aware walk of direct children (`listIndex` -1 for a direct slot) */
-export function walkChildren(n: Node, cb: (child: Node, field: string, listIndex: number) => boolean | void): void {
-    const fields = FIELDS[n.type];
-    const data = payload(n);
-    if (data === null) return;
-    for (let i = 0; i < fields.length; i++) {
-        const v = data[fields[i].name];
-        if (v == null) continue;
-        if (fields[i].list) {
-            const arr = v as (Node | null)[];
-            for (let j = 0; j < arr.length; j++) {
-                const c = arr[j];
-                if (c != null && cb(c, fields[i].name, j) === false) return;
-            }
-        } else if (cb(v as Node, fields[i].name, -1) === false) return;
+// Generated from CHILD_FIELDS, exactly like `walk` below and `visit`'s descent in semantic.ts.
+//
+// The hand-written version read each child as `data[fields[i].name]` — a DYNAMIC string key against
+// an object whose hidden class varies across ~151 node types, i.e. a megamorphic property access on
+// the hottest walk in the codebase — and re-read `fields[i].name` twice more to pass `(field,
+// listIndex)`. Inside a generated `case` arm the read is static (`d.body`) and `d` has exactly one
+// hidden class, so every access is monomorphic.
+//
+// Measured 1.178x (z=9.2, control flat at 0.981x) over the real three.core.js AST with a realistic
+// callback body — `benches/micro/walk-children.paired.ts`. An earlier attempt was shelved at "1.04%
+// end-to-end", but that verdict came from a bench with a TRIVIAL callback body (which flatters the
+// wrapper) and a tsx-loader profile that inflated total runtime ~40%; on a clean bundled-ESM profile
+// this walk is 4.41% of our code.
+//
+// The `(field, listIndex)` arguments are kept for API compatibility — no current caller reads them
+// (verified across all 25 call sites), but they cost nothing now that the field name is a literal.
+function buildChildrenBody(): string {
+    let s = 'const d=n.data;if(d===null)return;switch(n.type){';
+    for (const [name, fields] of Object.entries(CHILD_FIELDS) as [keyof typeof N, FieldSpec[]][]) {
+        if (fields.length === 0) continue;
+        s += `case ${N[name]}:{`;
+        for (const f of fields) {
+            const key = JSON.stringify(f.name);
+            s += f.list
+                ? `{const a=d[${key}];if(a!=null){for(let i=0;i<a.length;i++){const c=a[i];if(c!=null&&cb(c,${key},i)===false)return;}}}`
+                : `{const c=d[${key}];if(c!=null&&cb(c,${key},-1)===false)return;}`;
+        }
+        s += 'return;}';
     }
+    return `${s}}`;
 }
+
+export const walkChildren = new Function('n', 'cb', buildChildrenBody()) as (
+    n: Node,
+    cb: (child: Node, field: string, listIndex: number) => boolean | void,
+) => void;
 
 // --- codegen'd read-only pre-order walk (schema-driven; replaces a ~730-line hand-switch) ---------
 // One generated `switch (n.type)` over CHILD_FIELDS, recursing via the self-ref `W` param — `new
