@@ -9,6 +9,13 @@
  *    does no scan/resolve/link/tree-shake/chunk/render. That inflated the gap ~2x and left the
  *    bundling stages with no counterpart. rolldown is the honest peer (Rust, and uses oxc inside);
  *    esbuild is a useful second.
+ *  · DO NOT USE THIS SHAPE TO COMPARE TWO COPIES OF SHAKEUP. Loading two full copies of the bundler
+ *    into ONE process and alternating them inflates the difference badly: measured solo, an old and a
+ *    new tree ran 428ms vs 388ms (1.10x), but co-resident in one process the OLD arm measured 849ms
+ *    and the comparison read 2.04x. The allocation-heavier arm is penalised disproportionately by the
+ *    combined heap, and a baseline-vs-baseline CONTROL CANNOT SEE IT — both control arms are the
+ *    baseline, so both carry the same penalty and the control still reads flat. To compare two
+ *    versions of shakeup, run each ALONE in its own process and alternate the PROCESSES.
  *  · PAIRED, WITH A CONTROL. This machine runs at load 9-45 with no CPU pinning, and labs reports a
  *    comparison resolution of ~+-33% here. Rounds alternate the tools and include shakeup measured
  *    against ITSELF; if that control does not land near 1.000x the numbers are not admissible.
