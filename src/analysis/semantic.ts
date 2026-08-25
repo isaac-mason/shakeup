@@ -1,4 +1,4 @@
-import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast.ts';
+import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren, TYPE_COUNT } from '../ast.ts';
 import { enumeration } from '../util/enumeration';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */
@@ -41,6 +41,14 @@ export type Semantic = {
 
     // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
     nodeScope: Map<Node, number>;
+    /** `1` for every node TYPE that owns a scope in this semantic, `0` otherwise.
+     *
+     *  A gate in front of `nodeScope`, which is keyed by node OBJECT: `traverse`'s `descend` asks it
+     *  about every node it walks, and measured over a crashcat bundle 1,512,512 of 1,541,155 lookups
+     *  (98.14%) found nothing — only 12 of ~151 node types ever own a scope. Marked wherever a node
+     *  is registered below, so it is derived from the data rather than a hand-maintained list, and
+     *  can only ever be a SUPERSET of the owning types (never a false negative). */
+    scopeOwnerTypes: Uint8Array;
 
     unresolved: Node[];
 
@@ -115,6 +123,7 @@ export function createSemantic(): Semantic {
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
         nodeScope: new Map(),
+        scopeOwnerTypes: new Uint8Array(TYPE_COUNT),
         refs: new Map(),
         uses: new Map(),
         shorthand: new Set(),
@@ -152,7 +161,10 @@ type AnalyseState = {
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
     const id = state.sem.scopes.length;
     state.sem.scopes.push({ parent: state.scope, flags, node });
-    if (node !== null) state.sem.nodeScope.set(node, id);
+    if (node !== null) {
+        state.sem.nodeScope.set(node, id);
+        state.sem.scopeOwnerTypes[node.type] = 1;
+    }
     return id;
 }
 
@@ -240,6 +252,7 @@ function resetSem(out: Semantic): void {
     out.names.clear();
     out.bindings.clear();
     out.nodeScope.clear();
+    out.scopeOwnerTypes.fill(0);
     out.refs.clear();
     out.uses.clear();
     out.shorthand.clear();
@@ -852,6 +865,7 @@ export function createScope(semantic: Semantic, parent: number, flags: number): 
 export function attachScopeNode(semantic: Semantic, scope: number, node: Node): void {
     semantic.scopes[scope].node = node;
     semantic.nodeScope.set(node, scope);
+    semantic.scopeOwnerTypes[node.type] = 1;
 }
 
 /** Declare a local binding into an already-analyzed module's semantic at `scope` (e.g. an IIFE
