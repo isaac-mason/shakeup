@@ -37,8 +37,20 @@ export type PrinterConfig = {
 /** Printer state. Mirrors the load-bearing fields of oxc's `Codegen`
  *  (`llm/libs/oxc/crates/oxc_codegen/src/lib.rs:87-148`), trimmed to what we emit. */
 export type Printer = {
-    /** CodeBuffer: array of string chunks joined once at the end (V8-cheap cons/rope). */
-    out: string[];
+    /**
+     * CodeBuffer — one growable UTF-8 byte buffer, oxc's `CodeBuffer` model (`Vec<u8>` +
+     * `print_ascii_byte`), decoded once at the end.
+     *
+     * This replaced `out: string[]` + `push` per token + `join('')`. Instrumenting a real bundle showed
+     * why it matters: three.core.js emits 169,790 pushes for 376,544 chars, and **75% of those pushes
+     * are a SINGLE CHARACTER** (78% on crashcat) — the output is punctuation-dominated, so the array
+     * held ~170k one-char strings before joining them. Benched in isolation against the measured token
+     * profile (`benches/micro/emit.bench.ts`, cross-arm string equality enforced): 3.90ms -> 1.35ms,
+     * **2.89x**, beating `string +=` (2.16ms) and an 8KB-chunked hybrid (2.24ms).
+     */
+    buf: Uint8Array;
+    /** Bytes written so far — the buffer's logical length. */
+    len: number;
     opts: PrintOptions;
     /** Current indentation depth (ignored under minify). */
     indent: number;
@@ -76,7 +88,6 @@ function wouldMerge(a: string, b: string): boolean {
 export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Printer {
     const wantMap = cfg.srcLines !== undefined;
     return {
-        out: [],
         opts,
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
@@ -89,19 +100,24 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         col: 0,
         srcLines: cfg.srcLines ?? null,
         sourceIdx: cfg.sourceIdx ?? 0,
+        // Grown by doubling. A printer is created PER MODULE, so a large up-front reservation would be
+        // wasted on the many small ones; a 380KB chunk costs ~7 doublings and ~760KB copied in total.
+        buf: new Uint8Array(4096),
+        len: 0,
         pendingSpace: false,
         lastChar: '',
     };
 }
 
 export function finishPrinter(p: Printer): string {
-    return p.out.join('');
+    return DECODER.decode(p.buf.subarray(0, p.len));
 }
 
 /** The output plus its sourcemap segments, as a joinable {@link Part}-shaped value.
  *  `map` is undefined when the printer was created without `srcLines`. */
 export function printerPart(p: Printer): { code: string; map?: Mappings } {
-    return p.map === null ? { code: p.out.join('') } : { code: p.out.join(''), map: p.map };
+    const code = DECODER.decode(p.buf.subarray(0, p.len));
+    return p.map === null ? { code } : { code, map: p.map };
 }
 
 /** The single output sink: append `s` and advance the generated position, opening a new
@@ -118,9 +134,40 @@ function push(p: Printer, s: string): void {
 }
 
 /** Unconditional buffer append + position tracking. */
+const ENCODER = new TextEncoder();
+const DECODER = new TextDecoder();
+
+function grow(p: Printer, need: number): void {
+    let cap = p.buf.length;
+    while (cap < need) cap *= 2;
+    const next = new Uint8Array(cap);
+    next.set(p.buf.subarray(0, p.len));
+    p.buf = next;
+}
+
 function emit(p: Printer, s: string): void {
-    if (s.length > 0) p.lastChar = s[s.length - 1];
-    p.out.push(s);
+    const n = s.length;
+    if (n === 0) return;
+    p.lastChar = s[n - 1];
+    // Worst case is 3 bytes per UTF-16 unit (a surrogate PAIR is 4 bytes for 2 units, so 3/unit holds).
+    if (p.len + n * 3 > p.buf.length) grow(p, p.len + n * 3);
+    const buf = p.buf;
+    let w = p.len;
+    let i = 0;
+    for (; i < n; i++) {
+        const c = s.charCodeAt(i);
+        if (c > 0x7f) break;
+        buf[w] = c;
+        w++;
+    }
+    if (i < n) {
+        // Non-ASCII tail — rare in minified JS, so it takes the slow path and encodes properly rather
+        // than complicating the byte loop above.
+        const bytes = ENCODER.encode(s.slice(i));
+        buf.set(bytes, w);
+        w += bytes.length;
+    }
+    p.len = w;
     if (p.map === null) return;
     for (let i = 0; i < s.length; i++) {
         if (s.charCodeAt(i) === 10) {
@@ -185,8 +232,9 @@ export function semi(p: Printer): void {
  *  are emitted as distinct tokens and never land right before this call. */
 export function dropTrailingSemi(p: Printer): void {
     if (!p.opts.minify) return;
-    if (p.out.length > 0 && p.out[p.out.length - 1] === ';') {
-        p.out.pop();
+    // 0x3B is ';'. Simpler than the array form, which had to assume the last CHUNK was exactly ";".
+    if (p.len > 0 && p.buf[p.len - 1] === 0x3b) {
+        p.len--;
         if (p.map !== null && p.col > 0) p.col--;
     }
 }
