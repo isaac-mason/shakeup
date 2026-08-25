@@ -206,6 +206,30 @@ function listHook(n: Node, ctx: TransformCtx): void {
     if (list !== null && rewriteList(list)) ctx.changed = true;
 }
 
+/** Same rewrites, fired on EXIT instead of enter.
+ *
+ *  Exists for the single fused final traversal. `substituteAlternateSyntax` rewrites `const` -> `let`,
+ *  which turns declaration runs that were previously unmergeable (a `let` run split by a `const` run)
+ *  into one mergeable run — but it changes the DECLARATION nodes, which a traversal reaches only
+ *  after the enclosing statement list. Firing on enter (as {@link joinVars} does inside the fixed
+ *  point) would therefore see the pre-substitution kinds, which is why these two used to need
+ *  separate walks: two full traversals of every module, 122,202 nodes each, 21.6% of all
+ *  `traverse` node visits in a crashcat bundle. On exit the subtree is already substituted, so one
+ *  walk does both.
+ *
+ *  The loop's `joinVars` is deliberately left on enter — its ordering against the other 18 passes is
+ *  load-bearing and is not what this is about. */
+export const joinVarsOnExit: Visitor = {
+    name: 'joinVarsOnExit',
+    enter: null,
+    exit: hookTable({
+        [N.Program]: listHook,
+        [N.BlockStatement]: listHook,
+        [N.StaticBlock]: listHook,
+        [N.SwitchCase]: listHook,
+    }),
+};
+
 export const joinVars: Visitor = {
     name: 'joinVars',
     enter: hookTable({

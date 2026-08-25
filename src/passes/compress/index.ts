@@ -32,7 +32,7 @@ import { dropDebugger } from './drop-debugger.ts';
 import { dropUnused } from './drop-unused.ts';
 import { foldConstants } from './fold-constants.ts';
 import { inline } from './inline.ts';
-import { joinVars } from './join-vars.ts';
+import { joinVars, joinVarsOnExit } from './join-vars.ts';
 import { minimizeConditionalExpr } from './minimize-conditional.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
 import { minimizeExitPoints } from './minimize-exit-points.ts';
@@ -95,14 +95,14 @@ const LOOP_PASSES: TaggedPass[] = [
  *  the loop. `substituteAlternateSyntax` (`true`→`!0`) is the canonical example: inside the loop it
  *  would ping-pong forever against fold-constants (`!0`→`true`), so it runs last, once. Entirely
  *  cosmetic, so `'dce'` skips this traversal altogether. */
-const FINAL_PASSES: Visitor[] = [substituteAlternateSyntax];
+
 
 // A SECOND final traversal, run after `FINAL_PASSES` completes. `substituteAlternateSyntax` rewrites
 // `const` → `let`, which turns declaration runs that were previously unmergeable (a `let` run split by
 // a `const` run) into one mergeable run — a real byte win. It must be its own traversal: `traverse`
 // applies every visitor in ONE walk, and `joinVars` rewrites a statement LIST on the way down, before
 // descent reaches the child declarations whose `kind` the substitution is about to change.
-const POST_FINAL_PASSES: Visitor[] = [joinVars];
+const FINAL_AND_JOIN: Visitor[] = [substituteAlternateSyntax, joinVarsOnExit];
 
 /** Closure's placement for `CoalesceVariableNames`: ONCE, LATE, after everything else has settled —
  *  never inside the fixed point. It must follow `substituteAlternateSyntax` (which rewrites `const`→
@@ -294,8 +294,9 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     // single rebuild: `joinVars` only merges adjacent declarations (pure syntax, no symbol lookups),
     // so it does not need a semantic refreshed by `substituteAlternateSyntax` before it.
     if (mode === 'full') {
-        let finalChanged = traverse(program, cur, FINAL_PASSES);
-        if (traverse(program, cur, POST_FINAL_PASSES)) finalChanged = true;
+        // ONE walk: `substituteAlternateSyntax` on enter, `joinVarsOnExit` on exit, so the join sees
+        // the `const` -> `let` rewrites its merging depends on. These were two full traversals.
+        let finalChanged = traverse(program, cur, FINAL_AND_JOIN);
         if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
         if (finalChanged) {
             any = true;
