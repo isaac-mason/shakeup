@@ -244,3 +244,113 @@ group('decompose: Map vs record-array vs SoA @micro @soa @decompose', () => {
         };
     }).gc(true);
 });
+
+// ── HOW CLOSE CAN AN OBJECT FORM GET TO SoA? ──────────────────────────────────────────────────────
+// `record[]` captured 90% of the saving while keeping `{reads, writes}` — worth pushing further,
+// because every metre closed here is refactor NOT spent rewriting four passes to `reads[sym]`.
+//
+// Two levers left on the object side:
+//   • CLASS instances — one constructor, so V8 fixes the hidden class up front rather than
+//     transitioning through it on each literal.
+//   • REUSE — `analyze` already recycles its `Semantic` ("reuse it across analyze() calls to keep warm
+//     capacity"), so the record array can persist and have its fields ZEROED instead of reallocated.
+//     That removes per-call allocation entirely, which is what SoA's advantage really is.
+// The SoA arm gets the same treatment (`fill(0)` on a kept buffer) so the comparison stays fair.
+class RefCount {
+    reads = 0;
+    writes = 0;
+}
+
+group('object forms: how close to SoA? @micro @soa @objform', () => {
+    const S = { symbols: 7_332, refs: 26_000 };
+
+    bench('Map (baseline)', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs = new Map<number, { reads: number; writes: number }>();
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                let c = refs.get(sym);
+                if (c === undefined) { c = { reads: 0, writes: 0 }; refs.set(sym, c); }
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.size;
+        };
+    }).gc(true);
+
+    bench('literal record[], lazy', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs: ({ reads: number; writes: number } | undefined)[] = new Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                let c = refs[sym];
+                if (c === undefined) { c = { reads: 0, writes: 0 }; refs[sym] = c; }
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.length;
+        };
+    }).gc(true);
+
+    bench('class record[], lazy', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const refs: (RefCount | undefined)[] = new Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                let c = refs[sym];
+                if (c === undefined) { c = new RefCount(); refs[sym] = c; }
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.length;
+        };
+    }).gc(true);
+
+    bench('class record[], REUSED + zeroed', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        const refs: RefCount[] = new Array(S.symbols);
+        for (let i = 0; i < S.symbols; i++) refs[i] = new RefCount();
+        yield () => {
+            for (let i = 0; i < S.symbols; i++) { const c = refs[i]; c.reads = 0; c.writes = 0; }
+            for (let i = 0; i < stream.length; i++) {
+                const c = refs[stream[i]];
+                c.reads++;
+                if ((i & 7) === 0) c.writes++;
+            }
+            return refs.length;
+        };
+    }).gc(true);
+
+    bench('SoA Int32Array, fresh', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        yield () => {
+            const reads = new Int32Array(S.symbols);
+            const writes = new Int32Array(S.symbols);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                reads[sym]++;
+                if ((i & 7) === 0) writes[sym]++;
+            }
+            return reads.length;
+        };
+    }).gc(true);
+
+    bench('SoA Int32Array, REUSED + fill(0)', function* () {
+        const stream = refStream(S.symbols, S.refs);
+        const reads = new Int32Array(S.symbols);
+        const writes = new Int32Array(S.symbols);
+        yield () => {
+            reads.fill(0);
+            writes.fill(0);
+            for (let i = 0; i < stream.length; i++) {
+                const sym = stream[i];
+                reads[sym]++;
+                if ((i & 7) === 0) writes[sym]++;
+            }
+            return reads.length;
+        };
+    }).gc(true);
+});
