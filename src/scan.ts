@@ -876,6 +876,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasImportSyntax: boolean;
         let hasTopLevelReturn = false;
         let hasRequire = false;
+        let topLevelThis: Node[] = [];
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -943,6 +944,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax = hit.hasImportSyntax;
                 hasTopLevelReturn = hit.hasTopLevelReturn;
                 hasRequire = hit.hasRequire;
+                topLevelThis = hit.topLevelThis;
                 graph.parseStats.reused++;
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
@@ -960,6 +962,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax = parsed.hasImportSyntax;
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
                 hasRequire = parsed.hasRequire;
+                topLevelThis = parsed.topLevelThis;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
@@ -1111,6 +1114,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasImportSyntax,
             hasTopLevelReturn,
             hasRequire,
+            topLevelThis,
             jsxRuntime: null,
             sideEffects,
             meta: metaVal,
@@ -1171,6 +1175,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax: mod.hasImportSyntax,
                 hasTopLevelReturn: mod.hasTopLevelReturn,
                 hasRequire: mod.hasRequire,
+                topLevelThis: mod.topLevelThis,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
                 source,

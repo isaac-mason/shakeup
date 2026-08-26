@@ -130,6 +130,8 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
+        thisDepth: 0,
+        topLevelThis: [],
         sawImportSyntax: false,
         chainSawOptional: false,
         noCondType: false,
@@ -176,6 +178,12 @@ function isNameLike(state: ParserState): boolean {
 /** Human description of the current token for diagnostics: `token 'foo'`, or `end of input`. */
 function tokenDesc(state: ParserState): string {
     return state.tokEnd > state.tokStart ? `token '${state.src.slice(state.tokStart, state.tokEnd)}'` : 'end of input';
+}
+
+/** Note a `this` that is at the module top level, where CommonJS gives it `module.exports`. */
+function recordThis(state: ParserState, n: Node): Node {
+    if (state.thisDepth === 0) state.topLevelThis.push(n);
+    return n;
 }
 
 function ident(state: ParserState, role: number, start: number, end: number): Identifier {
@@ -709,7 +717,7 @@ function parseJSXName(state: ParserState): Node {
     }
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
         const isThis = e0 - s0 === 4 && src.startsWith('this', s0);
-        let obj: Node = isThis ? (create.ThisExpression(s0, e0, 0) as Node) : (ident(state, R_REF, s0, e0) as Node);
+        let obj: Node = isThis ? (recordThis(state, create.ThisExpression(s0, e0, 0) as Node)) : (ident(state, R_REF, s0, e0) as Node);
         while (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
             state.pos++;
             const [ps, pe] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
@@ -717,7 +725,7 @@ function parseJSXName(state: ParserState): Node {
         }
         return obj;
     }
-    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0)) return create.ThisExpression(s0, e0, 0) as Node;
+    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0)) return recordThis(state, create.ThisExpression(s0, e0, 0) as Node);
     if (first >= 65 && first <= 90) return ident(state, R_REF, s0, e0) as Node;
     return jsxIdent(state, s0, e0);
 }
@@ -1012,7 +1020,7 @@ function parsePrimary(state: ParserState): Node {
         switch (state.tok as number) {
             case K.THIS:
                 nextToken(state);
-                return create.ThisExpression(start, state.tokStart, 0) as Node;
+                return recordThis(state, create.ThisExpression(start, state.tokStart, 0) as Node);
             case K.SUPER:
                 nextToken(state);
                 return create.Super(start, state.tokStart, 0) as Node;
@@ -1293,11 +1301,16 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
     expectP(state, P.ARROW, "'=>'");
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
-    const body: Node = inFunctionScope(state, isAsync, () => {
-        if (isP(state, P.LBRACE)) return parseBlock(state);
-        exprBody = true;
-        return parseAssign(state);
-    });
+    const body: Node = inFunctionScope(
+        state,
+        isAsync,
+        () => {
+            if (isP(state, P.LBRACE)) return parseBlock(state);
+            exprBody = true;
+            return parseAssign(state);
+        },
+        true,
+    );
     if (exprBody) flags |= FL.EXPR_BODY;
     return create.ArrowFunctionExpression(start, body.end, flags, typeParams, params, returnType, body) as Node;
 }
@@ -1307,11 +1320,16 @@ function parseArrowAfterSingleParam(state: ParserState, start: number, id: Ident
     expectP(state, P.ARROW, "'=>'");
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
-    const body: Node = inFunctionScope(state, isAsync, () => {
-        if (isP(state, P.LBRACE)) return parseBlock(state);
-        exprBody = true;
-        return parseAssign(state);
-    });
+    const body: Node = inFunctionScope(
+        state,
+        isAsync,
+        () => {
+            if (isP(state, P.LBRACE)) return parseBlock(state);
+            exprBody = true;
+            return parseAssign(state);
+        },
+        true,
+    );
     if (exprBody) flags |= FL.EXPR_BODY;
     return create.ArrowFunctionExpression(start, body.end, flags, null, [param], null, body) as Node;
 }
@@ -1552,7 +1570,9 @@ function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, sta
         } while (eatP(state, P.COMMA));
     }
     const impls = finishList(state, implFrom);
+    state.thisDepth++;
     const body = parseClassBody(state);
+    state.thisDepth--;
     return isExpr
         ? (create.ClassExpression(
               start,
@@ -1722,13 +1742,16 @@ function isAccessModifier(state: ParserState): boolean {
  *  `new.target` exactly like a block body does. Handling only the block form silently let an
  *  expression-bodied async arrow inherit the enclosing scope's `await`, and wrongly rejected
  *  `() => new.target`. */
-function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T): T {
+function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T, arrow = false): T {
     state.fnDepth++;
     state.newTargetDepth++;
+    // An arrow does NOT rebind `this`, so it must not hide the module's own.
+    if (!arrow) state.thisDepth++;
     const outerAwait = state.awaitOk;
     state.awaitOk = isAsync; // REPLACED, not unioned — a non-async function inherits no `await`
     const out = parse();
     state.awaitOk = outerAwait;
+    if (!arrow) state.thisDepth--;
     state.fnDepth--;
     state.newTargetDepth--;
     return out;
@@ -3210,6 +3233,8 @@ export type ParseResult = {
     hasTopLevelReturn: boolean;
     /** Module mentions `require` — gates the `require("lit")` edge walk. */
     hasRequire: boolean;
+    /** `this` expressions at the module top level (CommonJS: `module.exports`). */
+    topLevelThis: Node[];
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -3254,6 +3279,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasImportSyntax: state.sawImportSyntax,
         hasTopLevelReturn: state.sawTopLevelReturn,
         hasRequire: state.sawRequire,
+        topLevelThis: state.topLevelThis,
     };
 }
 
