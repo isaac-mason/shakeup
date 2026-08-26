@@ -114,3 +114,53 @@ describe('CommonJS across chunk boundaries', () => {
         expect(await buildAndRun({ '/e.js': 'export const k = 7;', '/main.js': "export const x = import('./e.js').then((m) => m.k);" })).toBe(7);
     });
 });
+
+// KNOWN GAP (cjs.md §7.20, D1) — `require()` of an ES module is EAGER. rolldown gives such a target
+// an `__esm` lazy-init wrapper so the body runs at the CALL; shakeup evaluates it at its position in
+// the concatenation. Two observable consequences, both asserted below.
+//
+// The fix is a real AST transform (rolldown's `misc/wrapped_esm` fixture): every binding hoisted to a
+// bare `var` so the namespace getters can close over it, with the INITIALIZING statements moved into
+// the closure. Marked `it.fails` until that lands.
+describe('require() of an ES module is lazy', () => {
+    const runOne = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
+    };
+
+    it.fails('does not run a target whose require is never reached', async () => {
+        // The serious half: a module that should never execute does.
+        const ns = await runOne({
+            '/esm.js': 'globalThis.__ran = true;\nexport const a = 1;',
+            '/d.cjs': "let v = 0;\nif (globalThis.__never) { v = require('./esm.js').a }\nmodule.exports = { v, ran: globalThis.__ran ?? false };",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual({ v: 0, ran: false });
+    });
+
+    it.fails('runs the target AT the require call, not before it', async () => {
+        const ns = await runOne({
+            '/esm.js': 'globalThis.__log.push("esm");\nexport const a = 1;',
+            '/d.cjs': [
+                'globalThis.__log = [];',
+                'globalThis.__log.push("before");',
+                "const e = require('./esm.js');",
+                'globalThis.__log.push("after");',
+                'module.exports = { order: globalThis.__log.slice(), a: e.a };',
+            ].join('\n'),
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual({ order: ['before', 'esm', 'after'], a: 1 });
+    });
+
+    it('still resolves the required ES module’s values', async () => {
+        // Guard: whatever the timing fix does, the values must keep working.
+        const ns = await runOne({
+            '/esm.js': 'export const a = 1;\nexport default 2;',
+            '/d.cjs': "const e = require('./esm.js');\nmodule.exports = [e.a, e.default];",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual([1, 2]);
+    });
+});
