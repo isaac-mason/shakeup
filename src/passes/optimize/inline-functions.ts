@@ -32,7 +32,7 @@ import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts'
 import { cloneNode, N, type Node, node, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { VAR_KIND } from '../../parser/create.ts';
-import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
+import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { mutateForBlockInline } from './block-mutate.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 
@@ -433,7 +433,14 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
             },
         }),
     };
-    return traverse(program, semantic, [visitor]);
+    // Thread a `RefDelta`: without one, `ctx.dropRefs`/`addRefs` are NO-OPS, so references this pass
+    // moves never reach the maintained counts. That is the UNDER-count direction — a live symbol looks
+    // dead and `dropUnused` deletes a declaration still in use — invisible today only because the
+    // optimize tier is followed by a full rebuild.
+    const delta = new Map<number, RefDelta>();
+    const changed = traverse(program, semantic, [visitor], delta);
+    applyRefDelta(semantic, delta);
+    return changed;
 }
 
 // ── Cross-module `@inline` ──────────────────────────────────────────────────────────────────────

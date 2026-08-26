@@ -22,7 +22,7 @@
 import { cloneNode, N, type Node, node, statementListOf, walk } from '../../ast.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
-import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
+import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 
 /** Hard ceiling on iterations regardless of body size. */
@@ -191,7 +191,12 @@ export function unrollLoops(program: Node, semantic: Semantic, source: string): 
         }
     };
 
-    return traverse(program, semantic, [
+    // Thread a `RefDelta`: without one, `ctx.dropRefs`/`addRefs` are NO-OPS, so references this pass
+    // moves never reach the maintained counts. That is the UNDER-count direction — a live symbol looks
+    // dead and `dropUnused` deletes a declaration still in use — invisible today only because the
+    // optimize tier is followed by a full rebuild.
+    const delta = new Map<number, RefDelta>();
+    const changed = traverse(program, semantic, [
         {
             name: 'unroll',
             enter: hookTable({
@@ -202,5 +207,7 @@ export function unrollLoops(program: Node, semantic: Semantic, source: string): 
             }),
             exit: null,
         } satisfies Visitor,
-    ]);
+    ], delta);
+    applyRefDelta(semantic, delta);
+    return changed;
 }
