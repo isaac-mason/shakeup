@@ -24,13 +24,13 @@ import { emitRefFacts, REF } from '../../analysis/ref-facts.ts';
 
 export type Prelude = {
     /** Read/write counts per symbol — replaces `tallyRefs(program)`. */
-    refs: Map<number, RefCounts>;
+    refs: (RefCounts | undefined)[];
     /** Symbols read as a shorthand-property VALUE (`{ x }`), which cannot be substituted by span. */
     shorthand: Set<number>;
     /** Locals re-exported by a bare `export { X }` specifier — never rename or substitute these. */
     exported: Set<number>;
     /** Use counts per symbol (reference nodes only, not declarations) — replaces `countUses`. */
-    uses: Map<number, number>;
+    uses: number[];
 };
 
 /**
@@ -42,21 +42,21 @@ export type Prelude = {
  * is neither (a declaration is not a reference). `tst/compress-prelude.test.ts` pins the equivalence.
  */
 export function computePrelude(program: Node): Prelude {
-    const refs = new Map<number, RefCounts>();
+    const refs: (RefCounts | undefined)[] = [];
     const shorthand = new Set<number>();
     const exported = new Set<number>();
-    const uses = new Map<number, number>();
+    const uses: number[] = [];
     emitRefFacts(program, (sym, flags) => {
         if ((flags & (REF.READ | REF.WRITE)) !== 0) {
-            let c = refs.get(sym);
+            let c = refs[sym];
             if (c === undefined) {
                 c = { reads: 0, writes: 0 };
-                refs.set(sym, c);
+                refs[sym] = c;
             }
             if ((flags & REF.READ) !== 0) c.reads++;
             if ((flags & REF.WRITE) !== 0) c.writes++;
         }
-        uses.set(sym, (uses.get(sym) ?? 0) + 1);
+        uses[sym] = (uses[sym] ?? 0) + 1;
         if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
         if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
     });

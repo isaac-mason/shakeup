@@ -107,7 +107,7 @@ export const constProp: Visitor = {
                 const lit = constInit(init);
                 if (lit === null) continue;
                 if (shorthand.has(sym)) continue;
-                const c = refs.get(sym);
+                const c = refs[sym];
                 const reads = c?.reads ?? 0;
                 const writes = c?.writes ?? 0;
                 if (writes > 0 || reads === 0) continue; // reassigned, or unused (leave to DCE)

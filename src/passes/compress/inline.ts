@@ -38,7 +38,7 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 // Snapshot state for one traversal (set at Program enter; the driver rebuilds the semantic + these
 // each fixed-point iteration). REFS is the read/write tally; DYNAMIC_SCOPE bails everything when the
 // module uses `eval`/`with`.
-let REFS: Map<number, RefCounts> | null = null;
+let REFS: (RefCounts | undefined)[] | null = null;
 let DYNAMIC_SCOPE = false;
 
 /** True if the module contains a direct `eval(...)` call — it can resolve a name dynamically, so
@@ -82,7 +82,7 @@ function hasDynamicScope(program: Node, semantic: Semantic): boolean {
  *  return its symbol + initializer (+ whether the init is impure); else null. */
 function candidate(
     prev: Node,
-    refs: Map<number, RefCounts>,
+    refs: (RefCounts | undefined)[],
 ): { sym: number; init: Node; impure: boolean; fragile: boolean } | null {
     if (prev.type !== N.VariableDeclaration) return null;
     const d = prev.data as { kind: string; declarations: Node[] };
@@ -91,7 +91,7 @@ function candidate(
     if (dcl.id.type !== N.BindingIdentifier || dcl.init === null) return null;
     const sym = (dcl.id as { sym: number }).sym;
     if (sym === 0) return null;
-    const c = refs.get(sym);
+    const c = refs[sym];
     if (c === undefined || c.reads !== 1 || c.writes !== 0) return null; // exactly one read, never reassigned
     return { sym, init: dcl.init, impure: mayHaveSideEffects(dcl.init), fragile: readsMutableSymbol(dcl.init, refs) };
 }
@@ -105,7 +105,7 @@ function substituteInUse(
     init: Node,
     impure: boolean,
     fragile: boolean,
-    refs: Map<number, RefCounts>,
+    refs: (RefCounts | undefined)[],
 ): boolean {
     switch (use.type) {
         case N.ExpressionStatement:
@@ -155,7 +155,7 @@ function readsSym(n: Node, sym: number): boolean {
  * a gap either. So the gap machinery cost the quadratic scan and bought nothing measurable, and the
  * helpers that served it are gone with it.
  */
-function inlineBody(body: Node[], refs: Map<number, RefCounts>, ctx: TransformCtx): boolean {
+function inlineBody(body: Node[], refs: (RefCounts | undefined)[], ctx: TransformCtx): boolean {
     let changed = false;
     for (let u = 1; u < body.length; u++) {
         // Chain backwards, mirroring oxc's `while let Some(..) = stmts.last_mut()`: once a declaration
