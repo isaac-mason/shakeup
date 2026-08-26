@@ -112,10 +112,26 @@ function wantsCjsWrap(mod: Module): boolean {
 /** Bind an import of a WRAPPED CommonJS module. Its exports are built imperatively at runtime, so
  *  nothing can bind to a symbol — every name becomes a member read off the interop namespace. */
 function cjsBind(ctx: LinkCtx, target: Module, name: string): ImportBind {
-    if (!ctx.linked.cjsNamespace.has(target.idx)) {
-        ctx.linked.cjsNamespace.set(target.idx, `import_${reprName(target)}`);
-    }
-    return { kind: 'cjs-member', module: target.idx, name };
+    return { kind: 'cjs-member', ref: cjsNamespaceRef(ctx, target), name };
+}
+
+/** The synthetic symbol holding a wrapped module's interop namespace (`var import_foo = …`).
+ *  A real ref so it is deconflicted, tree-shaken and WIRED ACROSS CHUNKS like any other symbol. */
+function cjsNamespaceRef(ctx: LinkCtx, target: Module): number {
+    const existing = ctx.linked.cjsNamespace.get(target.idx);
+    if (existing !== undefined) return existing;
+    const ref = syntheticRef(ctx, target.idx, `import_${reprName(target)}`);
+    ctx.linked.cjsNamespace.set(target.idx, ref);
+    return ref;
+}
+
+/** The synthetic symbol holding a module's CommonJS wrapper (`var require_foo = __commonJS(…)`). */
+function cjsWrapRef(ctx: LinkCtx, target: Module): number {
+    const existing = ctx.linked.cjsWrap.get(target.idx);
+    if (existing !== undefined) return existing;
+    const ref = syntheticRef(ctx, target.idx, `require_${reprName(target)}`);
+    ctx.linked.cjsWrap.set(target.idx, ref);
+    return ref;
 }
 
 function namespaceBind(ctx: LinkCtx, target: Module): ImportBind {
@@ -218,7 +234,7 @@ export function linkGraph(graph: Graph): Linked {
     // `wrap_kind` in the link stage, ahead of `bind_imports_and_exports`).
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
-        if (wantsCjsWrap(mod)) linked.cjsWrap.set(idx, `require_${reprName(mod)}`);
+        if (wantsCjsWrap(mod)) cjsWrapRef(ctx, mod);
     }
     // A `require()`d module must ALSO be wrapped, whatever its own source looks like: `require` is a
     // call that returns an exports object, so the target needs a callable, once-only, memoized form.
@@ -232,7 +248,7 @@ export function linkGraph(graph: Graph): Linked {
             const target = graph.modules[rec.resolved];
             if (target.exportsKind === 'commonjs') {
                 // CJS requiring CJS: the wrapper's return value IS the exports object.
-                if (!linked.cjsWrap.has(rec.resolved)) linked.cjsWrap.set(rec.resolved, `require_${reprName(target)}`);
+                cjsWrapRef(ctx, target);
                 continue;
             }
             // CJS requiring ESM. Do NOT give it a CommonJS wrapper — an ES module has no `exports`

@@ -228,12 +228,8 @@ export function deconflictChunk(
         queue.sort((a, b) => b.w - a.w);
         for (const q of queue) q.run();
     }
-    for (const [idx, base] of linked.cjsWrap) {
-        if (memberSet !== null && !memberSet.has(idx)) continue;
-        linked.cjsWrap.set(idx, claim(base));
-        const ns = linked.cjsNamespace.get(idx);
-        if (ns !== undefined) linked.cjsNamespace.set(idx, claim(ns));
-    }
+    // No ad-hoc claiming for the CJS wrapper/namespace: they are synthetic REFS now, so the
+    // `syntheticNames` loop below already names them — the same path `*_default` uses.
     for (const [ref, base] of linked.syntheticNames) {
         if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
         linked.finalNames.set(ref, claim(base));
