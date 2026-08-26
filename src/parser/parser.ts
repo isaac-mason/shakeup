@@ -129,6 +129,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         speculating: 0,
         sawJSX: false,
         sawTopLevelReturn: false,
+        sawRequire: false,
         sawImportSyntax: false,
         chainSawOptional: false,
         noCondType: false,
@@ -179,7 +180,11 @@ function tokenDesc(state: ParserState): string {
 
 function ident(state: ParserState, role: number, start: number, end: number): Identifier {
     const h = start === state.tokStart && end === state.tokEnd ? state.tokHash : hashRange(state, start, end);
-    return { id: nextId(state), type: role, start, end, name: intern(state, start, end, h), sym: 0, data: null } as Identifier;
+    const name = intern(state, start, end, h);
+    // Cheap syntactic gate for the `require("lit")` edge walk — set here rather than by a dedicated
+    // pass, exactly as `sawJSX` is. A false positive (a local named `require`) only costs one walk.
+    if (name.length === 7 && name === 'require') state.sawRequire = true;
+    return { id: nextId(state), type: role, start, end, name, sym: 0, data: null } as Identifier;
 }
 function leafRaw(state: ParserState, flatType: number, start: number, end: number): Node {
     return { id: nextId(state), type: flatType, start, end, name: sliceFlat(state, start, end), sym: 0, data: null } as Node;
@@ -3203,6 +3208,8 @@ export type ParseResult = {
     /** Module contained a `return` outside any function body — tier 2 of the CommonJS kind rule
      *  (rolldown `EcmaModuleAstUsage::TopLevelReturn`). */
     hasTopLevelReturn: boolean;
+    /** Module mentions `require` — gates the `require("lit")` edge walk. */
+    hasRequire: boolean;
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -3246,6 +3253,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasJSX: state.sawJSX,
         hasImportSyntax: state.sawImportSyntax,
         hasTopLevelReturn: state.sawTopLevelReturn,
+        hasRequire: state.sawRequire,
     };
 }
 

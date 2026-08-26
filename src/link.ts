@@ -210,6 +210,19 @@ export function linkGraph(graph: Graph): Linked {
         const mod = graph.modules[idx];
         if (wantsCjsWrap(mod)) linked.cjsWrap.set(idx, `require_${reprName(mod)}`);
     }
+    // A `require()`d module must ALSO be wrapped, whatever its own source looks like: `require` is a
+    // call that returns an exports object, so the target needs a callable, once-only, memoized form.
+    // rolldown's `determine_module_exports_kind` reaches this through `ImportKind::Require`
+    // (`Esm -> WrapKind::Esm`, `CommonJs`/`None -> WrapKind::Cjs`); with an ESM-only emit the CJS
+    // wrapper serves both, since an ESM module's bindings are already hoisted into the closure.
+    for (const idx of linked.order) {
+        for (const rec of graph.modules[idx].importRecords) {
+            if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
+            if (!linked.cjsWrap.has(rec.resolved)) {
+                linked.cjsWrap.set(rec.resolved, `require_${reprName(graph.modules[rec.resolved])}`);
+            }
+        }
+    }
 
     for (const idx of linked.order) {
         const mod = graph.modules[idx];

@@ -74,6 +74,10 @@ export type ParserState = {
      *  body (wrapped in a function) can legally contain one. Free to record here: the goal gate
      *  already computes the predicate. */
     sawTopLevelReturn: boolean;
+    /** Module contains an identifier `require` (anywhere). A cheap syntactic gate — like
+     *  {@link sawJSX} / `sawImportSyntax` — so the whole-program walk that finds `require("lit")`
+     *  edges runs only on modules that could have one. rolldown's `sawRequire` equivalent. */
+    sawRequire: boolean;
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];

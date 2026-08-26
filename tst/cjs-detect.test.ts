@@ -379,3 +379,67 @@ describe('mangling a CJS-wrapped module', () => {
         expect(ns.x).toEqual([1, 99, 98]);
     });
 });
+
+// `require("./x")` inside a CommonJS module lowers to the target's wrapper call. The wrapper returns
+// `module.exports`, which is exactly what `require` should produce — the consumer is CommonJS and
+// wants a CommonJS exports object, so no interop conversion applies in this direction.
+describe('require() between CommonJS modules', () => {
+    const runCjs = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+    };
+
+    it('lowers a require to the wrapper call', async () => {
+        const { code, ns } = await runCjs({
+            '/inner.cjs': 'module.exports = { n: 21 };',
+            '/outer.cjs': "const inner = require('./inner.cjs');\nmodule.exports = { v: inner.n * 2 };",
+            '/main.js': "import d from './outer.cjs';\nexport const x = d.v;",
+        });
+        expect(ns.x).toBe(42);
+        expect(code).not.toMatch(/require\(['"]/); // no literal require survives
+    });
+
+    it('handles the facade re-export shape', async () => {
+        // cjs.md §2 pattern 4: `module.exports = require('./other')`.
+        const { ns } = await runCjs({
+            '/inner.cjs': 'module.exports = { z: 3 };',
+            '/outer.cjs': "module.exports = require('./inner.cjs');",
+            '/main.js': "import d from './outer.cjs';\nexport const x = d.z;",
+        });
+        expect(ns.x).toBe(3);
+    });
+
+    it('follows a chain of requires', async () => {
+        const { ns } = await runCjs({
+            '/a.cjs': 'module.exports = 1;',
+            '/b.cjs': "module.exports = require('./a.cjs') + 1;",
+            '/c.cjs': "module.exports = require('./b.cjs') + 1;",
+            '/main.js': "import d from './c.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toBe(3);
+    });
+
+    it('lowers EVERY require of a specifier, not just the first', async () => {
+        // `addRecord` dedupes by specifier and used to downgrade the record's kind to `static` on the
+        // second hit, silently leaving later `require` calls un-lowered — they then reached the
+        // output verbatim and threw `require is not defined` in an ES module.
+        const { code, ns } = await runCjs({
+            '/i.cjs': 'globalThis.__k = (globalThis.__k || 0) + 1;\nmodule.exports = globalThis.__k;',
+            '/o.cjs': "module.exports = [require('./i.cjs'), require('./i.cjs')];",
+            '/main.js': "import d from './o.cjs';\nexport const x = d;",
+        });
+        expect(code).not.toMatch(/require\(['"]/);
+        expect(ns.x).toEqual([1, 1]); // memoized: the body ran once
+    });
+
+    it('keeps a specifier that is both imported and required lowered', async () => {
+        const { code, ns } = await runCjs({
+            '/dep.cjs': 'module.exports = { n: 5 };',
+            '/mid.cjs': "module.exports = require('./dep.cjs').n;",
+            '/main.js': "import a from './dep.cjs';\nimport b from './mid.cjs';\nexport const x = [a.n, b];",
+        });
+        expect(code).not.toMatch(/require\(['"]/);
+        expect(ns.x).toEqual([5, 5]);
+    });
+});

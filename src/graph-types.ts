@@ -19,7 +19,7 @@ export const NAME_DEFAULT = 'default';
  *  (CSS `@import`/`url()`) are NOT core: a css plugin lowers them to JS + emitted assets before the
  *  graph sees them (the Vite model), so they never become an ImportRecordKind. Distinct from the
  *  plugin-facing {@link ./plugin.ImportKind} (the Rollup resolveId kind). */
-export type ImportRecordKind = 'static' | 'dynamic' | 'new-url';
+export type ImportRecordKind = 'static' | 'dynamic' | 'new-url' | 'require';
 
 /** How a module's format was DECLARED — by extension, or by the nearest `package.json#type`.
  *  Mirrors rolldown's `ModuleDefFormat` (`rolldown_common/src/types/module_def_format.rs`).
@@ -129,6 +129,8 @@ export type Module = {
     /** Module contained a `return` outside any function body (set by the parser). Tier 2 of the
      *  CommonJS kind rule — only a CJS body can legally contain one. */
     hasTopLevelReturn: boolean;
+    /** Module mentions `require` (set by the parser) — gates the `require("lit")` edge walk. */
+    hasRequire: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
     sideEffects: ModuleSideEffects;
@@ -206,6 +208,7 @@ export type CachedParse = {
     hasImportSyntax: boolean;
     /** Source-derived, so cacheable — unlike the {@link ExportsKind} computed from it. */
     hasTopLevelReturn: boolean;
+    hasRequire: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Stable digest of the module's export surface (named-export keys + `export *`
      *  specifiers). A change here means importers' link/shake/render is stale. */
