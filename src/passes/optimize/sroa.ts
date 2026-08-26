@@ -218,6 +218,7 @@ export function scalarReplaceAggregates(
     // MISCOMPILE direction: a live symbol looks dead and `dropUnused` deletes a declaration still in use.
     const scalarSyms = new Map<string, number>();
 
+    const delta = new Map<number, RefDelta>();
     const rewriter: Visitor = {
         name: 'sroa',
         enter: hookTable({
@@ -273,13 +274,32 @@ export function scalarReplaceAggregates(
                 ctx.replaceWith(ref);
             },
         }),
-        exit: null,
+        // EXIT, once the LHS has actually been replaced. `ctx.addRefs(newNode)` classifies by walking
+        // the replacement SUBTREE, and a bare `IdentifierReference` carries no assignment context — so
+        // `obj.x = 1` rewritten to `v_x = 1` books a READ where truth sees a WRITE
+        // ("writes maintained=0 truth=1 UNDER(unsafe)"). Under-counted writes are the unsafe direction:
+        // `movement.ts` blocks a reorder on `writes > 0`, so a missing write PERMITS a reorder it
+        // should forbid. Correct the classification here, where the position IS known.
+        exit: hookTable({
+            [N.AssignmentExpression]: (n) => {
+                const left = (n.data as { left: Node }).left;
+                if (left.type !== N.IdentifierReference) return;
+                const sym = (left as { sym: number }).sym;
+                if (sym <= 0 || !scalarSyms.has(left.name) || scalarSyms.get(left.name) !== sym) return;
+                let d = delta.get(sym);
+                if (d === undefined) {
+                    d = { reads: 0, writes: 0, uses: 0 };
+                    delta.set(sym, d);
+                }
+                d.reads -= 1;
+                d.writes += 1;
+            },
+        }),
     };
     // Thread a `RefDelta` through: without one, `ctx.dropRefs`/`addRefs` are NO-OPS, so the references
     // this rewrite moves never reach the maintained counts. That is the UNDER-count direction — a live
     // symbol looks dead and `dropUnused` deletes a declaration still in use — and it is only invisible
     // today because the optimize tier is followed by a full rebuild.
-    const delta = new Map<number, RefDelta>();
     const changed = traverse(program, semantic, [rewriter], delta);
     applyRefDelta(semantic, delta);
     return changed;
