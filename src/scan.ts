@@ -287,6 +287,28 @@ function classifyExportsKind(mod: Module, warnings: string[]): ExportsKind {
     return hasImport ? 'esm' : 'none';
 }
 
+/** Reject a `require()` the bundler cannot resolve statically — a computed specifier
+ *  (`require(name)`, `require('./' + x)`) or a call with the wrong arity.
+ *
+ *  cjs.md §2 pattern 7 called for this from the start and it went unimplemented, with the worst
+ *  possible result: the call reached the output VERBATIM, the build reported no error, and the
+ *  bundle threw `require is not defined` at runtime. A browser bundle has no module registry to
+ *  resolve against, so there is nothing to lower it to — naming the file and the call is the only
+ *  honest outcome. esbuild and rolldown both keep such a call as a runtime `require`, which only
+ *  works because they can emit a CommonJS format; shakeup emits ESM only. */
+function errorDynamicRequire(mod: Module, errors: string[]): void {
+    if (!mod.hasRequire) return;
+    walk(mod.program, (n) => {
+        if (!isAnyRequireCall(n) || isRequireCall(n)) return;
+        const args = (n.data as { arguments: Node[] }).arguments;
+        const why = args.length !== 1 ? `it takes ${args.length} arguments` : 'its specifier is not a string literal';
+        errors.push(
+            `${mod.id}:${n.start}: cannot statically resolve this require() — ${why}. ` +
+                'A bundle has no module registry to resolve against at runtime, so the specifier must be a literal.',
+        );
+    });
+}
+
 /** Error on an `import`/`export` statement in a file DECLARED CommonJS — a `.cjs`/`.cts` extension
  *  or the nearest `package.json#type: "commonjs"`. Port of oxc's `module_code` check
  *  (`oxc_semantic/src/checker/javascript.rs:532-548` **[V]**), whose message this mirrors.
@@ -481,6 +503,14 @@ function extractRecords(mod: Module): void {
 /** Match `new URL('./relative', import.meta.url)` — the web-standard asset-reference idiom. The
  *  callee must be the GLOBAL `URL` (unresolved symbol), arg0 a relative string literal, and arg1
  *  exactly `import.meta.url`. Non-literal / non-relative / bare `URL()` are left verbatim. */
+/** A call to a FREE `require` with any argument shape — the superset {@link isRequireCall} narrows.
+ *  Used to DIAGNOSE the calls that cannot be lowered rather than let them reach the output. */
+export function isAnyRequireCall(n: Node): boolean {
+    if (n.type !== N.CallExpression) return false;
+    const d = n.data as { callee: Node };
+    return d.callee.type === N.IdentifierReference && d.callee.name === 'require' && d.callee.sym === 0;
+}
+
 /** A `require("literal")` call with a FREE `require` — a local binding of that name is somebody
  *  else's function, not Node's. Only a string-literal specifier is an edge; a computed one cannot be
  *  resolved statically and is diagnosed separately. */
@@ -1111,10 +1141,12 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.jsxRuntime = c.jsxRuntime;
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorDynamicRequire(mod, graph.errors);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorDynamicRequire(mod, graph.errors);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its
