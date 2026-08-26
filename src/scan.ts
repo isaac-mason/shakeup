@@ -24,6 +24,7 @@ import { inlineFunctions } from './passes/optimize/inline-functions';
 import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
+import { compileDefines, makeDefine } from './passes/define';
 import { makeJsxLower } from './passes/lower-jsx';
 import { tsLower, sawUnloweredTs } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
@@ -685,6 +686,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // Per-build declared-format lookup (cjs.md §7.1b): a RESOLVE output, so its package.json cache
     // lives exactly one build and a `"type"` edit can never go stale.
     const defFormatOf = createDefFormatLookup(fs);
+    const compiledDefines = options.define === undefined ? null : compileDefines(options.define);
+    const definePass = compiledDefines === null ? null : makeDefine(compiledDefines);
     // `symlinks:false` disables the realpath deref below (config form only).
     const normalizedResolve = normalizeResolve(
         typeof options.resolve === 'function' ? undefined : options.resolve,
@@ -956,6 +959,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // `replaceWith`/`spliceStatements` already record it via `dropRefs`/`addRefs`; they
                 // are inert unless a delta map is threaded in, which is why the lowerings used to
                 // leave `semantic.refs` describing the PRE-lowering tree.
+                // `define` runs FIRST in the lowering traversal — before TS/JSX, matching rolldown's
+                // step ordering (`pre_process_ecma_ast.rs:155`) — and well before compress, so the
+                // substituted literal is what fold-constants and dead-code get to see.
+                if (definePass !== null) passes = passes.length === 0 ? [definePass] : [definePass, ...passes];
                 const lowerDelta = new Map<number, RefDelta>();
                 if (passes.length > 0) traverse(program, semantic, passes, lowerDelta);
                 // Resolved AFTER the walk: a `type`/`interface` may be declared after the declaration
