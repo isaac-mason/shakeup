@@ -67,9 +67,20 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
 
     if (name !== NAME_DEFAULT) {
         let found: ImportBind | null = null;
+        // A CommonJS star source can never answer statically — its export surface is built at
+        // runtime — so it is the LAST resort, tried only when no ESM star source provides the name.
+        // esbuild does the same thing in the same order: a name that reaches a file with dynamic
+        // export fallback is "rewrite[n] the import to a property access" (`linker.go:2704-2718`,
+        // `importDynamicFallback` → `matchImportNamespace`), and a static match wins over it
+        // (`matchImportNormalAndNamespace` keeps the normal binding).
+        let cjsFallback: ImportBind | null = null;
         for (const recIdx of module.starExports) {
             const rec = module.importRecords[recIdx];
             if (rec.external) continue;
+            if (ctx.linked.cjsWrap.has(rec.resolved)) {
+                cjsFallback ??= cjsBind(ctx, graph.modules[rec.resolved], name);
+                continue;
+            }
             const candidate = matchImport(ctx, graph.modules[rec.resolved], name, new Set(seen));
             if (candidate.kind === 'none') continue;
             if (found === null) found = candidate;
@@ -79,6 +90,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             }
         }
         if (found !== null) return found;
+        if (cjsFallback !== null) return cjsFallback;
     }
     return { kind: 'none' };
 }
@@ -240,6 +252,7 @@ export function linkGraph(graph: Graph): Linked {
         cjsWrap: new Map(),
         cjsNamespace: new Map(),
         esmInit: new Map(),
+        dynamicExports: new Set(),
         externalLocals: new Map(),
         defaultRefs: new Map(),
         errors: [],
@@ -323,23 +336,41 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
-    // `export * from './x.cjs'` is not lowered yet (cjs.md §7.4): a CommonJS module's export surface
-    // is built at runtime, so forwarding it needs a runtime namespace assembled by `__reExport` —
-    // namespace construction "mode 2" of §4.4, which does not exist here. Report it directly rather
-    // than let the name lookup fail later and blame the RE-EXPORTER for not having the name, which
-    // points at the wrong file entirely.
-    const cjsStarExporters = new Set<number>();
-    for (const idx of linked.order) {
-        const mod = graph.modules[idx];
-        for (const recIdx of mod.starExports) {
-            const rec = mod.importRecords[recIdx];
-            if (rec.external || rec.resolved < 0 || !linked.cjsWrap.has(rec.resolved)) continue;
-            cjsStarExporters.add(idx);
-            linked.errors.push(
-                `${mod.id}: 'export * from ${JSON.stringify(rec.specifier)}' is not supported yet — ` +
-                    'that module is CommonJS, whose export names are only known at runtime. ' +
-                    'Re-export the names explicitly (`export { a, b } from …`) or use `export * as ns from …`.',
-            );
+    // `export * from './x.cjs'` — namespace-construction MODE 2 of cjs.md §4.4. A CommonJS module's
+    // export surface is only known at runtime, so a re-exporter cannot enumerate it: its namespace
+    // becomes an `__exportAll` object of getter thunks for the names it DOES know, extended at
+    // runtime by `__reExport` with the CommonJS members. A NAMED import through such a star is
+    // answered separately, by `matchImport`'s CommonJS fallback.
+    //
+    // ~~Reported as unsupported.~~ It was, with a message suggesting `export { a, b } from …`
+    // instead. Now built.
+    //
+    // Propagated to a FIXED POINT: `export * from './c.js'` where c itself stars from CommonJS makes
+    // the outer module dynamic too, and its `__reExport` chains to c's namespace rather than to the
+    // CommonJS module. rolldown's `cjs_compat/exoprt_star_of_cjs` is exactly that chain:
+    //     var b_exports = __exportAll({}); __reExport(b_exports, __toESM(require_c()));
+    //     var a_exports = __exportAll({}); __reExport(a_exports, b_exports);
+    // Without the propagation the outer namespace was a plain literal built from a static export map
+    // that could not see the CommonJS names, and every member read `undefined`.
+    for (let changed = true; changed; ) {
+        changed = false;
+        for (const idx of linked.order) {
+            const mod = graph.modules[idx];
+            if (linked.dynamicExports.has(idx)) continue;
+            for (const recIdx of mod.starExports) {
+                const rec = mod.importRecords[recIdx];
+                if (rec.external || rec.resolved < 0) continue;
+                if (linked.cjsWrap.has(rec.resolved)) {
+                    // The re-exporter's namespace reads the CommonJS module's interop namespace, so
+                    // mint it here rather than leaving it to a consumer that may never appear.
+                    cjsBind(ctx, graph.modules[rec.resolved], NAME_NAMESPACE);
+                } else if (linked.dynamicExports.has(rec.resolved)) {
+                    namespaceBind(ctx, graph.modules[rec.resolved]);
+                } else continue;
+                linked.dynamicExports.add(idx);
+                changed = true;
+                break;
+            }
         }
     }
 
@@ -359,11 +390,11 @@ export function linkGraph(graph: Graph): Linked {
                 bind = namespaceBind(ctx, graph.modules[rec.resolved]);
             } else {
                 bind = matchImport(ctx, graph.modules[rec.resolved], imp.name, new Set());
-                // Suppress the follow-on complaint when the target already failed for a REPORTED
-                // reason: a name that would have arrived through `export * from <cjs>` is missing
-                // because that forwarding is unsupported, not because the re-exporter is at fault,
-                // and saying both points the reader at the wrong file.
-                if (bind.kind === 'none' && !cjsStarExporters.has(rec.resolved)) {
+                // ~~Suppressed when the target had a reported `export * from <cjs>`.~~ No longer
+                // needed: that forwarding is built, so such a name comes back as a CommonJS member
+                // read rather than `none`. `default` is the one exception and it SHOULD report —
+                // `export *` never forwards `default`, in any bundler or in Node.
+                if (bind.kind === 'none') {
                     linked.errors.push(
                         `'${imp.name}' is not exported by '${graph.modules[rec.resolved].id}' (imported by '${mod.id}')`,
                     );

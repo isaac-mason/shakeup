@@ -299,6 +299,12 @@ export type Linked = {
      *  semantics. Absent for a module that is also statically imported, whose bindings must stay
      *  hoisted (see §7.20's outstanding declaration/initializer split). */
     esmInit: Map<number, number>;
+    /** ESM modules that `export * from` a CommonJS module. Their export surface is only fully known
+     *  at RUNTIME, so their namespace is namespace-construction "mode 2" of cjs.md §4.4: an
+     *  `__exportAll({…})` object of getter thunks for the statically-known names, extended by
+     *  `__reExport` with the CommonJS module's members. esbuild calls this a file with "dynamic
+     *  export fallback" (`linker.go:2704`). */
+    dynamicExports: Set<number>;
     externalLocals: Map<string, string>;
     defaultRefs: Map<number, number>;
     errors: string[];

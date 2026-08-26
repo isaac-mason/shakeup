@@ -578,19 +578,26 @@ describe('re-exporting from a CommonJS module', () => {
         ).toBe(1);
     });
 
-    it('reports `export * from` a CommonJS module against the RIGHT file', async () => {
-        // Not supported yet (cjs.md §7.4 — it needs the runtime `__reExport` namespace, "mode 2" of
-        // §4.4). What matters here is that the diagnostic names the re-exporter and the real cause,
-        // rather than claiming the barrel is missing a name it was never going to declare.
+    it('`export * from` a CommonJS module forwards its names', async () => {
+        // ~~Not supported — reported against the re-exporter.~~ Built: namespace mode 2 of cjs.md
+        // §4.4. A named import through the star is answered by a member read on the CommonJS
+        // module's interop namespace, which is esbuild's `importDynamicFallback` — "rewrite the
+        // import to a property access" (`linker.go:2704-2718`).
+        expect(
+            (await runFiles({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" })).x,
+        ).toBe(1);
+    });
+
+    it('`export *` does NOT forward `default`, and still says so', async () => {
+        // The one name the star never carries — in any bundler, and in Node. It must keep reporting.
         const r = await bundle({
             entry: '/main.js',
-            fs: createMemoryFs({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" }),
+            fs: createMemoryFs({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import d from './b.js';\nexport const x = d;" }),
             external: [],
         });
-        expect(r.errors).toHaveLength(1);
-        expect(r.errors[0]).toMatch(/^\/b\.js: 'export \* from/);
-        expect(r.errors[0]).toMatch(/that module is CommonJS/);
-        expect(r.errors[0]).not.toMatch(/is not exported by/);
+        // Reported against `/b.js`, which is the module that genuinely does not export it — not
+        // against `/d.cjs`, which may well have a `module.exports.default`.
+        expect(r.errors.join('\n')).toMatch(/'default' is not exported by '\/b\.js'/);
     });
 });
 

@@ -574,6 +574,15 @@ function wireAndDeconflict(
                 if (rec.kind === 'dynamic') {
                     const targetChunk = chunkByModule[rec.resolved];
                     if (targetChunk >= 0 && targetChunk !== c) chunk.dynamicImports.add(targetChunk);
+                    // A MODE-2 target cannot surface its names as native chunk exports — half of
+                    // them only exist once `__reExport` has run. So the chunk exports the OBJECT and
+                    // the import site unwraps it, which is the same move rolldown makes for a
+                    // dynamically imported CommonJS module (`cjs_compat/dynamic_cjs_entry`:
+                    // `import("./cjs.js").then((m) => __toESM(m.default))`). Without it the target
+                    // chunk exported nothing at all and every member read `undefined`, silently.
+                    if (targetChunk >= 0 && targetChunk !== c && linked.dynamicExports.has(rec.resolved)) {
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'namespace', module: rec.resolved });
+                    }
                 } else {
                     // Bare side-effect import: a static import with no named bindings whose
                     // target is a different chunk must still be kept as `import './x';`.
@@ -617,6 +626,9 @@ function nativeNsEligible(linked: Linked, producer: Chunk, modIdx: number): bool
     // its `__esm` closure — so there is nothing for a native `import * as ns` to name. It exports its
     // assembled namespace object instead, which is the non-native path below.
     if (linked.esmInit.has(modIdx)) return false;
+    // Nor a mode-2 namespace: its surface is not its own locals — half of it arrives at runtime via
+    // `__reExport` — so there is nothing for a native `import * as ns` to name.
+    if (linked.dynamicExports.has(modIdx)) return false;
     const map = linked.exportMaps.get(modIdx);
     if (map === undefined || map.size === 0) return false;
     for (const bind of map.values()) {
@@ -680,6 +692,19 @@ function wireBind(
         if (!surfaceWired) {
             for (const member of linked.exportMaps.get(cross.module)?.values() ?? [])
                 wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, member);
+            // A MODE-2 namespace is also built by the producer, and its `__reExport` lines name the
+            // star sources — a CommonJS wrapper, or an inner mode-2 object. Neither is a named
+            // import, so nothing above carries them and the producer called an undeclared
+            // `require_d`. Same class of bug as the member wiring directly above.
+            if (linked.dynamicExports.has(cross.module)) {
+                for (const rec of graph.modules[cross.module].importRecords) {
+                    if (rec.external || rec.resolved < 0) continue;
+                    const wrapRef = linked.cjsWrap.get(rec.resolved);
+                    if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, { kind: 'found', ref: wrapRef });
+                    else if (linked.dynamicExports.has(rec.resolved))
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, { kind: 'namespace', module: rec.resolved });
+                }
+            }
         }
     } else {
         const existing = producer.exportNameOfRef?.get(cross.ref);
