@@ -271,6 +271,23 @@ export const substituteAlternateSyntax: Visitor = {
                 default: return;
             }
         },
+        // `typeof x === "lit"` → `typeof x == "lit"` (and `!==` → `!=`). `typeof` ALWAYS yields a
+        // string, and `==` between two strings is `===`, so the strict form buys nothing but a byte.
+        // oxc emits the loose form for every one of these; measured on three.core.js we were leaving
+        // 21 strict comparisons it converts.
+        //
+        // The right operand must be a STRING LITERAL. Against anything else `==` would coerce —
+        // `typeof x === 0` is always false, `typeof x == 0` is a numeric coercion of the type string.
+        [N.BinaryExpression]: (n, ctx: TransformCtx) => {
+            const d = n.data as { operator: string; left: Node; right: Node };
+            if (d.operator !== '===' && d.operator !== '!==') return;
+            const isTypeof = (x: Node): boolean =>
+                x.type === N.UnaryExpression && (x.data as { operator: string }).operator === 'typeof';
+            const strict = (isTypeof(d.left) && d.right.type === N.StringLiteral)
+                || (isTypeof(d.right) && d.left.type === N.StringLiteral);
+            if (!strict) return;
+            ctx.replaceWith(create.BinaryExpression(n.start, n.end, d.operator === '===' ? '==' : '!=', d.left, d.right));
+        },
         [N.CallExpression]: (n, ctx: TransformCtx) => {
             const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
             // `Math.pow(a, b)` → `a ** b` (oxc `replace_known_methods`; terser/esbuild do the same).

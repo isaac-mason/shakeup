@@ -143,3 +143,29 @@ describe('a constant interpolation folds into the template text', () => {
         expect(evaluate(code)).toBe('nundefinedm');
     });
 });
+
+describe('typeof comparisons use the loose operator', () => {
+    // A CONSTANT operand would let `fold-constants` reduce `typeof x` to its literal type first, so
+    // the rule under test would never see a `typeof` at all. Use a runtime value.
+    it.each([
+        ['typeof x === "number"', true],
+        ['typeof x !== "number"', false],
+        ['"number" === typeof x', true],
+    ])('%s', async (expr, want) => {
+        const code = await build(`const x = Number(globalThis.q ?? 1);\no = ${expr};`);
+        expect(code).not.toContain('==='); // `typeof` always yields a string, so `==` is identical
+        expect(code).not.toContain('!==');
+        expect(evaluate(code)).toBe(want);
+    });
+
+    it('leaves a NON-string right operand strict', async () => {
+        // `typeof x === 0` is always false; `typeof x == 0` coerces the type string to a number.
+        const code = await build('const x = Number(globalThis.q ?? 1);\no = typeof x === 0;');
+        expect(evaluate(code)).toBe(false);
+    });
+
+    it('leaves an ordinary strict comparison alone', async () => {
+        const code = await build('const x = "1";\no = x === 1;');
+        expect(evaluate(code)).toBe(false); // `==` here would be TRUE — the operator must not change
+    });
+});
