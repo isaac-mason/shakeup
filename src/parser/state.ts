@@ -69,6 +69,11 @@ export type ParserState = {
      *  (`js/expression.rs:89`). That is what keeps `await(x)` a call to a function named `await` in
      *  a script, and it makes `await x` fail naturally as two adjacent identifiers. */
     awaitOk: boolean;
+    /** Module contained a `return` outside any function body. rolldown's
+     *  `EcmaModuleAstUsage::TopLevelReturn` — tier 2 of the CommonJS kind rule, since only a CJS
+     *  body (wrapped in a function) can legally contain one. Free to record here: the goal gate
+     *  already computes the predicate. */
+    sawTopLevelReturn: boolean;
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];

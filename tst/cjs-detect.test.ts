@@ -40,8 +40,11 @@ describe('CommonJS variables in an ES module', () => {
     });
 
     it('stays quiet for a file with no ESM export keyword', async () => {
-        // Not reclassified and not warned about — it simply is not an ES module by this rule.
-        expect(await warningsFor('module.exports = { a: 1 };')).toEqual([]);
+        // Not reclassified and not WARNED about — it is simply not an ES module by this rule. Read
+        // the warning channel directly: this source is separately an ERROR (unsupported CommonJS),
+        // which the shared `build` helper asserts against.
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/main.js': 'module.exports = { a: 1 };' }), external: [] });
+        expect(r.warnings).toEqual([]);
     });
 
     it('stays quiet when the module declares its own `exports` binding', async () => {
@@ -215,17 +218,69 @@ describe('parse goal gates top-level return / new.target', () => {
         const errorsFor = async (files: Record<string, string>) =>
             (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;
         const body = 'if (1) { return }\n';
+        const parseErrOnly = (es: string[]) => es.filter((e) => e.includes('return statement is only allowed'));
         // `.cjs` → allowed; `.mjs` → rejected; plain `.js` with no declaration → permissive.
-        expect(await errorsFor({ '/a.cjs': `${body}globalThis.x = 1;`, '/main.js': "import './a.cjs';\nexport const y = 1;" })).toEqual([]);
-        expect(await errorsFor({ '/a.mjs': `${body}export const x = 1;`, '/main.js': "import './a.mjs';\nexport const y = 1;" })).toHaveLength(1);
-        expect(await errorsFor({ '/a.js': `${body}export const x = 1;`, '/main.js': "import './a.js';\nexport const y = 1;" })).toEqual([]);
+        // Filtered to the PARSE diagnostic: a top-level `return` also classifies the file as
+        // CommonJS, which raises the separate "not supported yet" error tested below.
+        expect(parseErrOnly(await errorsFor({ '/a.cjs': `${body}globalThis.x = 1;`, '/main.js': "import './a.cjs';\nexport const y = 1;" }))).toEqual([]);
+        expect(parseErrOnly(await errorsFor({ '/a.mjs': `${body}export const x = 1;`, '/main.js': "import './a.mjs';\nexport const y = 1;" }))).toHaveLength(1);
+        expect(parseErrOnly(await errorsFor({ '/a.js': `${body}export const x = 1;`, '/main.js': "import './a.js';\nexport const y = 1;" }))).toEqual([]);
         // …and `"type": "module"` makes a plain `.js` strict.
         expect(
+            parseErrOnly(
+                await errorsFor({
+                    '/package.json': '{"type":"module"}',
+                    '/a.js': `${body}export const x = 1;`,
+                    '/main.js': "import './a.js';\nexport const y = 1;",
+                }),
+            ),
+        ).toHaveLength(1);
+    });
+});
+
+// Kind detection's four tiers (cjs.md §2.1), and the diagnostic that makes them worth having today:
+// a real CommonJS dependency would otherwise bundle into a SILENT no-op — `module.exports = {…}`
+// becomes an assignment to an undeclared global, the build succeeds, and the failure surfaces as a
+// missing export at runtime. Until the P3/P4 wrapper lands, naming the file and the reason is
+// strictly better.
+describe('CommonJS source is reported, not silently mis-bundled', () => {
+    const errorsFor = async (files: Record<string, string>) =>
+        (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;
+    const MAIN = "import './a.cjs';\nexport const y = 1;";
+
+    it('reports `module.exports`, naming the global', async () => {
+        const errors = await errorsFor({ '/a.cjs': 'module.exports = { a: 1 };', '/main.js': MAIN });
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/CommonJS modules are not supported yet \(it references the CommonJS global 'module'\)/);
+    });
+
+    it('reports `exports.foo`', async () => {
+        expect((await errorsFor({ '/a.cjs': 'exports.foo = 1;', '/main.js': MAIN }))[0]).toMatch(/global 'exports'/);
+    });
+
+    it('reports a top-level return (tier 2 has two halves)', async () => {
+        expect((await errorsFor({ '/a.cjs': 'if (1) { return }\nglobalThis.q = 1;', '/main.js': MAIN }))[0]).toMatch(/it has a top-level return/);
+    });
+
+    it('classifies a plain .js by its SOURCE, not just its extension', async () => {
+        // Tier 2 precedes tier 3: no declaration needed for CJS feature use to decide.
+        expect((await errorsFor({ '/a.js': 'module.exports = { a: 1 };', '/main.js': "import './a.js';\nexport const y = 1;" }))[0]).toMatch(
+            /not supported yet/,
+        );
+    });
+
+    it('still bundles a .cjs that uses no CommonJS feature', async () => {
+        // Declared CJS by tier 3, but it needs none of the missing machinery — so it must not be
+        // rejected. Keyed on feature USE, not on the classification alone.
+        expect(await errorsFor({ '/a.cjs': 'globalThis.q = 1;', '/main.js': MAIN })).toEqual([]);
+    });
+
+    it('does not fire when the module declares its own `exports`', async () => {
+        expect(
             await errorsFor({
-                '/package.json': '{"type":"module"}',
-                '/a.js': `${body}export const x = 1;`,
+                '/a.js': 'const exports = {};\nexports.foo = 1;\nglobalThis.q = exports;',
                 '/main.js': "import './a.js';\nexport const y = 1;",
             }),
-        ).toHaveLength(1);
+        ).toEqual([]);
     });
 });

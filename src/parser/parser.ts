@@ -128,6 +128,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sp: 0,
         speculating: 0,
         sawJSX: false,
+        sawTopLevelReturn: false,
         sawImportSyntax: false,
         chainSawOptional: false,
         noCondType: false,
@@ -1914,7 +1915,10 @@ function parseStatement(state: ParserState): Node {
                 let arg: Ref = null;
                 if (!canInsertSemi(state) && !isP(state, P.SEMI)) arg = parseExpression(state);
                 consumeSemi(state);
-                if (state.fnDepth === 0 && !state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
+                if (state.fnDepth === 0) {
+                    state.sawTopLevelReturn = true;
+                    if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
+                }
                 return create.ReturnStatement(start, state.tokStart, 0, arg) as Node;
             }
             case K.THROW: {
@@ -3196,6 +3200,9 @@ export type ParseResult = {
     nodeCount: number;
     /** Module uses JSX (set during parse; avoids a JSX-detection walk). */
     hasJSX: boolean;
+    /** Module contained a `return` outside any function body — tier 2 of the CommonJS kind rule
+     *  (rolldown `EcmaModuleAstUsage::TopLevelReturn`). */
+    hasTopLevelReturn: boolean;
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -3232,7 +3239,14 @@ export function parse(source: string, options: ParseOptions): ParseResult {
     const body = finishList(state, from);
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;
-    return { program, errors: state.errors, nodeCount, hasJSX: state.sawJSX, hasImportSyntax: state.sawImportSyntax };
+    return {
+        program,
+        errors: state.errors,
+        nodeCount,
+        hasJSX: state.sawJSX,
+        hasImportSyntax: state.sawImportSyntax,
+        hasTopLevelReturn: state.sawTopLevelReturn,
+    };
 }
 
 export function parseProgram(source: string, options: ParseOptions): Program {
