@@ -277,7 +277,7 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
         const t = n.sym;
         if (m === 0 && t === 0) continue;
         if (m === 0) {
-            out.push(`node ${n.type} @${n.start} unbound in maintained, bound in truth (UNSAFE)`);
+            out.push(`node ${n.type} @${n.start} '${n.name}' unbound in maintained, bound in truth (UNSAFE)`);
             continue;
         }
         if (t === 0) continue; // bound in maintained only — stale extra, safe
