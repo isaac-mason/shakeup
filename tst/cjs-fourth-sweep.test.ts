@@ -120,3 +120,62 @@ describe('fourth sweep — configurations verified correct', () => {
         expect(r.code.trimEnd().endsWith('//# sourceMappingURL=main.js.map')).toBe(true);
     });
 });
+
+// Fifth sweep. The first group generalizes the classification bug: the fix must hold for ANY reason
+// an export disappears during lowering, not just an unconditional `throw`.
+describe('fifth sweep', () => {
+    const run = async (files: Record<string, string>, opts: Record<string, unknown> = {}) => {
+        const r = await build(files, opts);
+        const { ns, dispose } = await runChunks(r.chunks, r.chunks.find((c) => c.isEntry)!.fileName);
+        try {
+            return { value: await (ns.x as unknown), chunks: r.chunks };
+        } finally {
+            dispose();
+        }
+    };
+
+    it.each([
+        ['a dead `if (false)` block before the export', 'if (false) { globalThis.q = 1 }\nexport const a = 1;'],
+        ['an unknown call before the export', 'globalThis.__x();\nexport const a = 1;'],
+        ['the export first, dead code after', 'export const a = 1;\nif (false) { globalThis.q = 1 }'],
+    ])('stays ESM with %s', async (_label, src) => {
+        expect((await kindOf(src)).kind).toBe('esm');
+    });
+
+    it('require of a module a plugin marked side-effect-free', async () => {
+        const plugin = { name: 'se', resolveId: (_c: unknown, spec: string) => (spec === './o.cjs' ? { id: '/o.cjs', moduleSideEffects: false } : null) };
+        expect((await run({ '/o.cjs': 'module.exports = 3;', '/d.cjs': "module.exports = require('./o.cjs') * 2;", '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { plugins: [plugin] })).value).toBe(6);
+    });
+
+    it('mode-2 × preserveModules × minify together', async () => {
+        const { value, chunks } = await run(
+            {
+                '/d.cjs': 'module.exports = { a: 1, b: 2 };',
+                '/b.js': "export * from './d.cjs';\nexport const own = 9;",
+                '/main.js': "import * as ns from './b.js';\nexport const x = [ns.a, ns.b, ns.own];",
+            },
+            { output: { preserveModules: true, minify: true } },
+        );
+        expect(chunks.length).toBeGreaterThan(1);
+        expect(value).toEqual([1, 2, 9]);
+    });
+
+    it('import() of a mode-2 module with codeSplitting off', async () => {
+        expect((await run({ '/d.cjs': 'module.exports = { a: 1 };', '/b.js': "export * from './d.cjs';", '/main.js': "export const x = import('./b.js').then((m) => m.a);" }, { output: { codeSplitting: false } })).value).toBe(1);
+    });
+
+    it('one CommonJS file reached through two spellings of its path is one instance', async () => {
+        // `'./d.cjs'` and `'././d.cjs'` must resolve to a single module — otherwise the body runs
+        // twice and the two importers see different objects.
+        expect(
+            (
+                await run({
+                    '/d.cjs': 'globalThis.__dupN = (globalThis.__dupN ?? 0) + 1;\nmodule.exports = { n: globalThis.__dupN };',
+                    '/a.js': "import d from './d.cjs';\nexport const a = d;",
+                    '/b.js': "import d from '././d.cjs';\nexport const b = d;",
+                    '/main.js': "import { a } from './a.js';\nimport { b } from './b.js';\nexport const x = [a.n, b.n, a === b];",
+                })
+            ).value,
+        ).toEqual([1, 1, true]);
+    });
+});
