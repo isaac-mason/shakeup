@@ -5,6 +5,7 @@
 import type { Semantic } from './analysis/semantic';
 import type { Node, Program } from './ast';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
+import type { Platform } from './resolve';
 import type { CompressMode } from './passes/compress';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
@@ -161,6 +162,10 @@ export type Module = {
 /** The built module graph rooted at one or more entries. */
 export type Graph = {
     modules: Module[];
+    /** Target platform, as normalized by `scan`. Read at render time to pick the `__require` shim:
+     *  on `node` an ESM bundle can build a REAL require with `createRequire(import.meta.url)`
+     *  (rolldown `runtime-tail-node.js`), everywhere else it falls back to the Proxy stub. */
+    platform: Platform;
     byId: Map<string, number>;
     /** Entry roots, in normalized input order. Each is (module index, entry name).
      *  Replaces the single `entry`. */

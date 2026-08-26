@@ -734,6 +734,7 @@ export function resolveEmittedFileName(file: EmittedFile): string {
 export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Promise<Graph> {
     const graph: Graph = {
         modules: [],
+        platform: options.platform ?? 'browser',
         byId: new Map(),
         entries: [],
         errors: [],
