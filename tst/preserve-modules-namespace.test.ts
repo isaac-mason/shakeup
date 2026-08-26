@@ -104,7 +104,7 @@ describe('preserveModules: namespaces are native', () => {
 
 // The synthesized object is only NEEDED when there is no module boundary to hang a namespace on.
 describe('single-chunk bundles still synthesize a namespace object', () => {
-    it('builds a frozen object when target and consumer share a chunk', async () => {
+    it('builds the object inline when target and consumer share a chunk', async () => {
         const { chunks } = await build(
             {
                 '/a.js': 'export let v = 1;\nexport function bump(){ v = 2 }',
@@ -113,8 +113,12 @@ describe('single-chunk bundles still synthesize a namespace object', () => {
             false,
         );
         expect(chunks).toHaveLength(1);
-        expect(chunks[0].code).toContain('Object.freeze');
-        expect(chunks[0].code).toContain('Symbol.toStringTag');
+        expect(chunks[0].code).toMatch(/const \w+_ns = \{/);
+        // Not frozen — neither oracle freezes a namespace, and freezing would block the
+        // `__reExport` chain that `export * from 'cjs'` needs.
+        expect(chunks[0].code).not.toContain('Object.freeze');
+        // …and the tag is defined separately so it stays NON-enumerable.
+        expect(chunks[0].code).toMatch(/Object\.defineProperty\(\w+_ns, Symbol\.toStringTag/);
         expect(await runChunks(chunks)).toMatchObject({ got: 2 });
     });
 });
