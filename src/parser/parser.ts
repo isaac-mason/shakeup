@@ -131,6 +131,8 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sawTopLevelReturn: false,
         sawRequire: false,
         sawTopLevelAwait: false,
+        sawEsmExport: false,
+        sawEsmImport: false,
         thisDepth: 0,
         topLevelThis: [],
         sawImportSyntax: false,
@@ -2218,6 +2220,7 @@ function parseImport(state: ParserState): Node {
         const source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
         consumeSemi(state);
+        state.sawEsmImport = true;
         return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source) as Node;
     }
     if (isIdentLike(state)) {
@@ -2262,6 +2265,7 @@ function parseImport(state: ParserState): Node {
         nextToken(state);
     } else raise(state, ParseErrorCode.ExpectedModuleSpecifier);
     consumeSemi(state);
+    state.sawEsmImport = true;
     return create.ImportDeclaration(
         start,
         state.tokStart,
@@ -2328,6 +2332,7 @@ function parseExport(state: ParserState): Node {
             decl = parseAssign(state);
             consumeSemi(state);
         }
+        state.sawEsmExport = true;
         return create.ExportDefaultDeclaration(start, state.tokStart, 0, decl) as Node;
     }
     if (isP(state, P.STAR)) {
@@ -2341,6 +2346,7 @@ function parseExport(state: ParserState): Node {
             nextToken(state);
         }
         consumeSemi(state);
+        state.sawEsmExport = true;
         return create.ExportAllDeclaration(
             start,
             state.tokStart,
@@ -2393,9 +2399,11 @@ function parseExport(state: ParserState): Node {
             }
         }
         consumeSemi(state);
+        state.sawEsmExport = true;
         return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source) as Node;
     }
     const decl = parseStatement(state);
+    state.sawEsmExport = true;
     return create.ExportNamedDeclaration(start, state.tokStart, flags, decl, [], null) as Node;
 }
 
@@ -3236,6 +3244,8 @@ export type ParseResult = {
     /** Module mentions `require` — gates the `require("lit")` edge walk. */
     hasRequire: boolean;
     hasTopLevelAwait: boolean;
+    hasEsmExport: boolean;
+    hasEsmImport: boolean;
     /** `this` expressions at the module top level (CommonJS: `module.exports`). */
     topLevelThis: Node[];
     /** Did the module contain `import(...)` or `import.meta`?
@@ -3283,6 +3293,8 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasTopLevelReturn: state.sawTopLevelReturn,
         hasRequire: state.sawRequire,
         hasTopLevelAwait: state.sawTopLevelAwait,
+        hasEsmExport: state.sawEsmExport,
+        hasEsmImport: state.sawEsmImport,
         topLevelThis: state.topLevelThis,
     };
 }
