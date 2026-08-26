@@ -12,7 +12,7 @@
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
 import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
 import type { Semantic } from '../analysis/semantic.ts';
-import { CHILD_FIELDS, N, type Node, TYPE_COUNT } from '../ast.ts';
+import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast.ts';
 
 type Hook = (node: Node, ctx: TransformCtx) => void;
 
@@ -175,6 +175,31 @@ class Ctx {
     /** Subtract every reference under `dropped` from the pending deltas. */
     dropRefs(dropped: Node): void {
         if (this.refDelta !== null) accumulate(this.refDelta, dropped, -1);
+    }
+    /**
+     * A subtree is leaving the tree FOR GOOD: subtract its references AND retire the bindings it
+     * declared. Use this instead of `dropRefs` wherever the removal is final.
+     *
+     * WHY IT IS A SEPARATE VERB. `dropRefs`/`addRefs` are TRANSACTIONAL — `inline` drops a use, tries a
+     * substitution, and adds it straight back if refused; `replaceWith` drops the old subtree whose
+     * bindings usually REAPPEAR inside the replacement. Folding eviction into `dropRefs` broke 33 tests
+     * for exactly that reason. "Subtract these counts" and "this is gone" are different events and need
+     * different names.
+     *
+     * Eviction is `scope = 0` — "owned by no lexical scope", deliberately still a VALID index because
+     * an out-of-range sentinel crashed chunk-graph. Every consumer filters on the owning scope, so an
+     * evicted symbol goes invisible without anyone needing a null check.
+     */
+    retire(dropped: Node): void {
+        this.dropRefs(dropped);
+        walk(dropped, (n) => {
+            if (n.type === N.BindingIdentifier) {
+                const sym = (n as { sym: number }).sym;
+                const rec = sym > 0 ? this.semantic.symbols[sym] : undefined;
+                if (rec !== undefined) rec.scope = 0;
+            }
+            return undefined;
+        });
     }
     /** Add every reference under `added` to the pending deltas. */
     addRefs(added: Node): void {
@@ -427,7 +452,11 @@ function visitList(list: (Node | null)[], ctx: Ctx): void {
         ctx.op = OP_NONE;
         fireEnter(el, ctx);
         if (ctx.op === OP_REMOVE) {
-            ctx.dropRefs(el);
+            // RETIRE, not just drop: `remove()` is the one unambiguous "gone for good" event in the
+            // traversal, so any pass that calls it now gets its bindings evicted for free. `OP_MULTI`
+            // and `spliceStatements` both RE-INSERT (blockFlatten splices a block out and its contents
+            // back in, bindings included), so they keep the transactional `dropRefs`.
+            ctx.retire(el);
             if (!forked) {
                 out = list.slice(0, idx);
                 forked = true;
