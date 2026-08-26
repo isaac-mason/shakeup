@@ -129,6 +129,27 @@ export function makeBlockFlatten(): Visitor {
                 renameSymbol(b, sym, fresh);
                 used.add(fresh);
             }
+            // The block's SCOPE disappears with it, so the semantic must follow the tree: every
+            // binding it owned now belongs to `target`, and every scope nested inside it is reparented.
+            //
+            // Leaving this stale shipped TWO miscompiles, both from valid input:
+            //   • treeshake decides top-level liveness from `symbols[sym].scope`, so a lifted binding
+            //     was not seen as module-scope and its declaration was dropped while a reference to it
+            //     survived — `{ let y = f(x); use(y); }` became `use(y)` with `y` undefined.
+            //   • the MANGLER computes slot liveness from the same field, so a lifted `let y` and a
+            //     top-level `function f` looked non-overlapping and were both named `e`:
+            //     `function e(t){…} let e = e(…)` — a duplicate-declaration SyntaxError.
+            // Neither is exotic: a bare block with a lexical binding at module top level is enough,
+            // and `blockFlatten` exists precisely to flatten such blocks.
+            const removed = scopeOf(sem, b);
+            if (removed > 0) {
+                for (let sy = 1; sy < sem.symbols.length; sy++) {
+                    if (sem.symbols[sy].scope === removed) sem.symbols[sy].scope = target;
+                }
+                for (let sc = 1; sc < sem.scopes.length; sc++) {
+                    if (sem.scopes[sc].parent === removed) sem.scopes[sc].parent = target;
+                }
+            }
             ctx.spliceStatements(stmts, i, 1, ...inner);
             i--; // re-examine from here: the lifted statements may include further blocks
         }
