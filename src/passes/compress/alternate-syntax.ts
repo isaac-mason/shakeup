@@ -47,6 +47,28 @@ const isGlobalUndefined = (n: Node): boolean => n.type === N.IdentifierReference
 const isGlobalRef = (callee: Node, name: string): boolean =>
     callee.type === N.IdentifierReference && callee.name === name && callee.sym === 0;
 
+/** The raw QUOTED string a `"…".concat(…)` expression folds to, or null if it does not fold.
+ *
+ *  Recurses through a chain so `"a".concat("b").concat("c")` resolves in one visit. Every part must be
+ *  a StringLiteral carrying the SAME delimiter as the chain's root; anything else bails. */
+function concatText(n: Node): string | null {
+    if (n.type === N.StringLiteral) return n.name;
+    if (n.type !== N.CallExpression) return null;
+    const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
+    if (d.optional || d.arguments.length === 0 || d.callee.type !== N.StaticMemberExpression) return null;
+    const m = d.callee.data as { object: Node; property: Node; optional: boolean };
+    if (m.optional || m.property.name !== 'concat') return null;
+    const base = concatText(m.object);
+    if (base === null) return null;
+    const quote = base[0];
+    let text = base.slice(0, -1); // drop the closing delimiter; re-added once at the end
+    for (const arg of d.arguments) {
+        if (arg.type !== N.StringLiteral || arg.name[0] !== quote) return null;
+        text += arg.name.slice(1, -1);
+    }
+    return text + quote;
+}
+
 /** `undefined` OR `void 0` — either spelling of the JS `undefined` value. A `return`ed one is
  *  redundant (already-substituted `void 0` refs, or hand-written `void 0`, both count). */
 const isUndefinedValue = (n: Node): boolean =>
@@ -270,6 +292,36 @@ export const substituteAlternateSyntax: Visitor = {
                     exp.type !== N.SpreadElement
                 ) {
                     ctx.replaceWith(create.BinaryExpression(n.start, n.end, '**', base, exp));
+                    return;
+                }
+            }
+            // `"a".concat("b", "c")` → `"abc"`, including CHAINS (oxc `try_fold_concat` lib.rs:209
+            // plus `replace_concat_chain` lib.rs:125).
+            //
+            // A StringLiteral's `.name` is its RAW source INCLUDING the quotes, so the fold is a splice
+            // of the inner slices — no decode/re-encode, the same discipline
+            // `convertToDottedProperties` uses. That is only sound when every part carries the SAME
+            // delimiter: two `"`-quoted strings cannot contain an unescaped `"` between them, so the
+            // join can never terminate the literal early. Mixed delimiters (`"a".concat('b"c')`) bail.
+            //
+            // The chain is resolved HERE rather than left to another round, because this pass runs
+            // ONCE after the fixed point settles (`FINAL_AND_JOIN`) — there is no next round to catch
+            // `"a".concat("b").concat("c")`, whose outer call is visited first with a CallExpression
+            // object.
+            if (!d.optional) {
+                const folded = concatText(n);
+                if (folded !== null) {
+                    ctx.replaceWith(node(N.StringLiteral, n.start, n.end, folded, null));
+                    return;
+                }
+            }
+            // `Array.of(a, b)` → `[a, b]` (oxc `try_fold_array_of`, lib.rs:103). Unguarded on arity,
+            // and a SPREAD argument is fine because `Array.of(...xs)` and `[...xs]` build the same
+            // array — unlike `Array(...)`, whose single-numeric-argument form means a length.
+            if (!d.optional && d.callee.type === N.StaticMemberExpression) {
+                const m = d.callee.data as { object: Node; property: Node; optional: boolean };
+                if (!m.optional && m.property.name === 'of' && isGlobalRef(m.object, 'Array')) {
+                    ctx.replaceWith(create.ArrayExpression(n.start, n.end, 0, d.arguments));
                     return;
                 }
             }
