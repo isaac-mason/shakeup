@@ -150,6 +150,99 @@ const TOOLS: Tool[] = [
             }, true),
     },
     {
+        // webpack is the other mature pure-JavaScript bundler, and the one with the longest history.
+        // It is architecturally unlike the rest — a module graph with a runtime, not a concatenator —
+        // so this is a "what does the ecosystem cost" number rather than a like-for-like design
+        // comparison. It writes to disk, needs a loader file for TypeScript, and its `production`
+        // mode runs terser, so unlike rollup its size column IS minified and comparable.
+        name: 'webpack',
+        countsCpu: true,
+        run: () =>
+            timed(async () => {
+                const { default: webpack } = await import('webpack');
+                const out = mkdtempSync(join(tmpdir(), 'wp-'));
+                const externals: Record<string, string> = {};
+                for (const e of corpus.external) externals[e] = `module ${e}`;
+                await new Promise<void>((res, rej) =>
+                    webpack(
+                        {
+                            entry: corpus.entry,
+                            mode: 'production',
+                            devtool: false,
+                            experiments: { outputModule: true },
+                            output: { path: out, filename: 'b.mjs', library: { type: 'module' }, chunkFormat: 'module' },
+                            externalsType: 'module',
+                            externals,
+                            resolve: { extensions: ['.ts', '.tsx', '.js', '.mjs', '.json'] },
+                            module: { rules: [{ test: /\.tsx?$/, use: join(import.meta.dirname, 'bench-ts-loader.cjs') }] },
+                            infrastructureLogging: { level: 'error' },
+                            stats: 'errors-only',
+                        },
+                        (
+                            err: Error | null,
+                            st: { hasErrors(): boolean; toJson(o: unknown): { errors?: { message: string }[] } } | undefined,
+                        ) => {
+                            if (err) return rej(err);
+                            if (st?.hasErrors())
+                                return rej(new Error(st.toJson({ errorDetails: false }).errors?.[0]?.message ?? 'webpack error'));
+                            res();
+                        },
+                    ),
+                );
+                return readFileSync(join(out, 'b.mjs'), 'utf8');
+            }, true),
+    },
+    {
+        // rspack is webpack's architecture reimplemented in Rust — same config surface, same module
+        // graph + runtime model. Paired with webpack it isolates the LANGUAGE from the DESIGN: the
+        // webpack/rspack ratio is close to pure Rust-vs-JS on an identical architecture, which is
+        // the cleanest estimate available of what shakeup's own constant factor would cost to close.
+        name: 'rspack',
+        countsCpu: true,
+        run: () =>
+            timed(async () => {
+                const { rspack } = await import('@rspack/core');
+                const out = mkdtempSync(join(tmpdir(), 'rs-'));
+                const externals: Record<string, string> = {};
+                for (const e of corpus.external) externals[e] = `module ${e}`;
+                await new Promise<void>((res, rej) =>
+                    rspack(
+                        {
+                            entry: corpus.entry,
+                            mode: 'production',
+                            devtool: false,
+                            experiments: { outputModule: true },
+                            output: { path: out, filename: 'b.mjs', library: { type: 'module' }, chunkFormat: 'module' },
+                            externalsType: 'module',
+                            externals,
+                            resolve: { extensions: ['.ts', '.tsx', '.js', '.mjs', '.json'] },
+                            module: {
+                                rules: [
+                                    {
+                                        test: /\.tsx?$/,
+                                        loader: 'builtin:swc-loader',
+                                        options: { jsc: { parser: { syntax: 'typescript', tsx: true } } },
+                                    },
+                                ],
+                            },
+                            infrastructureLogging: { level: 'error' },
+                            stats: 'errors-only',
+                        } as never,
+                        (
+                            err: Error | null,
+                            st: { hasErrors(): boolean; toJson(o: unknown): { errors?: { message: string }[] } } | undefined,
+                        ) => {
+                            if (err) return rej(err);
+                            if (st?.hasErrors())
+                                return rej(new Error(st.toJson({ errorDetails: false }).errors?.[0]?.message ?? 'rspack error'));
+                            res();
+                        },
+                    ),
+                );
+                return readFileSync(join(out, 'b.mjs'), 'utf8');
+            }, true),
+    },
+    {
         name: 'esbuild',
         countsCpu: false, // work happens in a spawned binary; this process's CPU is not the story
         run: () =>
@@ -273,12 +366,17 @@ async function main(): Promise<void> {
     const rollupWall = wall['rollup'] !== undefined ? med(wall['rollup']) : null;
     if (rollupWall !== null) {
         const f = rollupWall / base;
+        console.log('\nPURE-JS arms — the like-for-like comparison, since rolldown and esbuild are native:');
         console.log(
-            `\nrollup is the only other PURE-JS bundler here: ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup is ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'},`,
+            `  rollup  ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'}  (rollup is NOT minifying; no built-in minifier, so read its size column as unminified)`,
         );
-        console.log(
-            'while also MINIFYING, which rollup is not (it has no built-in minifier). Read the size column for rollup as unminified.',
-        );
+        const wpWall = wall['webpack'] !== undefined ? med(wall['webpack']) : null;
+        if (wpWall !== null) {
+            const g = wpWall / base;
+            console.log(
+                `  webpack ${wpWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${g.toFixed(2)}x ${g >= 1 ? 'faster' : 'slower'}  (webpack IS minifying, so its size column is comparable)`,
+            );
+        }
     }
 }
 main();
