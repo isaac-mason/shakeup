@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { bundle } from '../src/bundle.ts';
+import { setSemanticVerify } from '../src/passes/compress/index.ts';
 
 // Phase 0 of llm/notes/incremental-vs-rebuild-plan.md — the standing guard.
 //
@@ -24,9 +25,10 @@ const diskFs = {
 };
 
 describe.skipIf(!existsSync(ENTRY))('the maintained semantic matches the tree', () => {
-    it('survives a full compress of a real TypeScript corpus', async () => {
-        const prev = process.env.SEMANTIC_VERIFY;
-        process.env.SEMANTIC_VERIFY = '1';
+    // Generous timeout on purpose: verifying every round rebuilds the whole semantic per round, so
+    // this is inherently far slower than a normal build. It is a correctness guard, not a benchmark.
+    it('survives a full compress of a real TypeScript corpus', { timeout: 180_000 }, async () => {
+        setSemanticVerify(true);
         try {
             const r = await bundle({
                 entry: ENTRY,
@@ -36,8 +38,7 @@ describe.skipIf(!existsSync(ENTRY))('the maintained semantic matches the tree', 
             } as never);
             expect((r as { code: string }).code.length).toBeGreaterThan(0);
         } finally {
-            if (prev === undefined) delete process.env.SEMANTIC_VERIFY;
-            else process.env.SEMANTIC_VERIFY = prev;
+            setSemanticVerify(false);
         }
     });
 });

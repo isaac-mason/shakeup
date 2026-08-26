@@ -197,7 +197,12 @@ const MAX_ITERS = 8;
 /** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` after
  *  every compress round. Off by default (it rebuilds the whole semantic per round); the point is to run
  *  it in CI and whenever a pass that mutates structure is touched. */
-const SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
+let SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
+
+/** Enable the check programmatically. The env var is read at MODULE LOAD, so a test that sets
+ *  `process.env` in its body has no effect — the first version of `tst/semantic-verify.test.ts` did
+ *  exactly that and was vacuous (and racy, since it mutated a global while other files ran). */
+export const setSemanticVerify = (on: boolean): void => { SEMANTIC_VERIFY = on; };
 
 /** Run the compress passes over `program` (loop to a fixed point, then the one-shot final pass).
  *  Returns a FRESH {@link Semantic} rebuilt from the compressed AST when anything changed (the caller
