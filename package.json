@@ -13,6 +13,7 @@
         "test": "vitest run",
         "bench": "pnpm --filter benches exec labs",
         "standing": "tsx scripts/standing.ts",
+        "oxcdiff": "tsx scripts/oxc-diff.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {
