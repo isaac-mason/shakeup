@@ -15,6 +15,7 @@
         "standing": "tsx scripts/standing.ts",
         "regress": "tsx scripts/regress.ts",
         "oxcdiff": "tsx scripts/oxc-diff.ts",
+        "cjsdiff": "tsx scripts/cjs-diff.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {
