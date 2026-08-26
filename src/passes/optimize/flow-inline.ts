@@ -29,7 +29,7 @@ import { buildCfg, type Cfg } from '../../analysis/cfg.ts';
 import { computeReachingDefs, TOP } from '../../analysis/reaching-defs.ts';
 import { computeReachingUses } from '../../analysis/reaching-uses.ts';
 import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast.ts';
-import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
+import { attachScopeNode, lookupValue, retireSymbol, type Semantic, scopeOf } from '../../analysis/semantic.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
 
@@ -178,7 +178,7 @@ function pathInterferes(cfg: Cfg, defId: number, useId: number, syms: ReadonlySe
 /** The declarator/assignment inside CFG node `stmt` that writes `sym`, with its RHS and how to drop it. */
 type DefLoc = { rhs: Node; drop: () => void };
 
-function locateDef(list: Node[], stmt: Node, sym: number): DefLoc | null {
+function locateDef(list: Node[], stmt: Node, sym: number, sem: Semantic): DefLoc | null {
     if (stmt.type === N.VariableDeclaration) {
         const d = stmt.data as { kind: string; declarations: Node[] };
         for (let i = 0; i < d.declarations.length; i++) {
@@ -188,10 +188,16 @@ function locateDef(list: Node[], stmt: Node, sym: number): DefLoc | null {
                 return {
                     rhs: init,
                     drop: () => {
+                        // The two branches below REMOVE the binding, so retire the symbol with it —
+                        // `dropRefs`-style count movement does not retire a BINDING, and a symbol left
+                        // live keeps claiming a mangler slot for a declaration that no longer exists.
+                        // The `let` branch keeps the declarator, so it must NOT evict.
                         if (d.declarations.length === 1) {
+                            retireSymbol(sem, sym);
                             const idx = list.indexOf(stmt);
                             if (idx >= 0) list.splice(idx, 1);
                         } else if (d.kind === 'const') {
+                            retireSymbol(sem, sym);
                             d.declarations.splice(i, 1);
                         } else {
                             // `let` — keep the binding, null the init (it might be read before reassigned).
@@ -302,7 +308,7 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
             const defList = listOfStmt.get(defNode);
             if (defList === undefined) continue;
 
-            const loc = locateDef(defList, defNode, sym);
+            const loc = locateDef(defList, defNode, sym, sem);
             if (loc === null) continue;
             if (!isPureExpr(loc.rhs) || !rhsSafe(loc.rhs)) continue;
 
@@ -388,6 +394,31 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
     // Apply: replace the single use with a clone of the RHS (in place, so the parent keeps its
     // reference), then drop the def. Deepest-first is unnecessary — each use node is distinct and each
     // def is used once — but drop after all substitutions so a dropped list index cannot shift a use.
+    /** Move the scope ownership of `from` onto its clone `to`.
+     *
+     *  `cloneNode` deliberately CLEARS `scopeId`, because a clone is normally a second copy and two
+     *  nodes cannot own one scope. Here it is not a copy: the clone replaces the use and the original
+     *  RHS is dropped immediately after, so this is a MOVE and the scope must travel with it.
+     *
+     *  Left unset, a cloned arrow function is a scope-OWNING node with no scope, and names inside it
+     *  resolve from the wrong scope — `verifySemantic` reports exactly that
+     *  ("scope-owning node 37 has no scopeId in maintained"). The two trees are structurally identical
+     *  by construction, so a lockstep walk pairs them up. */
+    const transferScopes = (from: Node, to: Node): void => {
+        const sid = (from.data as { scopeId?: number } | null)?.scopeId ?? 0;
+        if (sid !== 0) attachScopeNode(sem, sid, to);
+        const fk: Node[] = [];
+        const tk: Node[] = [];
+        walkChildren(from, (c) => {
+            fk.push(c);
+        });
+        walkChildren(to, (c) => {
+            tk.push(c);
+        });
+        const n = Math.min(fk.length, tk.length);
+        for (let i = 0; i < n; i++) transferScopes(fk[i], tk[i]);
+    };
+
     for (const d of decisions) {
         // Find the single IdentifierReference of useSym inside the use node and overwrite it in place.
         let done = false;
@@ -398,6 +429,7 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
                 set(n, clone.type, clone.data as never);
                 (n as { name: string }).name = clone.name;
                 (n as { sym: number }).sym = clone.sym;
+                transferScopes(d.rhs, n);
                 done = true;
                 return;
             }

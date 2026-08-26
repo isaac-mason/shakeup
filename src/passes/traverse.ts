@@ -11,7 +11,7 @@
 //     by `node.type`; each node fires every visitor's hook in order (fused), and hooks mutate via
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
 import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
-import { refFor, type Semantic } from '../analysis/semantic.ts';
+import { refFor, retireSymbol as retireSymbolIn, type Semantic } from '../analysis/semantic.ts';
 import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast.ts';
 
 type Hook = (node: Node, ctx: TransformCtx) => void;
@@ -264,9 +264,7 @@ class Ctx {
      * VALID index because an out-of-range sentinel crashed chunk-graph.
      */
     retireSymbol(sym: number): void {
-        if (sym <= 0) return; // unresolved / no symbol — index 0 is the table's own sentinel
-        const rec = this.semantic.symbols[sym];
-        if (rec !== undefined) rec.scope = 0;
+        retireSymbolIn(this.semantic, sym);
     }
     /**
      * Two symbols become one: `from`'s facts fold into `to`, and `from` is retired.

@@ -160,6 +160,18 @@ export function lookupValue(sem: Semantic, scope: number, name: string): number 
     }
 }
 
+/** Retire a symbol whose declaration has been erased: `scope = 0`, "owned by no lexical scope".
+ *
+ *  Deliberately still a VALID index — an out-of-range sentinel crashed chunk-graph — and every consumer
+ *  filters on the owning scope, so an evicted symbol goes invisible without anyone needing a null
+ *  check. `Ctx.retireSymbol` delegates here so traverse-based and standalone passes (the optimize tier
+ *  takes a `Semantic` directly, with no `ctx`) share one implementation. */
+export function retireSymbol(sem: Semantic, sym: number): void {
+    if (sym <= 0) return; // unresolved / no symbol — index 0 is the table's own sentinel
+    const rec = sem.symbols[sym];
+    if (rec !== undefined) rec.scope = 0;
+}
+
 /** The `RefCounts` record for `sym`, minted from the pool on first use in this analyze pass.
  *
  *  Every site that CREATES a refs entry goes through here, so the pooling and the "absent means
