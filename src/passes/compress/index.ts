@@ -15,7 +15,7 @@
 // refreshed mid-loop; today we refresh ONCE at the end (returning a fresh `Semantic` when anything
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
-import { emitRefFacts, REF, verifyRefFacts } from '../../analysis/ref-facts.ts';
+import { emitRefFacts, REF, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
 import type { RefCounts } from '../../analysis/movement.ts';
 import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
@@ -194,6 +194,11 @@ export const setDeltaMode = (m: DeltaMode): void => {
 
 const MAX_ITERS = 8;
 
+/** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` after
+ *  every compress round. Off by default (it rebuilds the whole semantic per round); the point is to run
+ *  it in CI and whenever a pass that mutates structure is touched. */
+const SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
+
 /** Run the compress passes over `program` (loop to a fixed point, then the one-shot final pass).
  *  Returns a FRESH {@link Semantic} rebuilt from the compressed AST when anything changed (the caller
  *  swaps it in so all downstream sym-id lookups stay consistent), or `null` when nothing changed. */
@@ -292,6 +297,16 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
                 if (problems.length > 0)
                     throw new Error(`incremental reference facts diverged after round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`);
             }
+        }
+        // AFTER the round's `RefDelta` is folded in — checking before it reports every reference the
+        // round moved as UNDER-counted, which is the instrument lying rather than a real divergence.
+        // The compress loop is where the AST is mutated most and where the maintained semantic has
+        // drifted before (`blockFlatten` shipped two miscompiles), so the boundary is worth checking:
+        // it names the offending stage instead of surfacing as a crash three stages later.
+        if (SEMANTIC_VERIFY) {
+            const problems = verifySemantic(cur, program);
+            if (problems.length > 0)
+                throw new Error(`maintained semantic diverged after compress round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`);
         }
     }
     // Both final traversals are purely cosmetic — `'dce'` stops after the fixed point. They share a

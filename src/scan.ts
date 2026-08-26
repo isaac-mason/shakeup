@@ -1,5 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
-import { verifyLowerSemantic } from './analysis/ref-facts';
+import { verifySemantic } from './analysis/ref-facts';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
@@ -831,7 +831,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 if (isTs || passes.length > 0) {
                     applyRefDelta(semantic, lowerDelta);
                     if (LOWER_SEMANTIC_MODE === 'verify') {
-                        const problems = verifyLowerSemantic(semantic, program);
+                        const problems = verifySemantic(semantic, program);
                         if (problems.length > 0)
                             throw new Error(`maintained semantic diverged after lowering in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
                     }
