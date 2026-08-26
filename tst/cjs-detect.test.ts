@@ -443,3 +443,45 @@ describe('require() between CommonJS modules', () => {
         expect(ns.x).toEqual([5, 5]);
     });
 });
+
+// cjs.md §2 pattern 7. This called for a loud rejection from the start and went unimplemented, with
+// the worst possible result: the call reached the output VERBATIM, the build reported no error, and
+// the bundle threw `require is not defined` at runtime. A browser bundle has no module registry to
+// resolve against, so there is nothing to lower a computed specifier to.
+describe('require() that cannot be resolved statically', () => {
+    const errorsFor = async (files: Record<string, string>) =>
+        (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;
+    const MAIN = "import d from './d.cjs';\nexport const x = d;";
+
+    it('rejects a computed specifier instead of emitting it', async () => {
+        const errors = await errorsFor({
+            '/d.cjs': 'const which = globalThis.flag ? "a" : "b";\nmodule.exports = require(which);',
+            '/main.js': MAIN,
+        });
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/cannot statically resolve this require\(\)/);
+        expect(errors[0]).toMatch(/specifier is not a string literal/);
+    });
+
+    it('rejects a concatenated specifier', async () => {
+        expect((await errorsFor({ '/d.cjs': 'module.exports = require("./" + name);', '/main.js': MAIN }))[0]).toMatch(/not a string literal/);
+    });
+
+    it('reports the wrong arity distinctly', async () => {
+        expect((await errorsFor({ '/d.cjs': 'module.exports = require();', '/main.js': MAIN }))[0]).toMatch(/it takes 0 arguments/);
+    });
+
+    it('does not fire for a literal require', async () => {
+        expect(await errorsFor({ '/i.cjs': 'module.exports = 1;', '/d.cjs': "module.exports = require('./i.cjs');", '/main.js': MAIN })).toEqual([]);
+    });
+
+    it('does not fire for a LOCAL function named require', async () => {
+        // The check keys on a free reference, so somebody else's `require` helper is not Node's.
+        expect(
+            await errorsFor({
+                '/d.cjs': 'function require(x){ return x * 2 }\nmodule.exports = require(21);',
+                '/main.js': MAIN,
+            }),
+        ).toEqual([]);
+    });
+});
