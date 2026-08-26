@@ -114,6 +114,36 @@ const fnHook = (n: Node, ctx: TransformCtx) => {
     if (trimTrailingReturn(n)) ctx.changed = true;
 };
 
+/** Re-associate a RIGHT-nested logical to the LEFT: `a && (b && c)` → `(a && b) && c`.
+ *
+ *  `&&`, `||` and `??` are associative — for each, the two shapes evaluate the same operands in the
+ *  same order and short-circuit identically. But the printer must parenthesise a same-precedence
+ *  operand on the RIGHT, so the right-nested form costs two characters per nesting level:
+ *  `a&&(b&&(c))` against `a&&b&&c`. oxc normalises the same way (`join_with_left_associative_op`).
+ *
+ *  Same operator only. Mixing is NOT associative — `a ?? (b || c)` is not `(a ?? b) || c`, and `??`
+ *  cannot even be written next to `&&`/`||` without parens. */
+function reassociateLogical(n: Node, ctx: TransformCtx): void {
+    const d = n.data as { operator: string; left: Node; right: Node };
+    if (d.right.type !== N.LogicalExpression) return;
+    const r = d.right.data as { operator: string; left: Node; right: Node };
+    if (r.operator !== d.operator) return;
+    // `a op (b op c)` becomes `(a op b) op c`, reusing the right node as the new left.
+    //
+    // CAPTURE FIRST. `r` IS `d.right.data`, so writing `newLeft.left` also writes `r.left` — reading
+    // `r.left` afterwards yields `a`, not `b`, and the expression silently collapses. (It did: the
+    // whole test folded to nothing until these three locals were introduced.)
+    const a = d.left;
+    const b = r.left;
+    const c = r.right;
+    const newLeft = d.right;
+    (newLeft.data as { left: Node; right: Node }).left = a;
+    (newLeft.data as { left: Node; right: Node }).right = b;
+    d.left = newLeft;
+    d.right = c;
+    ctx.changed = true;
+}
+
 /** Flatten nested sequences: `a, (b, c)` → `a, b, c`. Sequences associate left and yield their LAST
  *  operand, so splicing a nested sequence's operands into the parent changes neither evaluation order
  *  nor the result — but it drops the parentheses the printer must otherwise emit around an inner
@@ -134,6 +164,7 @@ export const normalize: Visitor = {
     name: 'normalize',
     enter: hookTable({
         [N.SequenceExpression]: flattenSequence,
+        [N.LogicalExpression]: reassociateLogical,
         [N.WhileStatement]: (n, ctx: TransformCtx) => {
             const d = n.data as { test: Node; body: Node };
             const f = create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body) as Node;

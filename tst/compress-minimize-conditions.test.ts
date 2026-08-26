@@ -210,3 +210,43 @@ describe('an empty `else` is normalised away', () => {
         expect(g.sink).toBe(1);
     });
 });
+
+describe('a right-nested logical re-associates to the left', () => {
+    const run = async (body: string, x: unknown): Promise<unknown> => {
+        const r = await bundle({
+            entry: '/e.js',
+            fs: createMemoryFs({ '/e.js': body }),
+            external: [],
+            output: { minify: true, optimize: true },
+        } as never);
+        const g: Record<string, unknown> = { x };
+        new Function('globalThis', (r as { code: string }).code)(g);
+        return g.sink;
+    };
+
+    it('drops the parentheses a same-precedence right operand would need', async () => {
+        const r = await bundle({
+            entry: '/e.js',
+            fs: createMemoryFs({ '/e.js': 'let o = 0;\nconst a = Number(globalThis.x);\nif (a) { if (a > 1) { o = 1; } }\nglobalThis.sink = o;' }),
+            external: [],
+            output: { minify: true, optimize: true },
+        } as never);
+        // `a && (a > 1 && (o = 1))` would print two extra characters.
+        expect((r as { code: string }).code).not.toMatch(/&&\(\w+>1&&/);
+    });
+
+    it('preserves short-circuit order and result', async () => {
+        // `a && (b && c)` and `(a && b) && c` must agree on WHICH operand is returned.
+        const src = 'const a = Number(globalThis.x);\nglobalThis.sink = a && (a - 1 && "z");';
+        expect(await run(src, 0)).toBe(0); // a falsy → a
+        expect(await run(src, 1)).toBe(0); // a truthy, a-1 falsy → a-1
+        expect(await run(src, 2)).toBe('z');
+    });
+
+    it('does NOT mix different operators', async () => {
+        // `a ?? (b || c)` is not `(a ?? b) || c`.
+        const src = 'const a = Number(globalThis.x);\nglobalThis.sink = a ?? (0 || "fallback");';
+        expect(await run(src, 0)).toBe(0);
+        expect(await run(src, 5)).toBe(5);
+    });
+});
