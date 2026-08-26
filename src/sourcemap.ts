@@ -224,6 +224,27 @@ export function joinParts(parts: Part[]): { code: string; map: Mappings } {
     return { code: `${codes.join('\n')}\n`, map: { lines } };
 }
 
+/** Re-position a part's mappings after its text was wrapped in a closure: `headerLines` unmapped
+ *  lines are prepended, and every remaining segment shifts right by `indent` columns.
+ *
+ *  Needed because CommonJS wrapping is a TEXT splice — the body is re-indented inside
+ *  `__commonJS(… => { … })` — while the part's segments still described the unwrapped text. The
+ *  line counts then disagreed with `joinParts`, which derives them from `part.code`, and the map
+ *  desynchronized for the WHOLE chunk: in a bundle with one wrapped module, no output line mapped
+ *  to anything, including untouched ES modules alongside it.
+ *
+ *  Trailing lines need no entry — `joinParts` treats a missing line as unmapped. */
+export function indentMappings(map: Mappings, headerLines: number, indent: number): Mappings {
+    const lines: Segment[][] = [];
+    for (let i = 0; i < headerLines; i++) lines.push([]);
+    for (const segs of map.lines) {
+        // An empty generated line is not indented (the re-indent regex leaves it alone), but it has
+        // no segments to shift either, so one branch covers both.
+        lines.push(segs.map((sg) => [sg[0] + indent, ...sg.slice(1)]));
+    }
+    return { lines };
+}
+
 /** Nearest-preceding mapped segment on `line` at/-before `col`. */
 function traceSegment(m: Mappings, line: number, col: number): Segment | null {
     const segs = m.lines[line];
