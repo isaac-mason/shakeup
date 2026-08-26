@@ -1,6 +1,6 @@
 import { isPureStatement } from './analysis/effects';
 import type { Graph, ImportBind, Linked, Module } from './graph-types';
-import { NAME_DEFAULT, NAME_NAMESPACE, isEsmFormat, packRef, refMod, refSym } from './graph-types';
+import { isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 
 type LinkCtx = {
     graph: Graph;

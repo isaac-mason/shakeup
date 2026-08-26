@@ -29,14 +29,20 @@ describe('renderChunk return shapes', () => {
         // the chunk's code, so the emitted bundle WAS the string `[object Object]` — no error, no
         // warning. A returned `map` is still not composed; the existing warning covers that.
         const plugin: Plugin = { name: 'rc', renderChunk: (_c, code) => ({ code: `/*H*/\n${code}`, map: null }) };
-        const r = await build({ '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { plugins: [plugin] });
+        const r = await build(
+            { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
+            { plugins: [plugin] },
+        );
         expect(r.code.startsWith('/*H*/\n')).toBe(true);
         expect(r.code).not.toContain('[object Object]');
     });
 
     it('still accepts a plain string', async () => {
         const plugin: Plugin = { name: 'rc', renderChunk: (_c, code) => `/*H*/\n${code}` };
-        const r = await build({ '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { plugins: [plugin] });
+        const r = await build(
+            { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
+            { plugins: [plugin] },
+        );
         expect(r.code.startsWith('/*H*/\n')).toBe(true);
     });
 });
@@ -45,7 +51,10 @@ describe('configurations verified correct, now pinned', () => {
     it('an incremental rebuild picks up an edited .cjs', async () => {
         // Warm `ParseCache` across two builds — the wrapper, its interop namespace and the export
         // map all have to be rebuilt, not reused from the first pass.
-        const files: Record<string, string> = { '/d.cjs': 'module.exports = { k: 1 };', '/main.js': "import d from './d.cjs';\nexport const x = d.k;" };
+        const files: Record<string, string> = {
+            '/d.cjs': 'module.exports = { k: 1 };',
+            '/main.js': "import d from './d.cjs';\nexport const x = d.k;",
+        };
         const cache = new Map();
         const first = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files), cache });
         expect(first.errors).toEqual([]);
@@ -62,7 +71,15 @@ describe('configurations verified correct, now pinned', () => {
             resolveId: (_c, spec) => (spec === 'virtual:cjs' ? '\0virtual:cjs' : null),
             load: (_c, id) => (id === '\0virtual:cjs' ? 'module.exports = { z: 5 };' : null),
         };
-        expect(await run({ '/d.cjs': "module.exports = require('virtual:cjs').z;", '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { plugins: [virt] })).toBe(5);
+        expect(
+            await run(
+                {
+                    '/d.cjs': "module.exports = require('virtual:cjs').z;",
+                    '/main.js': "import d from './d.cjs';\nexport const x = d;",
+                },
+                { plugins: [virt] },
+            ),
+        ).toBe(5);
         expect(await run({ '/main.js': "import v from 'virtual:cjs';\nexport const x = v.z;" }, { plugins: [virt] })).toBe(5);
     });
 
@@ -83,7 +100,8 @@ describe('configurations verified correct, now pinned', () => {
                 '/d.cjs': "exports.__esModule = true;\nexports.default = 'R';",
                 '/a.mjs': "import d from './d.cjs';\nexport const a = d;",
                 '/b.js': "import d from './d.cjs';\nexport const b = d;",
-                '/main.js': "export const x = Promise.all([import('./a.mjs'), import('./b.js')]).then(([p, q]) => [typeof p.a, q.b]);",
+                '/main.js':
+                    "export const x = Promise.all([import('./a.mjs'), import('./b.js')]).then(([p, q]) => [typeof p.a, q.b]);",
             }),
         ).toEqual(['object', 'R']);
     });
@@ -91,9 +109,15 @@ describe('configurations verified correct, now pinned', () => {
     it('sourcemaps stay accurate with a banner and intro above the helpers', async () => {
         // `banner`/`intro` sit above `helperLines` in `mapParts` too, so their line counts have to
         // be right as well.
-        const r = await build({ '/d.cjs': 'function h() {\n    return globalThis.z;\n}\nmodule.exports = h();', '/main.js': "import d from './d.cjs';\nexport const x = d;" }, {
-            output: { sourcemap: true, banner: '/*B1*/\n/*B2*/', intro: '/*I*/' },
-        });
+        const r = await build(
+            {
+                '/d.cjs': 'function h() {\n    return globalThis.z;\n}\nmodule.exports = h();',
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            },
+            {
+                output: { sourcemap: true, banner: '/*B1*/\n/*B2*/', intro: '/*I*/' },
+            },
+        );
         const { decode } = await import('@jridgewell/sourcemap-codec');
         const lines = r.code.split('\n');
         const li = lines.findIndex((l) => l.includes('function h()'));

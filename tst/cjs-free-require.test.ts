@@ -64,13 +64,16 @@ describe('free `require` references are substituted', () => {
     it('D8/D9 — on `platform: "node"` the shim is a REAL require', async () => {
         // `createRequire(import.meta.url)` IS Node's require, so `.resolve` and `.cache` are the
         // genuine articles rather than a stub's missing properties.
-        const { value, code } = await run('module.exports = [typeof require, typeof require.resolve, typeof require.cache];', 'node');
+        const { value, code } = await run(
+            'module.exports = [typeof require, typeof require.resolve, typeof require.cache];',
+            'node',
+        );
         expect(value).toEqual(['function', 'function', 'object']);
         expect(code).toContain("import { createRequire } from 'node:module';");
         expect(code).not.toContain('new Proxy');
     });
 
-    it('emits the oracle\'s Proxy shim verbatim off `node`', async () => {
+    it("emits the oracle's Proxy shim verbatim off `node`", async () => {
         // The shim's shape is the assertion here, because its two subtleties cannot be observed from
         // inside a test runner that already provides a `require` of its own:
         //   · the target is a FUNCTION, so `typeof require` is `'function'` even off Node (#1202);
@@ -109,13 +112,18 @@ describe('free `require` references are substituted', () => {
         const r = await bundle({
             entry: '/main.js',
             external: [],
-            fs: createMemoryFs({ '/d.cjs': 'module.exports = require(globalThis.n);', '/main.js': "import d from './d.cjs';\nexport const x = d;" }),
+            fs: createMemoryFs({
+                '/d.cjs': 'module.exports = require(globalThis.n);',
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            }),
         });
         expect(r.errors.join('\n')).toMatch(/cannot statically resolve this require\(\)/);
     });
 
     it('a LOCAL binding named `require` is untouched', async () => {
-        const { value } = await run('function make(require) { return require("shadowed") }\nmodule.exports = make((s) => s + "!");');
+        const { value } = await run(
+            'function make(require) { return require("shadowed") }\nmodule.exports = make((s) => s + "!");',
+        );
         expect(value).toBe('shadowed!');
     });
 

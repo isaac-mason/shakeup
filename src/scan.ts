@@ -1,32 +1,32 @@
-import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from './analysis/semantic';
 import { semanticVerifyOn, verifySemantic } from './analysis/ref-facts';
+import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from './analysis/semantic';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
     type CachedParse,
     type ExportsKind,
-    isCommonJsFormat,
-    isEsmFormat,
-    type ModuleDefFormat,
     type Graph,
     type ImportRecordKind,
+    isCommonJsFormat,
+    isEsmFormat,
     type JSXRuntime,
     type Module,
+    type ModuleDefFormat,
     NAME_DEFAULT,
     NAME_NAMESPACE,
 } from './graph-types';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
+import { compileDefines, makeDefine } from './passes/define';
+import { makeJsxLower } from './passes/lower-jsx';
+import { sawUnloweredTs, tsLower } from './passes/lower-ts';
 import { eliminateDeadStores } from './passes/optimize/dead-store';
 import { flowInlineVariables } from './passes/optimize/flow-inline';
 import { inlineFunctions } from './passes/optimize/inline-functions';
 import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
-import { compileDefines, makeDefine } from './passes/define';
-import { makeJsxLower } from './passes/lower-jsx';
-import { tsLower, sawUnloweredTs } from './passes/lower-ts';
 import { tsStrip } from './passes/strip-ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from './passes/traverse';
 import {
@@ -286,7 +286,11 @@ function esmSyntaxOf(mod: Module): { hasExport: boolean; hasImport: boolean } {
     let hasImport = mod.hasEsmImport;
     for (const stmt of mod.program.data.body) {
         if (stmt.type === N.ImportDeclaration) hasImport = true;
-        else if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration)
+        else if (
+            stmt.type === N.ExportNamedDeclaration ||
+            stmt.type === N.ExportDefaultDeclaration ||
+            stmt.type === N.ExportAllDeclaration
+        )
             hasExport = true;
         if (hasExport && hasImport) break;
     }
@@ -354,7 +358,7 @@ function errorDynamicRequire(mod: Module, errors: string[]): void {
  *  or the nearest `package.json#type: "commonjs"`. Port of oxc's `module_code` check
  *  (`oxc_semantic/src/checker/javascript.rs:532-548` **[V]**), whose message this mirrors.
  *
- *  The exact mirror of {@link warnCjsVarsInEsm}: that one catches CommonJS habits in an ES module,
+ *  The exact mirror of the tier-1 warning in {@link classifyExportsKind}: that one catches CommonJS habits in an ES module,
  *  this one catches ESM syntax in a CommonJS file. An ERROR rather than a warning because — unlike
  *  a stray `module.exports` in ESM, which merely does nothing — this file cannot be interpreted the
  *  way it is declared at all. Node rejects it too.
@@ -364,12 +368,16 @@ function errorDynamicRequire(mod: Module, errors: string[]): void {
 function errorEsmSyntaxInCjs(mod: Module, errors: string[]): void {
     if (!isCommonJsFormat(mod.defFormat)) return;
     const why =
-        mod.defFormat === 'cjs-package-json' ? 'the nearest package.json declares "type": "commonjs"' : `of its ${mod.defFormat === 'cts' ? '.cts' : '.cjs'} extension`;
+        mod.defFormat === 'cjs-package-json'
+            ? 'the nearest package.json declares "type": "commonjs"'
+            : `of its ${mod.defFormat === 'cts' ? '.cts' : '.cjs'} extension`;
     for (const stmt of mod.program.data.body) {
         const what =
             stmt.type === N.ImportDeclaration
                 ? 'import'
-                : stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration
+                : stmt.type === N.ExportNamedDeclaration ||
+                    stmt.type === N.ExportDefaultDeclaration ||
+                    stmt.type === N.ExportAllDeclaration
                   ? 'export'
                   : null;
         if (what === null) continue;
@@ -378,25 +386,6 @@ function errorEsmSyntaxInCjs(mod: Module, errors: string[]): void {
                 `CommonJS uses require/module.exports, not import/export statements`,
         );
         return; // one per module is enough
-    }
-}
-
-function warnCjsVarsInEsm(mod: Module, warnings: string[]): void {
-    let hasEsmExport = false;
-    for (const stmt of mod.program.data.body) {
-        if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration) {
-            hasEsmExport = true;
-            break;
-        }
-    }
-    if (!hasEsmExport) return;
-    for (const node of mod.semantic.unresolved) {
-        if (node.name !== 'module' && node.name !== 'exports') continue;
-        warnings.push(
-            `${mod.id}:${node.start}: '${node.name}' is a CommonJS variable and is not defined in an ES module ` +
-                `(this file uses ESM \`export\`, so it is treated as ESM)`,
-        );
-        return; // one per module is enough to make the point
     }
 }
 
@@ -1044,7 +1033,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     jsxRt = { jsx: 0, jsxs: 0, Fragment: 0, createElement: 0 };
                     const jsxPass = makeJsxLower(jsxOptions.importSource, jsxOptions.pure, jsxRt);
                     // jsxLower carries per-module state, so this array cannot be shared.
-                    passes = isTs ? (wantShapes ? [shapeCollector, tsLower, jsxPass, tsStrip] : [tsLower, jsxPass, tsStrip]) : [jsxPass];
+                    passes = isTs
+                        ? wantShapes
+                            ? [shapeCollector, tsLower, jsxPass, tsStrip]
+                            : [tsLower, jsxPass, tsStrip]
+                        : [jsxPass];
                 } else {
                     // Shared constants: `traverse` caches its per-node-type hook tables on the visitor
                     // ARRAY, so a fresh array per module would miss that cache every time.
@@ -1081,7 +1074,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     if (LOWER_SEMANTIC_MODE === 'verify') {
                         const problems = verifySemantic(semantic, program);
                         if (problems.length > 0)
-                            throw new Error(`maintained semantic diverged after lowering in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                            throw new Error(
+                                `maintained semantic diverged after lowering in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                            );
                     }
                     if (LOWER_SEMANTIC_MODE !== 'maintain') {
                         semantic = createSemantic();
@@ -1131,7 +1126,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     if (!semanticVerifyOn()) return;
                     const problems = verifySemantic(semantic, program);
                     if (problems.length > 0)
-                        throw new Error(`maintained semantic diverged after ${passName} in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                        throw new Error(
+                            `maintained semantic diverged after ${passName} in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                        );
                 };
                 if (optimizeTier) {
                     expanded = inlineFunctions(program, semantic, source);

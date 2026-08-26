@@ -16,7 +16,7 @@ import { createMemoryFs } from '../src/fs.ts';
 // The expected value for the `.mjs` case was not derived from the spec — it was MEASURED by running
 // the same two files through Node, which printed
 // `[{"__esModule":true,"default":"REAL","named":"N"},"N"]`.
-const CJS = ["exports.__esModule = true;", "exports.default = 'REAL';", "exports.named = 'N';"].join('\n');
+const CJS = ['exports.__esModule = true;', "exports.default = 'REAL';", "exports.named = 'N';"].join('\n');
 
 const run = async (files: Record<string, string>, entry: string) => {
     const r = await bundle({ entry, external: [], fs: createMemoryFs(files) });
@@ -27,14 +27,20 @@ const run = async (files: Record<string, string>, entry: string) => {
 
 describe('isNodeMode is decided per importer', () => {
     it('an .mjs importer gets the whole module.exports as default', async () => {
-        const { value, code } = await run({ '/d.cjs': CJS, '/main.mjs': "import d, { named } from './d.cjs';\nexport const x = [d, named];" }, '/main.mjs');
+        const { value, code } = await run(
+            { '/d.cjs': CJS, '/main.mjs': "import d, { named } from './d.cjs';\nexport const x = [d, named];" },
+            '/main.mjs',
+        );
         expect(value).toEqual([{ __esModule: true, default: 'REAL', named: 'N' }, 'N']);
         expect(code).toMatch(/__toESM\(require_d\(\), 1\)/);
     });
 
     it('a plain .js importer keeps honouring `__esModule`', async () => {
         // Unknown format — the ordinary bundler case, and the transpiler convention applies.
-        const { value, code } = await run({ '/d.cjs': CJS, '/main.js': "import d, { named } from './d.cjs';\nexport const x = [d, named];" }, '/main.js');
+        const { value, code } = await run(
+            { '/d.cjs': CJS, '/main.js': "import d, { named } from './d.cjs';\nexport const x = [d, named];" },
+            '/main.js',
+        );
         expect(value).toEqual(['REAL', 'N']);
         expect(code).toMatch(/__toESM\(require_d\(\)\)/);
     });

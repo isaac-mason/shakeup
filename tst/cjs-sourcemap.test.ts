@@ -15,7 +15,9 @@ import { createMemoryFs } from '../src/fs.ts';
 //
 // Both were silent: a map that decodes cleanly and has the right `sources` looks fine. Only
 // resolving a specific generated line back to its original catches it, which is what these do.
-const D_CJS = ['const A = 1;', 'function helper() {', '    return A + globalThis.z;', '}', 'module.exports = helper();'].join('\n');
+const D_CJS = ['const A = 1;', 'function helper() {', '    return A + globalThis.z;', '}', 'module.exports = helper();'].join(
+    '\n',
+);
 
 /** Resolve one output line to `source:line`, or null when unmapped. */
 const resolve = (code: string, map: { mappings: string; sources: (string | null)[] }, needle: string) => {

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { runChunks } from './exec-helpers.ts';
 import type { Platform } from '../src/resolve.ts';
+import { runChunks } from './exec-helpers.ts';
 
 // cjs.md §"NOT YET PROBED" — the seven configurations three audit passes had never RUN. Five of them
 // were broken, and every one failed silently or opaquely: a build that reported no errors produced
@@ -31,20 +31,29 @@ describe('§7.6 — require() of an external', () => {
         // `valueToSubstituteForRequire` (`js_parser.go:15788-15791`), and rolldown's shim error
         // points at "bundling-cjs#require-external-modules".
         const value = await run(
-            { '/d.cjs': "const p = require('node:path');\nmodule.exports = typeof p.join;", '/main.js': "import d from './d.cjs';\nexport const x = d;" },
+            {
+                '/d.cjs': "const p = require('node:path');\nmodule.exports = typeof p.join;",
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            },
             { platform: 'node' as Platform, external: ['node:path'] },
         );
         expect(value).toBe('function');
     });
 
     it('off node it throws a NAMED error rather than `require is not defined`', async () => {
-        const r = await build({ '/d.cjs': "module.exports = require('ext');", '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { external: ['ext'] });
+        const r = await build(
+            { '/d.cjs': "module.exports = require('ext');", '/main.js': "import d from './d.cjs';\nexport const x = d;" },
+            { external: ['ext'] },
+        );
         expect(r.errors).toEqual([]);
         expect(r.code).toContain("__require('ext')");
     });
 
     it('a DYNAMIC require is still a build error — it has no specifier to defer', async () => {
-        const r = await build({ '/d.cjs': 'module.exports = require(globalThis.n);', '/main.js': "import d from './d.cjs';\nexport const x = d;" });
+        const r = await build({
+            '/d.cjs': 'module.exports = require(globalThis.n);',
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
         expect(r.errors.join('\n')).toMatch(/cannot statically resolve this require\(\)/);
     });
 });
@@ -53,11 +62,24 @@ describe('import() of a CommonJS module with codeSplitting off', () => {
     it('resolves to the interop namespace, so `.default` exists', async () => {
         // The target folds into the importer's chunk, and the override pointed at `namespaceOf` —
         // which for a CommonJS module is not the interop object. `m.default.k` read `undefined`.
-        expect(await run({ '/c.cjs': 'module.exports = { k: 7 };', '/main.js': "export const x = import('./c.cjs').then((m) => m.default.k);" }, { output: { codeSplitting: false } })).toBe(7);
+        expect(
+            await run(
+                {
+                    '/c.cjs': 'module.exports = { k: 7 };',
+                    '/main.js': "export const x = import('./c.cjs').then((m) => m.default.k);",
+                },
+                { output: { codeSplitting: false } },
+            ),
+        ).toBe(7);
     });
 
     it('an ES target is unaffected', async () => {
-        expect(await run({ '/c.js': 'export const k = 7;', '/main.js': "export const x = import('./c.js').then((m) => m.k);" }, { output: { codeSplitting: false } })).toBe(7);
+        expect(
+            await run(
+                { '/c.js': 'export const k = 7;', '/main.js': "export const x = import('./c.js').then((m) => m.k);" },
+                { output: { codeSplitting: false } },
+            ),
+        ).toBe(7);
     });
 });
 
@@ -88,7 +110,13 @@ describe('circular require() of an ES module', () => {
     it('an ACYCLIC require of an ES module is untouched', async () => {
         // The guard must be about the cycle, not about require-of-ESM, which is the whole point of
         // the `__esm` lazy init.
-        expect(await run({ '/e.js': 'export const a = 7;', '/d.cjs': "module.exports = require('./e.js').a;", '/main.js': "import d from './d.cjs';\nexport const x = d;" })).toBe(7);
+        expect(
+            await run({
+                '/e.js': 'export const a = 7;',
+                '/d.cjs': "module.exports = require('./e.js').a;",
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            }),
+        ).toBe(7);
     });
 
     it('a cycle closed through a DYNAMIC import is allowed', async () => {
@@ -119,7 +147,12 @@ describe('§7.5 — top-level await inside a wrapper', () => {
     });
 
     it('top-level await with no wrapper still builds and runs', async () => {
-        expect(await run({ '/e.js': 'export const v = await Promise.resolve(7);', '/main.js': "import { v } from './e.js';\nexport const x = v;" })).toBe(7);
+        expect(
+            await run({
+                '/e.js': 'export const v = await Promise.resolve(7);',
+                '/main.js': "import { v } from './e.js';\nexport const x = v;",
+            }),
+        ).toBe(7);
     });
 
     it('`await` inside a function in a required module is fine', async () => {
@@ -148,7 +181,10 @@ describe('the configurations that were already correct', () => {
 
     it('a CommonJS module importing an external', async () => {
         const value = await run(
-            { '/d.cjs': 'module.exports = 1;', '/main.js': "import { join } from 'node:path';\nimport d from './d.cjs';\nexport const x = [typeof join, d];" },
+            {
+                '/d.cjs': 'module.exports = 1;',
+                '/main.js': "import { join } from 'node:path';\nimport d from './d.cjs';\nexport const x = [typeof join, d];",
+            },
             { external: ['node:path'] },
         );
         expect(value).toEqual(['function', 1]);

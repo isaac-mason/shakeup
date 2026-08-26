@@ -77,9 +77,13 @@ describe('CommonJS across chunk boundaries', () => {
         // The library case the native-namespace work was built for. Every module is its own chunk,
         // so a CommonJS dep ALWAYS crosses a boundary here.
         expect(
-            await buildAndRun({ '/d.cjs': 'module.exports = { k: 7 };', '/main.js': "import d from './d.cjs';\nexport const x = d.k;" }, '/main.js', {
-                preserveModules: true,
-            }),
+            await buildAndRun(
+                { '/d.cjs': 'module.exports = { k: 7 };', '/main.js': "import d from './d.cjs';\nexport const x = d.k;" },
+                '/main.js',
+                {
+                    preserveModules: true,
+                },
+            ),
         ).toBe(7);
     });
 
@@ -106,12 +110,22 @@ describe('CommonJS across chunk boundaries', () => {
     // ── already correct: guards the single-chunk behaviour these must not regress ──
 
     it('single-chunk CommonJS still resolves', async () => {
-        expect(await buildAndRun({ '/d.cjs': 'module.exports = { k: 7 };', '/main.js': "import d from './d.cjs';\nexport const x = d.k;" })).toBe(7);
+        expect(
+            await buildAndRun({
+                '/d.cjs': 'module.exports = { k: 7 };',
+                '/main.js': "import d from './d.cjs';\nexport const x = d.k;",
+            }),
+        ).toBe(7);
     });
 
     it('a dynamically imported ES module still resolves across chunks', async () => {
         // Proof the failure is about CommonJS, not about dynamic import or chunking generally.
-        expect(await buildAndRun({ '/e.js': 'export const k = 7;', '/main.js': "export const x = import('./e.js').then((m) => m.k);" })).toBe(7);
+        expect(
+            await buildAndRun({
+                '/e.js': 'export const k = 7;',
+                '/main.js': "export const x = import('./e.js').then((m) => m.k);",
+            }),
+        ).toBe(7);
     });
 });
 
@@ -133,7 +147,8 @@ describe('require() of an ES module is lazy', () => {
         // The serious half: a module that should never execute does.
         const ns = await runOne({
             '/esm.js': 'globalThis.__ran = true;\nexport const a = 1;',
-            '/d.cjs': "let v = 0;\nif (globalThis.__never) { v = require('./esm.js').a }\nmodule.exports = { v, ran: globalThis.__ran ?? false };",
+            '/d.cjs':
+                "let v = 0;\nif (globalThis.__never) { v = require('./esm.js').a }\nmodule.exports = { v, ran: globalThis.__ran ?? false };",
             '/main.js': "import d from './d.cjs';\nexport const x = d;",
         });
         expect(ns.x).toEqual({ v: 0, ran: false });
@@ -216,9 +231,13 @@ describe('require() of an ES module across a chunk boundary', () => {
 
     it('a producer chunk still surfaces a NATIVE namespace when the module is not lazy', async () => {
         // Guard on the exclusion added to `nativeNsEligible`: it must only fire for lazy modules.
-        const r = await build({ '/a.js': 'export const v = 1;', '/main.js': "import * as ns from './a.js';\nexport const x = ns.v;" }, '/main.js', {
-            preserveModules: true,
-        });
+        const r = await build(
+            { '/a.js': 'export const v = 1;', '/main.js': "import * as ns from './a.js';\nexport const x = ns.v;" },
+            '/main.js',
+            {
+                preserveModules: true,
+            },
+        );
         expect(r.chunks.find((c) => c.isEntry)!.code).toMatch(/import \* as \w+ from/);
     });
 });
