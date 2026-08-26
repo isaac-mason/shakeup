@@ -532,8 +532,10 @@ function wireAndDeconflict(
                 if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
                 const wrapRef = linked.cjsWrap.get(rec.resolved);
                 if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: wrapRef });
-                const nsRef = linked.cjsNamespace.get(rec.resolved);
-                if (nsRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
+                for (const map of [linked.cjsNamespace, linked.cjsNamespaceNode]) {
+                    const nsRef = map.get(rec.resolved);
+                    if (nsRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
+                }
                 // Requiring an ES MODULE reads its namespace object and — when the target is lazy —
                 // calls its `__esm` init. Neither is a named import either, and across a chunk
                 // boundary both dangled: the producer declared them and the consumer referenced them

@@ -294,6 +294,12 @@ export type Linked = {
     /** For each wrapped CJS module reached by an ESM import, the local holding its interop
      *  namespace — `var import_foo = __toESM(require_foo())`. */
     cjsNamespace: Map<number, number>;
+    /** Same, for importers that are ESM BY FILE FORMAT (`.mjs`/`.mts`/`"type":"module"`) — rolldown's
+     *  `should_consider_node_esm_spec_for_static_import`, which is exactly `def_format.is_esm()`
+     *  (`normal_module.rs:181-183`). Those get `__toESM(require_d(), 1)`: Node ignores `__esModule`
+     *  and hands the whole `module.exports` to `import d from`, so the marker must NOT be honoured.
+     *  A module imported both ways materializes both objects, since the shapes genuinely differ. */
+    cjsNamespaceNode: Map<number, number>;
     /** ESM modules reached ONLY through `require()`, mapped to their `__esm` init symbol. Their body
      *  goes inside the closure so it runs at the require CALL rather than eagerly — CommonJS
      *  semantics. Absent for a module that is also statically imported, whose bindings must stay
