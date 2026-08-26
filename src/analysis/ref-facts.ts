@@ -204,6 +204,19 @@ export function verifyRefFacts(
     return out;
 }
 
+/** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` at
+ *  every mutation boundary. Off by default (it rebuilds the whole semantic each time); the point is to
+ *  run it in CI and whenever a pass that mutates structure is touched.
+ *
+ *  Lives here rather than in the compress driver because BOTH the compress loop and the optimize tier
+ *  check it — flow-inline's block-scope escape lived in the optimize tier and was only caught two
+ *  stages later, at a compress boundary. */
+let SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
+export const semanticVerifyOn = (): boolean => SEMANTIC_VERIFY;
+/** Enable programmatically. The env var is read at MODULE LOAD, so a test setting `process.env` in its
+ *  body has no effect — the first version of `tst/semantic-verify.test.ts` did that and was vacuous. */
+export const setSemanticVerify = (on: boolean): void => { SEMANTIC_VERIFY = on; };
+
 /**
  * Differential check for ANY stage that mutates the AST while maintaining the semantic: does the
  * MAINTAINED semantic (built before the
