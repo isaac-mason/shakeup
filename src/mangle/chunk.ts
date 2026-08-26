@@ -247,7 +247,29 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
         while (taken.has(name)) name = base54(next++);
         return name;
     };
-    for (let s = 0; s < totalSlots; s++) if (slotName[s] === null) slotName[s] = fresh();
+    // oxc Phase 3, `SlotRanking::tally` (`oxc_mangler/src/lib.rs:732-777`): rank slots by REFERENCE
+    // FREQUENCY and hand out names hottest-first, because `base54` names get LONGER as they are
+    // consumed (54 one-character names, then two-character). Assigning in slot-index order — what this
+    // did — spends the one-character names on whichever slots happen to come first, which is arbitrary.
+    //
+    // `refScopes[u].length` is the reference count for unified symbol u (one entry pushed per
+    // reference), i.e. exactly oxc's `get_resolved_reference_ids(symbol_id).len()`.
+    //
+    // Top-level symbols are excluded, matching this file's existing policy: their slots are already
+    // ANCHORED to a `deconflict`-assigned name above and never take a fresh one.
+    const slotFreq = new Float64Array(totalSlots);
+    for (let u = 1; u < symbolCount; u++) {
+        if (isTopLevel[u]) continue;
+        const slot = slots[u];
+        if (slot === SLOT_UNASSIGNED) continue;
+        slotFreq[slot] += refScopes[u].length;
+    }
+    const unnamed: number[] = [];
+    for (let s = 0; s < totalSlots; s++) if (slotName[s] === null) unnamed.push(s);
+    // Descending frequency. `unnamed` is built in ascending slot order and `sort` is stable, so ties
+    // break by slot index — deterministic, which matters more here than oxc's `sort_unstable_by_key`.
+    unnamed.sort((a, b) => slotFreq[b] - slotFreq[a]);
+    for (const s of unnamed) slotName[s] = fresh();
 
     // ── 6. Write back — nested symbols only; top-level naming is left exactly as deconflict set it ──
     for (let u = 1; u < symbolCount; u++) {
