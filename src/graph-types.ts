@@ -262,7 +262,7 @@ export type ImportBind =
      *  surface is not statically known — its `exports` object is built imperatively at runtime — so
      *  `import { x } from 'cjs'` cannot bind to a symbol and becomes `ns.x` instead. Both oracles do
      *  this (esbuild's `NamespaceAlias`, rolldown's runtime member). */
-    | { kind: 'cjs-member'; module: number; name: string }
+    | { kind: 'cjs-member'; ref: number; name: string }
     | { kind: 'external'; specifier: string; name: string }
     | { kind: 'namespace'; module: number }
     | { kind: 'none' };
@@ -279,11 +279,16 @@ export type Linked = {
     /** Modules lowered to a `__commonJS` wrapper, mapped to the name of the wrapper function
      *  (`require_foo`). rolldown's `WrapKind::Cjs`. A wrapped module is NOT concatenated as
      *  top-level statements: its body becomes a closure evaluated on first `require`, which is what
-     *  gives CommonJS its lazy, once-only, partial-exports-on-cycle semantics. */
-    cjsWrap: Map<number, string>;
+     *  gives CommonJS its lazy, once-only, partial-exports-on-cycle semantics.
+     *
+     *  A real SYMBOL REF, not a name. rolldown does the same — the wrapper is a `SymbolRef` pushed
+     *  into `depended_symbols` (`compute_cross_chunk_links.rs:659,787`) so it travels the ordinary
+     *  cross-chunk machinery. Holding a bare NAME here is what left consumers in other chunks
+     *  emitting `import_d.default` with nothing importing `import_d`. */
+    cjsWrap: Map<number, number>;
     /** For each wrapped CJS module reached by an ESM import, the local holding its interop
      *  namespace — `var import_foo = __toESM(require_foo())`. */
-    cjsNamespace: Map<number, string>;
+    cjsNamespace: Map<number, number>;
     externalLocals: Map<string, string>;
     defaultRefs: Map<number, number>;
     errors: string[];

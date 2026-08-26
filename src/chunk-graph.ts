@@ -311,7 +311,10 @@ function crossProducer(
     consumerChunk: number,
     chunkByModule: Int32Array,
 ): { producerChunk: number; ref: number; kind: 'found' | 'namespace'; module: number } | null {
-    if (bind.kind === 'found') {
+    // A `cjs-member` names its module's interop namespace, which is a real symbol living in that
+    // module's chunk — so it crosses a boundary exactly like a `found` bind. Returning null here is
+    // what left a consumer chunk emitting `import_d.default` with no import for `import_d`.
+    if (bind.kind === 'found' || bind.kind === 'cjs-member') {
         const pc = chunkByModule[refMod(bind.ref)];
         if (pc < 0 || pc === consumerChunk) return null;
         return { producerChunk: pc, ref: bind.ref, kind: 'found', module: refMod(bind.ref) };
@@ -492,6 +495,16 @@ function wireAndDeconflict(
                 const bind = linked.binds.get(packRef(idx, localSym));
                 if (bind === undefined) continue;
                 wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, bind);
+            }
+            // `require('./x')` references the target's WRAPPER, and that reference is not a named
+            // import, so nothing above wires it. rolldown reaches the same place by pushing
+            // `target.wrapper_ref` into `depended_symbols` (`compute_cross_chunk_links.rs:659`).
+            for (const rec of mod.importRecords) {
+                if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
+                const wrapRef = linked.cjsWrap.get(rec.resolved);
+                if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: wrapRef });
+                const nsRef = linked.cjsNamespace.get(rec.resolved);
+                if (nsRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
             }
         }
     }

@@ -12,8 +12,12 @@ import { runChunks } from './exec-helpers.ts';
 // plenty of `require` but never a second chunk. Both axes looked well covered; their product was
 // empty.
 //
-// The `it.fails` cases assert the CORRECT behaviour and therefore fail today; they are marked so the
-// suite stays green while the gap is open. Fixing it turns them red — flip to plain `it` then.
+// FIXED. The wrapper and its interop namespace are now real SYMBOL REFS rather than chunk-local
+// names, so they travel the ordinary cross-chunk machinery — the shape rolldown uses, where the
+// wrapper is a `SymbolRef` pushed into `depended_symbols` (`compute_cross_chunk_links.rs:659`).
+// A `require` edge is wired explicitly, since it is not a named import and nothing else would.
+// And a chunk whose ENTRY is CommonJS now emits `export default require_main();` — without it a
+// dynamically imported CommonJS module resolved to an empty namespace.
 //
 // Assertions EXECUTE the built output from disk, following rolldown's own harness (358 `_test.mjs`
 // fixtures import `./dist/main.js` and assert on values). A text assertion cannot see a dangling
@@ -37,7 +41,7 @@ const buildAndRun = async (files: Record<string, string>, entry = '/main.js', ou
 };
 
 describe('CommonJS across chunk boundaries', () => {
-    it.fails('D13 — a dynamically imported CommonJS module resolves', async () => {
+    it('D13 — a dynamically imported CommonJS module resolves', async () => {
         expect(
             await buildAndRun({
                 '/c.cjs': 'module.exports = { k: 7 };',
@@ -46,7 +50,7 @@ describe('CommonJS across chunk boundaries', () => {
         ).toBe(7);
     });
 
-    it.fails('D14 — a CommonJS module shared by two dynamic entries', async () => {
+    it('D14 — a CommonJS module shared by two dynamic entries', async () => {
         // Fails with `import_s is not defined`: the namespace binding is minted in the shared
         // chunk but never exported from it, so neither consumer can name it.
         expect(
@@ -59,7 +63,7 @@ describe('CommonJS across chunk boundaries', () => {
         ).toBe(14);
     });
 
-    it.fails('D15 — CommonJS requiring CommonJS across a chunk boundary', async () => {
+    it('D15 — CommonJS requiring CommonJS across a chunk boundary', async () => {
         expect(
             await buildAndRun({
                 '/i.cjs': 'module.exports = 3;',
@@ -69,7 +73,7 @@ describe('CommonJS across chunk boundaries', () => {
         ).toBe(6);
     });
 
-    it.fails('D16 — preserveModules with a CommonJS dependency', async () => {
+    it('D16 — preserveModules with a CommonJS dependency', async () => {
         // The library case the native-namespace work was built for. Every module is its own chunk,
         // so a CommonJS dep ALWAYS crosses a boundary here.
         expect(

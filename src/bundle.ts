@@ -5,6 +5,7 @@ import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
 import {
     externalKey,
     type Graph,
+    NAME_DEFAULT,
     NAME_NAMESPACE,
     type ImportBind,
     type Linked,
@@ -220,11 +221,15 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
         }
         case 'cjs-member': {
             // Textual member access: the emit substitutes NAMES for identifier nodes, and a member
-            // expression is a valid expression in every position a bare name was. This is how a CJS
-            // module's non-statically-knowable export reaches its consumer.
-            const ns = linked.cjsNamespace.get(bind.module);
-            if (ns === undefined) return null;
-            return bind.name === NAME_NAMESPACE ? ns : `${ns}.${bind.name}`;
+            // expression is valid in every position a bare name was. This is how a CJS module's
+            // non-statically-knowable export reaches its consumer.
+            //
+            // The namespace is resolved exactly like a `found` bind — CHUNK-LOCAL alias first — so a
+            // consumer in another chunk names the symbol it imported rather than the producer's own
+            // local, which is what used to dangle.
+            const local = chunk?.importLocalOf.get(bind.ref) ?? finalNameOf(linked, bind.ref);
+            if (local === null) return null;
+            return bind.name === NAME_NAMESPACE ? local : `${local}.${bind.name}`;
         }
         case 'namespace': {
             if (chunk !== null) {
@@ -290,8 +295,11 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         const text = spec.length >= 2 ? spec.slice(1, -1) : spec;
         const rec = mod.importRecords.find((r) => r.kind === 'require' && r.specifier === text);
         if (rec === undefined || rec.external || rec.resolved < 0) return;
-        const wrapper = linked.cjsWrap.get(rec.resolved);
-        if (wrapper !== undefined) {
+        const wrapRef = linked.cjsWrap.get(rec.resolved);
+        if (wrapRef !== undefined) {
+            // Chunk-local alias first: a `require` that crosses a chunk boundary must call the name
+            // this chunk imported the wrapper under, not the producer's own local.
+            const wrapper = ctx.chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
             map.set(n, `${wrapper}()`);
             return;
         }
@@ -1021,13 +1029,15 @@ function renderChunk(
         // MINIMAL — bound only when the body references them (§4.3 of cjs.md: rolldown emits
         // `(exports)` for a module that never mentions `module`). `/* @__PURE__ */` lets an unused
         // wrapper be dropped entirely.
-        const wrapName = linked.cjsWrap.get(idx);
-        if (wrapName !== undefined) {
+        const wrapRef = linked.cjsWrap.get(idx);
+        if (wrapRef !== undefined) {
+            const wrapName = finalNameOf(linked, wrapRef);
             const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
             const params = uses.has('module') ? '(exports, module)' : '(exports)';
             const indented = out === '' ? '' : `\n${out.replace(/^/gm, '    ')}\n`;
             out = `var ${wrapName} = /* @__PURE__ */ __commonJS(${params} => {${indented}});`;
-            const nsName = linked.cjsNamespace.get(idx);
+            const nsRef = linked.cjsNamespace.get(idx);
+            const nsName = nsRef === undefined ? undefined : finalNameOf(linked, nsRef);
             // The interop namespace is materialized ONCE per module, right after its wrapper, and
             // every consumer reads members off it (`nameOfBind`'s `cjs-member`).
             if (nsName !== undefined) out += `\nvar ${nsName} = /* @__PURE__ */ __toESM(${wrapName}());`;
@@ -1086,10 +1096,23 @@ function renderChunk(
     // shared/producer chunk it is `chunk.exports`.
     const exportSpecs: string[] = [];
     const exportedNames: string[] = [];
+    let cjsEntryDefault: string | null = null;
     const seenExport = new Set<string>();
     const suppressEntryExports = naming.exports === 'none';
     // Entry (and dynamic-entry) chunks export their entry module's surface.
     if (!suppressEntryExports && chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
+        // A CommonJS entry has no ESM export surface — its exports are `module.exports`, produced by
+        // calling the wrapper. rolldown emits exactly `export default require_main();`
+        // (`cjs_compat/cjs_entry`). Without this the chunk exported NOTHING: a `import('./x.cjs')`
+        // resolved to an empty namespace, and a CommonJS entry point yielded `undefined` downstream.
+        const entryWrapRef = linked.cjsWrap.get(chunk.entryModule);
+        if (entryWrapRef !== undefined) {
+            // Its own statement, not an `export { … }` specifier: a specifier must be an identifier,
+            // and this is a CALL. `export default require_main();`
+            seenExport.add(NAME_DEFAULT);
+            cjsEntryDefault = `export default ${finalNameOf(linked, entryWrapRef)}();`;
+            exportedNames.push(NAME_DEFAULT);
+        }
         const entryMap = linked.exportMaps.get(chunk.entryModule);
         // A pure dynamic-entry chunk narrows to the members its `import()` consumers read (tree-shake
         // dropped the rest); a real user entry always exports its whole surface.
@@ -1136,7 +1159,7 @@ function renderChunk(
     const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => (tight ? `export*from'${spec}';` : `export * from '${spec}';`));
 
     // Empty non-entry chunk with nothing to emit: drop it.
-    const isEmpty = moduleTexts.length === 0 && exportLine === null && starLines.length === 0;
+    const isEmpty = moduleTexts.length === 0 && exportLine === null && cjsEntryDefault === null && starLines.length === 0;
     if (isEmpty && !chunk.isEntry) return null;
 
     // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. Order:
@@ -1181,6 +1204,7 @@ function renderChunk(
     parts.push(...helperLines);
     parts.push(...moduleTexts);
     if (exportLine !== null) parts.push(exportLine);
+    if (cjsEntryDefault !== null) parts.push(cjsEntryDefault);
     parts.push(...starLines);
     if (outro !== '') parts.push(outro);
     if (footer !== '') parts.push(footer);

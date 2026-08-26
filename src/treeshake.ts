@@ -291,7 +291,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         }
     }
     const markBind = (bind: ImportBind): void => {
-        if (bind.kind === 'found') markRef(bind.ref);
+        if (bind.kind === 'found' || bind.kind === 'cjs-member') markRef(bind.ref);
         else if (bind.kind === 'namespace') markRef(packRef(bind.module, NS_MARKER));
     };
     const markExportMap = (map: Map<string, ImportBind> | undefined): void => {
