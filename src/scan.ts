@@ -1,4 +1,4 @@
-import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
+import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from './analysis/semantic';
 import { semanticVerifyOn, verifySemantic } from './analysis/ref-facts';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
@@ -177,25 +177,39 @@ function moduleTypeOf(id: string): ModuleType {
     return 'js';
 }
 
-/** Drop import specifiers whose local binding has no remaining VALUE reference — TypeScript's
- *  import elision. Called after the lowering traversal has erased type annotations and its reference
- *  delta has been applied, so `uses` reflects the post-erasure program.
+/** TypeScript import elision. `import { makeNode, Node } from './lib'` with `Node` used only as a
+ *  type is ordinary TS — tsc (without `verbatimModuleSyntax`), rolldown and oxc all drop such a
+ *  specifier. shakeup dropped one only when it carried an explicit `type` marker, so the binding
+ *  survived into `namedImports`, `matchImport` found no value export that erasure had left behind,
+ *  and the build failed with `'Node' is not exported by …`.
  *
- *  The symbol is retired as well as unbound: left in module scope it would still claim its name
- *  during deconfliction, pushing the value that legitimately owns that name to `X$1`. */
-function elideUnreferencedImports(program: Program, semantic: Semantic): void {
-    for (const stmt of program.data.body) {
-        if (stmt.type !== N.ImportDeclaration) continue;
-        const d = stmt.data as { specifiers: Node[] };
-        if (d.specifiers.length === 0) continue; // bare `import 'x'` — a side effect, never elided
-        const kept = d.specifiers.filter((sp) => {
-            const local = (sp.data as { local: Node }).local;
-            const sym = symbolOf(semantic, local);
-            if (sym === 0 || (semantic.uses[sym] ?? 0) > 0) return true;
-            retireSymbol(semantic, sym);
-            return false;
-        });
-        if (kept.length !== d.specifiers.length) d.specifiers = kept;
+ *  Runs HERE, after every module is resolved, for two reasons that rule out the earlier options:
+ *   - the lowering traversal erases type annotations and `applyRefDelta` folds the resulting counts
+ *     in only afterwards, so checking inside `tsStrip` reads stale counts and keeps everything;
+ *   - EXTERNALITY is not knowable during scan. A plugin can mark a specifier external from
+ *     `resolveId`, which happens after the importing module has been scanned.
+ *
+ *  Externals are deliberately untouched: their import line is rebuilt from `linked.externalLocals`,
+ *  and whether an unreferenced one survives is decided by `pruneUnusedExternals` via symbol
+ *  liveness — which needs the binding to still be there. Dropping it collapsed
+ *  `import { a } from 'ext'` to a bare `import 'ext'`, which then reads as side-effectful and could
+ *  no longer be pruned at all.
+ *
+ *  TS ONLY: in JavaScript an imported name that does not exist is a real error and must keep being
+ *  reported, because no erasure could have removed it. */
+function elideTypeOnlyImports(graph: Graph): void {
+    for (const mod of graph.modules) {
+        if (mod.moduleType !== 'ts' && mod.moduleType !== 'tsx') continue;
+        if (mod.namedImports.size === 0) continue;
+        for (const [sym, imp] of mod.namedImports) {
+            if ((mod.semantic.uses[sym] ?? 0) > 0) continue; // still referenced as a value
+            const rec = mod.importRecords[imp.rec];
+            if (rec === undefined || rec.external || rec.resolved < 0) continue;
+            mod.namedImports.delete(sym);
+            // Retire the symbol too: left in module scope it still claims its name during
+            // deconfliction, pushing the value that legitimately owns that name to `X$1`.
+            retireSymbol(mod.semantic, sym);
+        }
     }
 }
 
@@ -1074,7 +1088,6 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 //
                 // TS ONLY. In JavaScript an imported name that does not exist is a real error and
                 // should keep being reported; there is no erasure that could have removed it.
-                if (isTs) elideUnreferencedImports(program, semantic);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 // Only a TS module can contain the construct this looks for (a value
@@ -1297,6 +1310,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             graph.entries.push({ module: idx, name });
         }
     }
+    elideTypeOnlyImports(graph);
     // Importers are now complete — propagate export-surface changes to the affected-set.
     if (changedExports.size > 0) graph.affected = computeAffected(graph, changedExports);
     return graph;
