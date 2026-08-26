@@ -180,6 +180,37 @@ describe('parse goal gates top-level return / new.target', () => {
         expect(parseErrs('class C { static { return } }', 'module')).toEqual(['return statement is only allowed inside a function body']);
     });
 
+    it('gates top-level await: allowed in a module, not in CommonJS, permissive by default', () => {
+        // oxc's third gate (`is_module() -> and_await(true)`). When `await` is not in scope it parses
+        // as an ORDINARY IDENTIFIER rather than erroring (oxc `js/expression.rs:89`), so the failure
+        // surfaces as `await x` being two adjacent identifiers.
+        expect(parseErrs('await x;', 'module')).toEqual([]);
+        expect(parseErrs('await x;', 'commonjs')).not.toEqual([]);
+        expect(parseErrs('await x;')).toEqual([]);
+        // …which is exactly what keeps `await(1)` a CALL to a function named `await` in CommonJS.
+        expect(parseErrs('await(1);', 'commonjs')).toEqual([]);
+    });
+
+    it('scopes await to the nearest function, not the nearest async ancestor', () => {
+        expect(parseErrs('async function f(){ await x }', 'module')).toEqual([]);
+        // A non-async function nested in an async one must NOT inherit `await`.
+        expect(parseErrs('async function o(){ function i(){ await x } }', 'module')).not.toEqual([]);
+        expect(parseErrs('async function o(){ const i = () => { await x } }', 'module')).not.toEqual([]);
+        // A class static block is not an async context either.
+        expect(parseErrs('class C { static { await x } }', 'module')).not.toEqual([]);
+    });
+
+    it('scopes an arrow with an EXPRESSION body, not just a block body', () => {
+        // Regression: only the `{ }` form was scoped, so an expression-bodied async arrow inherited
+        // the enclosing scope's `await` — which broke real code like
+        // `async (a, b) => (await f(a)) ?? (await g(b))` nested inside a non-async function.
+        expect(parseErrs('function o(){ return async (a) => (await a) ?? 1 }', 'module')).toEqual([]);
+        expect(parseErrs('const f = async x => await x;', 'module')).toEqual([]);
+        expect(parseErrs('function o(){ return (a) => await a }', 'module')).not.toEqual([]);
+        // …and the same gap wrongly rejected `new.target` in an expression-bodied arrow.
+        expect(parseErrs('const f = () => new.target;', 'module')).toEqual([]);
+    });
+
     it('applies the goal end-to-end from the declared format', async () => {
         const errorsFor = async (files: Record<string, string>) =>
             (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;

@@ -115,6 +115,9 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // `package.json#type` — is held to it. Mirrors oxc's `ModuleKind::Unambiguous`.
         allowTopReturn: options.kind !== 'module',
         allowTopNewTarget: options.kind !== 'module',
+        // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
+        // non-async function). `unambiguous` stays permissive, as with the other two gates.
+        awaitOk: options.kind !== 'commonjs',
         errors: [],
         baseId: 0,
         itKeys: new Array(cap),
@@ -431,6 +434,10 @@ function parseUnary(state: ParserState): Node {
                 return create.UnaryExpression(start, arg.end, op, arg) as Node;
             }
             case K.AWAIT: {
+                // Only an operator where `await` is in scope. Elsewhere it is an ordinary
+                // identifier (`await` is contextual), so fall out of the switch and let the normal
+                // expression path handle it — oxc `js/expression.rs:89`.
+                if (!state.awaitOk) break;
                 nextToken(state);
                 const arg = parseUnary(state);
                 return create.AwaitExpression(start, arg.end, 0, arg) as Node;
@@ -1154,7 +1161,7 @@ function parseMethodTail(state: ParserState, start: number, flags: number): Node
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0);
     else consumeSemi(state);
     return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body) as Node;
 }
@@ -1278,24 +1285,28 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     expectP(state, P.ARROW, "'=>'");
-    let body: Node;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
-    else {
-        body = parseAssign(state);
-        flags |= FL.EXPR_BODY;
-    }
+    const isAsync = (flags & FL.ASYNC) !== 0;
+    let exprBody = false;
+    const body: Node = inFunctionScope(state, isAsync, () => {
+        if (isP(state, P.LBRACE)) return parseBlock(state);
+        exprBody = true;
+        return parseAssign(state);
+    });
+    if (exprBody) flags |= FL.EXPR_BODY;
     return create.ArrowFunctionExpression(start, body.end, flags, typeParams, params, returnType, body) as Node;
 }
 
 function parseArrowAfterSingleParam(state: ParserState, start: number, id: Identifier, flags: number, identStart?: number): Node {
     const param = create.FormalParameter(identStart ?? start, id.end, 0, id, null, null) as Node;
     expectP(state, P.ARROW, "'=>'");
-    let body: Node;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
-    else {
-        body = parseAssign(state);
-        flags |= FL.EXPR_BODY;
-    }
+    const isAsync = (flags & FL.ASYNC) !== 0;
+    let exprBody = false;
+    const body: Node = inFunctionScope(state, isAsync, () => {
+        if (isP(state, P.LBRACE)) return parseBlock(state);
+        exprBody = true;
+        return parseAssign(state);
+    });
+    if (exprBody) flags |= FL.EXPR_BODY;
     return create.ArrowFunctionExpression(start, body.end, flags, null, [param], null, body) as Node;
 }
 
@@ -1490,7 +1501,7 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0);
     else consumeSemi(state);
     return isDecl && !isExpr
         ? (create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body) as Node)
@@ -1593,7 +1604,10 @@ function parseClassMember(state: ParserState): Node {
                 // A class static block enables `new.target` but NOT `return` — hence bumping only
                 // the new.target depth (oxc `js/function.rs:285`, `js/statement.rs:710-713`).
                 state.newTargetDepth++;
+                const outerAwait = state.awaitOk; // a static block is not an async context
+                state.awaitOk = false;
                 const b = parseBlock(state);
+                state.awaitOk = outerAwait;
                 state.newTargetDepth--;
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
                 return create.StaticBlock(start, state.tokStart, 0, body) as Node;
@@ -1697,15 +1711,27 @@ function isAccessModifier(state: ParserState): boolean {
     );
 }
 
-/** A FUNCTION body — tracked separately from {@link parseBlock} so top-level-only checks can fire.
- *  A plain `{ }` block at the top level is still top level; a function body is not. */
-function parseFunctionBody(state: ParserState): Node {
+/** Enter a function's scope for the duration of `parse`, whatever body FORM it has. An arrow with an
+ *  EXPRESSION body (`async x => await y`) is still a function boundary: it scopes `await` and
+ *  `new.target` exactly like a block body does. Handling only the block form silently let an
+ *  expression-bodied async arrow inherit the enclosing scope's `await`, and wrongly rejected
+ *  `() => new.target`. */
+function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T): T {
     state.fnDepth++;
     state.newTargetDepth++;
-    const body = parseBlock(state);
+    const outerAwait = state.awaitOk;
+    state.awaitOk = isAsync; // REPLACED, not unioned — a non-async function inherits no `await`
+    const out = parse();
+    state.awaitOk = outerAwait;
     state.fnDepth--;
     state.newTargetDepth--;
-    return body;
+    return out;
+}
+
+/** A FUNCTION body — tracked separately from {@link parseBlock} so top-level-only checks can fire.
+ *  A plain `{ }` block at the top level is still top level; a function body is not. */
+function parseFunctionBody(state: ParserState, isAsync: boolean): Node {
+    return inFunctionScope(state, isAsync, () => parseBlock(state));
 }
 
 function parseBlock(state: ParserState): Node {
