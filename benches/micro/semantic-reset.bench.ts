@@ -83,10 +83,89 @@ function plainArrayKeep(): number {
     return acc;
 }
 
+// ── `refs` SHAPES ────────────────────────────────────────────────────────────────────────────────
+// `refs` is `Map<symbolId, {reads,writes}>` and ABSENT is load-bearing: `movement.ts:119` reads
+// `c === undefined || c.writes > 0` — absent means "unknown, do not reorder", NOT "zero writes". So a
+// numeric array pre-filled with zeros would silently permit reordering it used to block.
+//
+// An ARRAY OF OBJECTS keeps that exactly: `refs[sym]` is `undefined` for a hole, which is precisely
+// what `Map.get` returns for absent. The value shape is unchanged, so the 18 sites reading
+// `.reads`/`.writes` need no edit at all.
+type RefCounts = { reads: number; writes: number };
+
+function refsMap(): number {
+    const refs = new Map<number, RefCounts>();
+    let acc = 0;
+    for (let m = 0; m < MODULES; m++) {
+        refs.clear();
+        const n = sizeFor(m);
+        for (let k = 1; k <= n; k++) {
+            let c = refs.get(k);
+            if (c === undefined) { c = { reads: 0, writes: 0 }; refs.set(k, c); }
+            c.reads++;
+        }
+        for (let k = 1; k <= n; k++) acc += refs.get(k)?.reads ?? 0;
+    }
+    return acc;
+}
+
+function refsArrayOfObjects(): number {
+    let refs: (RefCounts | undefined)[] = [];
+    let acc = 0;
+    for (let m = 0; m < MODULES; m++) {
+        refs = [];
+        const n = sizeFor(m);
+        for (let k = 1; k <= n; k++) {
+            let c = refs[k];
+            if (c === undefined) { c = { reads: 0, writes: 0 }; refs[k] = c; }
+            c.reads++;
+        }
+        for (let k = 1; k <= n; k++) acc += refs[k]?.reads ?? 0;
+    }
+    return acc;
+}
+
+/** Same, but POOLING the record objects across modules instead of reallocating them. Absent is still
+ *  distinguishable because the reset writes `undefined`, not a zeroed record. */
+function refsPooled(): number {
+    const refs: (RefCounts | undefined)[] = [];
+    const pool: RefCounts[] = [];
+    let acc = 0;
+    for (let m = 0; m < MODULES; m++) {
+        const n = sizeFor(m);
+        for (let k = 1; k < refs.length; k++) refs[k] = undefined; // keep capacity, keep "absent"
+        for (let k = 1; k <= n; k++) {
+            let c = refs[k];
+            if (c === undefined) {
+                c = pool[k] ?? (pool[k] = { reads: 0, writes: 0 });
+                c.reads = 0;
+                c.writes = 0;
+                refs[k] = c;
+            }
+            c.reads++;
+        }
+        for (let k = 1; k <= n; k++) acc += refs[k]?.reads ?? 0;
+    }
+    return acc;
+}
+
 group(`per-module table reset — ${MODULES} analyze calls`, () => {
     bench('Map + clear() (today)', () => same(mapClear()));
     bench('Map + clear() (CONTROL)', () => same(mapClearControl()));
     bench('fresh Map each module', () => same(mapFresh()));
     bench('plain array, length = 0', () => same(plainArray()));
     bench('plain array, capacity kept', () => same(plainArrayKeep()));
+});
+
+let EXPECT2 = -1;
+const same2 = (v: number): number => {
+    if (EXPECT2 === -1) EXPECT2 = v;
+    else if (v !== EXPECT2) throw new Error(`refs arm disagrees: ${v} vs ${EXPECT2}`);
+    return v;
+};
+
+group('refs shape — absent must stay distinguishable from {0,0}', () => {
+    bench('Map<sym, RefCounts> (today)', () => same2(refsMap()));
+    bench('array of RefCounts', () => same2(refsArrayOfObjects()));
+    bench('array of POOLED RefCounts', () => same2(refsPooled()));
 });
