@@ -34,6 +34,9 @@ export const ParseErrorCode = enumeration(
     'TopLevelNewTarget',
     'UnterminatedJSXElement',
     'UnterminatedRegex',
+    'UnterminatedString',
+    'UnterminatedTemplate',
+    'UnterminatedComment',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -63,6 +66,9 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.TopLevelNewTarget]: "'new.target' is only allowed inside a function body",
     [ParseErrorCode.UnterminatedJSXElement]: 'unterminated JSX element',
     [ParseErrorCode.UnterminatedRegex]: 'unterminated regex',
+    [ParseErrorCode.UnterminatedString]: 'unterminated string literal',
+    [ParseErrorCode.UnterminatedTemplate]: 'unterminated template literal',
+    [ParseErrorCode.UnterminatedComment]: 'unterminated block comment',
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */

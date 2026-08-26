@@ -29,17 +29,27 @@
  *    not a faster bundler. shakeup shipped three miscompiles once because its own parser was the
  *    only oracle.
  */
-import { existsSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+
 import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { cpus, loadavg, tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { gzipSync, brotliCompressSync } from 'node:zlib';
+import { dirname, join, resolve } from 'node:path';
+import { brotliCompressSync, gzipSync } from 'node:zlib';
+import { transformSync } from 'esbuild';
 import { bundle as shakeupBundle } from '../src/bundle.ts';
 
 type Corpus = { name: string; entry: string; external: string[] };
 const CORPORA: Record<string, Corpus> = {
-    crashcat: { name: 'crashcat', entry: '/Users/isaacmason/Development/crashcat/src/index.ts', external: ['math', 'math/shapes', 'three'] },
-    three: { name: 'three.core.js', entry: `${import.meta.dirname}/../llm/spikes/node_modules/three/build/three.core.js`, external: [] },
+    crashcat: {
+        name: 'crashcat',
+        entry: '/Users/isaacmason/Development/crashcat/src/index.ts',
+        external: ['math', 'math/shapes', 'three'],
+    },
+    three: {
+        name: 'three.core.js',
+        entry: `${import.meta.dirname}/../llm/spikes/node_modules/three/build/three.core.js`,
+        external: [],
+    },
 };
 
 const which = process.argv[2] ?? 'crashcat';
@@ -67,7 +77,19 @@ const TOOLS: Tool[] = [
     {
         name: 'shakeup',
         countsCpu: true,
-        run: () => timed(async () => (await shakeupBundle({ entry: corpus.entry, fs: diskFs, external: corpus.external, output: { minify: true, optimize: true } } as never)).code, true),
+        run: () =>
+            timed(
+                async () =>
+                    (
+                        await shakeupBundle({
+                            entry: corpus.entry,
+                            fs: diskFs,
+                            external: corpus.external,
+                            output: { minify: true, optimize: true },
+                        } as never)
+                    ).code,
+                true,
+            ),
     },
     {
         name: 'rolldown',
@@ -82,14 +104,65 @@ const TOOLS: Tool[] = [
             }, true),
     },
     {
+        // Rollup is the ORIGINAL of the family rolldown is a rewrite of, and it is pure JavaScript —
+        // the same constraint shakeup works under. rolldown and esbuild are native, so their wall
+        // times mostly measure the language gap; rollup is the like-for-like number, and the one
+        // that says whether shakeup's constant factor is a shakeup problem or a JS problem.
+        //
+        // It needs plugins to do what the other three do natively: resolve bare specifiers and read
+        // TypeScript. Those cost time that the others also pay internally, so it stays a fair
+        // wall-clock comparison, but it is NOT a comparison of equivalent feature sets — rollup
+        // cannot consume CommonJS at all without `@rollup/plugin-commonjs`.
+        name: 'rollup',
+        countsCpu: true,
+        run: () =>
+            timed(async () => {
+                const { rollup } = await import('rollup');
+                const b = await rollup({
+                    input: corpus.entry,
+                    external: corpus.external,
+                    onwarn: () => {},
+                    plugins: [
+                        {
+                            name: 'ts-and-resolve',
+                            resolveId(source: string, importer: string | undefined) {
+                                if (importer === undefined || corpus.external.includes(source)) return null;
+                                if (!source.startsWith('.')) return null;
+                                const base = resolve(dirname(importer), source);
+                                for (const ext of ['', '.ts', '.tsx', '.js', '.mjs', '/index.ts', '/index.js']) {
+                                    if (existsSync(base + ext) && !existsSync(join(base + ext, 'x'))) return base + ext;
+                                }
+                                return null;
+                            },
+                            transform(code: string, id: string) {
+                                if (!/\.tsx?$/.test(id)) return null;
+                                return {
+                                    code: transformSync(code, { loader: id.endsWith('.tsx') ? 'tsx' : 'ts' }).code,
+                                    map: null,
+                                };
+                            },
+                        },
+                    ],
+                });
+                const out = await b.generate({ format: 'es' });
+                await b.close();
+                return out.output.map((o: { code?: string }) => o.code ?? '').join('\n');
+            }, true),
+    },
+    {
         name: 'esbuild',
         countsCpu: false, // work happens in a spawned binary; this process's CPU is not the story
         run: () =>
             timed(async () => {
                 const esbuild = await import('esbuild');
                 const r = await esbuild.build({
-                    entryPoints: [corpus.entry], bundle: true, write: false, minify: true,
-                    format: 'esm', external: corpus.external, logLevel: 'silent',
+                    entryPoints: [corpus.entry],
+                    bundle: true,
+                    write: false,
+                    minify: true,
+                    format: 'esm',
+                    external: corpus.external,
+                    logLevel: 'silent',
                 });
                 return r.outputFiles.map((f) => f.text).join('\n');
             }, false),
@@ -129,41 +202,83 @@ async function main(): Promise<void> {
     for (const t of TOOLS) {
         const r = first[t.name];
         if (r === undefined) continue;
-        console.log(`${t.name.padEnd(10)}${r.code.length.toLocaleString().padStart(12)}${gz(r.code).toLocaleString().padStart(10)}${br(r.code).toLocaleString().padStart(10)}   ${assertValid(t.name, r.code, dir)}`);
+        console.log(
+            `${t.name.padEnd(10)}${r.code.length.toLocaleString().padStart(12)}${gz(r.code).toLocaleString().padStart(10)}${br(r.code).toLocaleString().padStart(10)}   ${assertValid(t.name, r.code, dir)}${t.name === 'rollup' ? '   ← NOT minified' : ''}`,
+        );
     }
 
     // Timing: alternate tools each round, and measure shakeup a second time as the control.
     const live = TOOLS.filter((t) => first[t.name] !== undefined);
-    const wall: Record<string, number[]> = {}; const cpu: Record<string, number[]> = {};
-    for (const t of live) { wall[t.name] = []; cpu[t.name] = []; }
-    wall['(control)'] = []; cpu['(control)'] = [];
+    const wall: Record<string, number[]> = {};
+    const cpu: Record<string, number[]> = {};
+    for (const t of live) {
+        wall[t.name] = [];
+        cpu[t.name] = [];
+    }
+    wall['(control)'] = [];
+    cpu['(control)'] = [];
     for (let w = 0; w < 2; w++) for (const t of live) await t.run();
     for (let r = 0; r < ROUNDS; r++) {
         const order = live.slice(r % live.length).concat(live.slice(0, r % live.length));
-        for (const t of order) { const x = await t.run(); wall[t.name].push(x.wallMs); cpu[t.name].push(x.cpuMs); }
-        const c = await TOOLS[0].run(); wall['(control)'].push(c.wallMs); cpu['(control)'].push(c.cpuMs);
+        for (const t of order) {
+            const x = await t.run();
+            wall[t.name].push(x.wallMs);
+            cpu[t.name].push(x.cpuMs);
+        }
+        const c = await TOOLS[0].run();
+        wall['(control)'].push(c.wallMs);
+        cpu['(control)'].push(c.cpuMs);
     }
-    const med = (a: number[]) => { const s = [...a].sort((x, y) => x - y); return s.length % 2 ? s[s.length >> 1] : (s[(s.length >> 1) - 1] + s[s.length >> 1]) / 2; };
+    const med = (a: number[]) => {
+        const s = [...a].sort((x, y) => x - y);
+        return s.length % 2 ? s[s.length >> 1] : (s[(s.length >> 1) - 1] + s[s.length >> 1]) / 2;
+    };
 
-    console.log(`\n${'tool'.padEnd(10)}${'wall'.padStart(10)}${'cpu'.padStart(10)}${'cpu/wall'.padStart(10)}${'vs shakeup'.padStart(16)}`);
+    console.log(
+        `\n${'tool'.padEnd(10)}${'wall'.padStart(10)}${'cpu'.padStart(10)}${'cpu/wall'.padStart(10)}${'vs shakeup'.padStart(16)}`,
+    );
     const base = med(wall['shakeup']);
     for (const t of live) {
-        const w = med(wall[t.name]); const c = med(cpu[t.name]);
+        const w = med(wall[t.name]);
+        const c = med(cpu[t.name]);
         const par = t.countsCpu ? (c / w).toFixed(2) + 'x' : '   n/a';
         const rel = t.name === 'shakeup' ? '—' : `${(base / w).toFixed(2)}x faster`;
-        console.log(`${t.name.padEnd(10)}${(w.toFixed(1) + 'ms').padStart(10)}${(t.countsCpu ? c.toFixed(1) + 'ms' : 'n/a').padStart(10)}${par.padStart(10)}${rel.padStart(16)}`);
+        console.log(
+            `${t.name.padEnd(10)}${(w.toFixed(1) + 'ms').padStart(10)}${(t.countsCpu ? c.toFixed(1) + 'ms' : 'n/a').padStart(10)}${par.padStart(10)}${rel.padStart(16)}`,
+        );
     }
     const ctrl = med(wall['(control)']);
     const ratio = base / ctrl;
     console.log(`\ncontrol (shakeup vs itself): ${ctrl.toFixed(1)}ms  ratio ${ratio.toFixed(3)}x`);
-    console.log(Math.abs(ratio - 1) > 0.08
-        ? '  CONTROL DRIFTED >8% — treat the comparisons above as indicative only.'
-        : '  Control is flat; comparisons are admissible.');
+    console.log(
+        Math.abs(ratio - 1) > 0.08
+            ? '  CONTROL DRIFTED >8% — treat the comparisons above as indicative only.'
+            : '  Control is flat; comparisons are admissible.',
+    );
     const rd = live.find((t) => t.name === 'rolldown');
     if (rd !== undefined) {
-        const rw = med(wall['rolldown']); const rc = med(cpu['rolldown']);
-        console.log(`\nrolldown gets ${(rc / rw).toFixed(2)}x from parallelism; shakeup ${(med(cpu['shakeup']) / base).toFixed(2)}x.`);
-        console.log(`So the ${(base / rw).toFixed(2)}x wall gap is ~${((rc / rw) / (med(cpu['shakeup']) / base)).toFixed(2)}x threading and ~${(base / rw / ((rc / rw) / (med(cpu['shakeup']) / base))).toFixed(2)}x constant factor — the latter is the tractable half.`);
+        const rw = med(wall['rolldown']);
+        const rc = med(cpu['rolldown']);
+        console.log(
+            `\nrolldown gets ${(rc / rw).toFixed(2)}x from parallelism; shakeup ${(med(cpu['shakeup']) / base).toFixed(2)}x.`,
+        );
+        console.log(
+            `So the ${(base / rw).toFixed(2)}x wall gap is ~${(rc / rw / (med(cpu['shakeup']) / base)).toFixed(2)}x threading and ~${(base / rw / (rc / rw / (med(cpu['shakeup']) / base))).toFixed(2)}x constant factor — the latter is the tractable half.`,
+        );
+    }
+    // rollup is the like-for-like arm: pure JavaScript, single-threaded, same constraints as
+    // shakeup. rolldown and esbuild are native, so most of their wall-clock lead is the language,
+    // not the design. rollup has NO built-in minifier (it needs terser), so its size column is
+    // unminified and not comparable — but its TIME is, and shakeup is doing strictly more work in it.
+    const rollupWall = wall['rollup'] !== undefined ? med(wall['rollup']) : null;
+    if (rollupWall !== null) {
+        const f = rollupWall / base;
+        console.log(
+            `\nrollup is the only other PURE-JS bundler here: ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup is ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'},`,
+        );
+        console.log(
+            'while also MINIFYING, which rollup is not (it has no built-in minifier). Read the size column for rollup as unminified.',
+        );
     }
 }
 main();

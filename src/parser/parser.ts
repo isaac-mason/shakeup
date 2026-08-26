@@ -555,7 +555,14 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             if (isP(state, P.LPAREN)) {
                 if (!allowCall) return finish(expr);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL | pureFlag(state, expr.start), expr, args, null) as Node;
+                expr = create.CallExpression(
+                    expr.start,
+                    state.tokStart,
+                    FL.OPTIONAL | pureFlag(state, expr.start),
+                    expr,
+                    args,
+                    null,
+                ) as Node;
             } else if (isP(state, P.LBRACKET)) {
                 nextToken(state);
                 const prop = parseExpression(state);
@@ -721,7 +728,9 @@ function parseJSXName(state: ParserState): Node {
     }
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
         const isThis = e0 - s0 === 4 && src.startsWith('this', s0);
-        let obj: Node = isThis ? (recordThis(state, create.ThisExpression(s0, e0, 0) as Node)) : (ident(state, R_REF, s0, e0) as Node);
+        let obj: Node = isThis
+            ? recordThis(state, create.ThisExpression(s0, e0, 0) as Node)
+            : (ident(state, R_REF, s0, e0) as Node);
         while (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
             state.pos++;
             const [ps, pe] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
@@ -729,7 +738,8 @@ function parseJSXName(state: ParserState): Node {
         }
         return obj;
     }
-    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0)) return recordThis(state, create.ThisExpression(s0, e0, 0) as Node);
+    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0))
+        return recordThis(state, create.ThisExpression(s0, e0, 0) as Node);
     if (first >= 65 && first <= 90) return ident(state, R_REF, s0, e0) as Node;
     return jsxIdent(state, s0, e0);
 }

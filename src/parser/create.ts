@@ -153,7 +153,8 @@ export const ArrowFunctionExpression = (
         body,
         async: (flags & FL.ASYNC) !== 0,
         expression: (flags & FL.EXPR_BODY) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const FunctionExpression = (
     s: number,
     e: number,
@@ -172,7 +173,8 @@ export const FunctionExpression = (
         body: body ?? null,
         async: (flags & FL.ASYNC) !== 0,
         generator: (flags & FL.GENERATOR) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const FunctionDeclaration = (
     s: number,
     e: number,
@@ -192,7 +194,8 @@ export const FunctionDeclaration = (
         async: (flags & FL.ASYNC) !== 0,
         generator: (flags & FL.GENERATOR) !== 0,
         declare: (flags & FL.DECLARE) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const ClassExpression = (
     s: number,
     e: number,
@@ -232,7 +235,8 @@ export const ClassDeclaration = (
         body: body ?? [],
         abstract: (flags & FL.ABSTRACT) !== 0,
         declare: (flags & FL.DECLARE) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const YieldExpression = (s: number, e: number, flags: number, a: Node | null): Node =>
     node(N.YieldExpression, s, e, '', { argument: a ?? null, delegate: (flags & FL.DELEGATE) !== 0 });
 export const VariableDeclaration = (s: number, e: number, flags: number, decls: Node[] | null): Node =>
@@ -249,7 +253,7 @@ export const VariableDeclarator = (s: number, e: number, flags: number, id: Node
         definite: (flags & FL.DEFINITE) !== 0,
     });
 export const ForOfStatement = (s: number, e: number, flags: number, left: Node, right: Node, body: Node): Node =>
-    node(N.ForOfStatement, s, e, '', { left, right, body, await: (flags & FL.AWAIT) !== 0 , scopeId: 0 });
+    node(N.ForOfStatement, s, e, '', { left, right, body, await: (flags & FL.AWAIT) !== 0, scopeId: 0 });
 export const MethodDefinition = (s: number, e: number, flags: number, key: Node, value: Node): Node =>
     node(N.MethodDefinition, s, e, '', {
         key,
@@ -401,14 +405,16 @@ export const TSInterfaceDeclaration = (
         extends: ext ?? [],
         body: body ?? [],
         declare: (flags & FL.DECLARE) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const TSTypeAliasDeclaration = (s: number, e: number, flags: number, id: Node, tp: Node | null, ta: Node): Node =>
     node(N.TSTypeAliasDeclaration, s, e, '', {
         id,
         typeParameters: tp ?? null,
         typeAnnotation: ta,
         declare: (flags & FL.DECLARE) !== 0,
-     scopeId: 0 });
+        scopeId: 0,
+    });
 export const TSEnumDeclaration = (s: number, e: number, flags: number, id: Node, members: Node[] | null): Node =>
     node(N.TSEnumDeclaration, s, e, '', {
         id,
@@ -433,7 +439,7 @@ export const TSImportEqualsDeclaration = (s: number, e: number, flags: number, i
 export const TSExternalModuleReference = (s: number, e: number, _f: number, expression: Node): Node =>
     node(N.TSExternalModuleReference, s, e, '', { expression });
 
-export const Program = (s: number, e: number, _f: number, body: Node[]): Node => node(N.Program, s, e, '', { body , scopeId: 0 });
+export const Program = (s: number, e: number, _f: number, body: Node[]): Node => node(N.Program, s, e, '', { body, scopeId: 0 });
 export const TemplateLiteral = (s: number, e: number, _f: number, quasis: Node[], expressions: Node[]): Node =>
     node(N.TemplateLiteral, s, e, '', { quasis, expressions });
 export const TaggedTemplateExpression = (s: number, e: number, _f: number, tag: Node, quasi: Node): Node =>
@@ -465,7 +471,7 @@ export const ImportExpression = (s: number, e: number, _f: number, source: Node,
 export const ExpressionStatement = (s: number, e: number, _f: number, expression: Node): Node =>
     node(N.ExpressionStatement, s, e, '', { expression });
 export const BlockStatement = (s: number, e: number, _f: number, body: Node[]): Node =>
-    node(N.BlockStatement, s, e, '', { body , scopeId: 0 });
+    node(N.BlockStatement, s, e, '', { body, scopeId: 0 });
 export const IfStatement = (s: number, e: number, _f: number, test: Node, consequent: Node, alternate: Node | null): Node =>
     node(N.IfStatement, s, e, '', { test, consequent, alternate: alternate ?? null });
 export const ForStatement = (
@@ -476,15 +482,15 @@ export const ForStatement = (
     test: Node | null,
     update: Node | null,
     body: Node,
-): Node => node(N.ForStatement, s, e, '', { init: init ?? null, test: test ?? null, update: update ?? null, body , scopeId: 0 });
+): Node => node(N.ForStatement, s, e, '', { init: init ?? null, test: test ?? null, update: update ?? null, body, scopeId: 0 });
 export const ForInStatement = (s: number, e: number, _f: number, left: Node, right: Node, body: Node): Node =>
-    node(N.ForInStatement, s, e, '', { left, right, body , scopeId: 0 });
+    node(N.ForInStatement, s, e, '', { left, right, body, scopeId: 0 });
 export const WhileStatement = (s: number, e: number, _f: number, test: Node, body: Node): Node =>
     node(N.WhileStatement, s, e, '', { test, body });
 export const DoWhileStatement = (s: number, e: number, _f: number, body: Node, test: Node): Node =>
     node(N.DoWhileStatement, s, e, '', { body, test });
 export const SwitchStatement = (s: number, e: number, _f: number, discriminant: Node, cases: Node[]): Node =>
-    node(N.SwitchStatement, s, e, '', { discriminant, cases , scopeId: 0 });
+    node(N.SwitchStatement, s, e, '', { discriminant, cases, scopeId: 0 });
 export const SwitchCase = (s: number, e: number, _f: number, test: Node | null, consequent: Node[]): Node =>
     node(N.SwitchCase, s, e, '', { test: test ?? null, consequent });
 export const TryStatement = (s: number, e: number, _f: number, block: Node, handler: Node | null, finalizer: Node | null): Node =>
