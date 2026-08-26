@@ -1179,11 +1179,21 @@ function renderChunk(
             const params = uses.has('module') ? '(exports, module)' : '(exports)';
             const indented = out === '' ? '' : `\n${out.replace(/^/gm, '    ')}\n`;
             out = `var ${wrapName} = /* @__PURE__ */ __commonJS(${params} => {${indented}});`;
-            const nsRef = linked.cjsNamespace.get(idx);
-            const nsName = nsRef === undefined ? undefined : finalNameOf(linked, nsRef);
-            // The interop namespace is materialized ONCE per module, right after its wrapper, and
-            // every consumer reads members off it (`nameOfBind`'s `cjs-member`).
-            if (nsName !== undefined) out += `\nvar ${nsName} = /* @__PURE__ */ __toESM(${wrapName}());`;
+            // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
+            // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
+            //
+            // The second argument is rolldown's `isNodeMode` (D4): an importer that is ESM BY FILE
+            // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
+            // hands back the whole `module.exports` as `default` — what Node actually does. A module
+            // imported both ways gets both objects; they are genuinely different values.
+            for (const [map, arg] of [
+                [linked.cjsNamespace, ''],
+                [linked.cjsNamespaceNode, ', 1'],
+            ] as const) {
+                const nsRef = map.get(idx);
+                if (nsRef === undefined) continue;
+                out += `\nvar ${finalNameOf(linked, nsRef)} = /* @__PURE__ */ __toESM(${wrapName}()${arg});`;
+            }
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
@@ -1369,7 +1379,7 @@ function renderChunk(
     if (needsCjs || needsToCjs || needsEsm) {
         const wanted = new Set<string>();
         if (needsCjs) wanted.add('__commonJS');
-        if (chunk.modules.some((i) => linked.cjsNamespace.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+        if (chunk.modules.some((i) => linked.cjsNamespace.has(i) || linked.cjsNamespaceNode.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
         if (needsEsm) wanted.add('__esm');
         if (chunk.modules.some((i) => linked.dynamicExports.has(i))) for (const d of EXPORT_ALL_DEPS) wanted.add(d);
         if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);

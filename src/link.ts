@@ -1,6 +1,6 @@
 import { isPureStatement } from './analysis/effects';
 import type { Graph, ImportBind, Linked, Module } from './graph-types';
-import { NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
+import { NAME_DEFAULT, NAME_NAMESPACE, isEsmFormat, packRef, refMod, refSym } from './graph-types';
 
 type LinkCtx = {
     graph: Graph;
@@ -31,7 +31,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             // (and `export * as ns from`). Recursing would look for a named export the CJS module
             // does not have (its surface is built at runtime), and report the re-EXPORTER as missing
             // the name — a misleading error for a very common barrel shape.
-            if (ctx.linked.cjsWrap.has(rec.resolved)) return cjsBind(ctx, target, exp.sourceName);
+            if (ctx.linked.cjsWrap.has(rec.resolved)) return cjsBind(ctx, target, exp.sourceName, module);
             if (exp.sourceName === NAME_NAMESPACE) return namespaceBind(ctx, target);
             return matchImport(ctx, target, exp.sourceName, seen);
         }
@@ -78,7 +78,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             const rec = module.importRecords[recIdx];
             if (rec.external) continue;
             if (ctx.linked.cjsWrap.has(rec.resolved)) {
-                cjsFallback ??= cjsBind(ctx, graph.modules[rec.resolved], name);
+                cjsFallback ??= cjsBind(ctx, graph.modules[rec.resolved], name, module);
                 continue;
             }
             const candidate = matchImport(ctx, graph.modules[rec.resolved], name, new Set(seen));
@@ -123,17 +123,18 @@ function wantsCjsWrap(mod: Module): boolean {
 
 /** Bind an import of a WRAPPED CommonJS module. Its exports are built imperatively at runtime, so
  *  nothing can bind to a symbol — every name becomes a member read off the interop namespace. */
-function cjsBind(ctx: LinkCtx, target: Module, name: string): ImportBind {
-    return { kind: 'cjs-member', ref: cjsNamespaceRef(ctx, target), name };
+function cjsBind(ctx: LinkCtx, target: Module, name: string, importer: Module): ImportBind {
+    return { kind: 'cjs-member', ref: cjsNamespaceRef(ctx, target, isEsmFormat(importer.defFormat)), name };
 }
 
 /** The synthetic symbol holding a wrapped module's interop namespace (`var import_foo = …`).
  *  A real ref so it is deconflicted, tree-shaken and WIRED ACROSS CHUNKS like any other symbol. */
-function cjsNamespaceRef(ctx: LinkCtx, target: Module): number {
-    const existing = ctx.linked.cjsNamespace.get(target.idx);
+function cjsNamespaceRef(ctx: LinkCtx, target: Module, nodeMode: boolean): number {
+    const map = nodeMode ? ctx.linked.cjsNamespaceNode : ctx.linked.cjsNamespace;
+    const existing = map.get(target.idx);
     if (existing !== undefined) return existing;
-    const ref = syntheticRef(ctx, target.idx, `import_${reprName(target)}`);
-    ctx.linked.cjsNamespace.set(target.idx, ref);
+    const ref = syntheticRef(ctx, target.idx, nodeMode ? `import_${reprName(target)}_node` : `import_${reprName(target)}`);
+    map.set(target.idx, ref);
     return ref;
 }
 
@@ -251,6 +252,7 @@ export function linkGraph(graph: Graph): Linked {
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),
+        cjsNamespaceNode: new Map(),
         esmInit: new Map(),
         dynamicExports: new Set(),
         externalLocals: new Map(),
@@ -363,7 +365,7 @@ export function linkGraph(graph: Graph): Linked {
                 if (linked.cjsWrap.has(rec.resolved)) {
                     // The re-exporter's namespace reads the CommonJS module's interop namespace, so
                     // mint it here rather than leaving it to a consumer that may never appear.
-                    cjsBind(ctx, graph.modules[rec.resolved], NAME_NAMESPACE);
+                    cjsBind(ctx, graph.modules[rec.resolved], NAME_NAMESPACE, mod);
                 } else if (linked.dynamicExports.has(rec.resolved)) {
                     namespaceBind(ctx, graph.modules[rec.resolved]);
                 } else continue;
@@ -385,7 +387,7 @@ export function linkGraph(graph: Graph): Linked {
                 // A wrapped CommonJS target: `import * as ns` gets the whole interop namespace,
                 // every other form a member read off it. `default` included — `__toESM` synthesizes
                 // it from `module.exports` when the module carries no `__esModule` marker.
-                bind = cjsBind(ctx, graph.modules[rec.resolved], imp.name);
+                bind = cjsBind(ctx, graph.modules[rec.resolved], imp.name, mod);
             } else if (imp.name === NAME_NAMESPACE) {
                 bind = namespaceBind(ctx, graph.modules[rec.resolved]);
             } else {
