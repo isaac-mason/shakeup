@@ -192,7 +192,25 @@ function newScope(state: AnalyseState, flags: number, node: Node | null): number
     return id;
 }
 
-const bindingKey = (scopeId: number, ns: number, nameId: number): number => (scopeId * 2 + ns) * 0x400000 + nameId;
+/** Composite `(scope, namespace, name)` key for the flat `bindings` map.
+ *
+ *  The multiplier form `(scopeId * 2 + ns) * 0x400000 + nameId` leaves Smi range as soon as
+ *  `scopeId * 2 + ns >= 512` — i.e. from scope id 256 — because 0x400000 is 4,194,304. Past that V8
+ *  stores the key as a heap-allocated DOUBLE and `bindings.get` hashes a boxed number. That is not a
+ *  corner case: crashcat's largest module has 344 scopes and three.core.js has 817+, and `bindings.get`
+ *  is the single biggest map consumer in a bundle (231,478 calls — 96,124 references at 2.08 scope hops
+ *  each). Benched at 29.5% on that lookup mix (`benches/micro/binding-key.bench.ts`).
+ *
+ *  So pack into 31 bits when the fields fit: 15 bits of `scope*2+ns`, 16 bits of `nameId`.
+ *
+ *  The two forms must never COLLIDE, or a reference resolves to the wrong binding — silently. The
+ *  packed form is always < 2**31 and the fallback is offset by 2**31, so their ranges are disjoint,
+ *  and each form is injective within itself. A tuple always hashes the same way because the branch
+ *  depends only on the tuple, so a binding stored under one form is always looked up under it. */
+const bindingKey = (scopeId: number, ns: number, nameId: number): number =>
+    nameId < 0x10000 && scopeId < 0x4000
+        ? ((scopeId * 2 + ns) << 16) | nameId
+        : (scopeId * 2 + ns) * 0x400000 + nameId + 0x80000000;
 
 function internName(state: AnalyseState, s: string): number {
     let id = state.sem.names.get(s);
