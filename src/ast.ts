@@ -49,7 +49,9 @@ const def = <const Name extends string, const D extends NodeDef>(name: Name, fie
     fields,
 });
 
-const DEFS = [
+/** Exported so out-of-tree spikes (llm/spikes/soa-ast) can generate builders from the SAME schema
+ *  rather than a hand-copied approximation of it — the non-representative-model failure mode. */
+export const DEFS = [
     def('Program', { body: list(child), scopeId: scalar<number>() }),
     def('BindingIdentifier', null),
     def('IdentifierReference', null),
