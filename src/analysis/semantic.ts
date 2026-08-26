@@ -76,6 +76,7 @@ export type Semantic = {
      * `symbols[sym].flags` (`SYM.VAR`/`LET`/`CONST`), so a consumer that cares still has it.
      */
     symbolInit: Map<number, Node>;
+
 };
 
 /** Read/write tally for one symbol. */
@@ -608,9 +609,17 @@ function visit(state: AnalyseState, node: Node | null): void {
             return;
         }
         case N.FunctionDeclaration: {
-            const id = node.data.id;
-            if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, hoistTarget(state));
+            // oxc `visit_function` (builder.rs:2028-2050): a function DECLARATION binds its name in the
+            // enclosing (hoist) scope BEFORE `enter_scope`, but the identifier NODE is visited INSIDE the
+            // function scope — "where the symbol is bound" and "where the identifier node lives" are
+            // separate. `hoistTarget` is therefore computed on the OUTER scope and passed in explicitly,
+            // while the `declare` call itself happens inside. `FunctionExpression` below already had
+            // this shape; only the declaration case attributed the id node to the enclosing scope, which
+            // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
+            const target = hoistTarget(state);
             declareInScope(state, SCOPE.FUNCTION, node, () => {
+                const id = node.data.id;
+                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target);
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params);
                 visitType(state, node.data.returnType);
@@ -637,10 +646,20 @@ function visit(state: AnalyseState, node: Node | null): void {
             });
             return;
         case N.ClassDeclaration: {
-            const id = node.data.id;
-            if (id !== null) declareDualNs(state, id, SYM.CLASS | SYM.TYPE, state.scope);
-            visit(state, node.data.superClass);
+            // oxc `visit_class` (builder.rs:959-984) enters the class scope FIRST, then visits the `id`
+            // and the heritage INSIDE it. The BINDING still targets the enclosing scope for a class
+            // DECLARATION — oxc keeps "where the symbol is bound" separate from "where the identifier
+            // node lives", which is why `declare` takes an explicit `targetScope`.
+            //
+            // We used to visit both before entering, so `analyze` attributed them to the enclosing
+            // scope while `traverse` (which reads `data.scopeId`) attributed them to the class scope.
+            // That disagreement is spec-visible: `class A extends A {}` is a TDZ error precisely
+            // because the heritage is evaluated inside the class scope.
+            const outer = state.scope;
             declareInScope(state, SCOPE.CLASS, node, () => {
+                const id = node.data.id;
+                if (id !== null) declareDualNs(state, id, SYM.CLASS | SYM.TYPE, outer);
+                visit(state, node.data.superClass);
                 declareTypeParams(state, node.data.typeParameters);
                 for (const h of node.data.implements) {
                     if (h.type !== N.TSClassImplements) continue;
@@ -653,10 +672,12 @@ function visit(state: AnalyseState, node: Node | null): void {
             return;
         }
         case N.ClassExpression:
-            visit(state, node.data.superClass);
             declareInScope(state, SCOPE.CLASS, node, () => {
+                // A class EXPRESSION binds its own name INSIDE the class scope (oxc builder.rs:962-964,
+                // "we need to bind class expressions in the class scope before visiting the identifier").
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.CLASS, NS_VALUE, state.scope);
+                visit(state, node.data.superClass);
                 declareTypeParams(state, node.data.typeParameters);
                 for (const h of node.data.implements) {
                     if (h.type !== N.TSClassImplements) continue;
