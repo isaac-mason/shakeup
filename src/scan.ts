@@ -177,6 +177,28 @@ function moduleTypeOf(id: string): ModuleType {
     return 'js';
 }
 
+/** Drop import specifiers whose local binding has no remaining VALUE reference — TypeScript's
+ *  import elision. Called after the lowering traversal has erased type annotations and its reference
+ *  delta has been applied, so `uses` reflects the post-erasure program.
+ *
+ *  The symbol is retired as well as unbound: left in module scope it would still claim its name
+ *  during deconfliction, pushing the value that legitimately owns that name to `X$1`. */
+function elideUnreferencedImports(program: Program, semantic: Semantic): void {
+    for (const stmt of program.data.body) {
+        if (stmt.type !== N.ImportDeclaration) continue;
+        const d = stmt.data as { specifiers: Node[] };
+        if (d.specifiers.length === 0) continue; // bare `import 'x'` — a side effect, never elided
+        const kept = d.specifiers.filter((sp) => {
+            const local = (sp.data as { local: Node }).local;
+            const sym = symbolOf(semantic, local);
+            if (sym === 0 || (semantic.uses[sym] ?? 0) > 0) return true;
+            retireSymbol(semantic, sym);
+            return false;
+        });
+        if (kept.length !== d.specifiers.length) d.specifiers = kept;
+    }
+}
+
 /** Collect every BindingIdentifier in a binding pattern into `out`. */
 function collectPatternIdents(node: Node | null, out: Node[]): void {
     if (node === null) return;
@@ -1037,6 +1059,22 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                         analyze(semantic, program);
                     }
                 }
+                // TypeScript import elision. `import { makeNode, Node } from './lib'` with `Node`
+                // used only as a type is ordinary TS — tsc (without `verbatimModuleSyntax`),
+                // rolldown and oxc all drop such a specifier. Without it the specifier survives into
+                // `namedImports`, link looks for a value export that erasure removed, and the build
+                // fails with `'Node' is not exported by …`. The same happens for a specifier that is
+                // never referenced at all.
+                //
+                // MUST run here: after `applyRefDelta`, because the type annotations that referenced
+                // these bindings are erased by `tsStrip` DURING the traversal and their reference
+                // counts are only folded in afterwards — checking inside the pass would read stale
+                // counts and keep every specifier. And before `extractRecords` (below), which is what
+                // turns surviving specifiers into import records.
+                //
+                // TS ONLY. In JavaScript an imported name that does not exist is a real error and
+                // should keep being reported; there is no erasure that could have removed it.
+                if (isTs) elideUnreferencedImports(program, semantic);
                 // Reject only value namespaces the lowering couldn't handle (nested/merged/re-export)
                 // — the handled ones are now `var`, so this runs AFTER the transform.
                 // Only a TS module can contain the construct this looks for (a value
