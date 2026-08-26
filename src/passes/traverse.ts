@@ -49,9 +49,20 @@ function buildWalkers(): Walker[] {
         let body = '';
         for (const f of FIELDS[t]) {
             const key = JSON.stringify(f.name);
+            // The store is CONDITIONAL. Measured over a crashcat bundle: 731,315 `visitSingle` calls,
+            // 2,534 of which actually replaced the node — 0.346%, so 99.65% of unconditional
+            // write-backs stored the value already in the slot. A pointer store into an object field
+            // costs a GC write barrier; a reference compare does not.
+            //
+            // oxc pays none of this — `walk_expression(&mut expr)` mutates through a reference, so
+            // there is no write-back at all. JS cannot take a reference to a property slot, so eliding
+            // the store when nothing changed is the closest aligned form.
+            //
+            // Benched at the MEASURED replacement rate (`benches/micro/writeback.bench.ts`): 8-12%
+            // faster than the unconditional store across three runs, against a byte-identical control.
             body += f.list
                 ? `{const a=node.data[${key}]; if(a!=null)L(a,ctx);}\n`
-                : `{const c=node.data[${key}]; if(c!=null)node.data[${key}]=S(c,ctx);}\n`;
+                : `{const c=node.data[${key}]; if(c!=null){const r=S(c,ctx); if(r!==c)node.data[${key}]=r;}}\n`;
         }
         // eslint-disable-next-line no-new-func -- schema-driven codegen; eval is mandated by the runtime.
         walkers[t] = new Function('node', 'ctx', 'S', 'L', body) as Walker;
