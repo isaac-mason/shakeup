@@ -29,7 +29,8 @@
 //     mismatch. This also covers globals (`Math`), which a local binding at the call site can shadow.
 import { isPureExpr } from '../../analysis/effects.ts';
 import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
-import { cloneNode, N, type Node, node, walk } from '../../ast.ts';
+import { cloneNode, N, type Node, node, walk, walkChildren } from '../../ast.ts';
+import { attachScopeNode, cloneSemanticSubtree, createScope, declareLocal, SCOPE, SYM } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
 import { VAR_KIND } from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
@@ -301,6 +302,52 @@ function blockIsInlinable(cand: BlockCandidate, args: readonly Node[], scope: nu
     return true;
 }
 
+/** Give the nodes `block-mutate` SYNTHESIZED their scopes and symbols.
+ *
+ *  `block-mutate` is a pure AST builder with no `Semantic`: it mints the wrapper `BlockStatement`, the
+ *  `let <result>;` prologue and the `ref(name)` reads as plain nodes — blocks with no `scopeId`, and
+ *  identifiers with `sym === 0`. To the verifier that reads as "scope-owning node has no scopeId" and
+ *  "'_r0' unbound in maintained, bound in truth", both UNSAFE: unbound in the table is the direction
+ *  where a live symbol looks dead and `dropUnused` deletes a declaration still in use.
+ *
+ *  Binding by NAME is safe here precisely because these names are freshly minted and unique
+ *  (`freshName` -> `_r{seq}` / `_L{seq}`), and only identifiers still carrying `sym === 0` are touched —
+ *  a reference to something OUTER legitimately has no symbol and must keep it. Two passes, because a
+ *  reference can appear before its binding. */
+function bindSynthesized(sem: Semantic, root: Node, scope: number): void {
+    const minted = new Map<string, number>();
+    const declare = (n: Node, sc: number): void => {
+        const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
+        let inner = sc;
+        if (own === 0 && SCOPE_OWNERS.has(n.type)) {
+            inner = createScope(sem, sc, SCOPE.BLOCK);
+            attachScopeNode(sem, inner, n);
+        } else if (own !== 0) {
+            inner = own;
+        }
+        if (n.type === N.BindingIdentifier && (n as { sym: number }).sym === 0 && n.name !== '') {
+            minted.set(n.name, declareLocal(sem, n, inner, SYM.LET));
+        }
+        walkChildren(n, (c) => {
+            declare(c, inner);
+        });
+    };
+    declare(root, scope);
+
+    if (minted.size === 0) return;
+    const stamp = (n: Node): void => {
+        if (n.type === N.IdentifierReference && (n as { sym: number }).sym === 0) {
+            const sym = minted.get(n.name);
+            if (sym !== undefined) (n as { sym: number }).sym = sym;
+        }
+        walkChildren(n, stamp);
+    };
+    stamp(root);
+}
+
+/** Node types that OWN a lexical scope and so need one minted when synthesized. */
+const SCOPE_OWNERS = new Set<number>([N.BlockStatement, N.StaticBlock]);
+
 /** The spliced statement for one call, or `null` when refused. `resultName` is `null` in statement
  *  position (the value is discarded). */
 function buildSplice(
@@ -316,14 +363,24 @@ function buildSplice(
     const label = freshName(sem, scope, '_L', seq, avoid);
     const result = resultName ?? freshName(sem, scope, '_r', seq, avoid);
     const out = mutateForBlockInline({
-        // `block-mutate` mutates its input in place, so every splice gets its own copy.
-        bodyStmts: cand.body.map((st) => cloneNode(st) as Node),
+        // `block-mutate` mutates its input in place, so every splice gets its own copy — and each copy
+        // needs its OWN scopes and symbols. `cloneNode` clears `scopeId` and copies `sym`, so without
+        // this every inlined copy of a callee shares one binding per local with the original and with
+        // every other call site: "no scopeId in maintained" plus "symbol partition mismatch", both
+        // UNSAFE. Done here, before `block-mutate` rewrites the statements, while the clone still
+        // pairs structurally with its source.
+        bodyStmts: cand.body.map((st) => {
+            const copy = cloneNode(st) as Node;
+            cloneSemanticSubtree(sem, st, copy, scope);
+            return copy;
+        }),
         params: cand.paramNames.slice(0, Math.max(args.length, 0)),
         args: args.map((a) => cloneNode(a) as Node),
         label,
         resultName: result,
         needsResult: resultName !== null,
     });
+    bindSynthesized(sem, out.block, scope);
     return out.block;
 }
 
