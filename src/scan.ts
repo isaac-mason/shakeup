@@ -15,6 +15,7 @@ import {
     NAME_DEFAULT,
     NAME_NAMESPACE,
 } from './graph-types';
+import { compileToModule } from './loaders';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
@@ -951,6 +952,27 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // cache lookup because it is part of the key, and before `parse` because it selects the
             // parse goal.
             defFormat = await defFormatOf(id);
+
+            // Non-JavaScript module types become ES module SOURCE here, before hashing and parsing,
+            // so everything downstream — the cache key, the parse goal, tree-shaking — sees an
+            // ordinary module. `ModuleType` has declared `json`/`text`/`base64`/`dataurl`/`binary`
+            // for a long time; only `ts`/`tsx` were ever acted on, and every other type fell through
+            // to the JavaScript parser (`.json` failed with `expected ';'`).
+            //
+            // A plugin that REWROTE the source owns the module: `@rollup/plugin-json` and friends
+            // turn `.json` into `export default …` in a `transform` hook, and running the built-in
+            // loader afterwards fed that JavaScript to `JSON.parse`. Extension-derived types only
+            // apply to source no plugin touched; an explicit `moduleType` from a plugin still wins,
+            // so a plugin CAN hand work back to a built-in loader deliberately.
+            const pluginOwns = pending?.moduleType === undefined && source !== source0;
+            const compiled = pluginOwns ? null : compileToModule(moduleTypeVal, source, id);
+            if (compiled !== null) {
+                if ('error' in compiled) {
+                    graph.errors.push(compiled.error);
+                    return -1;
+                }
+                source = compiled.code;
+            }
 
             // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
             // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.

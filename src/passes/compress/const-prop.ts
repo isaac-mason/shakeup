@@ -24,6 +24,27 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
  *  like drop-unused's snapshot). */
 let INLINE: Map<number, Node> | null = null;
 
+/** The `local` node of every `export { … }` specifier in this Program. Collected from the top-level
+ *  body only — an export declaration cannot appear anywhere else — so this stays O(top-level
+ *  statements) rather than reintroducing the whole-program walk this pass was rewritten to avoid. */
+let SPECIFIER_LOCALS: Set<Node> | null = null;
+
+function collectSpecifierLocals(program: Node): Set<Node> | null {
+    let out: Set<Node> | null = null;
+    for (const stmt of (program.data as { body: Node[] }).body) {
+        if (stmt.type !== N.ExportNamedDeclaration) continue;
+        const d = stmt.data as { source: Node | null; specifiers: Node[] };
+        // `export { x } from './m'` re-exports someone else's binding — there is no local read to
+        // protect, and nothing here could match it anyway.
+        if (d.source !== null) continue;
+        for (const spec of d.specifiers) {
+            if (spec.type !== N.ExportSpecifier) continue;
+            (out ??= new Set<Node>()).add((spec.data as { local: Node }).local);
+        }
+    }
+    return out;
+}
+
 /** A copyable PRIMITIVE constant init, or null. Primitives only — objects/arrays/functions have
  *  identity (duplicating them changes behavior) and are never candidates. */
 function constInit(init: Node | null): Node | null {
@@ -89,7 +110,8 @@ function copyConst(n: Node): Node {
 export const constProp: Visitor = {
     name: 'constProp',
     enter: hookTable({
-        [N.Program]: (_program, ctx: TransformCtx) => {
+        [N.Program]: (program, ctx: TransformCtx) => {
+            SPECIFIER_LOCALS = collectSpecifierLocals(program);
             // Both facts are maintained by `analyze` (see `Semantic.refs`) — no pre-pass walk at all,
             // where this pass once ran its own `tallyRefs` + `walkRefIdents`.
             const { refs, shorthand } = ctx.semantic;
@@ -118,6 +140,14 @@ export const constProp: Visitor = {
         },
         [N.IdentifierReference]: (n, ctx: TransformCtx) => {
             if (INLINE === null) return;
+            // An export specifier's `local` is an IdentifierReference, but it NAMES the export — it
+            // is not a value read. Substituting the literal there rewrote `export { used }` into
+            // `export { 1 }`: `extractRecords` recorded `symbol: 0` and every importer failed with
+            // **`'used' is not exported`** on ordinary ES module code.
+            //
+            // Skipping the NODE rather than disqualifying the SYMBOL is deliberate — barring the
+            // whole binding also stopped its real reads from inlining and cost 2.6KB on three.js.
+            if (SPECIFIER_LOCALS !== null && SPECIFIER_LOCALS.has(n)) return;
             const lit = INLINE.get((n as { sym: number }).sym);
             if (lit !== undefined) ctx.replaceWith(copyConst(lit));
         },
