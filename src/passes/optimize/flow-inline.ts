@@ -239,6 +239,10 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
     const body = (fn.data as { body: Node | null }).body;
     if (body === null || body.type !== N.BlockStatement) return false;
 
+    // The function's own scope and its body-block scope: a `let` at the function's top level lives in
+    // the BODY block, while parameters live in the function scope, so both count as "function level".
+    const fnScope = scopeOf(sem, fn);
+    const fnBodyScope = scopeOf(sem, body);
     const { locals, escaped } = scopeSymbols(fn);
     const tracked = new Set([...locals].filter((s) => !escaped.has(s)));
     if (tracked.size === 0) return false;
@@ -301,8 +305,41 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
             readSyms(loc.rhs, rhsReads);
             let scopeOk = true;
             for (const r of rhsReads) {
-                // A tracked local of this function is fine; only free/outer names need the check.
-                if (tracked.has(r)) continue;
+                // EVERY free symbol is checked, tracked locals included. The previous exemption
+                // ("a tracked local of this function is fine") holds for `var`, which is
+                // function-scoped, but NOT for `let`/`const` in a nested block: substituting such a
+                // local into a use site OUTSIDE its block moves a reference out of the scope that
+                // binds it.
+                //
+                // That is not hypothetical. Block-inlining wraps a spliced callee body in a block, so
+                // `{ let jv; … }  r = jv;` then `return r` inlined to `return jv` — referencing a
+                // block-scoped binding from outside the block. The output only came out correct
+                // because `blockFlatten` later hoisted the declaration and repaired it by accident;
+                // with that pass skipped the emitted code was `function t(e,n){{let i;…}return jv}`.
+                //
+                // For a TRACKED local the test is structural, not by name: is the scope that DECLARES
+                // it an ancestor-or-self of the use site's scope? A name lookup is unreliable here
+                // because inlining renames bindings, so `decl.name` need not match the current text.
+                if (tracked.has(r)) {
+                    // A tracked local is only safe to substitute if it is visible EVERYWHERE in the
+                    // function — i.e. declared at the function's own level, not inside a nested block.
+                    //
+                    // The old code exempted every tracked local outright. That holds for `var` but not
+                    // for `let`/`const` in a nested block: block-inlining wraps a spliced callee body
+                    // in a block, so `{ let jv; … } r = jv;` then `return r` became `return jv`,
+                    // referencing a block-scoped binding from OUTSIDE its block. The emitted code was
+                    // only correct because `blockFlatten` later hoisted the declaration by accident —
+                    // with that pass skipped it was `function t(e,n){{let i;…}return jv}`.
+                    //
+                    // A precise test would compare the declaring scope against the USE's enclosing
+                    // scope, but `scopeOfUse` reports the scope a node OWNS (0 for a `return`), so no
+                    // accurate use-scope is available here. This is the conservative sound form: it
+                    // refuses some valid substitutions of nested-block locals, and never permits one
+                    // that leaves its block.
+                    const declScope = sem.symbols[r]?.scope ?? 0;
+                    if (declScope !== fnScope && declScope !== fnBodyScope) { scopeOk = false; break; }
+                    continue;
+                }
                 const nm = sem.symbols[r]?.decl?.name;
                 if (nm !== undefined && lookupValue(sem, scopeOfUse(useNode), nm) !== r) {
                     scopeOk = false;
