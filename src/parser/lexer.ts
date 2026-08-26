@@ -210,6 +210,7 @@ export function nextToken(state: ParserState): void {
                     // in the span — but don't record every newline; the line table is built
                     // once, deferred. three.core.js is ~46% block-comment bytes.
                     const end = src.indexOf('*/', pos + 2);
+                    if (end < 0) raise(state, ParseErrorCode.UnterminatedComment);
                     const close = end < 0 ? srcLen : end + 2;
                     const nlIn = src.indexOf('\n', pos + 2);
                     if (nlIn !== -1 && nlIn < close) nl = F_NL;
@@ -277,18 +278,30 @@ export function nextToken(state: ParserState): void {
     }
     if (c === 34 || c === 39) {
         pos++;
+        // `closed` rather than inspecting `src[pos - 1]` afterwards: a source that ends ON the
+        // opening quote would read that quote back and look terminated. Written once, on the way
+        // out — no per-character cost.
+        let closed = false;
         while (pos < srcLen) {
             const cc = src.charCodeAt(pos);
             if (cc === c) {
                 pos++;
+                closed = true;
                 break;
             }
+            // A raw line terminator ends a string literal in the grammar; only an escaped one may
+            // span lines. Without this an unterminated string swallowed the rest of the file.
+            if (cc === 10 || cc === 13) break;
             if (cc === 92) {
                 pos += 2; // skip the escaped char (line table is built deferred, not here)
             } else {
                 pos++;
             }
         }
+        // Reported, not swallowed. An unterminated literal used to parse CLEANLY and reach the
+        // output verbatim — `export const x = 'abc` emitted `const x = 'abc;`, itself invalid
+        // JavaScript, from a build with `errors: []`. oxc rejects it in every module goal.
+        if (!closed) raise(state, ParseErrorCode.UnterminatedString);
         state.pos = pos;
         state.tok = T_STR;
         state.tokEnd = pos;
@@ -384,6 +397,8 @@ function scanTemplatePart(state: ParserState): void {
             pos++;
         }
     }
+    // Fell off the end without a closing backtick or `${`.
+    raise(state, ParseErrorCode.UnterminatedTemplate);
     state.pos = pos;
     state.tok = T_TEMPLATE_FULL;
     state.tokEnd = pos;

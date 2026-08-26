@@ -10,9 +10,10 @@
  * Both trees are loaded in ONE process (the baseline extracted with `git archive`), so there is no
  * cross-run drift to explain away: outputs either hash the same or they do not.
  */
-import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
+
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -25,8 +26,24 @@ const diskFs = { read: (i: string) => (existsSync(i) ? readFileSync(i, 'utf8') :
 const CC = '/Users/isaacmason/Development/crashcat/src/index.ts';
 const THREE = join(root, 'llm/spikes/node_modules/three/build/three.core.js');
 const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
-    { name: 'crashcat minify+optimize', opts: () => ({ entry: CC, fs: diskFs, external: ['math', 'math/shapes', 'three'], output: { minify: true, optimize: true } }) },
-    { name: 'crashcat minify, no opt', opts: () => ({ entry: CC, fs: diskFs, external: ['math', 'math/shapes', 'three'], output: { minify: true, optimize: false } }) },
+    {
+        name: 'crashcat minify+optimize',
+        opts: () => ({
+            entry: CC,
+            fs: diskFs,
+            external: ['math', 'math/shapes', 'three'],
+            output: { minify: true, optimize: true },
+        }),
+    },
+    {
+        name: 'crashcat minify, no opt',
+        opts: () => ({
+            entry: CC,
+            fs: diskFs,
+            external: ['math', 'math/shapes', 'three'],
+            output: { minify: true, optimize: false },
+        }),
+    },
     { name: 'crashcat plain', opts: () => ({ entry: CC, fs: diskFs, external: ['math', 'math/shapes', 'three'], output: {} }) },
     { name: 'three minify', opts: () => ({ entry: THREE, fs: diskFs, output: { minify: true } }) },
     { name: 'three plain', opts: () => ({ entry: THREE, fs: diskFs, output: {} }) },
@@ -39,12 +56,17 @@ async function main(): Promise<void> {
     console.log(`baseline: ${ref}   working tree vs that\n`);
     let allSame = true;
     for (const c of CASES) {
-        if (!existsSync((c.opts() as { entry: string }).entry)) { console.log(`  SKIP      ${c.name} (corpus missing)`); continue; }
+        if (!existsSync((c.opts() as { entry: string }).entry)) {
+            console.log(`  SKIP      ${c.name} (corpus missing)`);
+            continue;
+        }
         const a = (await base(c.opts())).code as string;
         const b = (await cur(c.opts())).code as string;
         const same = a === b;
         if (!same) allSame = false;
-        console.log(`  ${same ? 'IDENTICAL' : 'CHANGED  '} ${c.name.padEnd(26)} ${h(a)} -> ${h(b)}   ${a.length.toLocaleString()}b${same ? '' : ` -> ${b.length.toLocaleString()}b (${b.length - a.length >= 0 ? '+' : ''}${b.length - a.length})`}`);
+        console.log(
+            `  ${same ? 'IDENTICAL' : 'CHANGED  '} ${c.name.padEnd(26)} ${h(a)} -> ${h(b)}   ${a.length.toLocaleString()}b${same ? '' : ` -> ${b.length.toLocaleString()}b (${b.length - a.length >= 0 ? '+' : ''}${b.length - a.length})`}`,
+        );
     }
     console.log(allSame ? '\nOutput unchanged.' : '\nOUTPUT CHANGED — not a pure performance change.');
     if (!allSame) process.exitCode = 1;

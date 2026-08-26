@@ -68,7 +68,9 @@ const CASES: Case[] = [
  *  (`e&&(t=1)` vs `a&&(o=1)`). A comparator that cannot be trusted is worse than none, so the output
  *  is now simply both sides, side by side, for a human to read. */
 const strip = (c: string): string =>
-    c.trim().replace(/\n/g, ' ')
+    c
+        .trim()
+        .replace(/\n/g, ' ')
         .replace(/(?:let|var|const)\s+[\w$]+\s*=\s*Number\(globalThis\.x\)\s*,?\s*/, '')
         .replace(/^(?:let|var|const)\s+[\w$]+\s*[;,]\s*/, '')
         .replace(/[,;]?\s*globalThis\.sink\s*=\s*[\w$]+;?\s*$/, '')
@@ -76,9 +78,21 @@ const strip = (c: string): string =>
 
 let group = '';
 for (const [g, label, body] of CASES) {
-    if (g !== group) { group = g; console.log(`\n\u2500\u2500 ${g} \u2500\u2500`); }
+    if (g !== group) {
+        group = g;
+        console.log(`\n\u2500\u2500 ${g} \u2500\u2500`);
+    }
     const src = `const a = Number(globalThis.x);\nlet o;\n${body}\nglobalThis.sink = o;\n`;
-    const ours = strip(((await bundle({ entry: '/e.js', fs: createMemoryFs({ '/e.js': src }), external: [], output: { minify: true, optimize: true } } as never)) as { code: string }).code);
+    const ours = strip(
+        (
+            (await bundle({
+                entry: '/e.js',
+                fs: createMemoryFs({ '/e.js': src }),
+                external: [],
+                output: { minify: true, optimize: true },
+            } as never)) as { code: string }
+        ).code,
+    );
     const theirs = strip(minifySync('e.js', src, { compress: {}, mangle: true }).code);
     console.log(`  ${label}`);
     console.log(`      ours  ${ours}`);

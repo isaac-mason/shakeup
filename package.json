@@ -16,6 +16,7 @@
         "regress": "tsx scripts/regress.ts",
         "oxcdiff": "tsx scripts/oxc-diff.ts",
         "cjsdiff": "tsx scripts/cjs-diff.ts",
+        "parserdiff": "tsx scripts/parser-diff.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {
@@ -27,6 +28,8 @@
         "eslint-scope": "^9.1.2",
         "meriyah": "^7.3.1",
         "oxc-minify": "^0.146.0",
+        "oxc-parser": "^0.147.0",
+        "rollup": "^4.63.0",
         "typescript": "^7.0.2",
         "vitest": "^4.1.10"
     }
