@@ -250,3 +250,37 @@ describe('bundle: two-statement re-export', () => {
         expect(await run(code)).toMatchObject({ v: 21, doubled: 42 });
     });
 });
+
+// `export * as ns from './a'` at an ENTRY. `namespaceOf` grows while export maps are built (this
+// form is a named EXPORT, so the `namedImports` loop never registers its target), and linkGraph
+// used to build namespace-target maps BEFORE the entry's own map existed — so the target's map was
+// never built at all. One missing map, two silent symptoms: nothing in the target was rooted, and
+// the namespace object rendered as `Object.freeze({})`. Worked from a non-entry barrel, because
+// there the consumer's named import registered the target in time.
+describe('bundle: export * as ns', () => {
+    it('materializes the namespace at an entry and keeps the target module', async () => {
+        const { code } = await build({
+            '/main.ts': "export * as ns from './a';",
+            '/a.ts': 'export const v = 1;\nexport const w = 2;',
+        });
+        expect((await run(code)).ns).toMatchObject({ v: 1, w: 2 });
+    });
+
+    it('materializes it through a non-entry barrel too', async () => {
+        const { code } = await build({
+            '/main.ts': "import { ns } from './barrel';\nexport const got = ns.v;",
+            '/barrel.ts': "export * as ns from './a';",
+            '/a.ts': 'export const v = 1;\nexport const w = 2;',
+        });
+        expect(await run(code)).toMatchObject({ got: 1 });
+    });
+
+    it('handles a chain of namespace re-exports', async () => {
+        const { code } = await build({
+            '/main.ts': "export * as outer from './mid';",
+            '/mid.ts': "export * as inner from './a';",
+            '/a.ts': 'export const v = 7;',
+        });
+        expect((await run(code)).outer).toMatchObject({ inner: { v: 7 } });
+    });
+});
