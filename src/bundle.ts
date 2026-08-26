@@ -307,8 +307,22 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         // sees `__esModule: true` and its own default-interop resolves. `__toCommonJS` builds a
         // FRESH object per call rather than stamping the namespace itself — the importing side must
         // never see `__esModule` (cjs.md §4.3's asymmetry).
-        const ns = linked.namespaceOf.get(rec.resolved);
-        if (ns !== undefined) map.set(n, `__toCommonJS(${ns})`);
+        // Chunk-local alias first, same as the wrapper above: across a boundary the namespace is
+        // IMPORTED under a local name, not named by the producer's own.
+        if (!linked.namespaceOf.has(rec.resolved)) return;
+        const ns = nameOfBind(linked, { kind: 'namespace', module: rec.resolved }, ctx.chunk);
+        if (ns === null) return;
+        // A require-only ESM target is behind an `__esm` closure, so the CALL is what evaluates it —
+        // that is the whole point of the lazy form. Sequencing the init in front of the read is
+        // rolldown's shape too: `const foo = (init_foo(), __toCommonJS(foo_exports))`
+        // (`tests/rolldown/misc/wrapped_esm/artifacts.snap`).
+        const initRef = linked.esmInit.get(rec.resolved);
+        if (initRef === undefined) {
+            map.set(n, `__toCommonJS(${ns})`);
+            return;
+        }
+        const initName = ctx.chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
+        map.set(n, `(${initName}(), __toCommonJS(${ns}))`);
     });
 }
 
@@ -517,6 +531,8 @@ function renderNamespaceObject(
     chunk: Chunk | null,
     nsMembers: Set<string> | undefined,
     tight: boolean,
+    /** The `var` is already declared outside (lazy-init form) — assign, do not redeclare. */
+    preDeclared = false,
 ): string {
     const nsName = linked.namespaceOf.get(modIdx)!;
     const map = linked.exportMaps.get(modIdx);
@@ -560,7 +576,8 @@ function renderNamespaceObject(
     // assigning to a namespace member. Freezing also blocks the `__reExport` chain that
     // `export * from 'cjs'` (namespace mode 2) needs to extend the object.
     const tag = `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
-    return tight ? `const ${nsName}={${inner}};${tag}` : `const ${nsName} = { ${inner} };${tag}`;
+    const decl = preDeclared ? '' : 'const ';
+    return tight ? `${decl}${nsName}={${inner}};${tag}` : `${decl}${nsName} = { ${inner} };${tag}`;
 }
 
 /** Runtime helpers for CommonJS interop, transcribed from rolldown's `runtime-base.js`.
@@ -584,6 +601,21 @@ const CJS_HELPERS: Record<string, string> = {
     __create: 'var __create = Object.create;',
     __getProtoOf: 'var __getProtoOf = Object.getPrototypeOf;',
     __commonJS: 'var __commonJS = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);',
+    // rolldown's `__esmMin` verbatim (`runtime/runtime-base.js:17-23`). `fn = 0` after the first
+    // call makes it run ONCE; the `err` cache makes an evaluation failure STICKY, which the ESM
+    // spec requires — a module that threw must throw the same error on every later access, not
+    // re-run. Transcribed rather than derived: the one-liner it is tempting to write instead
+    // re-evaluates a module whose first evaluation threw.
+    __esm: [
+        'var __esm = (fn, res, err) => () => {',
+        '    if (err) throw err[0];',
+        '    try {',
+        '        return (fn && (res = fn((fn = 0))), res);',
+        '    } catch (e) {',
+        '        throw ((err = [e]), e);',
+        '    }',
+        '};',
+    ].join('\n'),
     __copyProps: [
         'var __copyProps = (to, from, except, desc) => {',
         "    if ((from && typeof from === 'object') || typeof from === 'function') {",
@@ -1042,10 +1074,29 @@ function renderChunk(
             // every consumer reads members off it (`nameOfBind`'s `cjs-member`).
             if (nsName !== undefined) out += `\nvar ${nsName} = /* @__PURE__ */ __toESM(${wrapName}());`;
         }
+        const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
-            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight);
+            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight, lazyRef !== undefined);
             out += `\n${nsCode}`;
+        }
+        // LAZY INIT — an ESM module reached only through `require()` (§7.20/D1). Its whole body,
+        // namespace included, moves inside an `__esm` closure so it evaluates at the require CALL.
+        //
+        // The namespace has to be built INSIDE too: its members are closure locals now, so a literal
+        // left outside would close over nothing. Only its BINDING is hoisted, which is also what
+        // makes the object reachable from the require site.
+        //
+        // rolldown instead splits declarations from initializers and keeps the bindings at top level
+        // (`misc/wrapped_esm`) — it has to, because it applies this to modules a static `import`
+        // also reads. `link.ts` restricts this path to require-only targets precisely so that split
+        // is not needed; the mixed case still takes the eager path and still warns.
+        if (lazyRef !== undefined && out !== '') {
+            const initName = finalNameOf(linked, lazyRef);
+            const nsName = linked.namespaceOf.get(idx);
+            const body = out.replace(/^/gm, '    ');
+            out = `${nsName === undefined ? '' : `var ${nsName};\n`}var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
+            nsCode = null;
         }
         if (out !== '') moduleTexts.push(out);
         if (wantMap && out !== '') {
@@ -1188,11 +1239,16 @@ function renderChunk(
             (r) => r.kind === 'require' && !r.external && r.resolved >= 0 && !linked.cjsWrap.has(r.resolved) && linked.namespaceOf.has(r.resolved),
         ),
     );
+    // A lazily-initialised module (§7.20/D1) carries its own `__esm` — and it is the PRODUCER chunk
+    // that declares the init function, which may wrap nothing and require nothing itself. Gating this
+    // on `needsCjs`/`needsToCjs` left the helper out of exactly that chunk.
+    const needsEsm = chunk.modules.some((i) => linked.esmInit.has(i));
     const helperLines: string[] = [];
-    if (needsCjs || needsToCjs) {
+    if (needsCjs || needsToCjs || needsEsm) {
         const wanted = new Set<string>();
         if (needsCjs) wanted.add('__commonJS');
         if (chunk.modules.some((i) => linked.cjsNamespace.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+        if (needsEsm) wanted.add('__esm');
         if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);
         for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
     }
