@@ -1,4 +1,5 @@
 import { dirnameOf, type Fs, joinPath, normalizePath } from './fs';
+import type { ModuleDefFormat } from './graph-types';
 
 /** The minimal context the resolver needs: a diagnostics sink. */
 type ResolveCtx = { warn(message: string): void };
@@ -267,6 +268,71 @@ function mixedExportsKeys(exports: unknown): { key: string; prev: string } | nul
         if (keys[i].startsWith('.') !== firstIsDot) return { key: keys[i], prev: keys[i - 1] };
     }
     return null;
+}
+
+/** Extensions Node treats as "js-like", i.e. the ones whose module goal is decided by the nearest
+ *  `package.json#type` rather than by the extension itself. `.jsx`/`.tsx` are included for the same
+ *  reason rolldown includes them (`rolldown_resolver/src/resolver.rs:252-258`): oxc_resolver follows
+ *  the Node ESM spec, which has no native `.jsx`/`.tsx`, but a bundler should treat all js-like
+ *  extensions consistently. */
+const JS_LIKE = ['.js', '.jsx', '.ts', '.tsx'];
+
+/** Resolve a module's DECLARED format: extension first, then the nearest `package.json#type`.
+ *  Port of rolldown's `resolver.rs:238-266` **[V]**.
+ *
+ *  Per `llm/notes/cjs.md` §7.1b this is a per-build RESOLVE output — the returned lookup owns a
+ *  cache that lives exactly as long as one build, which is what keeps a `package.json#type` edit
+ *  from going stale without any cross-file invalidation machinery. */
+export function createDefFormatLookup(fs: Fs): (id: string) => Promise<ModuleDefFormat> {
+    const typeCache = new Map<string, 'module' | 'commonjs' | null>();
+    const seenPkg = new Set<string>(); // dirs that HAVE a package.json, whatever it declares
+
+    const readType = async (dir: string): Promise<'module' | 'commonjs' | null> => {
+        const cached = typeCache.get(dir);
+        if (cached !== undefined) return cached;
+        let type: 'module' | 'commonjs' | null = null;
+        const text = await fs.read(`${dir}/package.json`);
+        if (text !== null) {
+            seenPkg.add(dir);
+            try {
+                const raw = JSON.parse(text) as Record<string, unknown>;
+                // ABSENT `type` means UNKNOWN, not CommonJS. Node's own default is CommonJS, but a
+                // bundler must stay permissive here: the overwhelming majority of packages ship a
+                // package.json with no `type` and ESM syntax in `.js` files, and treating those as
+                // declared-CommonJS would reject them. rolldown does the same — both its lookups
+                // return `Option` and fall through to `ModuleDefFormat::Unknown`
+                // (`rolldown_resolver/src/resolver.rs:249-265`). Only an explicit field decides.
+                type = raw.type === 'module' ? 'module' : raw.type === 'commonjs' ? 'commonjs' : null;
+            } catch {
+                type = null; // malformed: decides nothing
+            }
+        }
+        typeCache.set(dir, type);
+        return type;
+    };
+
+    return async (id: string): Promise<ModuleDefFormat> => {
+        if (id.endsWith('.mjs')) return 'esm-mjs';
+        if (id.endsWith('.mts')) return 'esm-mts';
+        if (id.endsWith('.cjs')) return 'cjs';
+        if (id.endsWith('.cts')) return 'cts';
+        if (!JS_LIKE.some((e) => id.endsWith(e))) return 'unknown';
+        // Walk up to the first package boundary. Virtual ids (`\0…`) have no directory to walk.
+        if (id.startsWith('\0')) return 'unknown';
+        // Walk up to the first package boundary, INCLUDING the root: `readType('')` probes
+        // `/package.json`, which a naive `while (dir !== '')` loop skips — and a root-level
+        // `"type": "module"` covering files in subdirectories is the single most common real layout.
+        let dir = id.slice(0, id.lastIndexOf('/'));
+        for (;;) {
+            const type = await readType(dir);
+            if (type !== null) return type === 'module' ? 'esm-package-json' : 'cjs-package-json';
+            // A package.json with no usable `type` still ends the search: Node stops at the first
+            // package boundary rather than inheriting a parent package's goal.
+            if (seenPkg.has(dir)) return 'unknown';
+            if (dir === '') return 'unknown';
+            dir = dir.slice(0, dir.lastIndexOf('/'));
+        }
+    };
 }
 
 export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
