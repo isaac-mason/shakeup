@@ -5,6 +5,8 @@ import type { Fs, MaybePromise } from './fs';
 import {
     type CachedParse,
     isCommonJsFormat,
+    isEsmFormat,
+    type ModuleDefFormat,
     type Graph,
     type ImportRecordKind,
     type JSXRuntime,
@@ -776,6 +778,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
+        let defFormat: ModuleDefFormat = 'unknown';
         let reuse: boolean;
         let hit: CachedParse | undefined;
         let srcHash = 0;
@@ -808,6 +811,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             sideEffects = resolveModuleSideEffects(pending);
             metaVal = pending.meta;
             moduleTypeVal = pending.moduleType ?? moduleTypeOf(id);
+            // Declared module goal (cjs.md §7.1b): a per-build RESOLVE output. Needed BEFORE the
+            // cache lookup because it is part of the key, and before `parse` because it selects the
+            // parse goal.
+            defFormat = await defFormatOf(id);
 
             // Incremental cache: reuse parse/analyze/extract when the (post-transform) source is
             // unchanged. Those AST passes dominate build cost; load/transform/resolve stay per-build.
@@ -818,7 +825,17 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // supply a cache; it is the watch loop that does.
             if (cache !== undefined) srcHash = hashSource(source);
             hit = cache?.get(id);
-            reuse = hit !== undefined && hit.srcHash === srcHash && hit.compress === compress && hit.optimize === optimizeTier;
+            // `defFormat` is part of the key because the AST is format-DEPENDENT: the parse goal
+            // gates top-level `return`/`new.target` (cjs.md §7.1c). Unlike `ts`/`jsx` — also
+            // per-module parse inputs, but derived from the id the cache is keyed by — a
+            // `package.json#type` edit changes this WITHOUT changing the id or the source, so it
+            // must be compared explicitly or a stale AST survives the edit.
+            reuse =
+                hit !== undefined &&
+                hit.srcHash === srcHash &&
+                hit.compress === compress &&
+                hit.optimize === optimizeTier &&
+                hit.defFormat === defFormat;
             if (reuse && hit !== undefined) {
                 ({ program, nodeCount, semantic } = hit);
                 hasJSX = hit.hasJSX;
@@ -829,7 +846,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // TS-mode parsing there is both wrong (rejects valid JS the TS grammar disallows) and
                 // slower (needless type/generic speculation).
                 const isTs = moduleTypeVal === 'ts' || moduleTypeVal === 'tsx';
-                const parsed = parse(source, { ts: isTs, jsx });
+                // Permissive `unambiguous` unless the file carries an explicit goal signal, so
+                // plain `.js` in a typeless package parses exactly as before (cjs.md §7.1c).
+                const kind = isEsmFormat(defFormat) ? 'module' : isCommonJsFormat(defFormat) ? 'commonjs' : 'unambiguous';
+                const parsed = parse(source, { ts: isTs, jsx, kind });
                 for (const e of parsed.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
                 program = parsed.program;
                 nodeCount = parsed.nodeCount;
@@ -987,7 +1007,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             isEntry,
             entryName: null,
             external: false,
-            defFormat: await defFormatOf(id),
+            defFormat,
             importers: new Set(),
         };
         graph.modules.push(mod);
@@ -1041,6 +1061,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 sideEffects,
                 meta: metaVal,
                 moduleType: moduleTypeVal,
+                defFormat,
             });
         }
         for (const hook of pipe.moduleParsed) {

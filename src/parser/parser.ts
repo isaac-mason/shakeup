@@ -108,6 +108,13 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokHash: 0,
         tsMode: options.ts,
         jsxMode: options.jsx,
+        fnDepth: 0,
+        newTargetDepth: 0,
+        // `unambiguous` (the default) stays permissive, so adopting the goal gate is NOT a breaking
+        // change: only a file with an explicit signal — `.cjs`/`.mjs`/`.cts`/`.mts` or a declared
+        // `package.json#type` — is held to it. Mirrors oxc's `ModuleKind::Unambiguous`.
+        allowTopReturn: options.kind !== 'module',
+        allowTopNewTarget: options.kind !== 'module',
         errors: [],
         baseId: 0,
         itKeys: new Array(cap),
@@ -450,6 +457,7 @@ function parseNew(state: ParserState): Node {
     if (isP(state, P.DOT)) {
         nextToken(state);
         parseNameAsIdent(state, R_NAME);
+        if (state.newTargetDepth === 0 && !state.allowTopNewTarget) raise(state, ParseErrorCode.TopLevelNewTarget);
         return create.NewTarget(start, state.tokStart, 0) as Node;
     }
     let callee: Node;
@@ -1146,7 +1154,7 @@ function parseMethodTail(state: ParserState, start: number, flags: number): Node
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseBlock(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
     else consumeSemi(state);
     return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body) as Node;
 }
@@ -1271,7 +1279,7 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     expectP(state, P.ARROW, "'=>'");
     let body: Node;
-    if (isP(state, P.LBRACE)) body = parseBlock(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
     else {
         body = parseAssign(state);
         flags |= FL.EXPR_BODY;
@@ -1283,7 +1291,7 @@ function parseArrowAfterSingleParam(state: ParserState, start: number, id: Ident
     const param = create.FormalParameter(identStart ?? start, id.end, 0, id, null, null) as Node;
     expectP(state, P.ARROW, "'=>'");
     let body: Node;
-    if (isP(state, P.LBRACE)) body = parseBlock(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
     else {
         body = parseAssign(state);
         flags |= FL.EXPR_BODY;
@@ -1482,7 +1490,7 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseBlock(state);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state);
     else consumeSemi(state);
     return isDecl && !isExpr
         ? (create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body) as Node)
@@ -1582,7 +1590,11 @@ function parseClassMember(state: ParserState): Node {
             const s = saveState(state);
             nextToken(state);
             if (isP(state, P.LBRACE)) {
+                // A class static block enables `new.target` but NOT `return` — hence bumping only
+                // the new.target depth (oxc `js/function.rs:285`, `js/statement.rs:710-713`).
+                state.newTargetDepth++;
                 const b = parseBlock(state);
+                state.newTargetDepth--;
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
                 return create.StaticBlock(start, state.tokStart, 0, body) as Node;
             }
@@ -1683,6 +1695,17 @@ function isAccessModifier(state: ParserState): boolean {
         (len === 7 && src.startsWith('private', state.tokStart)) ||
         (len === 9 && src.startsWith('protected', state.tokStart))
     );
+}
+
+/** A FUNCTION body — tracked separately from {@link parseBlock} so top-level-only checks can fire.
+ *  A plain `{ }` block at the top level is still top level; a function body is not. */
+function parseFunctionBody(state: ParserState): Node {
+    state.fnDepth++;
+    state.newTargetDepth++;
+    const body = parseBlock(state);
+    state.fnDepth--;
+    state.newTargetDepth--;
+    return body;
 }
 
 function parseBlock(state: ParserState): Node {
@@ -1865,6 +1888,7 @@ function parseStatement(state: ParserState): Node {
                 let arg: Ref = null;
                 if (!canInsertSemi(state) && !isP(state, P.SEMI)) arg = parseExpression(state);
                 consumeSemi(state);
+                if (state.fnDepth === 0 && !state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
                 return create.ReturnStatement(start, state.tokStart, 0, arg) as Node;
             }
             case K.THROW: {
@@ -3157,7 +3181,11 @@ export type ParseResult = {
      *  is far too common to gate on). */
     hasImportSyntax: boolean;
 };
-export type ParseOptions = { ts: boolean; jsx: boolean };
+/** Module goal, mirroring oxc's `ModuleKind` (`oxc_span/src/source_type.rs:56-75`). `unambiguous`
+ *  is the permissive default and is parser-input only — it never describes a finished AST. */
+export type ParseKind = 'module' | 'commonjs' | 'unambiguous';
+
+export type ParseOptions = { ts: boolean; jsx: boolean; kind?: ParseKind };
 
 /** Parse `source` into a standalone Program. Source, error sink, intern map and
  * line table are the parser's own state, reset at entry; nothing references

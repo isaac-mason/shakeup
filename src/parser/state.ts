@@ -48,6 +48,18 @@ export type ParserState = {
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;
+    /** Nesting depth of FUNCTION bodies (not plain blocks, and not class static blocks). `return`
+     *  is legal only when this is > 0, or when the module goal allows it at top level. oxc's
+     *  `Context::has_return` (`oxc_parser/src/lib.rs:875-877`), as a counter. */
+    fnDepth: number;
+    /** Like {@link fnDepth} but ALSO entered by a class static block — oxc enables `new.target`
+     *  there while still forbidding `return` (`js/function.rs:285`, `js/statement.rs:710-713`). */
+    newTargetDepth: number;
+    /** Module goal allows top-level `return` — true for a CommonJS-declared file (its body is
+     *  wrapped in a function) and for the permissive `unambiguous` default. */
+    allowTopReturn: boolean;
+    /** Module goal allows top-level `new.target`. Same rule as {@link allowTopReturn}. */
+    allowTopNewTarget: boolean;
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];
