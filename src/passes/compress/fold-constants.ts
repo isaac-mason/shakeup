@@ -245,6 +245,42 @@ function foldBinary(n: Node): boolean {
         toStr(n, a + b);
         return true;
     }
+    // string COMPARE string. `foldNumCompare` above already does this for numbers, but the string case
+    // was missing entirely — `1 === 1` folded to `!0` while `"a" === "a"` survived to the output, which
+    // oxc folds. Both operands being strings makes loose and strict coincide, and `<`/`>` on strings is
+    // the lexicographic comparison JS performs, so every operator below is exact.
+    if (isStr(l) && isStr(r)) {
+        const a = strValue(l);
+        const b = strValue(r);
+        if (a === null || b === null) return false;
+        let v: boolean;
+        switch (op) {
+            case '==':
+            case '===':
+                v = a === b;
+                break;
+            case '!=':
+            case '!==':
+                v = a !== b;
+                break;
+            case '<':
+                v = a < b;
+                break;
+            case '<=':
+                v = a <= b;
+                break;
+            case '>':
+                v = a > b;
+                break;
+            case '>=':
+                v = a >= b;
+                break;
+            default:
+                return false;
+        }
+        toBool(n, v);
+        return true;
+    }
     return false;
 }
 
