@@ -539,19 +539,20 @@ function renderNamespaceObject(
             entries.push(isImmutableBind(linked, bind) ? `${key}${tight ? ':' : ': '}${value}` : `get ${key}()${tight ? '{' : ' { '}return ${value};${tight ? '}' : ' }'}`);
         }
     }
-    // Spec namespaces carry `Symbol.toStringTag === 'Module'`, so `Object.prototype.toString.call`
-    // reports `[object Module]`. Emitted as a literal member rather than a `defineProperty` call:
-    // the only divergence is enumerability (the spec's is non-enumerable), which is unobservable to
-    // `Object.keys`/`for..in`/`JSON.stringify` since those skip symbols — it shows only under
-    // object spread. Revisit if/when the runtime-helper module lands and `__exportAll` supersedes
-    // this path.
-    entries.push(`[Symbol.toStringTag]${tight ? ':' : ': '}'Module'`);
     const inner = entries.join(clauseSep(tight));
-    // `Object.freeze` is KEPT. Getters already throw on write (assignment to an accessor with no
-    // setter throws in strict mode), but the plain-value members above would otherwise be silently
-    // assignable — the spec makes every namespace property non-writable. Freezing accessors does
-    // not disturb reads, so this stays live-correct.
-    return tight ? `const ${nsName}=Object.freeze({${inner}});` : `const ${nsName} = Object.freeze({ ${inner} });`;
+    // `Symbol.toStringTag` is defined SEPARATELY rather than as a literal member, so it is
+    // non-enumerable like the spec's. As a literal it was enumerable and got copied by `{...ns}`.
+    //
+    // No `Object.freeze`. It was here on a spec argument — namespace exotic objects are
+    // non-extensible with non-configurable properties — but NEITHER ORACLE freezes: rolldown's
+    // runtime contains no `freeze`/`seal`/`preventExtensions` at all, and esbuild's `__freeze` is
+    // used only by `__template`, where the spec requires it. A bundler-synthesized namespace cannot
+    // be a real namespace exotic object anyway, so both keep what is observable — live bindings and
+    // the tag, which feature detection reads — and drop what only affects code that is already
+    // assigning to a namespace member. Freezing also blocks the `__reExport` chain that
+    // `export * from 'cjs'` (namespace mode 2) needs to extend the object.
+    const tag = `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
+    return tight ? `const ${nsName}={${inner}};${tag}` : `const ${nsName} = { ${inner} };${tag}`;
 }
 
 /** Runtime helpers for CommonJS interop, transcribed from rolldown's `runtime-base.js`.

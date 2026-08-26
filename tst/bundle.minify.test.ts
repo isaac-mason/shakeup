@@ -160,8 +160,9 @@ describe('emit-layer glue respects minify.whitespace', () => {
 
     it('emits a compact namespace object', async () => {
         const code = await build(true);
-        expect(code).toMatch(/Object\.freeze\(\{\w+:/);
-        expect(code).not.toContain('Object.freeze({ ');
+        expect(code).toMatch(/const \w+=\{\w+:/); // no padding inside the literal
+        expect(code).not.toMatch(/const \w+ = \{ /);
+        expect(code).toMatch(/Object\.defineProperty\(\w+,Symbol\.toStringTag,\{value:'Module'\}\);/);
     });
 
     it('leaves the readable form alone when whitespace minification is off', async () => {

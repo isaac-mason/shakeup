@@ -307,18 +307,30 @@ describe('bundle: namespace objects are live', () => {
         expect(await run(code)).toMatchObject({ tag: '[object Module]' });
     });
 
-    it('is not writable', async () => {
+    it('rejects writes to a reassignable member, and is not frozen', async () => {
+        // The previous version of this test could not fail: its second clause never set the flag, so
+        // it only ever proved the ACCESSOR member throws — which it does by having no setter,
+        // whether or not the object is frozen.
+        //
+        // The namespace is deliberately NOT frozen (neither oracle freezes one), so a plain-value
+        // member is writable. That is the accepted cost of dropping the freeze; assigning to a
+        // namespace member is already a programming error, and freezing blocks the `__reExport`
+        // chain that `export * from 'cjs'` needs.
         const { code } = await build({
             '/main.ts': [
                 "import * as ns from './a';",
-                'let threw = false;',
-                'try { ns.v = 9 } catch { threw = true }',
-                'try { ns.c = 9 } catch { threw = threw && true }',
-                'export const readonly = threw;',
+                'let accessorThrew = false;',
+                'try { (ns as any).v = 9 } catch { accessorThrew = true }',
+                'export const state = {',
+                '  accessorThrew,',
+                '  extensible: Object.isExtensible(ns),',
+                '  tagEnumerable: Object.getOwnPropertyDescriptor(ns, Symbol.toStringTag)!.enumerable,',
+                '  spreadSymbols: Object.getOwnPropertySymbols({ ...ns }).length,',
+                '};',
             ].join('\n'),
             '/a.ts': 'export let v = 1;\nexport const c = 2;\nexport function bump(){ v = 3 }',
         });
-        expect(await run(code)).toMatchObject({ readonly: true });
+        expect((await run(code)).state).toEqual({ accessorThrew: true, extensible: true, tagEnumerable: false, spreadSymbols: 0 });
     });
 
     it('keeps immutable members as plain values, not accessors', async () => {
