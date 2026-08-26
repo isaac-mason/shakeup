@@ -130,6 +130,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
+        sawTopLevelAwait: false,
         thisDepth: 0,
         topLevelThis: [],
         sawImportSyntax: false,
@@ -452,6 +453,7 @@ function parseUnary(state: ParserState): Node {
                 // identifier (`await` is contextual), so fall out of the switch and let the normal
                 // expression path handle it — oxc `js/expression.rs:89`.
                 if (!state.awaitOk) break;
+                if (state.fnDepth === 0) state.sawTopLevelAwait = true;
                 nextToken(state);
                 const arg = parseUnary(state);
                 return create.AwaitExpression(start, arg.end, 0, arg) as Node;
@@ -3233,6 +3235,7 @@ export type ParseResult = {
     hasTopLevelReturn: boolean;
     /** Module mentions `require` — gates the `require("lit")` edge walk. */
     hasRequire: boolean;
+    hasTopLevelAwait: boolean;
     /** `this` expressions at the module top level (CommonJS: `module.exports`). */
     topLevelThis: Node[];
     /** Did the module contain `import(...)` or `import.meta`?
@@ -3279,6 +3282,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasImportSyntax: state.sawImportSyntax,
         hasTopLevelReturn: state.sawTopLevelReturn,
         hasRequire: state.sawRequire,
+        hasTopLevelAwait: state.sawTopLevelAwait,
         topLevelThis: state.topLevelThis,
     };
 }

@@ -913,6 +913,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasImportSyntax: boolean;
         let hasTopLevelReturn = false;
         let hasRequire = false;
+        let hasTopLevelAwait = false;
         let topLevelThis: Node[] = [];
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
@@ -981,6 +982,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax = hit.hasImportSyntax;
                 hasTopLevelReturn = hit.hasTopLevelReturn;
                 hasRequire = hit.hasRequire;
+                hasTopLevelAwait = hit.hasTopLevelAwait;
                 topLevelThis = hit.topLevelThis;
                 graph.parseStats.reused++;
             } else {
@@ -999,6 +1001,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax = parsed.hasImportSyntax;
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
                 hasRequire = parsed.hasRequire;
+                hasTopLevelAwait = parsed.hasTopLevelAwait;
                 topLevelThis = parsed.topLevelThis;
                 semantic = createSemantic();
                 analyze(semantic, program);
@@ -1166,6 +1169,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasImportSyntax,
             hasTopLevelReturn,
             hasRequire,
+            hasTopLevelAwait,
             topLevelThis,
             jsxRuntime: null,
             sideEffects,
@@ -1227,6 +1231,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasImportSyntax: mod.hasImportSyntax,
                 hasTopLevelReturn: mod.hasTopLevelReturn,
                 hasRequire: mod.hasRequire,
+                hasTopLevelAwait: mod.hasTopLevelAwait,
                 topLevelThis: mod.topLevelThis,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,

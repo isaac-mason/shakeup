@@ -296,6 +296,10 @@ function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[
  *  as an unresolvable specifier. Keeping the stub off call position is what preserves shakeup's
  *  deliberate divergence — a dynamic `require(expr)` stays a LOUD BUILD ERROR rather than becoming a
  *  runtime throw from inside `__require`. */
+function needsRequireShim(mod: Module): boolean {
+    return freeRequireRefs(mod).length > 0 || mod.importRecords.some((r) => r.kind === 'require' && r.external);
+}
+
 function freeRequireRefs(mod: Module): Node[] {
     const found: Node[] = [];
     if (!mod.hasRequire && !mod.semantic.unresolved.some((n) => n.name === 'require')) return found;
@@ -321,7 +325,21 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         const spec = (n.data as { arguments: Node[] }).arguments[0].name;
         const text = spec.length >= 2 ? spec.slice(1, -1) : spec;
         const rec = mod.importRecords.find((r) => r.kind === 'require' && r.specifier === text);
-        if (rec === undefined || rec.external || rec.resolved < 0) return;
+        if (rec === undefined) return;
+        // EXTERNAL (cjs.md §7.6) — nothing to lower to, so route the call through the `__require`
+        // shim. On `platform: 'node'` that is `createRequire(import.meta.url)` and the call genuinely
+        // works; elsewhere it throws a named error instead of `require is not defined`. Both oracles
+        // do this: esbuild wraps any `require(…)` it cannot bundle with
+        // `valueToSubstituteForRequire` (`js_parser.go:15788-15791, 15800-15804`), and rolldown's
+        // shim points its error message at "bundling-cjs#require-external-modules".
+        //
+        // Distinct from a DYNAMIC `require(expr)`, which stays a loud build error: that one has no
+        // specifier to hand anybody, so deferring it to runtime would only hide it.
+        if (rec.external) {
+            map.set(n, `__require(${spec})`);
+            return;
+        }
+        if (rec.resolved < 0) return;
         const wrapRef = linked.cjsWrap.get(rec.resolved);
         if (wrapRef !== undefined) {
             // Chunk-local alias first: a `require` that crosses a chunk boundary must call the name
@@ -371,7 +389,14 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                     if (targetChunk < 0) {
                         map.set(n, 'Promise.resolve({})');
                     } else if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {
-                        const nsName = ctx.linked.namespaceOf.get(rec.resolved);
+                        // A CommonJS target resolves to its INTEROP namespace (which carries
+                        // `default`), not to `namespaceOf` — same object a static `import` of it
+                        // gets. Chunk-local alias first, as everywhere else.
+                        const cjsNs = ctx.linked.cjsNamespace.get(rec.resolved);
+                        const nsName =
+                            cjsNs !== undefined
+                                ? (ctx.chunk?.importLocalOf.get(cjsNs) ?? finalNameOf(ctx.linked, cjsNs))
+                                : ctx.linked.namespaceOf.get(rec.resolved);
                         map.set(n, `Promise.resolve().then(() => ${nsName ?? '{}'})`);
                     } else {
                         const path =
@@ -1370,9 +1395,9 @@ function renderChunk(
     const needsEsm = chunk.modules.some((i) => linked.esmInit.has(i));
     // A free `require` reference anywhere in the chunk pulls in the shim. Independent of every gate
     // above: an ESM module can perfectly well contain `typeof require` without wrapping anything.
-    const needsRequireShim = chunk.modules.some((i) => freeRequireRefs(graph.modules[i]).length > 0);
+    const wantRequireShim = chunk.modules.some((i) => needsRequireShim(graph.modules[i]));
     const helperLines: string[] = [];
-    if (needsRequireShim) {
+    if (wantRequireShim) {
         if (graph.platform === 'node') helperLines.push(REQUIRE_SHIM_NODE_IMPORT, REQUIRE_SHIM_NODE);
         else helperLines.push(REQUIRE_SHIM);
     }

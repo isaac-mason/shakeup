@@ -132,6 +132,8 @@ export type Module = {
     hasTopLevelReturn: boolean;
     /** Module mentions `require` (set by the parser) — gates the `require("lit")` edge walk. */
     hasRequire: boolean;
+    /** Module-level `await`. See {@link ParseState.sawTopLevelAwait}. */
+    hasTopLevelAwait: boolean;
     /** `this` expressions at the module top level. CommonJS calls a module body with
      *  `module.exports` as the receiver, so these mean `exports`; in an ES module they are
      *  `undefined`. Rewritten at emit for a wrapped module. */
@@ -218,6 +220,8 @@ export type CachedParse = {
     /** Source-derived, so cacheable — unlike the {@link ExportsKind} computed from it. */
     hasTopLevelReturn: boolean;
     hasRequire: boolean;
+    /** Module-level `await`. See {@link ParseState.sawTopLevelAwait}. */
+    hasTopLevelAwait: boolean;
     topLevelThis: Node[];
     jsxRuntime: JSXRuntime | null;
     /** Stable digest of the module's export surface (named-export keys + `export *`
