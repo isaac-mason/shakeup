@@ -283,9 +283,26 @@ function clearTypes(n: Node, ctx: TransformCtx): void {
 }
 
 /** The TS type-strip pass. */
+/** Symbols declared by an ERASED `declare` form, collected during the strip and reclassified as
+ *  unresolved globals at Program exit (see the Program exit hook). Module-level, reset on entry. */
+const AMBIENT = new Set<number>();
+
+/** Record every binding an erased `declare` form introduced, so its references can be turned into
+ *  globals once the whole module has been walked. */
+function markAmbient(root: Node): void {
+    walk(root, (x) => {
+        if (x.type === N.BindingIdentifier) {
+            const sym = (x as { sym: number }).sym;
+            if (sym > 0) AMBIENT.add(sym);
+        }
+        return undefined;
+    });
+}
+
 export const tsStrip: Visitor = {
     name: 'tsStrip',
     enter: hookTable({
+        [N.Program]: () => { AMBIENT.clear(); },
         // Type-assertion / non-null / instantiation wrappers → the inner expression (all layers).
         [N.TSAsExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         [N.TSSatisfiesExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
@@ -307,15 +324,27 @@ export const tsStrip: Visitor = {
         // rebuild reserves the name via `Semantic.unresolved` — and keeping the symbol reserves it
         // exactly the same way. Evicting here instead left the name free for capture.
         [N.FunctionDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
-            else clearTypes(n, ctx);
+            if (isErasedStmt(n)) {
+                // ONLY a genuine `declare function` is ambient. `isErasedStmt` is also true for an
+                // OVERLOAD SIGNATURE (`body === null`), which shares its symbol with the real
+                // implementation via declaration merging — marking that ambient zeroed references to a
+                // function that very much still exists, and `verifySemantic` caught it immediately as
+                // "unbound in maintained, bound in truth".
+                if ((n.data as { declare?: boolean }).declare === true) markAmbient(n);
+                ctx.remove();
+            } else clearTypes(n, ctx);
         },
         [N.ClassDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
-            else clearTypes(n, ctx);
+            if (isErasedStmt(n)) {
+                markAmbient(n);
+                ctx.remove();
+            } else clearTypes(n, ctx);
         },
         [N.VariableDeclaration]: (n, ctx) => {
-            if (isErasedStmt(n)) ctx.remove();
+            if (isErasedStmt(n)) {
+                markAmbient(n);
+                ctx.remove();
+            }
         },
         // Pure type-field clearing (A1b — plain-JS AST).
         [N.VariableDeclarator]: (n, ctx) => clearTypes(n, ctx),
@@ -381,8 +410,29 @@ export const tsStrip: Visitor = {
         // `TSNonNullExpression` where the tree now has the `CallExpression` it wrapped, and decline
         // to fire. Repairing is O(symbols-with-inits) (median 94 per module), not a tree walk,
         // because the replacement is always a DESCENDANT reachable by the same unwrap.
-        [N.Program]: (_n, ctx) => {
+        [N.Program]: (n, ctx) => {
             const sem = ctx.semantic;
+            // An erased `declare` form leaves an AMBIENT GLOBAL: `declare const g` names something the
+            // runtime provides, and references to `g` outlive the strip. A from-scratch `analyze` of
+            // the stripped tree resolves them to NOTHING, so they land in `Semantic.unresolved`, which
+            // is what reserves the name AND what stops the mangler renaming them.
+            //
+            // The maintained semantic used to just KEEP the symbol, on the reasoning that a live symbol
+            // reserves the name too. It does — but it also leaves the reference looking like an ordinary
+            // local, so dropping the post-compress rebuild renamed `g` to `r` and the output called a
+            // global that does not exist. Matching the rebuild exactly is the only thing that makes the
+            // rebuild removable.
+            if (AMBIENT.size > 0) {
+                walk(n, (x) => {
+                    if (x.type === N.IdentifierReference && AMBIENT.has((x as { sym: number }).sym)) {
+                        (x as { sym: number }).sym = 0;
+                        sem.unresolved.push(x);
+                    }
+                    return undefined;
+                });
+                for (const sym of AMBIENT) evictSym(ctx, sym);
+                AMBIENT.clear();
+            }
             const si = sem.symbolInit;
             for (const [sym, init] of si) {
                 const inner = unwrapAssertions(init);
