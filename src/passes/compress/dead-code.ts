@@ -166,7 +166,10 @@ function rewriteList(body: Node[], ctx: TransformCtx): boolean {
                 if (anyHoisted(tail)) {
                     for (const s of tail) out.push(s); // hoisting hazard → keep the unreachable tail
                 } else {
-                    for (const s of tail) ctx.dropRefs(s);
+                    // RETIRE, not drop: the unreachable tail is discarded outright, so its bindings
+                    // go with it. Left live they keep claiming mangler slots for declarations that no
+                    // longer exist — the over-approximation that used to force a post-compress rebuild.
+                    for (const s of tail) ctx.retire(s);
                     changed = true; // dead tail dropped
                 }
             }
