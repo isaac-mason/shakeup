@@ -85,6 +85,29 @@ function sameBind(a: ImportBind, b: ImportBind): boolean {
     return true;
 }
 
+/** Should this module be lowered to a `__commonJS` wrapper? rolldown's `WrapKind::Cjs`, restricted
+ *  to the case that matters for an ESM-only emit: a module whose SOURCE is CommonJS
+ *  (`exportsKind === 'commonjs'`) and which actually uses a CommonJS feature — so a `.cjs` file that
+ *  merely runs side effects still concatenates as plain statements rather than paying for a closure.
+ *
+ *  rolldown reaches the same conclusion through `determine_module_exports_kind`'s final per-importer
+ *  rule: for an ESM output format every CommonJs module is wrapped. */
+function wantsCjsWrap(mod: Module): boolean {
+    if (mod.exportsKind !== 'commonjs') return false;
+    if (mod.hasTopLevelReturn) return true;
+    for (const node of mod.semantic.unresolved) if (node.name === 'module' || node.name === 'exports') return true;
+    return false;
+}
+
+/** Bind an import of a WRAPPED CommonJS module. Its exports are built imperatively at runtime, so
+ *  nothing can bind to a symbol — every name becomes a member read off the interop namespace. */
+function cjsBind(ctx: LinkCtx, target: Module, name: string): ImportBind {
+    if (!ctx.linked.cjsNamespace.has(target.idx)) {
+        ctx.linked.cjsNamespace.set(target.idx, `import_${reprName(target)}`);
+    }
+    return { kind: 'cjs-member', module: target.idx, name };
+}
+
 function namespaceBind(ctx: LinkCtx, target: Module): ImportBind {
     if (!ctx.linked.namespaceOf.has(target.idx)) {
         ctx.linked.namespaceOf.set(target.idx, `${reprName(target)}_ns`);
@@ -168,6 +191,8 @@ export function linkGraph(graph: Graph): Linked {
         namespaceOf: new Map(),
         exportMaps: new Map(),
         syntheticNames: new Map(),
+        cjsWrap: new Map(),
+        cjsNamespace: new Map(),
         externalLocals: new Map(),
         defaultRefs: new Map(),
         errors: [],
@@ -178,6 +203,14 @@ export function linkGraph(graph: Graph): Linked {
         nextSynthetic: graph.modules.map((m) => m.semantic.symbols.length),
     };
 
+    // Wrap decisions first: `matchImport` routes an import of a wrapped module to a runtime member
+    // read, so the decision has to exist before any bind is resolved (rolldown likewise settles
+    // `wrap_kind` in the link stage, ahead of `bind_imports_and_exports`).
+    for (const idx of linked.order) {
+        const mod = graph.modules[idx];
+        if (wantsCjsWrap(mod)) linked.cjsWrap.set(idx, `require_${reprName(mod)}`);
+    }
+
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
         for (const [localSym, imp] of mod.namedImports) {
@@ -185,6 +218,11 @@ export function linkGraph(graph: Graph): Linked {
             let bind: ImportBind;
             if (rec.external) {
                 bind = { kind: 'external', specifier: rec.specifier, name: imp.name };
+            } else if (ctx.linked.cjsWrap.has(rec.resolved)) {
+                // A wrapped CommonJS target: `import * as ns` gets the whole interop namespace,
+                // every other form a member read off it. `default` included — `__toESM` synthesizes
+                // it from `module.exports` when the module carries no `__esModule` marker.
+                bind = cjsBind(ctx, graph.modules[rec.resolved], imp.name);
             } else if (imp.name === NAME_NAMESPACE) {
                 bind = namespaceBind(ctx, graph.modules[rec.resolved]);
             } else {

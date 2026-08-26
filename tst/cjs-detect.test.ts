@@ -238,49 +238,80 @@ describe('parse goal gates top-level return / new.target', () => {
     });
 });
 
-// Kind detection's four tiers (cjs.md §2.1), and the diagnostic that makes them worth having today:
-// a real CommonJS dependency would otherwise bundle into a SILENT no-op — `module.exports = {…}`
-// becomes an assignment to an undeclared global, the build succeeds, and the failure surfaces as a
-// missing export at runtime. Until the P3/P4 wrapper lands, naming the file and the reason is
-// strictly better.
-describe('CommonJS source is reported, not silently mis-bundled', () => {
-    const errorsFor = async (files: Record<string, string>) =>
-        (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;
-    const MAIN = "import './a.cjs';\nexport const y = 1;";
+// Kind detection's four tiers (cjs.md §2.1) driving the real thing: a CommonJS module is lowered to
+// a `__commonJS` closure and reached through `__toESM`, matching the shapes traced out of rolldown
+// in cjs.md §4.4/§4.5. Assertions EXECUTE the bundle — a plausible-looking wrapper that returns the
+// wrong object would pass any text check.
+describe('CommonJS modules are wrapped and interoperate', () => {
+    const runCjs = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+    };
 
-    it('reports `module.exports`, naming the global', async () => {
-        const errors = await errorsFor({ '/a.cjs': 'module.exports = { a: 1 };', '/main.js': MAIN });
-        expect(errors).toHaveLength(1);
-        expect(errors[0]).toMatch(/CommonJS modules are not supported yet \(it references the CommonJS global 'module'\)/);
+    it('default-imports `module.exports`', async () => {
+        const { ns } = await runCjs({ '/d.cjs': 'module.exports = { a: 1, b: 2 };', '/main.js': "import d from './d.cjs';\nexport const x = d.a + d.b;" });
+        expect(ns.x).toBe(3);
     });
 
-    it('reports `exports.foo`', async () => {
-        expect((await errorsFor({ '/a.cjs': 'exports.foo = 1;', '/main.js': MAIN }))[0]).toMatch(/global 'exports'/);
+    it('named-imports an `exports.foo` property', async () => {
+        const { ns } = await runCjs({ '/d.cjs': 'exports.foo = 7;', '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;" });
+        expect(ns.x).toBe(7);
     });
 
-    it('reports a top-level return (tier 2 has two halves)', async () => {
-        expect((await errorsFor({ '/a.cjs': 'if (1) { return }\nglobalThis.q = 1;', '/main.js': MAIN }))[0]).toMatch(/it has a top-level return/);
+    it('namespace-imports a CommonJS module', async () => {
+        const { ns } = await runCjs({ '/d.cjs': 'exports.a = 1; exports.b = 2;', '/main.js': "import * as m from './d.cjs';\nexport const x = [m.a, m.b];" });
+        expect(ns.x).toEqual([1, 2]);
     });
 
-    it('classifies a plain .js by its SOURCE, not just its extension', async () => {
-        // Tier 2 precedes tier 3: no declaration needed for CJS feature use to decide.
-        expect((await errorsFor({ '/a.js': 'module.exports = { a: 1 };', '/main.js': "import './a.js';\nexport const y = 1;" }))[0]).toMatch(
-            /not supported yet/,
-        );
+    it('honours the `__esModule` marker (the common transpiled-ESM shape)', async () => {
+        // Pattern 3 in cjs.md §2 — what TypeScript and Babel emit, so the most common real dep.
+        // `__toESM` must bind `import d` to `exports.default`, NOT to the whole exports object.
+        const { ns } = await runCjs({
+            '/d.cjs': 'Object.defineProperty(exports, "__esModule", { value: true });\nexports.default = 5;\nexports.n = 9;',
+            '/main.js': "import d, { n } from './d.cjs';\nexport const x = [d, n];",
+        });
+        expect(ns.x).toEqual([5, 9]);
     });
 
-    it('still bundles a .cjs that uses no CommonJS feature', async () => {
-        // Declared CJS by tier 3, but it needs none of the missing machinery — so it must not be
-        // rejected. Keyed on feature USE, not on the classification alone.
-        expect(await errorsFor({ '/a.cjs': 'globalThis.q = 1;', '/main.js': MAIN })).toEqual([]);
+    it('handles a bare function export', async () => {
+        const { ns } = await runCjs({ '/d.cjs': 'module.exports = function(){ return 4 };', '/main.js': "import d from './d.cjs';\nexport const x = d();" });
+        expect(ns.x).toBe(4);
     });
 
-    it('does not fire when the module declares its own `exports`', async () => {
-        expect(
-            await errorsFor({
-                '/a.js': 'const exports = {};\nexports.foo = 1;\nglobalThis.q = exports;',
-                '/main.js': "import './a.js';\nexport const y = 1;",
-            }),
-        ).toEqual([]);
+    it('evaluates the body once, however many importers there are', async () => {
+        // `__commonJS` memoizes on `mod ||`. This is also what makes a cycle observe PARTIAL exports
+        // rather than re-running the body, which is Node's behaviour.
+        const { ns } = await runCjs({
+            '/d.cjs': 'globalThis.__n = (globalThis.__n || 0) + 1;\nmodule.exports = { n: globalThis.__n };',
+            '/main.js': "import a from './d.cjs';\nimport b from './d.cjs';\nexport const x = [a.n, b.n];",
+        });
+        expect(ns.x).toEqual([1, 1]);
+    });
+
+    it('binds only the wrapper params the body uses', async () => {
+        // rolldown emits `(exports)` for a module that never mentions `module` (cjs.md §4.4).
+        const { code } = await runCjs({ '/d.cjs': 'exports.foo = 1;', '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;" });
+        expect(code).toMatch(/__commonJS\(\(exports\) =>/);
+        const withModule = await runCjs({ '/d.cjs': 'module.exports = { foo: 1 };', '/main.js': "import d from './d.cjs';\nexport const x = d.foo;" });
+        expect(withModule.code).toMatch(/__commonJS\(\(exports, module\) =>/);
+    });
+
+    it('marks the wrapper pure so an unused one can be dropped', async () => {
+        const { code } = await runCjs({ '/d.cjs': 'module.exports = { a: 1 };', '/main.js': "import d from './d.cjs';\nexport const x = d.a;" });
+        expect(code).toContain('/* @__PURE__ */ __commonJS');
+    });
+
+    it('still bundles a .cjs that uses no CommonJS feature, without a wrapper', async () => {
+        const { code } = await runCjs({ '/a.cjs': 'globalThis.q = 1;', '/main.js': "import './a.cjs';\nexport const y = 1;" });
+        expect(code).not.toContain('__commonJS');
+    });
+
+    it('does not wrap a module that declares its own `exports`', async () => {
+        const { code } = await runCjs({
+            '/a.js': 'const exports = {};\nexports.foo = 1;\nglobalThis.q = exports;',
+            '/main.js': "import './a.js';\nexport const y = 1;",
+        });
+        expect(code).not.toContain('__commonJS');
     });
 });

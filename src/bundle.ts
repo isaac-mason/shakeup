@@ -217,6 +217,14 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
             }
             return finalNameOf(linked, bind.ref);
         }
+        case 'cjs-member': {
+            // Textual member access: the emit substitutes NAMES for identifier nodes, and a member
+            // expression is a valid expression in every position a bare name was. This is how a CJS
+            // module's non-statically-knowable export reaches its consumer.
+            const ns = linked.cjsNamespace.get(bind.module);
+            if (ns === undefined) return null;
+            return bind.name === NAME_NAMESPACE ? ns : `${ns}.${bind.name}`;
+        }
         case 'namespace': {
             if (chunk !== null) {
                 const local = chunk.nsImportLocalOf.get(bind.module);
@@ -514,6 +522,59 @@ function renderNamespaceObject(
     // not disturb reads, so this stays live-correct.
     return tight ? `const ${nsName}=Object.freeze({${inner}});` : `const ${nsName} = Object.freeze({ ${inner} });`;
 }
+
+/** Runtime helpers for CommonJS interop, transcribed from rolldown's `runtime-base.js`.
+ *
+ *  The `Min` forms are used: rolldown selects the named-function variants only under
+ *  `profiler_names` (default off), and every fixture snapshot uses these. Emitted verbatim into the
+ *  chunk that needs them rather than through a synthetic runtime module — a full runtime-module
+ *  facility is only warranted once more than a handful of helpers exist.
+ *
+ *  `__commonJSMin` memoizes: `mod ||` short-circuits after the first call, so a module body runs at
+ *  most once and a cycle re-entering it observes the PARTIAL exports, which is exactly Node's
+ *  behaviour. `__toESM` converts a CommonJS exports object into an ESM namespace, honouring the
+ *  `__esModule` marker — and note rolldown's extra `hasOwnProperty(mod, 'default')` guard, a fix
+ *  (#10360) esbuild lacks: a module claiming `__esModule` without actually owning a `default` would
+ *  otherwise yield `undefined` for `import d from`. */
+const CJS_HELPERS: Record<string, string> = {
+    __getOwnPropNames: 'var __getOwnPropNames = Object.getOwnPropertyNames;',
+    __getOwnPropDesc: 'var __getOwnPropDesc = Object.getOwnPropertyDescriptor;',
+    __hasOwnProp: 'var __hasOwnProp = Object.prototype.hasOwnProperty;',
+    __defProp: 'var __defProp = Object.defineProperty;',
+    __create: 'var __create = Object.create;',
+    __getProtoOf: 'var __getProtoOf = Object.getPrototypeOf;',
+    __commonJS: 'var __commonJS = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);',
+    __copyProps: [
+        'var __copyProps = (to, from, except, desc) => {',
+        "    if ((from && typeof from === 'object') || typeof from === 'function') {",
+        '        for (var keys = __getOwnPropNames(from), i = 0, n = keys.length, key; i < n; i++) {',
+        '            key = keys[i];',
+        '            if (!__hasOwnProp.call(to, key) && key !== except) {',
+        '                __defProp(to, key, {',
+        '                    get: ((k) => from[k]).bind(null, key),',
+        '                    enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable,',
+        '                });',
+        '            }',
+        '        }',
+        '    }',
+        '    return to;',
+        '};',
+    ].join('\n'),
+    __toESM: [
+        'var __toESM = (mod, isNodeMode, target) => (',
+        '    (target = mod != null ? __create(__getProtoOf(mod)) : {}),',
+        '    __copyProps(',
+        "        isNodeMode || !mod || !mod.__esModule || !__hasOwnProp.call(mod, 'default')",
+        "            ? __defProp(target, 'default', { value: mod, enumerable: true })",
+        '            : target,',
+        '        mod,',
+        '    )',
+        ');',
+    ].join('\n'),
+};
+
+/** Helpers `__toESM` needs, in dependency order. */
+const TO_ESM_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__toESM'];
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
 export async function bundle(options: BundleOptions): Promise<BundleResult> {
@@ -914,6 +975,21 @@ function renderChunk(
                 out = finishPrinter(printer).trim();
             }
         }
+        // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
+        // MINIMAL — bound only when the body references them (§4.3 of cjs.md: rolldown emits
+        // `(exports)` for a module that never mentions `module`). `/* @__PURE__ */` lets an unused
+        // wrapper be dropped entirely.
+        const wrapName = linked.cjsWrap.get(idx);
+        if (wrapName !== undefined) {
+            const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
+            const params = uses.has('module') ? '(exports, module)' : '(exports)';
+            const indented = out === '' ? '' : `\n${out.replace(/^/gm, '    ')}\n`;
+            out = `var ${wrapName} = /* @__PURE__ */ __commonJS(${params} => {${indented}});`;
+            const nsName = linked.cjsNamespace.get(idx);
+            // The interop namespace is materialized ONCE per module, right after its wrapper, and
+            // every consumer reads members off it (`nameOfBind`'s `cjs-member`).
+            if (nsName !== undefined) out += `\nvar ${nsName} = /* @__PURE__ */ __toESM(${wrapName}());`;
+        }
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
             nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight);
@@ -1038,10 +1114,21 @@ function renderChunk(
     const footer = naming.footer(preInfo);
 
     const parts: string[] = [];
+    // CommonJS runtime helpers, emitted only into a chunk that actually wraps something. Ordered by
+    // dependency: `__toESM` calls `__copyProps`, which calls the property primitives.
+    const needsCjs = chunk.modules.some((i) => linked.cjsWrap.has(i));
+    const helperLines: string[] = [];
+    if (needsCjs) {
+        const wanted = new Set<string>(['__commonJS']);
+        if (chunk.modules.some((i) => linked.cjsNamespace.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+        for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
+    }
+
     if (banner !== '') parts.push(banner);
     if (intro !== '') parts.push(intro);
     parts.push(...crossImportLines);
     parts.push(...extImports);
+    parts.push(...helperLines);
     parts.push(...moduleTexts);
     if (exportLine !== null) parts.push(exportLine);
     parts.push(...starLines);

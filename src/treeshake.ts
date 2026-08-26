@@ -274,6 +274,12 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         for (const r of info.refs) markRef(r);
     };
 
+    // A WRAPPED CommonJS module is all-or-nothing: its exports are built imperatively at runtime, so
+    // no statement in it can be shown dead by symbol liveness. rolldown reaches the same place via
+    // whole-module inclusion for `WrapKind::Cjs`.
+    for (const modIdx of linked.cjsWrap.keys()) {
+        for (let i = 0; i < infos[modIdx].length; i++) includeStatement(modIdx, i);
+    }
     for (const mod of graph.modules) {
         // Module-level side-effect gate: a module marked `false` does NOT auto-root its impure
         // statements — they drop if unreferenced; `'no-treeshake'` roots EVERY statement (forces
