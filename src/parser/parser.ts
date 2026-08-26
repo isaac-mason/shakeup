@@ -159,6 +159,30 @@ function eatP(state: ParserState, v: number): boolean {
     }
     return false;
 }
+/**
+ * Force progress in a RECOVERY LOOP, returning true if the loop should stop.
+ *
+ * Every `while (!isP(state, <closer>) && tok !== T_EOF)` in this file assumes its body consumes at
+ * least one token. On invalid input that assumption breaks: `expectP` and `parseNameAsIdent` REPORT
+ * without consuming, so a token that is neither the closer, nor EOF, nor anything the body handles
+ * leaves the state identical and the loop runs forever — allocating a node per iteration.
+ *
+ * That is not hypothetical. `llm/repro/parser-oom.js` is 347 bytes of Flow-typed source that
+ * exhausted a 4GB heap and killed the process: `parseBindingTarget`'s object-pattern loop spun on a
+ * token it could not start a property with, pushing one `ObjectProperty` per turn. A bundler must
+ * never be killed by its input, and the file was reached simply by parsing `node_modules`.
+ *
+ * Call at the END of a loop body with the `state.tokStart` captured at the START. No extra
+ * diagnostic: the body already raised one for this exact token — that is WHY it made no progress —
+ * and a second would be noise. Cost is one integer compare per iteration.
+ */
+function noProgress(state: ParserState, mark: number): boolean {
+    if (state.tokStart !== mark) return false;
+    if ((state.tok as number) === T_EOF) return true;
+    nextToken(state);
+    return false;
+}
+
 function expectP(state: ParserState, v: number, what: string): void {
     if (isP(state, v)) nextToken(state);
     else raise(state, ParseErrorCode.Expected, what);
@@ -1019,6 +1043,7 @@ function parsePrimary(state: ParserState): Node {
                 nextToken(state);
                 const from = state.sp;
                 while (!isP(state, P.RBRACKET) && (state.tok as number) !== T_EOF) {
+                    const mark = state.tokStart;
                     if (isP(state, P.COMMA)) {
                         push(state, null);
                         nextToken(state);
@@ -1031,6 +1056,7 @@ function parsePrimary(state: ParserState): Node {
                         push(state, create.SpreadElement(s, arg.end, 0, arg) as Node);
                     } else push(state, parseAssign(state));
                     if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
+                    if (noProgress(state, mark)) break;
                 }
                 expectP(state, P.RBRACKET, "']'");
                 return create.ArrayExpression(start, state.tokStart, 0, finishListWithHoles(state, from)) as Node;
@@ -1362,6 +1388,7 @@ function parseBindingTarget(state: ParserState): Node {
         nextToken(state);
         const from = state.sp;
         while (!isP(state, P.RBRACKET) && (state.tok as number) !== T_EOF) {
+            const mark = state.tokStart;
             if (isP(state, P.COMMA)) {
                 push(state, null);
                 nextToken(state);
@@ -1374,6 +1401,7 @@ function parseBindingTarget(state: ParserState): Node {
                 push(state, create.RestElement(s, arg.end, 0, arg, null) as Node);
             } else push(state, parseBindingElement(state));
             if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
+            if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACKET, "']'");
         return create.ArrayPattern(start, state.tokStart, 0, finishListWithHoles(state, from)) as Node;
@@ -1383,6 +1411,7 @@ function parseBindingTarget(state: ParserState): Node {
         nextToken(state);
         const from = state.sp;
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+            const mark = state.tokStart;
             if (isP(state, P.DOTDOTDOT)) {
                 const s = state.tokStart;
                 nextToken(state);
@@ -1426,6 +1455,7 @@ function parseBindingTarget(state: ParserState): Node {
                 push(state, create.ObjectProperty(s, value.end, flags, key, value) as Node);
             }
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
+            if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACE, "'}'");
         return create.ObjectPattern(start, state.tokStart, 0, finishList(state, from)) as Node;
@@ -1789,7 +1819,11 @@ function parseBlock(state: ParserState): Node {
     const start = state.tokStart;
     expectP(state, P.LBRACE, "'{'");
     const from = state.sp;
-    while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) push(state, parseStatement(state));
+    while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+        const mark = state.tokStart;
+        push(state, parseStatement(state));
+        if (noProgress(state, mark)) break;
+    }
     expectP(state, P.RBRACE, "'}'");
     return create.BlockStatement(start, state.tokStart, 0, finishList(state, from)) as Node;
 }
@@ -1916,6 +1950,7 @@ function parseStatement(state: ParserState): Node {
                 expectP(state, P.LBRACE, "'{'");
                 const from = state.sp;
                 while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+                    const mark = state.tokStart;
                     const cs = state.tokStart;
                     let test: Ref = null;
                     if (eatK(state, K.CASE)) {
@@ -1936,6 +1971,7 @@ function parseStatement(state: ParserState): Node {
                         push(state, parseStatement(state));
                     const body = finishList(state, bodyFrom);
                     push(state, create.SwitchCase(cs, state.tokStart, 0, test, body) as Node);
+                    if (noProgress(state, mark)) break;
                 }
                 expectP(state, P.RBRACE, "'}'");
                 return create.SwitchStatement(start, state.tokStart, 0, disc, finishList(state, from)) as Node;
@@ -2052,7 +2088,11 @@ function parseStatement(state: ParserState): Node {
                         if (isP(state, P.LBRACE)) {
                             nextToken(state);
                             const from = state.sp;
-                            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) push(state, parseStatement(state));
+                            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+                                const mark = state.tokStart;
+                                push(state, parseStatement(state));
+                                if (noProgress(state, mark)) break;
+                            }
                             expectP(state, P.RBRACE, "'}'");
                             const mod = create.TSModuleDeclaration(
                                 start,
@@ -2091,7 +2131,11 @@ function parseStatement(state: ParserState): Node {
                         if (isP(state, P.LBRACE)) {
                             nextToken(state);
                             const from = state.sp;
-                            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) push(state, parseStatement(state));
+                            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+                                const mark = state.tokStart;
+                                push(state, parseStatement(state));
+                                if (noProgress(state, mark)) break;
+                            }
                             expectP(state, P.RBRACE, "'}'");
                             return create.TSModuleDeclaration(
                                 start,
@@ -2257,6 +2301,7 @@ function parseImport(state: ParserState): Node {
     } else if (isP(state, P.LBRACE)) {
         nextToken(state);
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+            const mark = state.tokStart;
             const ss = state.tokStart;
             let specFlags = 0;
             if (state.tsMode && isK(state, K.TYPE)) {
@@ -2273,6 +2318,7 @@ function parseImport(state: ParserState): Node {
             const local = eatK(state, K.AS) ? parseIdent(state, R_BIND) : ident(state, R_BIND, imported.start, imported.end);
             push(state, create.ImportSpecifier(ss, state.tokStart, specFlags, local, imported) as Node);
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
+            if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACE, "'}'");
     }
@@ -2384,6 +2430,7 @@ function parseExport(state: ParserState): Node {
         nextToken(state);
         const from = state.sp;
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+            const mark = state.tokStart;
             const ss = state.tokStart;
             let specFlags = 0;
             if (state.tsMode && isK(state, K.TYPE)) {
@@ -2407,6 +2454,7 @@ function parseExport(state: ParserState): Node {
             if (exported.type === N.StringLiteral) nextToken(state);
             push(state, create.ExportSpecifier(ss, state.tokStart, specFlags, local, exported) as Node);
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
+            if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACE, "'}'");
         let source: Ref = null;
@@ -2476,6 +2524,7 @@ function parseEnum(state: ParserState, start: number, extraFlags: number): Node 
     expectP(state, P.LBRACE, "'{'");
     const from = state.sp;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+        const mark = state.tokStart;
         const ms = state.tokStart;
         let key: Node;
         if ((state.tok as number) === T_STR) {
@@ -2489,6 +2538,7 @@ function parseEnum(state: ParserState, start: number, extraFlags: number): Node 
         }
         push(state, create.TSEnumMember(ms, state.tokStart, 0, key, init) as Node);
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
+        if (noProgress(state, mark)) break;
     }
     expectP(state, P.RBRACE, "'}'");
     return create.TSEnumDeclaration(start, state.tokStart, extraFlags, id, finishList(state, from)) as Node;
@@ -2735,6 +2785,7 @@ function parsePrimaryType(state: ParserState): Node {
         nextToken(state);
         const from = state.sp;
         while (!isP(state, P.RBRACKET) && (state.tok as number) !== T_EOF) {
+            const mark = state.tokStart;
             if (isP(state, P.DOTDOTDOT)) {
                 const s = state.tokStart;
                 nextToken(state);
@@ -2780,6 +2831,7 @@ function parsePrimaryType(state: ParserState): Node {
                 if (isP(state, P.QUESTION)) nextToken(state);
             }
             if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
+            if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACKET, "']'");
         return create.TSTupleType(start, state.tokStart, 0, finishList(state, from)) as Node;

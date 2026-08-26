@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from '../src/parser';
 import { formatError, ParseErrorCode } from '../src/parser/errors.ts';
@@ -119,5 +120,72 @@ describe('async arrows after a line break', () => {
         ['an async method', 'const o = { async m() {} };'],
     ])('does not regress %s', (_label, src) => {
         expect(ok(src)).toEqual([]);
+    });
+});
+
+// A parser that hangs or exhausts memory on bad input is worse than one that rejects it: a bundler
+// must never be killed by a file it was asked to read.
+//
+// `llm/repro/parser-oom.js` — 347 bytes of Flow-typed source, parsed as plain JavaScript — exhausted
+// a 4GB heap and killed the process with `Ineffective mark-compacts near heap limit`. Found by
+// running `pnpm parsercorpus` over `node_modules`, which died partway through.
+//
+// Cause: every `while (!isP(state, <closer>) && tok !== T_EOF)` loop assumed its body consumed a
+// token. `expectP` and `parseNameAsIdent` REPORT without consuming, so a token that is neither the
+// closer, nor EOF, nor anything the body handles left the state identical — and the loop spun,
+// allocating one node per turn. `parseBindingTarget`'s object-pattern loop was the one that fired;
+// eight loops shared the hazard and now call `noProgress`.
+//
+// These assertions are about TERMINATION, not error text. `pnpm parserfuzz` covers the general case
+// by mutating real sources; these pin the specific shapes.
+describe('the parser always terminates on invalid input', () => {
+    const parses = (src: string, ts = false) => {
+        const r = parse(src, { ts, jsx: false });
+        return Array.isArray(r.errors);
+    };
+
+    it('the 347-byte input that exhausted a 4GB heap', () => {
+        const src = readFileSync(new URL('../llm/repro/parser-oom.js', import.meta.url), 'utf8');
+        expect(parses(src)).toBe(true);
+    });
+
+    it.each([
+        ['an object pattern meeting a token it cannot start a property with', 'function f({ a, ) ) {}'],
+        ['an array pattern likewise', 'function f([ a, ) ) {}'],
+        ['an array literal with a stray closer', 'x = [1, ) ];'],
+        ['import specifiers with a stray token', "import { a, ) } from 'm';"],
+        ['export specifiers with a stray token', 'export { a, ) };'],
+        ['a switch body that is not a case', 'switch (x) { ) }'],
+        ['a nested block of junk', 'function f() { ) ) ) }'],
+        ['unbalanced closers at top level', ') ) ) ) )'],
+        [
+            'a mid-function fragment',
+            '  a: B,\n): C<D, E<F, G>> {\n  let h: I<J> = new K(\n    () => new Map(),\n  );\n  m.n({\n    o(p, q) {\n',
+        ],
+    ])('terminates on %s', (_label, src) => {
+        expect(parses(src)).toBe(true);
+    });
+
+    it.each([
+        ['an enum with a stray token', 'enum E { A, ) }'],
+        ['a tuple type with a stray token', 'let x: [A, ) ];'],
+    ])('terminates on %s (TypeScript)', (_label, src) => {
+        expect(parses(src, true)).toBe(true);
+    });
+
+    it('still parses the valid forms of every guarded construct', () => {
+        // The guards must not fire on well-formed input.
+        for (const [src, ts] of [
+            ['function f({ a, b: { c } = {}, ...r }) { return [a, c, r] }', false],
+            ['function f([a, , b, ...r]) { return [a, b, r] }', false],
+            ['x = [1, , 3, ...y];', false],
+            ["import { a, b as c } from 'm';", false],
+            ['export { a, b as c };\nvar a = 1, b = 2;', false],
+            ['switch (x) { case 1: y(); break; default: z(); }', false],
+            ['enum E { A = 1, B, C = 3 }', true],
+            ['let x: [A, B?, ...C[]];', true],
+        ] as const) {
+            expect(parse(src, { ts, jsx: false }).errors, src).toEqual([]);
+        }
     });
 });
