@@ -160,6 +160,38 @@ export function lookupValue(sem: Semantic, scope: number, name: string): number 
     }
 }
 
+/** Mirror the scope structure of `from` onto its CLONE `to`, minting FRESH scopes under `parentScope`.
+ *
+ *  `cloneNode` clears `scopeId` deliberately: a clone is normally a second copy, and two nodes cannot
+ *  own one scope. That leaves every scope-owning node in the clone owning nothing, so names inside it
+ *  resolve from the wrong scope — `verifySemantic` reports "scope-owning node N has no scopeId in
+ *  maintained (UNSAFE)".
+ *
+ *  Use this when the original SURVIVES or is duplicated (loop unrolling makes N copies of one body,
+ *  function inlining splices a copy per call site). When the original is dropped immediately after,
+ *  the scope should be MOVED instead — see `flow-inline`'s `transferScopes`.
+ *
+ *  The two trees are structurally identical by construction, so a lockstep walk pairs them up. */
+export function cloneScopeTree(sem: Semantic, from: Node, to: Node, parentScope: number): void {
+    const own = (from.data as { scopeId?: number } | null)?.scopeId ?? 0;
+    let inner = parentScope;
+    if (own !== 0 && sem.scopes[own] !== undefined) {
+        const fresh = createScope(sem, parentScope, sem.scopes[own].flags);
+        attachScopeNode(sem, fresh, to);
+        inner = fresh;
+    }
+    const fk: Node[] = [];
+    const tk: Node[] = [];
+    walkChildren(from, (c) => {
+        fk.push(c);
+    });
+    walkChildren(to, (c) => {
+        tk.push(c);
+    });
+    const n = Math.min(fk.length, tk.length);
+    for (let i = 0; i < n; i++) cloneScopeTree(sem, fk[i], tk[i], inner);
+}
+
 /** Retire a symbol whose declaration has been erased: `scope = 0`, "owned by no lexical scope".
  *
  *  Deliberately still a VALID index — an out-of-range sentinel crashed chunk-graph — and every consumer
