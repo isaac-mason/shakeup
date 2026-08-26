@@ -321,7 +321,21 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // ONE walk: `substituteAlternateSyntax` on enter, `joinVarsOnExit` on exit, so the join sees
         // the `const` -> `let` rewrites its merging depends on. These were two full traversals.
         let finalChanged = traverse(program, cur, FINAL_AND_JOIN);
+        // EVERY mutation boundary, not just the loop rounds. `coalesceVariableNames` runs here rather
+        // than in the fixed point, so a round-boundary-only check never saw it — and its known
+        // `STALE SYM` defect therefore still surfaced as `Cannot read properties of undefined` in a
+        // later stage instead of being named here.
+        if (SEMANTIC_VERIFY) {
+            const problems = verifySemantic(cur, program);
+            if (problems.length > 0)
+                throw new Error(`maintained semantic diverged after the final traversal:\n  ${problems.slice(0, 20).join('\n  ')}`);
+        }
         if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
+        if (SEMANTIC_VERIFY) {
+            const problems = verifySemantic(cur, program);
+            if (problems.length > 0)
+                throw new Error(`maintained semantic diverged after coalesceVariableNames:\n  ${problems.slice(0, 20).join('\n  ')}`);
+        }
         if (finalChanged) {
             any = true;
             refreshFull();

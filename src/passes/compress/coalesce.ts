@@ -242,6 +242,43 @@ const coalesceFn = (fn: Node, ctx: TransformCtx): void => {
             );
         }
     }
+    // ── keep the SEMANTIC in step with the rewrite above ─────────────────────────────────────────
+    // The rewrite reassigns `node.sym` IN PLACE rather than going through `ctx.replaceWith`, so the
+    // `RefDelta` never learns about it — the recurring "mutated outside traverse's API" defect. Left
+    // unmaintained, the merged symbols stay LIVE in the table while nothing references them, the
+    // survivor's counts are UNDER-stated by exactly the merged symbol's share, and a later stage reads
+    // a symbol id the table no longer describes. That is the documented `STALE SYM 65 (table size 64)`
+    // crash that has kept this pass disabled.
+    //
+    // `verifySemantic` names it precisely — "symbol partition mismatch" plus `UNDER(unsafe)` counts,
+    // reported against `coalesceVariableNames` itself rather than as a crash three stages later.
+    const sem = ctx.semantic;
+    for (const [merged, target] of rename) {
+        const t = target.sym;
+        if (merged === t) continue;
+        const mRefs = sem.refs.get(merged);
+        if (mRefs !== undefined) {
+            const tRefs = sem.refs.get(t);
+            if (tRefs === undefined) sem.refs.set(t, { reads: mRefs.reads, writes: mRefs.writes });
+            else { tRefs.reads += mRefs.reads; tRefs.writes += mRefs.writes; }
+            sem.refs.delete(merged);
+        }
+        const mUses = sem.uses.get(merged);
+        if (mUses !== undefined) {
+            sem.uses.set(t, (sem.uses.get(t) ?? 0) + mUses);
+            sem.uses.delete(merged);
+        }
+        if (sem.shorthand.has(merged)) { sem.shorthand.add(t); sem.shorthand.delete(merged); }
+        if (sem.exported.has(merged)) { sem.exported.add(t); sem.exported.delete(merged); }
+        // The merged declaration is gone (or became a plain assignment), so its recorded init no
+        // longer describes a declarator.
+        sem.symbolInit.delete(merged);
+        // Evict, using the established convention: scope 0 = "owned by no lexical scope", still a
+        // VALID index because an out-of-range sentinel crashed chunk-graph (`strip-ts.ts` evictSym).
+        const rec = sem.symbols[merged];
+        if (rec !== undefined) rec.scope = 0;
+    }
+
     ctx.changed = true;
 };
 

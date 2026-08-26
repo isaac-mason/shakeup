@@ -289,6 +289,14 @@ function resolveRef(state: AnalyseState, identNode: Node, ns: number): void {
             }
         }
     }
+    // UNRESOLVED: clear any stale association. `analyze` otherwise only WRITES `node.sym` when it
+    // resolves, so a node whose reference stopped resolving keeps whatever id it held — and after a
+    // rebuild shrinks the table that id is OUT OF BOUNDS. That is the `STALE SYM 65 (table size 64)`
+    // crash: `treeshake.ts:53` reads `symbols[sym].scope` and gets `undefined`.
+    //
+    // Zeroing here makes the post-`analyze` invariant unconditional: no node holds a sym the table
+    // does not describe. `sym === 0` already means "unresolved / global" everywhere.
+    identNode.sym = 0;
     if (ns === NS_VALUE) state.sem.unresolved.push(identNode);
 }
 
