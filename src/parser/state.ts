@@ -78,6 +78,10 @@ export type ParserState = {
      *  {@link sawJSX} / `sawImportSyntax` — so the whole-program walk that finds `require("lit")`
      *  edges runs only on modules that could have one. rolldown's `sawRequire` equivalent. */
     sawRequire: boolean;
+    /** A module-level `await` — outside every function scope. Recorded because such a body cannot
+     *  be moved inside a synchronous wrapper closure (`__commonJS` / `__esm`), which is a build
+     *  error rather than something to discover as `Unexpected reserved word` at load. */
+    sawTopLevelAwait: boolean;
     /** Nesting depth of scopes that REBIND `this` — non-arrow function bodies and class bodies.
      *  Arrows are excluded because they inherit `this` from the enclosing scope, so an arrow at the
      *  module top level still sees the module's `this`. */

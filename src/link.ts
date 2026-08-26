@@ -210,6 +210,25 @@ export function exportMapOf(ctx: LinkCtx, module: Module): Map<string, ImportBin
     return map;
 }
 
+/** Is `to` reachable from `from` along STATIC/require edges? Used to spot a `require(esm)` cycle;
+ *  dynamic edges are excluded because they do not force synchronous evaluation. */
+function reachesModule(graph: Graph, from: number, to: number): boolean {
+    const seen = new Set<number>([from]);
+    const stack = [from];
+    while (stack.length > 0) {
+        const cur = stack.pop()!;
+        for (const rec of graph.modules[cur].importRecords) {
+            if (rec.external || rec.resolved < 0 || rec.kind === 'dynamic') continue;
+            if (rec.resolved === to) return true;
+            if (!seen.has(rec.resolved)) {
+                seen.add(rec.resolved);
+                stack.push(rec.resolved);
+            }
+        }
+    }
+    return false;
+}
+
 function sortModules(graph: Graph): number[] {
     const order: number[] = [];
     const state = new Uint8Array(graph.modules.length);
@@ -346,6 +365,66 @@ export function linkGraph(graph: Graph): Linked {
     //
     // ~~Reported as unsupported.~~ It was, with a message suggesting `export { a, b } from …`
     // instead. Now built.
+    // TOP-LEVEL AWAIT × wrapping (cjs.md §7.5). A wrapper closure — `__commonJS` or `__esm` — is a
+    // plain synchronous arrow, so a module body containing module-level `await` moves inside it and
+    // stops parsing: the bundle loaded with `SyntaxError: Unexpected reserved word`, produced by a
+    // build that reported no errors at all. Reported here instead.
+    //
+    // Making the closure `async` is not a fix: `require()` is synchronous by definition and cannot
+    // wait for a promise, so there would be nothing correct to hand the caller. Node draws the same
+    // line — a `.cjs` file cannot contain top-level `await`, and `require()` of an ESM module with
+    // top-level await is refused (ERR_REQUIRE_ASYNC_MODULE).
+    for (const idx of linked.order) {
+        const mod = graph.modules[idx];
+        if (!mod.hasTopLevelAwait) continue;
+        if (!linked.cjsWrap.has(idx) && !linked.esmInit.has(idx)) continue;
+        linked.errors.push(
+            `${mod.id}: this module uses top-level await and is reached by require(), so its body would have to ` +
+                'move inside a synchronous wrapper where `await` is not valid. Node refuses the same combination ' +
+                '(ERR_REQUIRE_ASYNC_MODULE). Import it instead of requiring it, or use a dynamic import().',
+        );
+    }
+
+    // `require()` of an ES module that leads back to the requirer — NODE REFUSES THIS PROGRAM:
+    //     Error [ERR_REQUIRE_CYCLE_MODULE]: Cannot require() ES Module <a> in a cycle. (from <b>)
+    //     A cycle involving require(esm) is not allowed to maintain invariants mandated by the
+    //     ECMAScript specification.
+    // (measured, both directions, on Node 24.) shakeup used to emit it and fail at LOAD with
+    // `Cannot access 'a_ns' before initialization` — the namespace `const` read before its
+    // declaration — which says nothing about the actual problem. Reported here instead, in Node's
+    // own terms.
+    //
+    // Only a cycle back to the REQUIRER is refused. `require`ing an ES module that is otherwise
+    // acyclic is fine and is exactly what the `__esm` lazy init exists for (§7.20).
+    for (const idx of linked.order) {
+        const mod = graph.modules[idx];
+        for (const rec of mod.importRecords) {
+            if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
+            if (linked.cjsWrap.has(rec.resolved)) continue;
+            if (!reachesModule(graph, rec.resolved, idx)) continue;
+            linked.errors.push(
+                `${mod.id}: require('${rec.specifier}') targets an ES module that leads back to '${mod.id}'. ` +
+                    'A cycle involving require() of an ES module is not allowed — Node rejects it too ' +
+                    '(ERR_REQUIRE_CYCLE_MODULE), because the required module cannot be evaluated before ' +
+                    'its own dependencies are. Break the cycle, or make part of it a dynamic import().',
+            );
+        }
+    }
+
+    // A DYNAMIC import of a CommonJS module needs the same interop namespace a static one does —
+    // `import('./c.cjs')` must resolve to something with a `.default`. When the target lands in the
+    // importer's own chunk there is no chunk boundary to hang a real module namespace on, and the
+    // override fell back to `namespaceOf`, which for a CommonJS module is not the interop object:
+    // `m.default` read `undefined` under `codeSplitting: false`, with no error. Minted here because
+    // deconfliction runs on link's output; minting at render time is too late.
+    for (const idx of linked.order) {
+        const mod = graph.modules[idx];
+        for (const rec of mod.importRecords) {
+            if (rec.kind !== 'dynamic' || rec.external || rec.resolved < 0) continue;
+            if (linked.cjsWrap.has(rec.resolved)) cjsBind(ctx, graph.modules[rec.resolved], NAME_NAMESPACE, mod);
+        }
+    }
+
     //
     // Propagated to a FIXED POINT: `export * from './c.js'` where c itself stars from CommonJS makes
     // the outer module dynamic too, and its `__reExport` chains to c's namespace rather than to the
