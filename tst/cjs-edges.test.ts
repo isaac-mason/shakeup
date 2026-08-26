@@ -200,3 +200,55 @@ describe('the configurations that were already correct', () => {
         ).toEqual(['a', 'M']);
     });
 });
+
+// The oracles DISAGREE on `__commonJS`, and only esbuild matches Node. A CommonJS module whose body
+// throws is deleted from Node's require cache and RE-RUNS on the next `require()` — measured on
+// Node 24: a module that throws once then succeeds gives `["THREW:first", {ran:2}]`.
+//
+// rolldown's `__commonJS` (`runtime-base.js:25-31`) has no `try`, so `mod` keeps the HALF-POPULATED
+// exports object from the failed run and the second require hands that back. shakeup had transcribed
+// rolldown's, and returned `{}` where Node returns `{ran:2}` — silently.
+//
+// esbuild's form (`runtime.go:201-207`) resets `mod = 0` in a `catch`, which is why it also does not
+// null `cb` after the first call: a retry needs it.
+describe('a CommonJS module that throws re-runs on the next require', () => {
+    const build = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files) });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+    };
+
+    it('matches Node: the failed run is not cached', async () => {
+        const ns = await build({
+            '/t.cjs':
+                "globalThis.__retryN = (globalThis.__retryN ?? 0) + 1;\nif (globalThis.__retryN === 1) throw new Error('first');\nmodule.exports = { ran: globalThis.__retryN };",
+            '/d.cjs':
+                "const out = [];\nfor (let i = 0; i < 2; i++) { try { out.push(require('./t.cjs')) } catch (e) { out.push('THREW:' + e.message) } }\nmodule.exports = out;",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual(['THREW:first', { ran: 2 }]);
+    });
+
+    it('a module that succeeds still evaluates exactly once', async () => {
+        // The memoization must survive the `try` — otherwise every require re-runs the body.
+        const ns = await build({
+            '/t.cjs': 'globalThis.__onceN = (globalThis.__onceN ?? 0) + 1;\nmodule.exports = { n: globalThis.__onceN };',
+            '/d.cjs': "const a = require('./t.cjs');\nconst b = require('./t.cjs');\nmodule.exports = [a.n, b.n, a === b];",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual([1, 1, true]);
+    });
+
+    it('an ES module’s error stays STICKY — the opposite, and deliberate', async () => {
+        // Spec: an ES module that throws during evaluation rethrows the same error forever. The two
+        // helpers are asymmetric on purpose; `__esm` keeps its `err` cache.
+        const ns = await build({
+            '/e.js':
+                "globalThis.__esmRetryN = (globalThis.__esmRetryN ?? 0) + 1;\nthrow new Error('boom' + globalThis.__esmRetryN);\nexport const a = 1;",
+            '/d.cjs':
+                "const out = [];\nfor (let i = 0; i < 2; i++) { try { require('./e.js') } catch (e) { out.push(e.message) } }\nmodule.exports = out;",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual(['boom1', 'boom1']);
+    });
+});

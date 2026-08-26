@@ -696,8 +696,25 @@ const CJS_HELPERS: Record<string, string> = {
     __defProp: 'var __defProp = Object.defineProperty;',
     __create: 'var __create = Object.create;',
     __getProtoOf: 'var __getProtoOf = Object.getPrototypeOf;',
-    __commonJS:
-        'var __commonJS = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);',
+    // esbuild's `__commonJSMin` (`runtime.go:201-207`), NOT rolldown's — the two differ and only
+    // esbuild's matches Node. A CommonJS module whose body THROWS is deleted from Node's require
+    // cache and RE-RUNS on the next `require()`; measured on Node 24, a module that throws once then
+    // succeeds gives `["THREW:first", {ran:2}]`. rolldown's body has no `try`, so `mod` stays set to
+    // the HALF-POPULATED exports object from the failed run and the second require hands that back —
+    // shakeup returned `{}` where Node returns `{ran:2}`, silently.
+    //
+    // `cb` is deliberately NOT nulled after the first call (rolldown nulls it to free the closure):
+    // a retry needs it. Note the asymmetry with `__esm` below, which is the OPPOSITE and equally
+    // deliberate — an ES module's evaluation error IS sticky per spec, a CommonJS module's is not.
+    __commonJS: [
+        'var __commonJS = (cb, mod) => () => {',
+        '    try {',
+        '        return (mod || cb((mod = { exports: {} }).exports, mod), mod.exports);',
+        '    } catch (e) {',
+        '        throw ((mod = 0), e);',
+        '    }',
+        '};',
+    ].join('\n'),
     // rolldown's `__esmMin` verbatim (`runtime/runtime-base.js:17-23`). `fn = 0` after the first
     // call makes it run ONCE; the `err` cache makes an evaluation failure STICKY, which the ESM
     // spec requires — a module that threw must throw the same error on every later access, not
