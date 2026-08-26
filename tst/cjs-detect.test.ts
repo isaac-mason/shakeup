@@ -593,3 +593,60 @@ describe('re-exporting from a CommonJS module', () => {
         expect(r.errors[0]).not.toMatch(/is not exported by/);
     });
 });
+
+// The other interop direction: CommonJS requiring an ES module. Previously the ESM target was given
+// a CommonJS wrapper, which has no `exports` object to populate — so `require('./esm.js')` silently
+// returned `{}` with no error at all.
+describe('require() of an ES module', () => {
+    const runFiles = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+    };
+
+    it('hands the requiring code a CommonJS view of the ESM exports', async () => {
+        const { ns } = await runFiles({
+            '/esm.js': 'export const a = 1;\nexport default 2;',
+            '/d.cjs': "const e = require('./esm.js');\nmodule.exports = { a: e.a, def: e.default, esm: e.__esModule };",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual({ a: 1, def: 2, esm: true });
+    });
+
+    it('keeps the ES module ESM rather than wrapping it', async () => {
+        // The bindings stay hoisted; only a namespace object is added for the require site.
+        const { code } = await runFiles({
+            '/esm.js': 'export const a = 1;',
+            '/d.cjs': "module.exports = require('./esm.js').a;",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(code).toMatch(/__toCommonJS\(\w+\)/);
+        expect(code).not.toMatch(/require_esm/);
+    });
+
+    // cjs.md §4.3 — "the bug farm". The SAME module imported and required must present two views:
+    // the importing side must NOT see `__esModule` (it would leak a phantom named export and can
+    // flip other tools' default-interop), while the requiring side MUST. This works only because
+    // `__toCommonJS` builds a fresh object per call instead of stamping the shared namespace.
+    it('shows __esModule to the requiring side and hides it from the importing side', async () => {
+        const { ns } = await runFiles({
+            '/esm.js': 'export const a = 1;',
+            '/d.cjs': "const e = require('./esm.js');\nmodule.exports = { seen: e.__esModule === true };",
+            '/main.js': [
+                "import * as m from './esm.js';",
+                "import d from './d.cjs';",
+                'export const x = { imported: "__esModule" in m, keys: Object.keys(m), required: d.seen };',
+            ].join('\n'),
+        });
+        expect(ns.x).toEqual({ imported: false, keys: ['a'], required: true });
+    });
+
+    it('emits __toCommonJS even when nothing else in the chunk is wrapped', async () => {
+        const { ns } = await runFiles({
+            '/esm.js': 'export const a = 5;',
+            '/d.cjs': "exports.v = require('./esm.js').a;",
+            '/main.js': "import { v } from './d.cjs';\nexport const x = v;",
+        });
+        expect(ns.x).toBe(5);
+    });
+});
