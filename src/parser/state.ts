@@ -60,6 +60,15 @@ export type ParserState = {
     allowTopReturn: boolean;
     /** Module goal allows top-level `new.target`. Same rule as {@link allowTopReturn}. */
     allowTopNewTarget: boolean;
+    /** Is `await` the OPERATOR here, rather than a plain identifier? oxc's `Context::has_await`
+     *  (`js/arrow.rs:261,311` — `ctx.and_await(r#async)`), which is REPLACED on entering a function
+     *  body by that function's async-ness and restored on exit, not accumulated. Seeded at top level
+     *  from the module goal: an ES module permits top-level await, a CommonJS body does not.
+     *
+     *  When false, `await` parses as an identifier rather than erroring — matching oxc
+     *  (`js/expression.rs:89`). That is what keeps `await(x)` a call to a function named `await` in
+     *  a script, and it makes `await x` fail naturally as two adjacent identifiers. */
+    awaitOk: boolean;
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];
