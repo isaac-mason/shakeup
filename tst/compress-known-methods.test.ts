@@ -169,3 +169,27 @@ describe('typeof comparisons use the loose operator', () => {
         expect(evaluate(code)).toBe(false); // `==` here would be TRUE — the operator must not change
     });
 });
+
+describe('string comparisons fold like numeric ones', () => {
+    it.each([
+        ['"a" === "a"', true],
+        ['"a" === "b"', false],
+        ['"a" !== "b"', true],
+        ['"a" == "a"', true],
+        ['"a" < "b"', true],
+        ['"b" <= "a"', false],
+    ])('%s', async (expr, want) => {
+        // `1 === 1` already folded; the string case was missing entirely and survived to the output.
+        // Both operands being strings makes loose and strict coincide, and `<`/`>` is the lexicographic
+        // comparison JS performs.
+        const code = await build(`o = ${expr};`);
+        expect(code).not.toContain('==');
+        expect(evaluate(code)).toBe(want);
+    });
+
+    it('leaves a MIXED comparison alone', async () => {
+        // `"1" == 1` is true by coercion but `"1" === 1` is false — not a case to fold blind.
+        const code = await build('o = "1" === 1;');
+        expect(evaluate(code)).toBe(false);
+    });
+});
