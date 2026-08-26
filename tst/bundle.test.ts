@@ -202,3 +202,51 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
         expect(await bundleErr('declare global { const G: number; }\nexport const z = 2;')).toEqual([]);
     });
 });
+
+// A two-statement re-export (`import { x } from './a'; export { x }`) binds an exported name to a
+// local that is ITSELF an import. `matchImport` used to hand back the importing module's own symbol
+// for these, which has no declaration in the output and roots nothing in the source — so the bundle
+// silently emitted a dangling `export { x }` and dropped `./a` entirely (`errors: []`). It only
+// showed up when the binding was not ALSO referenced locally, since a local use roots it by the
+// normal path. Executable assertions, because the failure mode was a chunk that would not load.
+describe('bundle: two-statement re-export', () => {
+    it('re-exports a named import and keeps its source module', async () => {
+        const { code } = await build({
+            '/main.ts': "import { v } from './a';\nexport { v };",
+            '/a.ts': 'export const v = 1;',
+        });
+        expect(await run(code)).toMatchObject({ v: 1 });
+    });
+
+    it('re-exports a named import under a new name', async () => {
+        const { code } = await build({
+            '/main.ts': "import { v } from './a';\nexport { v as w };",
+            '/a.ts': 'export const v = 1;',
+        });
+        expect(await run(code)).toMatchObject({ w: 1 });
+    });
+
+    it('re-exports a default import', async () => {
+        const { code } = await build({
+            '/main.ts': "import d from './a';\nexport { d };",
+            '/a.ts': 'export default 42;',
+        });
+        expect(await run(code)).toMatchObject({ d: 42 });
+    });
+
+    it('re-exports a namespace import', async () => {
+        const { code } = await build({
+            '/main.ts': "import * as ns from './a';\nexport { ns };",
+            '/a.ts': 'export const v = 1;\nexport const w = 2;',
+        });
+        expect((await run(code)).ns).toMatchObject({ v: 1, w: 2 });
+    });
+
+    it('still roots the binding when it is also used locally', async () => {
+        const { code } = await build({
+            '/main.ts': "import { v } from './a';\nexport const doubled = v * 2;\nexport { v };",
+            '/a.ts': 'export const v = 21;',
+        });
+        expect(await run(code)).toMatchObject({ v: 21, doubled: 42 });
+    });
+});

@@ -29,7 +29,26 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             if (exp.sourceName === NAME_NAMESPACE) return namespaceBind(ctx, target);
             return matchImport(ctx, target, exp.sourceName, seen);
         }
-        if (exp.symbol !== 0) return { kind: 'found', ref: packRef(module.idx, exp.symbol) };
+        if (exp.symbol !== 0) {
+            // The exported local may itself be an import binding — the two-statement re-export
+            // `import { x } from './a'; export { x }` (and its `import * as ns` / default forms).
+            // Follow it to the source, exactly as the `exp.rec >= 0` branch above does for the
+            // one-statement `export { x } from './a'`. Binding to the importing module's own
+            // symbol instead would name a local that has no declaration in the output AND leave
+            // the source export unrooted — a dangling `export { x }` next to a dropped module.
+            // EXTERNAL imports are deliberately NOT followed: unlike the one-statement form, a
+            // two-statement re-export has a real local symbol for the external binding, and that
+            // symbol is what carries liveness — `pruneUnusedExternals` keeps an external import
+            // only when its ref appears in `liveRefs`. Returning a ref-less `external` bind here
+            // would prune the `import … from 'ext'` line out from under a live re-export.
+            const imported = module.namedImports.get(exp.symbol);
+            if (imported !== undefined && !module.importRecords[imported.rec].external) {
+                const target = graph.modules[module.importRecords[imported.rec].resolved];
+                if (imported.name === NAME_NAMESPACE) return namespaceBind(ctx, target);
+                return matchImport(ctx, target, imported.name, seen);
+            }
+            return { kind: 'found', ref: packRef(module.idx, exp.symbol) };
+        }
         if (exp.exprNode !== null) {
             const existing = ctx.linked.defaultRefs.get(module.idx);
             if (existing !== undefined) return { kind: 'found', ref: existing };
