@@ -55,9 +55,17 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
     // One scan yields both `referenced_symbols` (uses → `out`) and `declared_symbols` (module-scope
     // bindings → `declared`), keyed by SymbolRef identity — the rolldown `StmtInfo` model. No spans:
     // this is robust to synthetic (lowered) nodes, which carry symbols but have no meaningful span.
+    // An `import` DECLARES its locals and REFERENCES nothing (rolldown's `StmtInfo` for an import
+    // decl carries no referenced_symbols — the module dependency lives on the ImportRecord). Running
+    // it through `pushSym` made each specifier's own BindingIdentifier a reference to itself, and
+    // since ONE statement carries every specifier, including it for a used name (`mat3`) also rooted
+    // the unused ones — crashcat kept `vec4` in its `math` import with zero uses, where oxc drops it.
+    // Liveness is per-specifier once the decl stops rooting itself: the specifier is included via
+    // `declared` when something actually references it.
+    const isImport = statement.type === N.ImportDeclaration;
     walkRefIdents(statement, (ident) => {
         const sym = symbolOf(sem, ident);
-        pushSym(sym);
+        if (!isImport) pushSym(sym);
         if (ident.type === N.BindingIdentifier && sym !== 0 && sem.symbols[sym].scope === moduleScope) {
             declared.push(packRef(mod.idx, sym));
         }

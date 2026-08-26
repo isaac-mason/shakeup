@@ -206,3 +206,36 @@ describe('tree shaking — module-level side-effect gate (unit seam)', () => {
         expect(effectLive.size).toBeGreaterThan(0);
     });
 });
+
+describe('external import specifiers shake individually', () => {
+    const buildExt = async (main: string) => {
+        const result = await bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': main }), external: ['ext'] });
+        expect(result.errors).toEqual([]);
+        return result.code;
+    };
+
+    it('drops an unused specifier while a used sibling keeps the statement', async () => {
+        // One ImportDeclaration carries every specifier, so including it for `used` used to root
+        // `unused` too — the whole statement's refs were marked live together. oxc-minify drops it.
+        const code = await buildExt(['import { used, unused } from "ext";', 'export const out = used();'].join('\n'));
+        expect(code).toContain('used');
+        expect(code).not.toMatch(/\bunused\b/);
+    });
+
+    it('keeps the module import itself, so its side effects still run', async () => {
+        const code = await buildExt(['import { used, unused } from "ext";', 'export const out = used();'].join('\n'));
+        expect(code).toMatch(/from\s*['"]ext['"]/);
+    });
+
+    it('keeps every specifier when NONE is referenced', async () => {
+        // Nothing live means the statement itself would go, and a side-effectful external then needs
+        // a bare `import "ext";` emitted in the right ORDER — deliberately left on the conservative path.
+        const code = await buildExt(['import { a, b } from "ext";', 'export const out = 1;'].join('\n'));
+        expect(code).toMatch(/from\s*['"]ext['"]/);
+    });
+
+    it('still drops specifiers behind a default import', async () => {
+        const code = await buildExt(['import d, { used, unused } from "ext";', 'export const out = d + used();'].join('\n'));
+        expect(code).not.toMatch(/\bunused\b/);
+    });
+});
