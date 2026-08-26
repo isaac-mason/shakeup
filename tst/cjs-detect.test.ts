@@ -315,3 +315,67 @@ describe('CommonJS modules are wrapped and interoperate', () => {
         expect(code).not.toContain('__commonJS');
     });
 });
+
+// A CJS-wrapped module's body is a closure, so deconflict deliberately skips its top-level symbols
+// — they cannot collide with the chunk root. That skip removes their `finalNames` entries, and the
+// mangler's step 5 anchors `slotName[slot] = existing ?? originalName`. Folded into the chunk's ROOT
+// scope they would be `isTopLevel`, so an ESM binding and a wrapped-CJS binding sharing an original
+// name would anchor TWO slots to that one name — and nested symbols inheriting those slots would
+// collide with no liveness guarantee. Giving the wrapper its own unified scope removes the premise,
+// and as a side effect lets the CJS blob be mangled at all.
+describe('mangling a CJS-wrapped module', () => {
+    const buildMin = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [], output: { minify: true } });
+        expect(r.errors).toEqual([]);
+        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+    };
+
+    it('mangles the wrapped body instead of leaving it verbatim', async () => {
+        const { code, ns } = await buildMin({
+            '/dep.cjs': [
+                'var longNameAlpha = 10;',
+                'var longNameBeta = 20;',
+                'function longFnGamma(){ return longNameAlpha + longNameBeta }',
+                'module.exports = { v: longFnGamma() };',
+            ].join('\n'),
+            '/main.js': "import d from './dep.cjs';\nfunction outerHelper(q){ return q * 2 }\nexport const x = [d.v, outerHelper(3)];",
+        });
+        expect(ns.x).toEqual([30, 6]);
+        expect(code).not.toContain('longNameAlpha');
+        expect(code).not.toContain('longFnGamma');
+    });
+
+    it('survives a wrapped module whose top-level names match the ESM side', async () => {
+        // Real pre-minified npm CJS ships exactly these base54 identifiers, which is why this is the
+        // default case rather than a rarity: `deconflictChunk` seeds `taken` from claimed names, and
+        // `makeMangleClaim` hands out `e, t, n, r, i, a, o, s…` in order.
+        const { ns } = await buildMin({
+            '/dep.cjs': [
+                'var e = 1, t = 2, n = 3;',
+                'function r(i){ return i + e + t + n }',
+                'module.exports = { v: r(4) };',
+            ].join('\n'),
+            '/main.js': [
+                "import d from './dep.cjs';",
+                'function e(x){ return x + 1 }',
+                'function t(x){ return e(x) * 2 }',
+                'const n = t(5);',
+                'export const x = [d.v, n];',
+            ].join('\n'),
+        });
+        expect(ns.x).toEqual([10, 12]);
+    });
+
+    it('keeps the wrapper and its namespace distinct from user bindings', async () => {
+        const { ns } = await buildMin({
+            '/dep.cjs': 'module.exports = { v: 1 };',
+            '/main.js': [
+                "import d from './dep.cjs';",
+                'function require_dep(){ return 99 }',
+                'function import_dep(){ return 98 }',
+                'export const x = [d.v, require_dep(), import_dep()];',
+            ].join('\n'),
+        });
+        expect(ns.x).toEqual([1, 99, 98]);
+    });
+});

@@ -75,16 +75,32 @@ export function computeChunkSlots(graph: Graph, linked: Linked, chunkModules: nu
     for (const idx of chunkModules) {
         const sem = graph.modules[idx].semantic;
         const moduleScope = scopeOf(sem, graph.modules[idx].program);
+        // A CJS-WRAPPED module is not part of the chunk's top-level scope — its body is a closure —
+        // so it gets its OWN unified scope parented at ROOT rather than being folded into it.
+        //
+        // This is a correctness fix, not a size one. Deconflict deliberately skips a wrapped
+        // module's top-level symbols (they cannot collide with the chunk root), so they have no
+        // `finalNames` entry — and step 5 anchors `slotName[slot] = existing ?? originalName`. Folded
+        // into ROOT they would be `isTopLevel`, so an ESM binding and a wrapped-CJS binding sharing
+        // an original name would anchor TWO slots to that one name, and nested symbols inheriting
+        // those slots would collide with no liveness guarantee between them. Giving the wrapper its
+        // own scope removes the premise.
+        //
+        // It also makes the CJS blob mangle-able, which folding into ROOT prevented (step 6 writes
+        // names for non-top-level symbols only) — the largest, most opaque part of the output was
+        // keeping its original identifiers.
+        const moduleRoot = linked.cjsWrap.has(idx) ? parent.length : ROOT;
+        if (moduleRoot !== ROOT) parent.push(ROOT);
         const sm = new Int32Array(sem.scopes.length).fill(-1);
         // Ascending local ids keep parents before children, so unified ids stay topological too.
         for (let s = 1; s < sem.scopes.length; s++) {
             if (s === moduleScope) {
-                sm[s] = ROOT;
+                sm[s] = moduleRoot;
                 continue;
             }
             const p = sem.scopes[s].parent;
             sm[s] = parent.length;
-            parent.push(p === moduleScope || p === 0 ? ROOT : sm[p]);
+            parent.push(p === moduleScope || p === 0 ? moduleRoot : sm[p]);
         }
         scopeMap[idx] = sm;
 
@@ -105,13 +121,12 @@ export function computeChunkSlots(graph: Graph, linked: Linked, chunkModules: nu
     for (const idx of chunkModules) {
         const mod = graph.modules[idx];
         const sem = mod.semantic;
-        const moduleScope = scopeOf(sem, mod.program);
         for (let sym = 1; sym < sem.symbols.length; sym++) {
             if (mod.namedImports.has(sym)) continue; // alias for a producer symbol — never named here
             if (sem.symbols[sym].decl === null) continue;
             const u = symMap[idx][sym];
             const owner = sem.symbols[sym].scope;
-            const uScope = owner === moduleScope ? ROOT : scopeMap[idx][owner];
+            const uScope = scopeMap[idx][owner] ?? ROOT;
             if (uScope < 0) continue;
             if (uScope === ROOT) isTopLevel[u] = 1;
             bindingsByScope[uScope].push(u);
