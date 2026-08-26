@@ -203,7 +203,6 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
-    for (const modIdx of linked.namespaceOf.keys()) exportMapOf(ctx, graph.modules[modIdx]);
     for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);
     // Build export maps for dynamic-import targets too: treeshake seeds them as inclusion roots
     // and the emit rewrites an in-bundle `import('./x')` to `Promise.resolve(namespaceObject)`,
@@ -214,6 +213,19 @@ export function linkGraph(graph: Graph): Linked {
         for (const rec of mod.importRecords) {
             if (rec.hasDynamicLiteral && !rec.external && rec.resolved >= 0) exportMapOf(ctx, graph.modules[rec.resolved]);
         }
+    }
+
+    // Namespace targets, LAST and to a fixed point. `namespaceOf` grows while export maps are
+    // built: `export * as ns from './m'` is a named EXPORT, not a named import, so the loop over
+    // `namedImports` above never sees it — `m` is registered only when the re-exporting module's
+    // own map is constructed. Running this before those maps existed left `m`'s export map unbuilt,
+    // which silently produced BOTH halves of the same bug: `expandNs` bailed on the missing map so
+    // nothing in `m` was rooted, and `renderNamespaceObject` found no map so it emitted an empty
+    // `Object.freeze({})`. Building one target's map can reveal further targets, hence the fixed
+    // point; `exportMapOf` memoizes, so repeat calls are free and this terminates on module count.
+    for (let seen = -1; seen !== linked.namespaceOf.size; ) {
+        seen = linked.namespaceOf.size;
+        for (const modIdx of [...linked.namespaceOf.keys()]) exportMapOf(ctx, graph.modules[modIdx]);
     }
 
     return linked;
