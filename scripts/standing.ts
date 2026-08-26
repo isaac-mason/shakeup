@@ -193,10 +193,11 @@ const TOOLS: Tool[] = [
             }, true),
     },
     {
-        // rspack is webpack's architecture reimplemented in Rust — same config surface, same module
-        // graph + runtime model. Paired with webpack it isolates the LANGUAGE from the DESIGN: the
-        // webpack/rspack ratio is close to pure Rust-vs-JS on an identical architecture, which is
-        // the cleanest estimate available of what shakeup's own constant factor would cost to close.
+        // rspack is API/config-compatible with webpack — an independent Rust implementation that
+        // accepts the same config, NOT a port of webpack's architecture. So the webpack/rspack ratio
+        // is not a language isolate: it mixes a language change with a different implementation.
+        // No pair in this table isolates language from design; treat every cross-tool ratio as
+        // unattributed.
         name: 'rspack',
         countsCpu: true,
         run: () =>
