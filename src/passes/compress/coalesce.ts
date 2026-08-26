@@ -252,33 +252,7 @@ const coalesceFn = (fn: Node, ctx: TransformCtx): void => {
     //
     // `verifySemantic` names it precisely — "symbol partition mismatch" plus `UNDER(unsafe)` counts,
     // reported against `coalesceVariableNames` itself rather than as a crash three stages later.
-    const sem = ctx.semantic;
-    for (const [merged, target] of rename) {
-        const t = target.sym;
-        if (merged === t) continue;
-        const mRefs = sem.refs.get(merged);
-        if (mRefs !== undefined) {
-            const tRefs = sem.refs.get(t);
-            if (tRefs === undefined) sem.refs.set(t, { reads: mRefs.reads, writes: mRefs.writes });
-            else { tRefs.reads += mRefs.reads; tRefs.writes += mRefs.writes; }
-            sem.refs.delete(merged);
-        }
-        const mUses = sem.uses.get(merged);
-        if (mUses !== undefined) {
-            sem.uses.set(t, (sem.uses.get(t) ?? 0) + mUses);
-            sem.uses.delete(merged);
-        }
-        if (sem.shorthand.has(merged)) { sem.shorthand.add(t); sem.shorthand.delete(merged); }
-        if (sem.exported.has(merged)) { sem.exported.add(t); sem.exported.delete(merged); }
-        // The merged declaration is gone (or became a plain assignment), so its recorded init no
-        // longer describes a declarator.
-        sem.symbolInit.delete(merged);
-        // Evict, using the established convention: scope 0 = "owned by no lexical scope", still a
-        // VALID index because an out-of-range sentinel crashed chunk-graph (`strip-ts.ts` evictSym).
-        const rec = sem.symbols[merged];
-        if (rec !== undefined) rec.scope = 0;
-    }
-
+    for (const [merged, target] of rename) ctx.mergeSymbol(merged, target.sym);
     ctx.changed = true;
 };
 

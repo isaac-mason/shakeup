@@ -255,6 +255,58 @@ class Ctx {
         list[index] = next;
         this.changed = true;
     }
+    /**
+     * Retire ONE symbol by id, when the pass has no subtree to hand over.
+     *
+     * `tsStrip` needs this: an erased type-only import specifier, or a `declare` form whose references
+     * are being reclassified as unresolved globals, is identified by SYMBOL rather than by a node that
+     * is leaving. Same eviction, same convention — `scope = 0`, "owned by no lexical scope", still a
+     * VALID index because an out-of-range sentinel crashed chunk-graph.
+     */
+    retireSymbol(sym: number): void {
+        if (sym <= 0) return; // unresolved / no symbol — index 0 is the table's own sentinel
+        const rec = this.semantic.symbols[sym];
+        if (rec !== undefined) rec.scope = 0;
+    }
+    /**
+     * Two symbols become one: `from`'s facts fold into `to`, and `from` is retired.
+     *
+     * A MERGE is not a removal — nothing leaves the tree, the nodes are simply rebound — so neither
+     * `retire` nor `dropRefs` fits. `coalesceVariableNames` rewrites `node.sym` in place, which means
+     * the traversal's automatic bookkeeping never fires; without this the survivor's counts came out
+     * UNDER-stated by exactly the merged symbol's share and the merged symbol stayed live.
+     */
+    mergeSymbol(from: number, to: number): void {
+        if (from === to || from <= 0 || to <= 0) return;
+        const sem = this.semantic;
+        const fRefs = sem.refs.get(from);
+        if (fRefs !== undefined) {
+            const tRefs = sem.refs.get(to);
+            if (tRefs === undefined) sem.refs.set(to, { reads: fRefs.reads, writes: fRefs.writes });
+            else {
+                tRefs.reads += fRefs.reads;
+                tRefs.writes += fRefs.writes;
+            }
+            sem.refs.delete(from);
+        }
+        const fUses = sem.uses.get(from);
+        if (fUses !== undefined) {
+            sem.uses.set(to, (sem.uses.get(to) ?? 0) + fUses);
+            sem.uses.delete(from);
+        }
+        if (sem.shorthand.has(from)) {
+            sem.shorthand.add(to);
+            sem.shorthand.delete(from);
+        }
+        if (sem.exported.has(from)) {
+            sem.exported.add(to);
+            sem.exported.delete(from);
+        }
+        // The merged declaration is gone (or became a plain assignment), so its recorded init no
+        // longer describes a declarator.
+        sem.symbolInit.delete(from);
+        this.retireSymbol(from);
+    }
     spliceStatements(list: Node[], start: number, deleteCount: number, ...insert: Node[]): void {
         if (deleteCount === 0 && insert.length === 0) return;
         if (this.refDelta !== null) {

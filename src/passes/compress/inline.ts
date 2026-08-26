@@ -177,13 +177,14 @@ function inlineBody(body: Node[], refs: Map<number, RefCounts>, ctx: TransformCt
                 break;
             }
             ctx.addRefs(use);
-            // the decl is dead — its init moved into the use, which shifts down.
-            // EVICT the binding too: `spliceStatements` retires the STATEMENT and `dropRefs` moves the
-            // COUNTS, but neither retires the SYMBOL. Left live it keeps claiming a mangler slot for a
-            // declaration that no longer exists, which is what made the maintained table carry more
-            // live symbols than a rebuild — and so what kept `refreshFull` load-bearing.
-            const rec = ctx.semantic.symbols[cand.sym];
-            if (rec !== undefined) rec.scope = 0;
+            // The decl is dead — its init moved into the use, which shifts down.
+            //
+            // Retire the DECLARED SYMBOL specifically, not the whole statement: the init expression has
+            // already been substituted into the use site, so a subtree-wide retire would also evict
+            // bindings INSIDE it (an arrow's parameters, say) that are now live somewhere else. That
+            // cost +192 bytes on crashcat before the byte gate caught it. `spliceStatements` still
+            // handles the reference accounting for the statement itself.
+            ctx.retireSymbol(cand.sym);
             ctx.spliceStatements(body, u - 1, 1);
             u--;
             changed = true;

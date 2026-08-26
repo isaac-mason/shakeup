@@ -152,14 +152,10 @@ function evictDeclSymbol(ctx: TransformCtx, decl: Node): void {
     evictSym(ctx, ((decl.data as { id?: Node }).id as { sym: number } | undefined)?.sym ?? 0);
 }
 
-function evictSym(ctx: TransformCtx, sym: number): void {
-    if (sym === 0) return; // unresolved / no symbol — symbols[0] is the table's own sentinel
-    const rec = ctx.semantic.symbols[sym];
-    // Scope 0 is the root sentinel `createSemantic` seeds and is never a module scope, so this
-    // reads as "owned by no lexical scope" while staying a VALID index for anything that does
-    // `scopes[rec.scope]` (an out-of-range sentinel crashed chunk-graph).
-    if (rec !== undefined) rec.scope = 0;
-}
+/** Retire a symbol whose declaration this pass erased. Thin alias for `ctx.retireSymbol` — kept as a
+ *  local name because the call sites read better as "evict this binding". */
+const evictSym = (ctx: TransformCtx, sym: number): void => ctx.retireSymbol(sym);
+
 
 function stripExport(n: Node): boolean {
     const d = n.data as { exportKind: string; declaration: Node | null; specifiers: Node[]; source: Node | null };
