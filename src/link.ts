@@ -26,6 +26,11 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
             const rec = module.importRecords[exp.rec];
             if (rec.external) return { kind: 'external', specifier: rec.specifier, name: exp.sourceName };
             const target = graph.modules[rec.resolved];
+            // A one-statement re-export FROM a wrapped CommonJS module — `export { v } from './d.cjs'`
+            // (and `export * as ns from`). Recursing would look for a named export the CJS module
+            // does not have (its surface is built at runtime), and report the re-EXPORTER as missing
+            // the name — a misleading error for a very common barrel shape.
+            if (ctx.linked.cjsWrap.has(rec.resolved)) return cjsBind(ctx, target, exp.sourceName);
             if (exp.sourceName === NAME_NAMESPACE) return namespaceBind(ctx, target);
             return matchImport(ctx, target, exp.sourceName, seen);
         }
@@ -228,6 +233,26 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
+    // `export * from './x.cjs'` is not lowered yet (cjs.md §7.4): a CommonJS module's export surface
+    // is built at runtime, so forwarding it needs a runtime namespace assembled by `__reExport` —
+    // namespace construction "mode 2" of §4.4, which does not exist here. Report it directly rather
+    // than let the name lookup fail later and blame the RE-EXPORTER for not having the name, which
+    // points at the wrong file entirely.
+    const cjsStarExporters = new Set<number>();
+    for (const idx of linked.order) {
+        const mod = graph.modules[idx];
+        for (const recIdx of mod.starExports) {
+            const rec = mod.importRecords[recIdx];
+            if (rec.external || rec.resolved < 0 || !linked.cjsWrap.has(rec.resolved)) continue;
+            cjsStarExporters.add(idx);
+            linked.errors.push(
+                `${mod.id}: 'export * from ${JSON.stringify(rec.specifier)}' is not supported yet — ` +
+                    'that module is CommonJS, whose export names are only known at runtime. ' +
+                    'Re-export the names explicitly (`export { a, b } from …`) or use `export * as ns from …`.',
+            );
+        }
+    }
+
     for (const idx of linked.order) {
         const mod = graph.modules[idx];
         for (const [localSym, imp] of mod.namedImports) {
@@ -244,7 +269,11 @@ export function linkGraph(graph: Graph): Linked {
                 bind = namespaceBind(ctx, graph.modules[rec.resolved]);
             } else {
                 bind = matchImport(ctx, graph.modules[rec.resolved], imp.name, new Set());
-                if (bind.kind === 'none') {
+                // Suppress the follow-on complaint when the target already failed for a REPORTED
+                // reason: a name that would have arrived through `export * from <cjs>` is missing
+                // because that forwarding is unsupported, not because the re-exporter is at fault,
+                // and saying both points the reader at the wrong file.
+                if (bind.kind === 'none' && !cjsStarExporters.has(rec.resolved)) {
                     linked.errors.push(
                         `'${imp.name}' is not exported by '${graph.modules[rec.resolved].id}' (imported by '${mod.id}')`,
                     );

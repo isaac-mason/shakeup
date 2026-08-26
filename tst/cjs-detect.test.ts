@@ -534,3 +534,62 @@ describe('top-level `this` in a CommonJS module', () => {
         expect(r.chunks[0].code).toContain('__commonJS');
     });
 });
+
+// Re-exporting FROM a CommonJS module — the barrel shape, and how most packages are actually
+// consumed. `matchImport` used to recurse into the CJS target looking for a named export it cannot
+// have (its surface is built at runtime), then blame the RE-EXPORTER for not providing the name.
+describe('re-exporting from a CommonJS module', () => {
+    const runFiles = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
+    };
+    const D = { '/d.cjs': 'exports.a = 1; exports.b = 2;' };
+
+    it('forwards a named export', async () => {
+        expect((await runFiles({ ...D, '/b.js': "export { a } from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" })).x).toBe(1);
+    });
+
+    it('forwards a renamed export', async () => {
+        expect((await runFiles({ ...D, '/b.js': "export { a as z } from './d.cjs';", '/main.js': "import { z } from './b.js';\nexport const x = z;" })).x).toBe(1);
+    });
+
+    it('forwards `default`', async () => {
+        expect(
+            (await runFiles({ '/d.cjs': 'module.exports = 9;', '/b.js': "export { default } from './d.cjs';", '/main.js': "import v from './b.js';\nexport const x = v;" }))
+                .x,
+        ).toBe(9);
+    });
+
+    it('forwards a namespace', async () => {
+        expect(
+            (await runFiles({ ...D, '/b.js': "export * as ns from './d.cjs';", '/main.js': "import { ns } from './b.js';\nexport const x = [ns.a, ns.b];" })).x,
+        ).toEqual([1, 2]);
+    });
+
+    it('forwards through two hops of barrel', async () => {
+        expect(
+            (await runFiles({
+                ...D,
+                '/b.js': "export { a } from './d.cjs';",
+                '/c.js': "export { a } from './b.js';",
+                '/main.js': "import { a } from './c.js';\nexport const x = a;",
+            })).x,
+        ).toBe(1);
+    });
+
+    it('reports `export * from` a CommonJS module against the RIGHT file', async () => {
+        // Not supported yet (cjs.md §7.4 — it needs the runtime `__reExport` namespace, "mode 2" of
+        // §4.4). What matters here is that the diagnostic names the re-exporter and the real cause,
+        // rather than claiming the barrel is missing a name it was never going to declare.
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" }),
+            external: [],
+        });
+        expect(r.errors).toHaveLength(1);
+        expect(r.errors[0]).toMatch(/^\/b\.js: 'export \* from/);
+        expect(r.errors[0]).toMatch(/that module is CommonJS/);
+        expect(r.errors[0]).not.toMatch(/is not exported by/);
+    });
+});
