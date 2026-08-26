@@ -1,3 +1,4 @@
+import { isPureStatement } from './analysis/effects';
 import type { Graph, ImportBind, Linked, Module } from './graph-types';
 import { NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 
@@ -224,6 +225,7 @@ export function linkGraph(graph: Graph): Linked {
     // rolldown's `determine_module_exports_kind` reaches this through `ImportKind::Require`
     // (`Esm -> WrapKind::Esm`, `CommonJs`/`None -> WrapKind::Cjs`); with an ESM-only emit the CJS
     // wrapper serves both, since an ESM module's bindings are already hoisted into the closure.
+    const warnedEagerEsm = new Set<number>();
     for (const idx of linked.order) {
         for (const rec of graph.modules[idx].importRecords) {
             if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
@@ -238,11 +240,29 @@ export function linkGraph(graph: Graph): Linked {
             // yielded `{}`. It needs its ESM namespace instead, converted at the call site by
             // `__toCommonJS` (which stamps the `__esModule` marker the requiring code checks for).
             //
-            // rolldown additionally gives such a target an `__esm` lazy-init wrapper. shakeup does
-            // not need one: a `require` edge is ordered like a static import (`sortModules` treats
-            // every non-dynamic edge alike), so the target is already evaluated before the requirer
-            // runs, and the init call would be a no-op.
+            //
+            // KNOWN DIVERGENCE (cjs.md §7.20). rolldown additionally gives such a target an `__esm`
+            // LAZY-INIT wrapper, so the module body runs at the `require()` CALL. shakeup evaluates
+            // it eagerly at its position in `linked.order`, which is observable two ways:
+            //   * ordering — `require()` should run the target between the statements around it;
+            //   * a require that is never reached (`if (false) require(…)`) should never run it.
+            // Building the lazy form means splitting declarations from initializers — every binding
+            // hoisted to a bare `var` so the namespace getters can close over it, with the
+            // initializing statements moved inside the init closure (rolldown's `wrapped_esm`
+            // fixture). That is a real transform, not yet built.
+            //
+            // Until then the divergence is REPORTED rather than hidden: it is unobservable when
+            // every top-level statement of the target is pure, which covers the common
+            // `export const … ` dependency, so the warning fires only when it can actually matter.
             if (!linked.namespaceOf.has(rec.resolved)) linked.namespaceOf.set(rec.resolved, `${reprName(target)}_ns`);
+            if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
+                warnedEagerEsm.add(rec.resolved);
+                graph.warnings.push(
+                    `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module with side effects — ` +
+                        'it is evaluated eagerly with the rest of the bundle rather than at the require() call, ' +
+                        'so its side effects may run earlier than Node would run them, or run even if the require is never reached.',
+                );
+            }
         }
     }
 

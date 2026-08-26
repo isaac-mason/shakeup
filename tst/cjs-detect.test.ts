@@ -650,3 +650,51 @@ describe('require() of an ES module', () => {
         expect(ns.x).toBe(5);
     });
 });
+
+// cjs.md §7.20 — a KNOWN divergence, reported rather than hidden. rolldown gives an ESM target of a
+// `require` edge an `__esm` lazy-init wrapper so the body runs at the CALL; shakeup evaluates it
+// eagerly with the rest of the bundle. Unobservable when the target's top-level statements are all
+// pure, which is the ordinary `export const …` dependency — so the warning fires only when the
+// timing can actually matter.
+describe('require() of an ES module evaluates eagerly (known divergence)', () => {
+    const warningsFor = async (esm: string) =>
+        (
+            await bundle({
+                entry: '/main.js',
+                fs: createMemoryFs({
+                    '/esm.js': esm,
+                    '/d.cjs': "module.exports = require('./esm.js').a;",
+                    '/main.js': "import d from './d.cjs';\nexport const x = d;",
+                }),
+                external: [],
+            })
+        ).warnings;
+
+    it('stays quiet for a pure ES module', async () => {
+        expect(await warningsFor('export const a = 1;')).toEqual([]);
+    });
+
+    it('warns when the target has a side-effectful statement', async () => {
+        const w = await warningsFor('console.log("hi");\nexport const a = 1;');
+        expect(w).toHaveLength(1);
+        expect(w[0]).toMatch(/evaluated eagerly/);
+        expect(w[0]).toMatch(/may run earlier than Node would run them/);
+    });
+
+    it('warns when an initializer is impure', async () => {
+        expect(await warningsFor('export const a = globalThis.f();')).toHaveLength(1);
+    });
+
+    it('warns once per target, not once per require', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/esm.js': 'console.log("hi");\nexport const a = 1;',
+                '/d.cjs': "module.exports = [require('./esm.js').a, require('./esm.js').a];",
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            }),
+            external: [],
+        });
+        expect(r.warnings).toHaveLength(1);
+    });
+});
