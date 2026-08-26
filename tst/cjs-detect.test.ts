@@ -32,7 +32,9 @@ describe('CommonJS variables in an ES module', () => {
 
     it('warns for `export default` and `export *` too', async () => {
         expect(await warningsFor('export default 1;\nexports.foo = 2;')).toHaveLength(1);
-        expect(await warningsFor("export * from './a.js';\nexports.foo = 2;", { '/a.js': 'export const z = 1;' })).toHaveLength(1);
+        expect(await warningsFor("export * from './a.js';\nexports.foo = 2;", { '/a.js': 'export const z = 1;' })).toHaveLength(
+            1,
+        );
     });
 
     it('stays quiet for a clean ES module', async () => {
@@ -43,7 +45,11 @@ describe('CommonJS variables in an ES module', () => {
         // Not reclassified and not WARNED about — it is simply not an ES module by this rule. Read
         // the warning channel directly: this source is separately an ERROR (unsupported CommonJS),
         // which the shared `build` helper asserts against.
-        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/main.js': 'module.exports = { a: 1 };' }), external: [] });
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': 'module.exports = { a: 1 };' }),
+            external: [],
+        });
         expect(r.warnings).toEqual([]);
     });
 
@@ -105,13 +111,21 @@ describe('ESM syntax in a CommonJS-declared file', () => {
     // rolldown does the same (`resolver.rs:249-265`, both lookups return Option).
     it('a package.json without `type` decides nothing', async () => {
         expect(
-            await errorsFor({ '/package.json': '{"name":"app"}', '/a.js': 'export const x = 1;', '/main.js': "import { x } from './a.js';\nexport { x };" }),
+            await errorsFor({
+                '/package.json': '{"name":"app"}',
+                '/a.js': 'export const x = 1;',
+                '/main.js': "import { x } from './a.js';\nexport { x };",
+            }),
         ).toEqual([]);
     });
 
     it('a malformed package.json decides nothing', async () => {
         expect(
-            await errorsFor({ '/package.json': '{ not json', '/a.js': 'export const x = 1;', '/main.js': "import { x } from './a.js';\nexport { x };" }),
+            await errorsFor({
+                '/package.json': '{ not json',
+                '/a.js': 'export const x = 1;',
+                '/main.js': "import { x } from './a.js';\nexport { x };",
+            }),
         ).toEqual([]);
     });
 
@@ -119,11 +133,14 @@ describe('ESM syntax in a CommonJS-declared file', () => {
         // A naive upward walk stops before probing `/package.json`, which would silently miss the
         // single most common layout: a root `"type"` covering sources in subdirectories.
         expect(
-            await errorsFor({
-                '/package.json': '{"type":"module"}',
-                '/src/a.js': 'export const x = 1;',
-                '/src/main.js': "import { x } from './a.js';\nexport { x };",
-            }, '/src/main.js'),
+            await errorsFor(
+                {
+                    '/package.json': '{"type":"module"}',
+                    '/src/a.js': 'export const x = 1;',
+                    '/src/main.js': "import { x } from './a.js';\nexport { x };",
+                },
+                '/src/main.js',
+            ),
         ).toEqual([]);
     });
 
@@ -145,7 +162,8 @@ describe('ESM syntax in a CommonJS-declared file', () => {
 // `return` and `new.target` are legal there and illegal in an ES module. Accepting them everywhere
 // is not neutral — it destroys the very signal CJS kind detection reads (tier 2, §2.1).
 describe('parse goal gates top-level return / new.target', () => {
-    const parseErrs = (src: string, kind?: 'module' | 'commonjs') => parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);
+    const parseErrs = (src: string, kind?: 'module' | 'commonjs') =>
+        parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);
 
     it('rejects top-level return in an ES module', () => {
         expect(parseErrs('return 1;', 'module')).toEqual(['return statement is only allowed inside a function body']);
@@ -180,7 +198,9 @@ describe('parse goal gates top-level return / new.target', () => {
     it('a class static block enables new.target but not return', () => {
         // oxc's asymmetry (`js/function.rs:285` vs `js/statement.rs:710-713`) — hence two counters.
         expect(parseErrs('class C { static { new.target } }', 'module')).toEqual([]);
-        expect(parseErrs('class C { static { return } }', 'module')).toEqual(['return statement is only allowed inside a function body']);
+        expect(parseErrs('class C { static { return } }', 'module')).toEqual([
+            'return statement is only allowed inside a function body',
+        ]);
     });
 
     it('gates top-level await: allowed in a module, not in CommonJS, permissive by default', () => {
@@ -222,9 +242,21 @@ describe('parse goal gates top-level return / new.target', () => {
         // `.cjs` → allowed; `.mjs` → rejected; plain `.js` with no declaration → permissive.
         // Filtered to the PARSE diagnostic: a top-level `return` also classifies the file as
         // CommonJS, which raises the separate "not supported yet" error tested below.
-        expect(parseErrOnly(await errorsFor({ '/a.cjs': `${body}globalThis.x = 1;`, '/main.js': "import './a.cjs';\nexport const y = 1;" }))).toEqual([]);
-        expect(parseErrOnly(await errorsFor({ '/a.mjs': `${body}export const x = 1;`, '/main.js': "import './a.mjs';\nexport const y = 1;" }))).toHaveLength(1);
-        expect(parseErrOnly(await errorsFor({ '/a.js': `${body}export const x = 1;`, '/main.js': "import './a.js';\nexport const y = 1;" }))).toEqual([]);
+        expect(
+            parseErrOnly(
+                await errorsFor({ '/a.cjs': `${body}globalThis.x = 1;`, '/main.js': "import './a.cjs';\nexport const y = 1;" }),
+            ),
+        ).toEqual([]);
+        expect(
+            parseErrOnly(
+                await errorsFor({ '/a.mjs': `${body}export const x = 1;`, '/main.js': "import './a.mjs';\nexport const y = 1;" }),
+            ),
+        ).toHaveLength(1);
+        expect(
+            parseErrOnly(
+                await errorsFor({ '/a.js': `${body}export const x = 1;`, '/main.js': "import './a.js';\nexport const y = 1;" }),
+            ),
+        ).toEqual([]);
         // …and `"type": "module"` makes a plain `.js` strict.
         expect(
             parseErrOnly(
@@ -246,21 +278,33 @@ describe('CommonJS modules are wrapped and interoperate', () => {
     const runCjs = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
         expect(r.errors).toEqual([]);
-        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+        return {
+            code: r.chunks[0].code,
+            ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>,
+        };
     };
 
     it('default-imports `module.exports`', async () => {
-        const { ns } = await runCjs({ '/d.cjs': 'module.exports = { a: 1, b: 2 };', '/main.js': "import d from './d.cjs';\nexport const x = d.a + d.b;" });
+        const { ns } = await runCjs({
+            '/d.cjs': 'module.exports = { a: 1, b: 2 };',
+            '/main.js': "import d from './d.cjs';\nexport const x = d.a + d.b;",
+        });
         expect(ns.x).toBe(3);
     });
 
     it('named-imports an `exports.foo` property', async () => {
-        const { ns } = await runCjs({ '/d.cjs': 'exports.foo = 7;', '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;" });
+        const { ns } = await runCjs({
+            '/d.cjs': 'exports.foo = 7;',
+            '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;",
+        });
         expect(ns.x).toBe(7);
     });
 
     it('namespace-imports a CommonJS module', async () => {
-        const { ns } = await runCjs({ '/d.cjs': 'exports.a = 1; exports.b = 2;', '/main.js': "import * as m from './d.cjs';\nexport const x = [m.a, m.b];" });
+        const { ns } = await runCjs({
+            '/d.cjs': 'exports.a = 1; exports.b = 2;',
+            '/main.js': "import * as m from './d.cjs';\nexport const x = [m.a, m.b];",
+        });
         expect(ns.x).toEqual([1, 2]);
     });
 
@@ -275,7 +319,10 @@ describe('CommonJS modules are wrapped and interoperate', () => {
     });
 
     it('handles a bare function export', async () => {
-        const { ns } = await runCjs({ '/d.cjs': 'module.exports = function(){ return 4 };', '/main.js': "import d from './d.cjs';\nexport const x = d();" });
+        const { ns } = await runCjs({
+            '/d.cjs': 'module.exports = function(){ return 4 };',
+            '/main.js': "import d from './d.cjs';\nexport const x = d();",
+        });
         expect(ns.x).toBe(4);
     });
 
@@ -291,14 +338,23 @@ describe('CommonJS modules are wrapped and interoperate', () => {
 
     it('binds only the wrapper params the body uses', async () => {
         // rolldown emits `(exports)` for a module that never mentions `module` (cjs.md §4.4).
-        const { code } = await runCjs({ '/d.cjs': 'exports.foo = 1;', '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;" });
+        const { code } = await runCjs({
+            '/d.cjs': 'exports.foo = 1;',
+            '/main.js': "import { foo } from './d.cjs';\nexport const x = foo;",
+        });
         expect(code).toMatch(/__commonJS\(\(exports\) =>/);
-        const withModule = await runCjs({ '/d.cjs': 'module.exports = { foo: 1 };', '/main.js': "import d from './d.cjs';\nexport const x = d.foo;" });
+        const withModule = await runCjs({
+            '/d.cjs': 'module.exports = { foo: 1 };',
+            '/main.js': "import d from './d.cjs';\nexport const x = d.foo;",
+        });
         expect(withModule.code).toMatch(/__commonJS\(\(exports, module\) =>/);
     });
 
     it('marks the wrapper pure so an unused one can be dropped', async () => {
-        const { code } = await runCjs({ '/d.cjs': 'module.exports = { a: 1 };', '/main.js': "import d from './d.cjs';\nexport const x = d.a;" });
+        const { code } = await runCjs({
+            '/d.cjs': 'module.exports = { a: 1 };',
+            '/main.js': "import d from './d.cjs';\nexport const x = d.a;",
+        });
         expect(code).toContain('/* @__PURE__ */ __commonJS');
     });
 
@@ -327,7 +383,10 @@ describe('mangling a CJS-wrapped module', () => {
     const buildMin = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [], output: { minify: true } });
         expect(r.errors).toEqual([]);
-        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+        return {
+            code: r.chunks[0].code,
+            ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>,
+        };
     };
 
     it('mangles the wrapped body instead of leaving it verbatim', async () => {
@@ -338,7 +397,8 @@ describe('mangling a CJS-wrapped module', () => {
                 'function longFnGamma(){ return longNameAlpha + longNameBeta }',
                 'module.exports = { v: longFnGamma() };',
             ].join('\n'),
-            '/main.js': "import d from './dep.cjs';\nfunction outerHelper(q){ return q * 2 }\nexport const x = [d.v, outerHelper(3)];",
+            '/main.js':
+                "import d from './dep.cjs';\nfunction outerHelper(q){ return q * 2 }\nexport const x = [d.v, outerHelper(3)];",
         });
         expect(ns.x).toEqual([30, 6]);
         expect(code).not.toContain('longNameAlpha');
@@ -387,7 +447,10 @@ describe('require() between CommonJS modules', () => {
     const runCjs = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
         expect(r.errors).toEqual([]);
-        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+        return {
+            code: r.chunks[0].code,
+            ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>,
+        };
     };
 
     it('lowers a require to the wrapper call', async () => {
@@ -464,15 +527,25 @@ describe('require() that cannot be resolved statically', () => {
     });
 
     it('rejects a concatenated specifier', async () => {
-        expect((await errorsFor({ '/d.cjs': 'module.exports = require("./" + name);', '/main.js': MAIN }))[0]).toMatch(/not a string literal/);
+        expect((await errorsFor({ '/d.cjs': 'module.exports = require("./" + name);', '/main.js': MAIN }))[0]).toMatch(
+            /not a string literal/,
+        );
     });
 
     it('reports the wrong arity distinctly', async () => {
-        expect((await errorsFor({ '/d.cjs': 'module.exports = require();', '/main.js': MAIN }))[0]).toMatch(/it takes 0 arguments/);
+        expect((await errorsFor({ '/d.cjs': 'module.exports = require();', '/main.js': MAIN }))[0]).toMatch(
+            /it takes 0 arguments/,
+        );
     });
 
     it('does not fire for a literal require', async () => {
-        expect(await errorsFor({ '/i.cjs': 'module.exports = 1;', '/d.cjs': "module.exports = require('./i.cjs');", '/main.js': MAIN })).toEqual([]);
+        expect(
+            await errorsFor({
+                '/i.cjs': 'module.exports = 1;',
+                '/d.cjs': "module.exports = require('./i.cjs');",
+                '/main.js': MAIN,
+            }),
+        ).toEqual([]);
     });
 
     it('does not fire for a LOCAL function named require', async () => {
@@ -492,7 +565,11 @@ describe('require() that cannot be resolved statically', () => {
 // `typeof this === "object"` silently took the wrong branch — pattern 10, "must work".
 describe('top-level `this` in a CommonJS module', () => {
     const runDep = async (dep: string) => {
-        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/d.cjs': dep, '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }), external: [] });
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/d.cjs': dep, '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }),
+            external: [],
+        });
         expect(r.errors).toEqual([]);
         return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
     };
@@ -510,7 +587,9 @@ describe('top-level `this` in a CommonJS module', () => {
     });
 
     it('leaves `this` alone inside a function, which DOES rebind it', async () => {
-        expect((await runDep('function f(){ return this === undefined }\nmodule.exports = { v: f.call(undefined) ? 42 : 0 };')).x).toBe(42);
+        expect(
+            (await runDep('function f(){ return this === undefined }\nmodule.exports = { v: f.call(undefined) ? 42 : 0 };')).x,
+        ).toBe(42);
     });
 
     it('leaves a method`s own `this` alone', async () => {
@@ -522,14 +601,20 @@ describe('top-level `this` in a CommonJS module', () => {
     });
 
     it('leaves an arrow nested inside a function bound to that function', async () => {
-        expect((await runDep('function f(){ const g = () => this; return g() }\nmodule.exports = { v: f.call({ k: 42 }).k };')).x).toBe(42);
+        expect(
+            (await runDep('function f(){ const g = () => this; return g() }\nmodule.exports = { v: f.call({ k: 42 }).k };')).x,
+        ).toBe(42);
     });
 
     it('wraps a module whose ONLY CommonJS signal is top-level `this`', async () => {
         // No `module`/`exports` reference and no top-level return — tier 3 classifies it CommonJS by
         // extension, but without counting `this` it was never wrapped, and the import failed with
         // "'default' is not exported".
-        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/d.cjs': 'this.v = 42;', '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }), external: [] });
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/d.cjs': 'this.v = 42;', '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }),
+            external: [],
+        });
         expect(r.errors).toEqual([]);
         expect(r.chunks[0].code).toContain('__commonJS');
     });
@@ -547,34 +632,63 @@ describe('re-exporting from a CommonJS module', () => {
     const D = { '/d.cjs': 'exports.a = 1; exports.b = 2;' };
 
     it('forwards a named export', async () => {
-        expect((await runFiles({ ...D, '/b.js': "export { a } from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" })).x).toBe(1);
+        expect(
+            (
+                await runFiles({
+                    ...D,
+                    '/b.js': "export { a } from './d.cjs';",
+                    '/main.js': "import { a } from './b.js';\nexport const x = a;",
+                })
+            ).x,
+        ).toBe(1);
     });
 
     it('forwards a renamed export', async () => {
-        expect((await runFiles({ ...D, '/b.js': "export { a as z } from './d.cjs';", '/main.js': "import { z } from './b.js';\nexport const x = z;" })).x).toBe(1);
+        expect(
+            (
+                await runFiles({
+                    ...D,
+                    '/b.js': "export { a as z } from './d.cjs';",
+                    '/main.js': "import { z } from './b.js';\nexport const x = z;",
+                })
+            ).x,
+        ).toBe(1);
     });
 
     it('forwards `default`', async () => {
         expect(
-            (await runFiles({ '/d.cjs': 'module.exports = 9;', '/b.js': "export { default } from './d.cjs';", '/main.js': "import v from './b.js';\nexport const x = v;" }))
-                .x,
+            (
+                await runFiles({
+                    '/d.cjs': 'module.exports = 9;',
+                    '/b.js': "export { default } from './d.cjs';",
+                    '/main.js': "import v from './b.js';\nexport const x = v;",
+                })
+            ).x,
         ).toBe(9);
     });
 
     it('forwards a namespace', async () => {
         expect(
-            (await runFiles({ ...D, '/b.js': "export * as ns from './d.cjs';", '/main.js': "import { ns } from './b.js';\nexport const x = [ns.a, ns.b];" })).x,
+            (
+                await runFiles({
+                    ...D,
+                    '/b.js': "export * as ns from './d.cjs';",
+                    '/main.js': "import { ns } from './b.js';\nexport const x = [ns.a, ns.b];",
+                })
+            ).x,
         ).toEqual([1, 2]);
     });
 
     it('forwards through two hops of barrel', async () => {
         expect(
-            (await runFiles({
-                ...D,
-                '/b.js': "export { a } from './d.cjs';",
-                '/c.js': "export { a } from './b.js';",
-                '/main.js': "import { a } from './c.js';\nexport const x = a;",
-            })).x,
+            (
+                await runFiles({
+                    ...D,
+                    '/b.js': "export { a } from './d.cjs';",
+                    '/c.js': "export { a } from './b.js';",
+                    '/main.js': "import { a } from './c.js';\nexport const x = a;",
+                })
+            ).x,
         ).toBe(1);
     });
 
@@ -584,7 +698,13 @@ describe('re-exporting from a CommonJS module', () => {
         // module's interop namespace, which is esbuild's `importDynamicFallback` — "rewrite the
         // import to a property access" (`linker.go:2704-2718`).
         expect(
-            (await runFiles({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import { a } from './b.js';\nexport const x = a;" })).x,
+            (
+                await runFiles({
+                    ...D,
+                    '/b.js': "export * from './d.cjs';",
+                    '/main.js': "import { a } from './b.js';\nexport const x = a;",
+                })
+            ).x,
         ).toBe(1);
     });
 
@@ -592,7 +712,11 @@ describe('re-exporting from a CommonJS module', () => {
         // The one name the star never carries — in any bundler, and in Node. It must keep reporting.
         const r = await bundle({
             entry: '/main.js',
-            fs: createMemoryFs({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import d from './b.js';\nexport const x = d;" }),
+            fs: createMemoryFs({
+                ...D,
+                '/b.js': "export * from './d.cjs';",
+                '/main.js': "import d from './b.js';\nexport const x = d;",
+            }),
             external: [],
         });
         // Reported against `/b.js`, which is the module that genuinely does not export it — not
@@ -608,7 +732,10 @@ describe('require() of an ES module', () => {
     const runFiles = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
         expect(r.errors).toEqual([]);
-        return { code: r.chunks[0].code, ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown> };
+        return {
+            code: r.chunks[0].code,
+            ns: (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>,
+        };
     };
 
     it('hands the requiring code a CommonJS view of the ESM exports', async () => {
@@ -747,7 +874,10 @@ describe('an undecided module is promoted by how it is imported', () => {
         // The other half of the rule: an `import` promotes to Esm, so no CommonJS wrapper appears.
         const r = await bundle({
             entry: '/main.js',
-            fs: createMemoryFs({ '/e.js': 'globalThis.__imported = 1;', '/main.js': "import './e.js';\nexport const x = globalThis.__imported;" }),
+            fs: createMemoryFs({
+                '/e.js': 'globalThis.__imported = 1;',
+                '/main.js': "import './e.js';\nexport const x = globalThis.__imported;",
+            }),
             external: [],
         });
         expect(r.errors).toEqual([]);

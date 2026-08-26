@@ -36,7 +36,10 @@ describe('CommonJS entry points', () => {
     });
 
     it('a CommonJS module reached as a DYNAMIC entry resolves', async () => {
-        const r = await build({ '/cjs.js': "module.exports = 'cjs';", '/main.js': "export default import('./cjs.js');" }, '/main.js');
+        const r = await build(
+            { '/cjs.js': "module.exports = 'cjs';", '/main.js': "export default import('./cjs.js');" },
+            '/main.js',
+        );
         const { ns, dispose } = await runChunks(r.chunks, 'main.js');
         try {
             expect(((await ns.default) as { default: unknown }).default).toBe('cjs');
@@ -62,7 +65,10 @@ describe('CommonJS entry points', () => {
                     "const again = require('./main2.js');",
                     'module.exports = { same: main2 === again, n: main2.n };',
                 ].join('\n'),
-                '/main2.js': ['globalThis.__cjsEntryN = (globalThis.__cjsEntryN ?? 0) + 1;', 'module.exports = { n: globalThis.__cjsEntryN };'].join('\n'),
+                '/main2.js': [
+                    'globalThis.__cjsEntryN = (globalThis.__cjsEntryN ?? 0) + 1;',
+                    'module.exports = { n: globalThis.__cjsEntryN };',
+                ].join('\n'),
             },
             ['/main.js', '/main2.js'],
         );
@@ -84,10 +90,10 @@ describe('CommonJS entry points', () => {
 // entry module's surface from the chunk that holds it. rolldown emits exactly this.
 describe('two entries in an import cycle each get an output file', () => {
     it('CommonJS — the facade imports the wrapper and calls it', async () => {
-        const r = await build({ '/a.js': "import './b.js';\nmodule.exports = 'a';", '/b.js': "import './a.js';\nmodule.exports = 'b';" }, [
-            '/a.js',
-            '/b.js',
-        ]);
+        const r = await build(
+            { '/a.js': "import './b.js';\nmodule.exports = 'a';", '/b.js': "import './a.js';\nmodule.exports = 'b';" },
+            ['/a.js', '/b.js'],
+        );
         expect(r.chunks.map((c) => c.fileName).sort()).toEqual(['a.js', 'b.js']);
         expect(r.chunks.find((c) => c.fileName === 'b.js')!.code).toMatch(/import \{ require_b \} from '\.\/a\.js';/);
         expect(await importChunk(r, 'a.js')).toBe('a');
@@ -95,10 +101,10 @@ describe('two entries in an import cycle each get an output file', () => {
     });
 
     it('ES modules — same collapse, same fix', async () => {
-        const r = await build({ '/a.js': "import './b.js';\nexport const a = 1;", '/b.js': "import './a.js';\nexport const b = 2;" }, [
-            '/a.js',
-            '/b.js',
-        ]);
+        const r = await build(
+            { '/a.js': "import './b.js';\nexport const a = 1;", '/b.js': "import './a.js';\nexport const b = 2;" },
+            ['/a.js', '/b.js'],
+        );
         expect(r.chunks.map((c) => c.fileName).sort()).toEqual(['a.js', 'b.js']);
         const { ns, dispose } = await runChunks(r.chunks, 'b.js');
         try {
@@ -110,7 +116,10 @@ describe('two entries in an import cycle each get an output file', () => {
 
     it('non-cyclic entries are unaffected', async () => {
         // Guard: the facade must only appear when two static entries genuinely share a chunk.
-        const r = await build({ '/a.js': "import { b } from './b.js';\nexport const a = b + 1;", '/b.js': 'export const b = 2;' }, ['/a.js', '/b.js']);
+        const r = await build(
+            { '/a.js': "import { b } from './b.js';\nexport const a = b + 1;", '/b.js': 'export const b = 2;' },
+            ['/a.js', '/b.js'],
+        );
         expect(r.chunks.map((c) => c.fileName).sort()).toEqual(['a.js', 'b.js']);
         expect(r.chunks.every((c) => c.code.trim() !== '')).toBe(true);
     });

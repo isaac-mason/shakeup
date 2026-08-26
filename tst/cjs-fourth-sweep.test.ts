@@ -51,7 +51,11 @@ describe('exports kind comes from the source, not the surviving AST', () => {
 
     it('a module with neither is still `none`, then promoted by how it is imported', async () => {
         // D3's link-stage promotion must keep working — it is what the tier-4 `none` verdict feeds.
-        const r = await build({ '/e.js': 'globalThis.__q = 1;', '/d.cjs': "module.exports = require('./e.js');", '/main.js': "import d from './d.cjs';\nexport const x = d;" });
+        const r = await build({
+            '/e.js': 'globalThis.__q = 1;',
+            '/d.cjs': "module.exports = require('./e.js');",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
         expect(r.graph!.modules.find((m) => m.id === '/e.js')!.exportsKind).toBe('commonjs');
     });
 });
@@ -64,8 +68,10 @@ describe('the __esm error cache', () => {
         // same error every time. Asserted by the counter in the message: two `boom1`, not `boom1`
         // then `boom2`, and not a single entry.
         const r = await build({
-            '/e.js': "globalThis.__stickyN = (globalThis.__stickyN ?? 0) + 1;\nthrow new Error('boom' + globalThis.__stickyN);\nexport const a = 1;",
-            '/d.cjs': "const out = [];\nfor (let i = 0; i < 2; i++) { try { require('./e.js') } catch (e) { out.push(e.message) } }\nmodule.exports = out;",
+            '/e.js':
+                "globalThis.__stickyN = (globalThis.__stickyN ?? 0) + 1;\nthrow new Error('boom' + globalThis.__stickyN);\nexport const a = 1;",
+            '/d.cjs':
+                "const out = [];\nfor (let i = 0; i < 2; i++) { try { require('./e.js') } catch (e) { out.push(e.message) } }\nmodule.exports = out;",
             '/main.js': "import d from './d.cjs';\nexport const x = d;",
         });
         expect(r.code).toMatch(/__esm\(/);
@@ -89,7 +95,11 @@ describe('fourth sweep — configurations verified correct', () => {
 
     it('mode-2 alongside an external star source', async () => {
         const r = await build(
-            { '/d.cjs': 'module.exports = { a: 1 };', '/b.js': "export * from './d.cjs';\nexport * from 'ext';", '/main.js': "import { a } from './b.js';\nexport const x = a;" },
+            {
+                '/d.cjs': 'module.exports = { a: 1 };',
+                '/b.js': "export * from './d.cjs';\nexport * from 'ext';",
+                '/main.js': "import { a } from './b.js';\nexport const x = a;",
+            },
             { external: ['ext'] },
         );
         expect(r.code).toBeTruthy();
@@ -99,7 +109,10 @@ describe('fourth sweep — configurations verified correct', () => {
         const r = await bundle({
             input: ['/d.cjs', '/main.js'],
             external: [],
-            fs: createMemoryFs({ '/d.cjs': 'module.exports = { k: 7 };', '/main.js': "import d from './d.cjs';\nexport const x = d.k;" }),
+            fs: createMemoryFs({
+                '/d.cjs': 'module.exports = { k: 7 };',
+                '/main.js': "import d from './d.cjs';\nexport const x = d.k;",
+            }),
         });
         expect(r.errors).toEqual([]);
         const entryNames = r.chunks.filter((c) => c.isEntry).map((c) => c.fileName);
@@ -113,9 +126,12 @@ describe('fourth sweep — configurations verified correct', () => {
     });
 
     it('a banner carrying its own sourceMappingURL does not suppress ours', async () => {
-        const r = await build({ '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" }, {
-            output: { sourcemap: true, banner: '//# sourceMappingURL=fake.map' },
-        });
+        const r = await build(
+            { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
+            {
+                output: { sourcemap: true, banner: '//# sourceMappingURL=fake.map' },
+            },
+        );
         // Ours is emitted LAST, which is the one a consumer honours.
         expect(r.code.trimEnd().endsWith('//# sourceMappingURL=main.js.map')).toBe(true);
     });
@@ -143,8 +159,22 @@ describe('fifth sweep', () => {
     });
 
     it('require of a module a plugin marked side-effect-free', async () => {
-        const plugin = { name: 'se', resolveId: (_c: unknown, spec: string) => (spec === './o.cjs' ? { id: '/o.cjs', moduleSideEffects: false } : null) };
-        expect((await run({ '/o.cjs': 'module.exports = 3;', '/d.cjs': "module.exports = require('./o.cjs') * 2;", '/main.js': "import d from './d.cjs';\nexport const x = d;" }, { plugins: [plugin] })).value).toBe(6);
+        const plugin = {
+            name: 'se',
+            resolveId: (_c: unknown, spec: string) => (spec === './o.cjs' ? { id: '/o.cjs', moduleSideEffects: false } : null),
+        };
+        expect(
+            (
+                await run(
+                    {
+                        '/o.cjs': 'module.exports = 3;',
+                        '/d.cjs': "module.exports = require('./o.cjs') * 2;",
+                        '/main.js': "import d from './d.cjs';\nexport const x = d;",
+                    },
+                    { plugins: [plugin] },
+                )
+            ).value,
+        ).toBe(6);
     });
 
     it('mode-2 × preserveModules × minify together', async () => {
@@ -161,7 +191,18 @@ describe('fifth sweep', () => {
     });
 
     it('import() of a mode-2 module with codeSplitting off', async () => {
-        expect((await run({ '/d.cjs': 'module.exports = { a: 1 };', '/b.js': "export * from './d.cjs';", '/main.js': "export const x = import('./b.js').then((m) => m.a);" }, { output: { codeSplitting: false } })).value).toBe(1);
+        expect(
+            (
+                await run(
+                    {
+                        '/d.cjs': 'module.exports = { a: 1 };',
+                        '/b.js': "export * from './d.cjs';",
+                        '/main.js': "export const x = import('./b.js').then((m) => m.a);",
+                    },
+                    { output: { codeSplitting: false } },
+                )
+            ).value,
+        ).toBe(1);
     });
 
     it('one CommonJS file reached through two spellings of its path is one instance', async () => {

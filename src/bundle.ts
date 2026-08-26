@@ -1,3 +1,5 @@
+import { resetInferredPure } from './analysis/effects';
+import { stampPureCallsGraph } from './analysis/purity';
 import { SYM, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
@@ -5,11 +7,11 @@ import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
 import {
     externalKey,
     type Graph,
-    NAME_DEFAULT,
-    NAME_NAMESPACE,
     type ImportBind,
     type Linked,
     type Module,
+    NAME_DEFAULT,
+    NAME_NAMESPACE,
     type ParseCache,
     type ParseStats,
     packRef,
@@ -17,7 +19,6 @@ import {
     refSym,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
-import { isAnyRequireCall, isRequireCall } from './scan';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,
@@ -33,25 +34,24 @@ import {
     replaceSinglePlaceholder,
     resolveMinify,
 } from './output-options';
+import { runCompress } from './passes/compress';
+import { inlineCrossModule } from './passes/optimize/inline-functions';
 import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
 import type { GraphOptions } from './resolve';
-import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan';
+import { buildGraph, hashSource, isAnyRequireCall, isRequireCall, resolveEmittedFileName, toModuleInfo } from './scan';
 import {
     buildLineTable,
     encodeMappings,
+    indentMappings,
     inlineSourceMapComment,
-    indentMappings, joinParts,
+    joinParts,
     type Part,
     type SourceMap,
     trimMappings,
 } from './sourcemap';
-import { resetInferredPure } from './analysis/effects';
-import { stampPureCallsGraph } from './analysis/purity';
-import { runCompress } from './passes/compress';
-import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
 import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
@@ -89,9 +89,7 @@ export type AdvancedChunksOptions = {
 
 /** manualChunks — Rollup-compatible: a fn (id→name) or an object map (name→ids). Normalized
  *  into the same {@link ResolvedGroup} model as advancedChunks. */
-export type ManualChunks =
-    | ((id: string, meta: ChunkMeta) => string | null | undefined)
-    | Record<string, string[]>;
+export type ManualChunks = ((id: string, meta: ChunkMeta) => string | null | undefined) | Record<string, string[]>;
 
 /** Output-shaping options plus naming/hash/sourcemap (from {@link OutputOptionsNaming}). */
 export type OutputOptions = OutputOptionsNaming & {
@@ -619,7 +617,11 @@ function renderNamespaceObject(
             // undercount there (stale refs after a lowering pass) would silently reintroduce the
             // exact miscompile above, whereas a symbol's declaration kind cannot go stale. The
             // trade is a getter for a never-reassigned `export let`, which is rare and harmless.
-            entries.push(isImmutableBind(linked, bind) ? `${key}${tight ? ':' : ': '}${value}` : `get ${key}()${tight ? '{' : ' { '}return ${value};${tight ? '}' : ' }'}`);
+            entries.push(
+                isImmutableBind(linked, bind)
+                    ? `${key}${tight ? ':' : ': '}${value}`
+                    : `get ${key}()${tight ? '{' : ' { '}return ${value};${tight ? '}' : ' }'}`,
+            );
         }
     }
     const inner = entries.join(clauseSep(tight));
@@ -694,7 +696,8 @@ const CJS_HELPERS: Record<string, string> = {
     __defProp: 'var __defProp = Object.defineProperty;',
     __create: 'var __create = Object.create;',
     __getProtoOf: 'var __getProtoOf = Object.getPrototypeOf;',
-    __commonJS: 'var __commonJS = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);',
+    __commonJS:
+        'var __commonJS = (cb, mod) => () => (mod || (cb((mod = { exports: {} }).exports, mod), cb = null), mod.exports);',
     // rolldown's `__esmMin` verbatim (`runtime/runtime-base.js:17-23`). `fn = 0` after the first
     // call makes it run ONCE; the `err` cache makes an evaluation failure STICKY, which the ESM
     // spec requires — a module that threw must throw the same error on every later access, not
@@ -738,7 +741,8 @@ const CJS_HELPERS: Record<string, string> = {
         '    return target;',
         '};',
     ].join('\n'),
-    __reExport: "var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, 'default'), secondTarget && __copyProps(secondTarget, mod, 'default'));",
+    __reExport:
+        "var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, 'default'), secondTarget && __copyProps(secondTarget, mod, 'default'));",
     __toCommonJS: [
         'var __toCommonJS = (mod) =>',
         "    __hasOwnProp.call(mod, 'module.exports')",
@@ -770,7 +774,7 @@ const CJS_HELPERS: Record<string, string> = {
  *  issues: `typeof require` must be `'function'` even off Node (esbuild #1202) — hence a function
  *  target — and it must pick up a `require` that appears LATER, including through property access
  *  (esbuild #1614) — hence the Proxy rather than a captured value. */
-const REQUIRE_SHIM_NODE = "var __require = /* @__PURE__ */ (() => createRequire(import.meta.url))();";
+const REQUIRE_SHIM_NODE = 'var __require = /* @__PURE__ */ (() => createRequire(import.meta.url))();';
 const REQUIRE_SHIM_NODE_IMPORT = "import { createRequire } from 'node:module';";
 const REQUIRE_SHIM = [
     'var __require = /* @__PURE__ */ ((x) =>',
@@ -780,7 +784,7 @@ const REQUIRE_SHIM = [
     "          ? new Proxy(x, { get: (a, b) => (typeof require !== 'undefined' ? require : a)[b] })",
     '          : x)(function (x) {',
     "    if (typeof require !== 'undefined') return require.apply(this, arguments);",
-    '    throw Error(\'Dynamic require of "\' + x + \'" is not supported\');',
+    "    throw Error('Dynamic require of \"' + x + '\" is not supported');",
     '});',
 ].join('\n');
 
@@ -803,7 +807,12 @@ export function helpersNeededBy(graph: Graph, linked: Linked, chunk: Chunk): Set
     // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
     const needsToCjs = has((i) =>
         graph.modules[i].importRecords.some(
-            (r) => r.kind === 'require' && !r.external && r.resolved >= 0 && !linked.cjsWrap.has(r.resolved) && linked.namespaceOf.has(r.resolved),
+            (r) =>
+                r.kind === 'require' &&
+                !r.external &&
+                r.resolved >= 0 &&
+                !linked.cjsWrap.has(r.resolved) &&
+                linked.namespaceOf.has(r.resolved),
         ),
     );
     // A lazily-initialised module (§7.20/D1) carries its own `__esm` — and it is the PRODUCER chunk
@@ -819,10 +828,30 @@ export function helpersNeededBy(graph: Graph, linked: Linked, chunk: Chunk): Set
 }
 
 /** Helpers namespace mode 2 needs, in dependency order. */
-const EXPORT_ALL_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__exportAll', '__reExport', '__toESM'];
+const EXPORT_ALL_DEPS = [
+    '__getOwnPropNames',
+    '__getOwnPropDesc',
+    '__hasOwnProp',
+    '__defProp',
+    '__create',
+    '__getProtoOf',
+    '__copyProps',
+    '__exportAll',
+    '__reExport',
+    '__toESM',
+];
 
 /** Helpers `__toESM` needs, in dependency order. */
-const TO_ESM_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__toESM'];
+const TO_ESM_DEPS = [
+    '__getOwnPropNames',
+    '__getOwnPropDesc',
+    '__hasOwnProp',
+    '__defProp',
+    '__create',
+    '__getProtoOf',
+    '__copyProps',
+    '__toESM',
+];
 
 /** Helpers `__toCommonJS` needs, in dependency order. */
 const TO_CJS_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__copyProps', '__toCommonJS'];
@@ -1053,7 +1082,21 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         mrc.namesHash = namesHash;
     }
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
-        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, min.whitespace, naming, pathToChunk, prelim, inc?.mod ?? null);
+        renderChunk(
+            graph,
+            linked,
+            chunkGraph,
+            chunk,
+            ci,
+            shaken,
+            warnings,
+            want,
+            min.whitespace,
+            naming,
+            pathToChunk,
+            prelim,
+            inc?.mod ?? null,
+        );
 
     let outputChunks: OutputChunk[];
     let assets: OutputAsset[];
@@ -1322,7 +1365,8 @@ function renderChunk(
         const path = pathToChunk(producerChunk);
         // A `*` specifier is a NATIVE namespace import (chunk-graph `nsNative`): the host builds the
         // Module namespace, so it gets its own statement rather than joining the named clause.
-        for (const s of specs) if (s.imported === NAME_NAMESPACE) crossImportLines.push(importStmt(`* as ${s.local}`, path, tight));
+        for (const s of specs)
+            if (s.imported === NAME_NAMESPACE) crossImportLines.push(importStmt(`* as ${s.local}`, path, tight));
         const named = specs.filter((s) => s.imported !== NAME_NAMESPACE);
         if (named.length === 0) continue;
         const parts = named.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
@@ -1415,7 +1459,9 @@ function renderChunk(
     }
     const exportInner = exportSpecs.join(clauseSep(tight));
     const exportLine = exportSpecs.length > 0 ? (tight ? `export{${exportInner}};` : `export { ${exportInner} };`) : null;
-    const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => (tight ? `export*from'${spec}';` : `export * from '${spec}';`));
+    const starLines = suppressEntryExports
+        ? []
+        : entryStarSpecs.map((spec) => (tight ? `export*from'${spec}';` : `export * from '${spec}';`));
 
     // CommonJS runtime helpers. Which ones a chunk needs is decided by `helpersNeededBy`, shared
     // with chunk-graph so the SHARED-RUNTIME decision (below) uses the same answer the render does.
@@ -1436,7 +1482,12 @@ function renderChunk(
     }
 
     // Empty non-entry chunk with nothing to emit: drop it.
-    const isEmpty = moduleTexts.length === 0 && exportLine === null && cjsEntryDefault === null && starLines.length === 0 && helperLines.length === 0;
+    const isEmpty =
+        moduleTexts.length === 0 &&
+        exportLine === null &&
+        cjsEntryDefault === null &&
+        starLines.length === 0 &&
+        helperLines.length === 0;
     if (isEmpty && !chunk.isEntry) return null;
 
     // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. Order:
@@ -1541,8 +1592,7 @@ const ENGINE_GROUP_DEFAULTS: GroupDefaults = {
  *  to a predicate (string → substring match, RegExp → `re.test`, fn → threaded) or `null`. */
 function normalizeGroup(g: CodeSplittingGroup, index: number, defaults: GroupDefaults, meta: ChunkMeta): ResolvedGroup {
     const gName = g.name;
-    const nameFn: (id: string) => string | null =
-        typeof gName === 'function' ? (id) => gName(id, meta) : () => gName;
+    const nameFn: (id: string) => string | null = typeof gName === 'function' ? (id) => gName(id, meta) : () => gName;
     let testFn: ((id: string) => boolean) | null = null;
     if (typeof g.test === 'string') {
         const t = g.test;
@@ -1622,10 +1672,7 @@ function resolveChunkOptions(
         if (typeof mc === 'function') {
             // fn form → one group whose `name` is the fn; deps NOT pulled in (Rollup semantics:
             // only the modules the fn names land in the chunk).
-            add(
-                { name: (id, m) => mc(id, m) ?? null, includeDependenciesRecursively: false },
-                ENGINE_GROUP_DEFAULTS,
-            );
+            add({ name: (id, m) => mc(id, m) ?? null, includeDependenciesRecursively: false }, ENGINE_GROUP_DEFAULTS);
         } else {
             // object map { chunkName: [ids] } → one group per entry; listed modules + their deps
             // land in the chunk (Rollup semantics → includeDependenciesRecursively: true).

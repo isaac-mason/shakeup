@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { runChunks } from './exec-helpers.ts';
 import type { Platform } from '../src/resolve.ts';
+import { runChunks } from './exec-helpers.ts';
 
 // cjs.md D5 / Track 5 — the CommonJS runtime helpers used to be inlined into EVERY chunk that needed
 // them. Measured on a code-split CommonJS build: six identical copies of the helper set across seven
@@ -36,7 +36,8 @@ const run = async (files: Record<string, string>, opts: Record<string, unknown> 
     }
 };
 
-const helperCopies = (chunks: { code: string }[], name: string) => chunks.reduce((n, c) => n + (c.code.match(new RegExp(`var ${name} =`, 'g')) ?? []).length, 0);
+const helperCopies = (chunks: { code: string }[], name: string) =>
+    chunks.reduce((n, c) => n + (c.code.match(new RegExp(`var ${name} =`, 'g')) ?? []).length, 0);
 
 describe('the shared runtime chunk', () => {
     it('defines each helper once and every consumer imports it', async () => {
@@ -52,19 +53,27 @@ describe('the shared runtime chunk', () => {
     it('is NOT minted for a single consumer', async () => {
         // One consumer would pay an import statement and a second file to save one helper set. The
         // single-chunk path has to stay byte-identical to what it was.
-        const { value, chunks } = await run({ '/c.cjs': 'module.exports = { k: 7 };', '/main.js': "import c from './c.cjs';\nexport const x = c.k;" });
+        const { value, chunks } = await run({
+            '/c.cjs': 'module.exports = { k: 7 };',
+            '/main.js': "import c from './c.cjs';\nexport const x = c.k;",
+        });
         expect(value).toBe(7);
         expect(chunks).toHaveLength(1);
         expect(chunks[0].code).toContain('var __toESM =');
     });
 
     it('is not minted for a bundle with no CommonJS at all', async () => {
-        const { chunks } = await run({ '/a.js': 'export const a = 1;', '/main.js': "export const x = import('./a.js').then((m) => m.a);" });
+        const { chunks } = await run({
+            '/a.js': 'export const a = 1;',
+            '/main.js': "export const x = import('./a.js').then((m) => m.a);",
+        });
         expect(chunks.some((c) => c.fileName.includes('runtime'))).toBe(false);
     });
 
     it('survives hashed filenames', async () => {
-        const { value, chunks } = await run(TWO_CONSUMERS, { output: { entryFileNames: '[name]-[hash].js', chunkFileNames: '[name]-[hash].js' } });
+        const { value, chunks } = await run(TWO_CONSUMERS, {
+            output: { entryFileNames: '[name]-[hash].js', chunkFileNames: '[name]-[hash].js' },
+        });
         expect(value).toEqual([1, 2]);
         expect(chunks.some((c) => /runtime-[A-Za-z0-9_-]+\.js/.test(c.fileName))).toBe(true);
     });
@@ -81,7 +90,8 @@ describe('the shared runtime chunk', () => {
             {
                 '/a.cjs': 'module.exports = typeof require;',
                 '/b.cjs': 'module.exports = typeof require.resolve;',
-                '/main.js': "export const x = Promise.all([import('./a.cjs'), import('./b.cjs')]).then((a) => a.map((m) => m.default));",
+                '/main.js':
+                    "export const x = Promise.all([import('./a.cjs'), import('./b.cjs')]).then((a) => a.map((m) => m.default));",
             },
             { platform: 'node' as Platform },
         );
@@ -92,7 +102,11 @@ describe('the shared runtime chunk', () => {
 
     it('serves mode-2 namespaces across chunks', async () => {
         const { value } = await run(
-            { '/d.cjs': 'module.exports = { a: 1, b: 2 };', '/b.js': "export * from './d.cjs';", '/main.js': "import * as ns from './b.js';\nexport const x = [ns.a, ns.b];" },
+            {
+                '/d.cjs': 'module.exports = { a: 1, b: 2 };',
+                '/b.js': "export * from './d.cjs';",
+                '/main.js': "import * as ns from './b.js';\nexport const x = [ns.a, ns.b];",
+            },
             { output: { preserveModules: true } },
         );
         expect(value).toEqual([1, 2]);

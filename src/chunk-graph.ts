@@ -1,8 +1,8 @@
-import { deconflictChunk } from './deconflict';
-import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
 import { helpersNeededBy } from './bundle';
+import { deconflictChunk } from './deconflict';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 import { finalNameOf, reprName } from './link';
+import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
 export type CrossImport = { imported: string; local: string };
@@ -585,10 +585,12 @@ function wireAndDeconflict(
             for (const rec of mod.importRecords) {
                 if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
                 const wrapRef = linked.cjsWrap.get(rec.resolved);
-                if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: wrapRef });
+                if (wrapRef !== undefined)
+                    wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: wrapRef });
                 for (const map of [linked.cjsNamespace, linked.cjsNamespaceNode]) {
                     const nsRef = map.get(rec.resolved);
-                    if (nsRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
+                    if (nsRef !== undefined)
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
                 }
                 // Requiring an ES MODULE reads its namespace object and — when the target is lazy —
                 // calls its `__esm` init. Neither is a named import either, and across a chunk
@@ -597,7 +599,8 @@ function wireAndDeconflict(
                 if (wrapRef === undefined && linked.namespaceOf.has(rec.resolved)) {
                     wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'namespace', module: rec.resolved });
                     const initRef = linked.esmInit.get(rec.resolved);
-                    if (initRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
+                    if (initRef !== undefined)
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
                 }
             }
         }
@@ -611,7 +614,8 @@ function wireAndDeconflict(
         // depends on — and for a facade chunk the wrapper lives elsewhere. Not a named import, so
         // nothing else carries it; without this the facade called an undeclared `require_b`.
         const wrapRef = linked.cjsWrap.get(entryModule);
-        if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, chunkIdx, { kind: 'found', ref: wrapRef });
+        if (wrapRef !== undefined)
+            wireBind(graph, linked, chunks, chunkByModule, chunkClaim, chunkIdx, { kind: 'found', ref: wrapRef });
         const map = linked.exportMaps.get(entryModule);
         if (map === undefined) continue;
         for (const bind of map.values()) {
@@ -637,7 +641,10 @@ function wireAndDeconflict(
                     // `import("./cjs.js").then((m) => __toESM(m.default))`). Without it the target
                     // chunk exported nothing at all and every member read `undefined`, silently.
                     if (targetChunk >= 0 && targetChunk !== c && linked.dynamicExports.has(rec.resolved)) {
-                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'namespace', module: rec.resolved });
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, {
+                            kind: 'namespace',
+                            module: rec.resolved,
+                        });
                     }
                 } else {
                     // Bare side-effect import: a static import with no named bindings whose
@@ -756,9 +763,16 @@ function wireBind(
                 for (const rec of graph.modules[cross.module].importRecords) {
                     if (rec.external || rec.resolved < 0) continue;
                     const wrapRef = linked.cjsWrap.get(rec.resolved);
-                    if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, { kind: 'found', ref: wrapRef });
+                    if (wrapRef !== undefined)
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, {
+                            kind: 'found',
+                            ref: wrapRef,
+                        });
                     else if (linked.dynamicExports.has(rec.resolved))
-                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, { kind: 'namespace', module: rec.resolved });
+                        wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, {
+                            kind: 'namespace',
+                            module: rec.resolved,
+                        });
                 }
             }
         }

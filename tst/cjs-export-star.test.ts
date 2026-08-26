@@ -33,7 +33,11 @@ const run = async (files: Record<string, string>, output: Record<string, unknown
 
 describe('export * from a CommonJS module', () => {
     it('forwards a named import through the star', async () => {
-        const { value } = await run({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import { a, b } from './b.js';\nexport const x = [a, b];" });
+        const { value } = await run({
+            ...D,
+            '/b.js': "export * from './d.cjs';",
+            '/main.js': "import { a, b } from './b.js';\nexport const x = [a, b];",
+        });
         expect(value).toEqual([1, 2]);
     });
 
@@ -99,7 +103,11 @@ describe('export * from CommonJS across chunk boundaries', () => {
         // The `__reExport` line names `require_d`, which is not a named import, so nothing carried it
         // across and the producer chunk called an undeclared binding.
         const { value } = await run(
-            { ...D, '/b.js': "export * from './d.cjs';", '/main.js': "import * as ns from './b.js';\nexport const x = [ns.a, ns.b];" },
+            {
+                ...D,
+                '/b.js': "export * from './d.cjs';",
+                '/main.js': "import * as ns from './b.js';\nexport const x = [ns.a, ns.b];",
+            },
             { preserveModules: true },
         );
         expect(value).toEqual([1, 2]);
@@ -109,7 +117,11 @@ describe('export * from CommonJS across chunk boundaries', () => {
         // Its names cannot be chunk exports — half of them only exist after `__reExport` runs — so
         // the chunk exports the OBJECT and the import site unwraps it. Before this the target chunk
         // exported nothing at all and every member was `undefined`, with no error.
-        const { value, chunks } = await run({ ...D, '/b.js': "export * from './d.cjs';", '/main.js': "export const x = import('./b.js').then((m) => [m.a, m.b]);" });
+        const { value, chunks } = await run({
+            ...D,
+            '/b.js': "export * from './d.cjs';",
+            '/main.js': "export const x = import('./b.js').then((m) => [m.a, m.b]);",
+        });
         expect(chunks.length).toBeGreaterThan(1);
         expect(value).toEqual([1, 2]);
     });
