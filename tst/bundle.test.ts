@@ -284,3 +284,50 @@ describe('bundle: export * as ns', () => {
         expect((await run(code)).outer).toMatchObject({ inner: { v: 7 } });
     });
 });
+
+// A namespace object must expose LIVE bindings — `ns.v` re-reads the local, so a reassigned
+// `export let` is visible through it. It used to emit `v: v`, snapshotting the initial value.
+// Only reassignable bindings need an accessor: `const`/`function`/`class` are provably immutable,
+// so those stay plain values (same bytes as before). `Object.freeze` is retained so the flat
+// members are non-writable too, matching the spec's non-writable namespace properties.
+describe('bundle: namespace objects are live', () => {
+    it('reads a mutated `let` export through the namespace', async () => {
+        const { code } = await build({
+            '/main.ts': "import * as ns from './a';\nns.bump();\nexport const got = ns.v;",
+            '/a.ts': 'export let v = 1;\nexport function bump(){ v = 2 }',
+        });
+        expect(await run(code)).toMatchObject({ got: 2 });
+    });
+
+    it('reports [object Module]', async () => {
+        const { code } = await build({
+            '/main.ts': "import * as ns from './a';\nexport const tag = Object.prototype.toString.call(ns);",
+            '/a.ts': 'export const v = 1;',
+        });
+        expect(await run(code)).toMatchObject({ tag: '[object Module]' });
+    });
+
+    it('is not writable', async () => {
+        const { code } = await build({
+            '/main.ts': [
+                "import * as ns from './a';",
+                'let threw = false;',
+                'try { ns.v = 9 } catch { threw = true }',
+                'try { ns.c = 9 } catch { threw = threw && true }',
+                'export const readonly = threw;',
+            ].join('\n'),
+            '/a.ts': 'export let v = 1;\nexport const c = 2;\nexport function bump(){ v = 3 }',
+        });
+        expect(await run(code)).toMatchObject({ readonly: true });
+    });
+
+    it('keeps immutable members as plain values, not accessors', async () => {
+        const { code } = await build({
+            '/main.ts': "import * as ns from './a';\nexport const out = ns;",
+            '/a.ts': 'export const c = 1;\nexport function f(){}\nexport let mut = 2;\nexport function bump(){ mut = 3 }',
+        });
+        expect(code).toMatch(/\bc: c\b/);
+        expect(code).toMatch(/\bf: f\b/);
+        expect(code).toMatch(/get mut\(\)/);
+    });
+});

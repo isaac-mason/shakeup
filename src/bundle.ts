@@ -1,4 +1,4 @@
-import { symbolOf } from './analysis/semantic';
+import { SYM, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
@@ -450,6 +450,19 @@ function importStmt(clauses: string, spec: string, tight: boolean): string {
     return `import${lead}${clauses}${tail}from'${spec}';`;
 }
 
+/** Whether a namespace member's local binding can never be reassigned, so the namespace may hold it
+ *  as a plain value instead of an accessor. Only a positive proof counts: a `const`/`function`/
+ *  `class` declaration in this graph. A namespace-of-a-namespace, an external, a synthetic ref, or
+ *  anything whose symbol we cannot inspect falls through to `false` (accessor), which is always
+ *  correct — just larger. */
+function isImmutableBind(linked: Linked, bind: ImportBind): boolean {
+    if (bind.kind !== 'found') return false;
+    const mod = linked.graph.modules[refMod(bind.ref)];
+    const sym = mod?.semantic.symbols[refSym(bind.ref)];
+    if (sym === undefined) return false; // synthetic (`*_default`) refs have no symbol record
+    return (sym.flags & (SYM.CONST | SYM.FUNCTION | SYM.CLASS)) !== 0;
+}
+
 function renderNamespaceObject(
     linked: Linked,
     modIdx: number,
@@ -467,10 +480,37 @@ function renderNamespaceObject(
             if (nsMembers !== undefined && !nsMembers.has(name)) continue;
             const value = nameOfBind(linked, bind, chunk);
             if (value === null) continue;
-            entries.push(`${isIdentName(name) ? name : JSON.stringify(name)}${tight ? ':' : ': '}${value}`);
+            const key = isIdentName(name) ? name : JSON.stringify(name);
+            // An ESM namespace exposes LIVE bindings: `ns.v` must re-read the local, so an
+            // `export let v` reassigned after the namespace is built is visible through it. A flat
+            // `v: v` snapshots the initial value and silently miscompiles (`ns.bump(); ns.v` read 1
+            // where the spec says 2).
+            //
+            // But a getter is only needed when the local CAN be reassigned. A bundler knows that
+            // statically, so pay for it only where it buys something: `const`/`function`/`class`
+            // bindings are immutable, so a plain value is exactly equivalent and cheaper — which is
+            // the overwhelming majority of exports. Only `let`/`var` (and anything we cannot
+            // positively prove immutable) gets an accessor.
+            //
+            // Keyed off the symbol KIND, deliberately not off `semantic.refs[...].writes`: an
+            // undercount there (stale refs after a lowering pass) would silently reintroduce the
+            // exact miscompile above, whereas a symbol's declaration kind cannot go stale. The
+            // trade is a getter for a never-reassigned `export let`, which is rare and harmless.
+            entries.push(isImmutableBind(linked, bind) ? `${key}${tight ? ':' : ': '}${value}` : `get ${key}()${tight ? '{' : ' { '}return ${value};${tight ? '}' : ' }'}`);
         }
     }
+    // Spec namespaces carry `Symbol.toStringTag === 'Module'`, so `Object.prototype.toString.call`
+    // reports `[object Module]`. Emitted as a literal member rather than a `defineProperty` call:
+    // the only divergence is enumerability (the spec's is non-enumerable), which is unobservable to
+    // `Object.keys`/`for..in`/`JSON.stringify` since those skip symbols — it shows only under
+    // object spread. Revisit if/when the runtime-helper module lands and `__exportAll` supersedes
+    // this path.
+    entries.push(`[Symbol.toStringTag]${tight ? ':' : ': '}'Module'`);
     const inner = entries.join(clauseSep(tight));
+    // `Object.freeze` is KEPT. Getters already throw on write (assignment to an accessor with no
+    // setter throws in strict mode), but the plain-value members above would otherwise be silently
+    // assignable — the spec makes every namespace property non-writable. Freezing accessors does
+    // not disturb reads, so this stays live-correct.
     return tight ? `const ${nsName}=Object.freeze({${inner}});` : `const ${nsName} = Object.freeze({ ${inner} });`;
 }
 
