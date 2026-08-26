@@ -125,6 +125,26 @@ function cjsNamespaceRef(ctx: LinkCtx, target: Module): number {
     return ref;
 }
 
+/** Is this module reached by any STATIC import (as opposed to only `require`/`import()`)? A static
+ *  importer needs the module's bindings hoisted at top level, which rules out putting the whole body
+ *  inside a lazy-init closure. */
+function isStaticallyImported(graph: Graph, idx: number): boolean {
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.resolved === idx && rec.kind === 'static' && !rec.external) return true;
+        }
+    }
+    return false;
+}
+
+/** The synthetic symbol holding a lazily-initialised ESM module's init function
+ *  (`var init_foo = __esm(() => {…})`). */
+function cjsInitRef(ctx: LinkCtx, target: Module): number {
+    const existing = ctx.linked.esmInit.get(target.idx);
+    if (existing !== undefined) return existing;
+    return syntheticRef(ctx, target.idx, `init_${reprName(target)}`);
+}
+
 /** The synthetic symbol holding a module's CommonJS wrapper (`var require_foo = __commonJS(…)`). */
 function cjsWrapRef(ctx: LinkCtx, target: Module): number {
     const existing = ctx.linked.cjsWrap.get(target.idx);
@@ -219,6 +239,7 @@ export function linkGraph(graph: Graph): Linked {
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),
+        esmInit: new Map(),
         externalLocals: new Map(),
         defaultRefs: new Map(),
         errors: [],
@@ -277,27 +298,26 @@ export function linkGraph(graph: Graph): Linked {
             // yielded `{}`. It needs its ESM namespace instead, converted at the call site by
             // `__toCommonJS` (which stamps the `__esModule` marker the requiring code checks for).
             //
-            //
-            // KNOWN DIVERGENCE (cjs.md §7.20). rolldown additionally gives such a target an `__esm`
-            // LAZY-INIT wrapper, so the module body runs at the `require()` CALL. shakeup evaluates
-            // it eagerly at its position in `linked.order`, which is observable two ways:
-            //   * ordering — `require()` should run the target between the statements around it;
-            //   * a require that is never reached (`if (false) require(…)`) should never run it.
-            // Building the lazy form means splitting declarations from initializers — every binding
-            // hoisted to a bare `var` so the namespace getters can close over it, with the
-            // initializing statements moved inside the init closure (rolldown's `wrapped_esm`
-            // fixture). That is a real transform, not yet built.
-            //
-            // Until then the divergence is REPORTED rather than hidden: it is unobservable when
-            // every top-level statement of the target is pure, which covers the common
-            // `export const … ` dependency, so the warning fires only when it can actually matter.
             if (!linked.namespaceOf.has(rec.resolved)) linked.namespaceOf.set(rec.resolved, `${reprName(target)}_ns`);
-            if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
+            // LAZY INIT when nothing else needs the module's bindings hoisted. `require()` must
+            // evaluate its target AT THE CALL — eagerly running it changes when side effects happen
+            // and runs a module whose require is never reached (§7.20).
+            //
+            // rolldown always builds the lazy form, splitting declarations from initializers so the
+            // namespace getters can close over bare `var`s (`misc/wrapped_esm`). That split is only
+            // NEEDED when something else — a static `import` — also wants those bindings at top
+            // level. When the target is reached ONLY through `require`, the whole body can go inside
+            // the closure untouched and the namespace can be assigned from within it, which is the
+            // same semantics with no rewriting. The split remains outstanding for the mixed case,
+            // which is why the warning below still fires there.
+            if (!isStaticallyImported(graph, rec.resolved)) linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
+            else if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
                 warnedEagerEsm.add(rec.resolved);
                 graph.warnings.push(
-                    `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module with side effects — ` +
-                        'it is evaluated eagerly with the rest of the bundle rather than at the require() call, ' +
-                        'so its side effects may run earlier than Node would run them, or run even if the require is never reached.',
+                    `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module that is ALSO statically ` +
+                        'imported, so its bindings must stay hoisted and it cannot go inside a lazy-init closure — it is ' +
+                        'evaluated eagerly with the rest of the bundle rather than at the require() call, so its side ' +
+                        'effects may run earlier than Node would run them, or run even if the require is never reached.',
                 );
             }
         }

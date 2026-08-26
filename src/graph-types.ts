@@ -289,6 +289,11 @@ export type Linked = {
     /** For each wrapped CJS module reached by an ESM import, the local holding its interop
      *  namespace — `var import_foo = __toESM(require_foo())`. */
     cjsNamespace: Map<number, number>;
+    /** ESM modules reached ONLY through `require()`, mapped to their `__esm` init symbol. Their body
+     *  goes inside the closure so it runs at the require CALL rather than eagerly — CommonJS
+     *  semantics. Absent for a module that is also statically imported, whose bindings must stay
+     *  hoisted (see §7.20's outstanding declaration/initializer split). */
+    esmInit: Map<number, number>;
     externalLocals: Map<string, string>;
     defaultRefs: Map<number, number>;
     errors: string[];

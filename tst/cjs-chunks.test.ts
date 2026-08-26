@@ -129,7 +129,7 @@ describe('require() of an ES module is lazy', () => {
         return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
     };
 
-    it.fails('does not run a target whose require is never reached', async () => {
+    it('does not run a target whose require is never reached', async () => {
         // The serious half: a module that should never execute does.
         const ns = await runOne({
             '/esm.js': 'globalThis.__ran = true;\nexport const a = 1;',
@@ -139,7 +139,7 @@ describe('require() of an ES module is lazy', () => {
         expect(ns.x).toEqual({ v: 0, ran: false });
     });
 
-    it.fails('runs the target AT the require call, not before it', async () => {
+    it('runs the target AT the require call, not before it', async () => {
         const ns = await runOne({
             '/esm.js': 'globalThis.__log.push("esm");\nexport const a = 1;',
             '/d.cjs': [
@@ -162,5 +162,63 @@ describe('require() of an ES module is lazy', () => {
             '/main.js': "import d from './d.cjs';\nexport const x = d;",
         });
         expect(ns.x).toEqual([1, 2]);
+    });
+});
+
+// The lazy form × a chunk boundary — a product neither axis's tests covered. `esm_ns` and `init_esm`
+// are declared by the producer chunk and referenced by the consumer's wrapper body, and nothing
+// joined the two: the consumer emitted a bare side-effect `import './esm-….js'` and then called an
+// undeclared `init_esm`. Pre-existing for the namespace half (a require of an ES module across a
+// boundary always dangled); the init half arrived with D1.
+describe('require() of an ES module across a chunk boundary', () => {
+    it('resolves under preserveModules', async () => {
+        expect(
+            await buildAndRun(
+                {
+                    '/esm.js': 'export const a = 7;',
+                    '/d.cjs': "module.exports = require('./esm.js').a;",
+                    '/main.js': "import d from './d.cjs';\nexport const x = d;",
+                },
+                '/main.js',
+                { preserveModules: true },
+            ),
+        ).toBe(7);
+    });
+
+    it('stays lazy across the boundary', async () => {
+        // The timing guarantee must survive chunking, not just hold in one file.
+        expect(
+            await buildAndRun(
+                {
+                    '/esm.js': 'globalThis.__log.push("esm");\nexport const a = 1;',
+                    '/d.cjs':
+                        'globalThis.__log = ["before"];\n' +
+                        "const e = require('./esm.js');\n" +
+                        'globalThis.__log.push("after");\n' +
+                        'module.exports = globalThis.__log.concat(e.a);',
+                    '/main.js': "import d from './d.cjs';\nexport const x = d;",
+                },
+                '/main.js',
+                { preserveModules: true },
+            ),
+        ).toEqual(['before', 'esm', 'after', 1]);
+    });
+
+    it('resolves through a dynamic import', async () => {
+        expect(
+            await buildAndRun({
+                '/esm.js': 'export const a = 7;',
+                '/d.cjs': "module.exports = require('./esm.js').a;",
+                '/main.js': "export const x = import('./d.cjs').then((m) => m.default);",
+            }),
+        ).toBe(7);
+    });
+
+    it('a producer chunk still surfaces a NATIVE namespace when the module is not lazy', async () => {
+        // Guard on the exclusion added to `nativeNsEligible`: it must only fire for lazy modules.
+        const r = await build({ '/a.js': 'export const v = 1;', '/main.js': "import * as ns from './a.js';\nexport const x = ns.v;" }, '/main.js', {
+            preserveModules: true,
+        });
+        expect(r.chunks.find((c) => c.isEntry)!.code).toMatch(/import \* as \w+ from/);
     });
 });

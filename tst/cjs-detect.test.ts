@@ -651,41 +651,44 @@ describe('require() of an ES module', () => {
     });
 });
 
-// cjs.md §7.20 — a KNOWN divergence, reported rather than hidden. rolldown gives an ESM target of a
-// `require` edge an `__esm` lazy-init wrapper so the body runs at the CALL; shakeup evaluates it
-// eagerly with the rest of the bundle. Unobservable when the target's top-level statements are all
-// pure, which is the ordinary `export const …` dependency — so the warning fires only when the
-// timing can actually matter.
-describe('require() of an ES module evaluates eagerly (known divergence)', () => {
-    const warningsFor = async (esm: string) =>
-        (
-            await bundle({
-                entry: '/main.js',
-                fs: createMemoryFs({
-                    '/esm.js': esm,
-                    '/d.cjs': "module.exports = require('./esm.js').a;",
-                    '/main.js': "import d from './d.cjs';\nexport const x = d;",
-                }),
-                external: [],
-            })
-        ).warnings;
+// cjs.md §7.20 / D1 — `require()` of an ES module is now LAZY: the target goes inside an `__esm`
+// closure so its body runs at the CALL, which is what Node does. See `tst/cjs-chunks.test.ts` for the
+// value assertions on ordering and never-reached requires.
+//
+// The lazy form needs the whole body inside the closure, which is only possible when nothing else
+// wants the module's bindings at top level. A target that is ALSO statically imported still takes the
+// eager path — closing that needs rolldown's declaration/initializer split — and that remainder is
+// what the warning now reports.
+describe('require() of an ES module that is also statically imported', () => {
+    const mixed = async (esm: string) =>
+        bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/esm.js': esm,
+                '/d.cjs': "module.exports = require('./esm.js').a;",
+                '/main.js': "import d from './d.cjs';\nimport { a } from './esm.js';\nexport const x = [d, a];",
+            }),
+            external: [],
+        });
 
     it('stays quiet for a pure ES module', async () => {
-        expect(await warningsFor('export const a = 1;')).toEqual([]);
+        // Eager evaluation of a pure body is unobservable, so there is nothing to report.
+        expect((await mixed('export const a = 1;')).warnings).toEqual([]);
     });
 
     it('warns when the target has a side-effectful statement', async () => {
-        const w = await warningsFor('console.log("hi");\nexport const a = 1;');
+        const w = (await mixed('console.log("hi");\nexport const a = 1;')).warnings;
         expect(w).toHaveLength(1);
-        expect(w[0]).toMatch(/evaluated eagerly/);
+        expect(w[0]).toMatch(/ALSO statically imported/);
         expect(w[0]).toMatch(/may run earlier than Node would run them/);
     });
 
     it('warns when an initializer is impure', async () => {
-        expect(await warningsFor('export const a = globalThis.f();')).toHaveLength(1);
+        expect((await mixed('export const a = globalThis.f();')).warnings).toHaveLength(1);
     });
 
-    it('warns once per target, not once per require', async () => {
+    it('a require-ONLY target is lazy and never warns', async () => {
+        // The case that used to warn. It is now fixed rather than reported.
         const r = await bundle({
             entry: '/main.js',
             fs: createMemoryFs({
@@ -695,7 +698,10 @@ describe('require() of an ES module evaluates eagerly (known divergence)', () =>
             }),
             external: [],
         });
-        expect(r.warnings).toHaveLength(1);
+        expect(r.warnings).toEqual([]);
+        expect(r.code).toMatch(/var init_esm = \/\* @__PURE__ \*\/ __esm\(/);
+        // Called once per require site; `__esm`'s `fn = 0` makes the second call a no-op.
+        expect(r.code.match(/init_esm\(\)/g)).toHaveLength(2);
     });
 });
 

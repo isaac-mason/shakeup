@@ -505,6 +505,15 @@ function wireAndDeconflict(
                 if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: wrapRef });
                 const nsRef = linked.cjsNamespace.get(rec.resolved);
                 if (nsRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: nsRef });
+                // Requiring an ES MODULE reads its namespace object and — when the target is lazy —
+                // calls its `__esm` init. Neither is a named import either, and across a chunk
+                // boundary both dangled: the producer declared them and the consumer referenced them
+                // with nothing joining the two.
+                if (wrapRef === undefined && linked.namespaceOf.has(rec.resolved)) {
+                    wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'namespace', module: rec.resolved });
+                    const initRef = linked.esmInit.get(rec.resolved);
+                    if (initRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
+                }
             }
         }
     }
@@ -570,6 +579,10 @@ function wireAndDeconflict(
  *     is not guaranteed at this point in wiring. */
 function nativeNsEligible(linked: Linked, producer: Chunk, modIdx: number): boolean {
     if (producer.modules.length !== 1 || producer.modules[0] !== modIdx) return false;
+    // A lazily-initialised module (§7.20/D1) has no top-level bindings to surface — they live inside
+    // its `__esm` closure — so there is nothing for a native `import * as ns` to name. It exports its
+    // assembled namespace object instead, which is the non-native path below.
+    if (linked.esmInit.has(modIdx)) return false;
     const map = linked.exportMaps.get(modIdx);
     if (map === undefined || map.size === 0) return false;
     for (const bind of map.values()) {
