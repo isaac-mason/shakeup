@@ -181,3 +181,50 @@ describe('minimize-conditional (compress)', () => {
         expect(code).not.toMatch(/!!/);
     });
 });
+
+describe('a common assignment target hoists out of a conditional', () => {
+    const build = async (body: string): Promise<string> => {
+        const r = await bundle({
+            entry: '/e.js',
+            fs: createMemoryFs({ '/e.js': body }),
+            external: [],
+            output: { minify: true, optimize: true },
+        } as never);
+        return (r as { code: string }).code;
+    };
+    const run = (code: string, x: unknown): unknown => {
+        const g: Record<string, unknown> = { x };
+        new Function('globalThis', code)(g);
+        return g.sink;
+    };
+
+    it('`t ? (x = a) : (x = b)` becomes `x = t ? a : b`', async () => {
+        const code = await build('let o;\nif (Number(globalThis.x)) { o = 1; } else { o = 2; }\nglobalThis.sink = o;');
+        expect(run(code, 1)).toBe(1);
+        expect(run(code, 0)).toBe(2);
+    });
+
+    it('does NOT hoist when the targets are different bindings', async () => {
+        // Same spelling in different scopes is a DIFFERENT variable; the guard compares `sym`.
+        const code = await build(
+            'let a = 0, b = 0;\nif (Number(globalThis.x)) { a = 1; } else { b = 2; }\nglobalThis.sink = a + "," + b;',
+        );
+        expect(run(code, 1)).toBe('1,0');
+        expect(run(code, 0)).toBe('0,2');
+    });
+
+    it('does NOT hoist a MEMBER target', async () => {
+        // Hoisting `a.b = …` would move evaluation of `a` before the test, which is observable.
+        const code = await build(
+            'const log = [];\nconst obj = { get self() { log.push("get"); return this; } };\nlet o = {};\nNumber(globalThis.x) ? (o.v = 1) : (o.v = 2);\nglobalThis.sink = o.v;',
+        );
+        expect(run(code, 1)).toBe(1);
+        expect(run(code, 0)).toBe(2);
+    });
+
+    it('does NOT hoist when the operators differ', async () => {
+        const code = await build('let o = 5;\nNumber(globalThis.x) ? (o = 1) : (o += 2);\nglobalThis.sink = o;');
+        expect(run(code, 1)).toBe(1);
+        expect(run(code, 0)).toBe(7);
+    });
+});
