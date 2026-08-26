@@ -374,6 +374,16 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
         if (d !== null && d.scopeId !== undefined) d.scopeId = beforeScope.get(n) ?? 0;
     }
 
+    if (process.env.VERIFY_EXTRAS === '1') {
+        // Diagnostic only: SAFE-direction divergence. Stale EXTRA symbols cost a mangled name, not
+        // correctness — but they are exactly what makes the maintained table produce different
+        // identifiers from a rebuilt one, which is what keeps `refreshFull` load-bearing.
+        let liveM = 0;
+        for (let i = 1; i < maintained.symbols.length; i++) if (maintained.symbols[i].scope !== 0) liveM++;
+        let liveT = 0;
+        for (let i = 1; i < truth.symbols.length; i++) if (truth.symbols[i].scope !== 0) liveT++;
+        if (liveM !== liveT) out.push(`EXTRAS(safe): maintained has ${liveM} live symbols, truth ${liveT} (delta ${liveM - liveT})`);
+    }
     for (const p of verifyRefFacts(maintained, program)) if (p.includes('UNDER(unsafe)')) out.push(p);
 
     // `symbolInit` / `shorthand` / `exported` are read by compress passes (alias-inline, const-prop)
