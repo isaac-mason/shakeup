@@ -1214,7 +1214,11 @@ function renderChunk(
             // Its own statement, not an `export { … }` specifier: a specifier must be an identifier,
             // and this is a CALL. `export default require_main();`
             seenExport.add(NAME_DEFAULT);
-            cjsEntryDefault = `export default ${finalNameOf(linked, entryWrapRef)}();`;
+            // Chunk-local alias first — a FACADE entry chunk (one whose entry module lives in
+            // another chunk, minted when two static entries share a color) has to call the name it
+            // imported the wrapper under. rolldown's `multiple_circle_cjs_entries` snapshot is the
+            // same shape: `import { t as require_b } from "./a.js"; export default require_b();`.
+            cjsEntryDefault = `export default ${chunk.importLocalOf.get(entryWrapRef) ?? finalNameOf(linked, entryWrapRef)}();`;
             exportedNames.push(NAME_DEFAULT);
         }
         const entryMap = linked.exportMaps.get(chunk.entryModule);
