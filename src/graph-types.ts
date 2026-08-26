@@ -21,6 +21,32 @@ export const NAME_DEFAULT = 'default';
  *  plugin-facing {@link ./plugin.ImportKind} (the Rollup resolveId kind). */
 export type ImportRecordKind = 'static' | 'dynamic' | 'new-url';
 
+/** How a module's format was DECLARED — by extension, or by the nearest `package.json#type`.
+ *  Mirrors rolldown's `ModuleDefFormat` (`rolldown_common/src/types/module_def_format.rs`).
+ *
+ *  Distinct from `exportsKind`, which is what the module's SOURCE looks like. This is the declared
+ *  goal, and it is the tie-breaker when the source is ambiguous (CJS kind rule tier 3). The
+ *  provenance split (`cjs` vs `cjs-package-json`) drives nothing behaviourally — both oracles group
+ *  them — but it makes diagnostics able to say *why* a file was treated as CommonJS.
+ *
+ *  Per `llm/notes/cjs.md` §7.1b this is a RESOLVE output, recomputed every build, and must never be
+ *  stored in {@link CachedParse}: it depends on another file (`package.json`), so caching it would
+ *  need a cross-file invalidation the parse cache does not have. */
+export type ModuleDefFormat =
+    | 'unknown'
+    | 'cjs' // .cjs
+    | 'cts' // .cts
+    | 'cjs-package-json' // "type": "commonjs"
+    | 'esm-mjs' // .mjs
+    | 'esm-mts' // .mts
+    | 'esm-package-json'; // "type": "module"
+
+/** Declared as ESM by extension or `package.json#type` (rolldown `ModuleDefFormat::is_esm`). */
+export const isEsmFormat = (f: ModuleDefFormat): boolean => f === 'esm-mjs' || f === 'esm-mts' || f === 'esm-package-json';
+
+/** Declared as CommonJS by extension or `package.json#type` (rolldown `ModuleDefFormat::is_commonjs`). */
+export const isCommonJsFormat = (f: ModuleDefFormat): boolean => f === 'cjs' || f === 'cts' || f === 'cjs-package-json';
+
 /** A resolved edge to another module (deduped per specifier for `static`/`dynamic`). */
 export type ImportRecord = {
     specifier: string;
@@ -104,6 +130,9 @@ export type Module = {
     entryName: string | null;
     /** Module-level external flag (distinct from per-record ImportRecord.external). */
     external: boolean;
+    /** Declared module format (extension / nearest `package.json#type`). A per-build RESOLVE output,
+     *  deliberately absent from {@link CachedParse} — see {@link ModuleDefFormat}. */
+    defFormat: ModuleDefFormat;
     /** Reverse edges: ids of modules that statically import this one (filled during build). */
     importers: Set<string>;
 };

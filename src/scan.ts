@@ -4,6 +4,7 @@ import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
     type CachedParse,
+    isCommonJsFormat,
     type Graph,
     type ImportRecordKind,
     type JSXRuntime,
@@ -11,7 +12,7 @@ import {
     NAME_DEFAULT,
     NAME_NAMESPACE,
 } from './graph-types';
-import { EMPTY_MODULE_ID } from './node-resolve';
+import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
 import { eliminateDeadStores } from './passes/optimize/dead-store';
@@ -236,6 +237,37 @@ const strValue = (source: string, node: Node): string =>
  *  Reads `semantic.unresolved`, which is already populated — a free identifier is exactly one that
  *  bound to no declaration, which is rolldown's `is_global_identifier_reference`. A module that
  *  declares its own `exports` therefore does NOT warn, correctly. */
+/** Error on an `import`/`export` statement in a file DECLARED CommonJS — a `.cjs`/`.cts` extension
+ *  or the nearest `package.json#type: "commonjs"`. Port of oxc's `module_code` check
+ *  (`oxc_semantic/src/checker/javascript.rs:532-548` **[V]**), whose message this mirrors.
+ *
+ *  The exact mirror of {@link warnCjsVarsInEsm}: that one catches CommonJS habits in an ES module,
+ *  this one catches ESM syntax in a CommonJS file. An ERROR rather than a warning because — unlike
+ *  a stray `module.exports` in ESM, which merely does nothing — this file cannot be interpreted the
+ *  way it is declared at all. Node rejects it too.
+ *
+ *  Reads only the DECLARED format, never `exportsKind`: kind detection's tier 1 says ESM syntax wins
+ *  and the module IS ESM, which is precisely the contradiction being reported. */
+function errorEsmSyntaxInCjs(mod: Module, errors: string[]): void {
+    if (!isCommonJsFormat(mod.defFormat)) return;
+    const why =
+        mod.defFormat === 'cjs-package-json' ? 'the nearest package.json declares "type": "commonjs"' : `of its ${mod.defFormat === 'cts' ? '.cts' : '.cjs'} extension`;
+    for (const stmt of mod.program.data.body) {
+        const what =
+            stmt.type === N.ImportDeclaration
+                ? 'import'
+                : stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration
+                  ? 'export'
+                  : null;
+        if (what === null) continue;
+        errors.push(
+            `${mod.id}:${stmt.start}: '${what}' statement in a CommonJS file (this file is CommonJS because ${why}) — ` +
+                `CommonJS uses require/module.exports, not import/export statements`,
+        );
+        return; // one per module is enough
+    }
+}
+
 function warnCjsVarsInEsm(mod: Module, warnings: string[]): void {
     let hasEsmExport = false;
     for (const stmt of mod.program.data.body) {
@@ -590,6 +622,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     graph.externalSideEffects.set(`${jsxOptions.importSource}/jsx-runtime`, false);
     const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
+    // Per-build declared-format lookup (cjs.md §7.1b): a RESOLVE output, so its package.json cache
+    // lives exactly one build and a `"type"` edit can never go stale.
+    const defFormatOf = createDefFormatLookup(fs);
     // `symlinks:false` disables the realpath deref below (config form only).
     const normalizedResolve = normalizeResolve(
         typeof options.resolve === 'function' ? undefined : options.resolve,
@@ -952,6 +987,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             isEntry,
             entryName: null,
             external: false,
+            defFormat: await defFormatOf(id),
             importers: new Set(),
         };
         graph.modules.push(mod);
@@ -972,9 +1008,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.starExports = c.starExports;
             mod.jsxRuntime = c.jsxRuntime;
             warnCjsVarsInEsm(mod, graph.warnings);
+            errorEsmSyntaxInCjs(mod, graph.errors);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
             warnCjsVarsInEsm(mod, graph.warnings);
+            errorEsmSyntaxInCjs(mod, graph.errors);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its

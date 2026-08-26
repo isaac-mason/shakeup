@@ -58,3 +58,80 @@ describe('CommonJS variables in an ES module', () => {
         expect(await warningsFor("import './dep.js';\nexport const a = 1;", { '/dep.js': 'globalThis.x = 1;' })).toEqual([]);
     });
 });
+
+// The mirror of the warning above, and the first consumer of `ModuleDefFormat` (cjs.md §7.1b): a
+// file DECLARED CommonJS — `.cjs`/`.cts`, or the nearest `package.json#type` — cannot contain ESM
+// syntax. An error rather than a warning because, unlike a stray `module.exports` in ESM (which
+// merely does nothing), such a file cannot be interpreted as declared at all. Port of oxc's
+// `module_code` check (`oxc_semantic/src/checker/javascript.rs:532-548`).
+describe('ESM syntax in a CommonJS-declared file', () => {
+    const errorsFor = async (files: Record<string, string>, entry = '/main.js') =>
+        (await bundle({ entry, fs: createMemoryFs(files), external: [] })).errors;
+
+    const OK_MAIN = "import './a.cjs';\nexport const y = 1;";
+
+    it('errors on `export` in a .cjs file', async () => {
+        const errors = await errorsFor({ '/a.cjs': 'export const x = 1;', '/main.js': OK_MAIN });
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toMatch(/'export' statement in a CommonJS file/);
+        expect(errors[0]).toMatch(/because of its \.cjs extension/);
+    });
+
+    it('errors on `import` in a .cjs file', async () => {
+        const errors = await errorsFor({ '/a.cjs': "import './b.js';", '/b.js': 'globalThis.z = 1;', '/main.js': OK_MAIN });
+        expect(errors[0]).toMatch(/'import' statement in a CommonJS file/);
+    });
+
+    it('errors under `"type": "commonjs"`, and says so', async () => {
+        const errors = await errorsFor({
+            '/pkg/package.json': '{"type":"commonjs"}',
+            '/pkg/a.js': 'export const x = 1;',
+            '/main.js': "import './pkg/a.js';\nexport const y = 1;",
+        });
+        expect(errors[0]).toMatch(/because the nearest package\.json declares "type": "commonjs"/);
+    });
+
+    it('accepts a .cjs file with no ESM syntax', async () => {
+        expect(await errorsFor({ '/a.cjs': 'globalThis.q = 1;', '/main.js': OK_MAIN })).toEqual([]);
+    });
+
+    // The regression that matters most: a package.json with NO `type` field must mean UNKNOWN, not
+    // CommonJS. Node's own default is CommonJS, but most packages ship no `type` and use ESM syntax
+    // in `.js` — treating those as declared-CommonJS would reject the majority of real projects.
+    // rolldown does the same (`resolver.rs:249-265`, both lookups return Option).
+    it('a package.json without `type` decides nothing', async () => {
+        expect(
+            await errorsFor({ '/package.json': '{"name":"app"}', '/a.js': 'export const x = 1;', '/main.js': "import { x } from './a.js';\nexport { x };" }),
+        ).toEqual([]);
+    });
+
+    it('a malformed package.json decides nothing', async () => {
+        expect(
+            await errorsFor({ '/package.json': '{ not json', '/a.js': 'export const x = 1;', '/main.js': "import { x } from './a.js';\nexport { x };" }),
+        ).toEqual([]);
+    });
+
+    it('finds a ROOT package.json from a nested file', async () => {
+        // A naive upward walk stops before probing `/package.json`, which would silently miss the
+        // single most common layout: a root `"type"` covering sources in subdirectories.
+        expect(
+            await errorsFor({
+                '/package.json': '{"type":"module"}',
+                '/src/a.js': 'export const x = 1;',
+                '/src/main.js': "import { x } from './a.js';\nexport { x };",
+            }, '/src/main.js'),
+        ).toEqual([]);
+    });
+
+    it('stops at the nearest boundary instead of inheriting a parent package', async () => {
+        // `/sub` has its own package.json, so it does NOT inherit the root's "commonjs".
+        const errors = await errorsFor({
+            '/package.json': '{"type":"commonjs"}',
+            '/sub/package.json': '{"name":"inner"}',
+            '/sub/a.js': 'export const x = 1;',
+            '/main.cjs': 'globalThis.q = 1;',
+            '/main.js': "import { x } from './sub/a.js';\nexport { x };",
+        });
+        expect(errors.filter((e) => e.includes('/sub/a.js'))).toEqual([]);
+    });
+});
