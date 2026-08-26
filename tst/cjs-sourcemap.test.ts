@@ -18,12 +18,12 @@ import { createMemoryFs } from '../src/fs.ts';
 const D_CJS = ['const A = 1;', 'function helper() {', '    return A + globalThis.z;', '}', 'module.exports = helper();'].join('\n');
 
 /** Resolve one output line to `source:line`, or null when unmapped. */
-const resolve = (code: string, map: { mappings: string; sources: string[] }, needle: string) => {
+const resolve = (code: string, map: { mappings: string; sources: (string | null)[] }, needle: string) => {
     const lines = code.split('\n');
     const li = lines.findIndex((l) => l.includes(needle));
     expect(li, `"${needle}" not found in output`).toBeGreaterThanOrEqual(0);
     const seg = (decode(map.mappings)[li] ?? [])[0];
-    return seg === undefined || seg.length < 4 ? null : { source: map.sources[seg[1]], line: seg[2] + 1, column: seg[3] };
+    return seg === undefined || seg.length < 4 ? null : { source: map.sources[seg[1]!], line: seg[2]! + 1, column: seg[3] };
 };
 
 const build = async (files: Record<string, string>) => {
