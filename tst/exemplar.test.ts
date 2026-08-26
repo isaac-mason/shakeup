@@ -106,7 +106,8 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
         const unresolved = new Set(sem.unresolved.map((n) => n.name));
         expect(unresolved.has('basename')).toBe(false);
         expect(unresolved.has('sep')).toBe(false);
-        const allowedGlobals = new Set(['Map', 'Object', 'Math', 'console', 'undefined']);
+        // `Symbol` joined the set when namespace objects started carrying `Symbol.toStringTag`.
+        const allowedGlobals = new Set(['Map', 'Object', 'Math', 'console', 'undefined', 'Symbol']);
         for (const g of unresolved) expect(allowedGlobals.has(g)).toBe(true);
     });
 });
@@ -125,7 +126,11 @@ describe('exemplar: pinned known limitations', () => {
         expect(ns.both).toBe(3);
     });
 
-    it('KNOWN LIMITATION: namespace object snapshots mutated `let` exports (no live binding)', async () => {
+    // RESOLVED (was: "KNOWN LIMITATION: namespace object snapshots mutated `let` exports"). The
+    // namespace now holds a reassignable binding as an accessor, so the read is live and this
+    // returns the spec-correct 1. Kept here as the regression pin for that limitation; the broader
+    // live-binding coverage lives in `bundle.test.ts`.
+    it('namespace objects expose live bindings for mutated `let` exports', async () => {
         const { code } = await buildOne({
             '/main.ts': [
                 "import * as ns from './c';",
@@ -136,6 +141,6 @@ describe('exemplar: pinned known limitations', () => {
             '/c.ts': 'export let count = 0;\nexport const bump = () => { count += 1; };',
         });
         const mod = await run(code);
-        expect(mod.v).toBe(0);
+        expect(mod.v).toBe(1);
     });
 });
