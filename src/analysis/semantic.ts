@@ -160,36 +160,63 @@ export function lookupValue(sem: Semantic, scope: number, name: string): number 
     }
 }
 
-/** Mirror the scope structure of `from` onto its CLONE `to`, minting FRESH scopes under `parentScope`.
+/** Give a CLONE its own scopes AND its own symbols, mirroring the original's structure.
  *
- *  `cloneNode` clears `scopeId` deliberately: a clone is normally a second copy, and two nodes cannot
- *  own one scope. That leaves every scope-owning node in the clone owning nothing, so names inside it
- *  resolve from the wrong scope — `verifySemantic` reports "scope-owning node N has no scopeId in
- *  maintained (UNSAFE)".
+ *  `cloneNode` clears `scopeId` (a clone is normally a second copy, and two nodes cannot own one
+ *  scope) but COPIES `sym` — so every binding in the clone points at the ORIGINAL's symbol. Both are
+ *  wrong when the original is duplicated rather than moved:
  *
- *  Use this when the original SURVIVES or is duplicated (loop unrolling makes N copies of one body,
- *  function inlining splices a copy per call site). When the original is dropped immediately after,
- *  the scope should be MOVED instead — see `flow-inline`'s `transferScopes`.
+ *   * no scope    -> names inside resolve from the wrong scope
+ *     ("scope-owning node N has no scopeId in maintained (UNSAFE)")
+ *   * shared sym  -> N copies of a binding are ONE symbol where a rebuild sees N
+ *     ("symbol partition mismatch (UNSAFE)") — renaming or substitution then binds the wrong thing.
  *
- *  The two trees are structurally identical by construction, so a lockstep walk pairs them up. */
-export function cloneScopeTree(sem: Semantic, from: Node, to: Node, parentScope: number): void {
-    const own = (from.data as { scopeId?: number } | null)?.scopeId ?? 0;
-    let inner = parentScope;
-    if (own !== 0 && sem.scopes[own] !== undefined) {
-        const fresh = createScope(sem, parentScope, sem.scopes[own].flags);
-        attachScopeNode(sem, fresh, to);
-        inner = fresh;
-    }
-    const fk: Node[] = [];
-    const tk: Node[] = [];
-    walkChildren(from, (c) => {
-        fk.push(c);
-    });
-    walkChildren(to, (c) => {
-        tk.push(c);
-    });
-    const n = Math.min(fk.length, tk.length);
-    for (let i = 0; i < n; i++) cloneScopeTree(sem, fk[i], tk[i], inner);
+ *  Use for DUPLICATION (loop unrolling makes N copies of a body; function inlining splices a copy per
+ *  call site). When the original is dropped immediately after, the scope should be MOVED instead —
+ *  see `flow-inline`'s `transferScopes`.
+ *
+ *  Two passes, because a reference can appear before its binding: mint scopes and bindings first,
+ *  then remap the references that resolved to a rebound symbol. The trees are structurally identical
+ *  by construction, so a lockstep walk pairs them up. */
+export function cloneSemanticSubtree(sem: Semantic, from: Node, to: Node, parentScope: number): void {
+    const rebound = new Map<number, number>();
+
+    const mint = (f: Node, t: Node, scope: number): void => {
+        const own = (f.data as { scopeId?: number } | null)?.scopeId ?? 0;
+        let inner = scope;
+        if (own !== 0 && sem.scopes[own] !== undefined) {
+            const fresh = createScope(sem, scope, sem.scopes[own].flags);
+            attachScopeNode(sem, fresh, t);
+            inner = fresh;
+        }
+        if (f.type === N.BindingIdentifier) {
+            const old = (f as { sym: number }).sym;
+            if (old > 0 && sem.symbols[old] !== undefined) {
+                rebound.set(old, declareLocal(sem, t, inner, sem.symbols[old].flags));
+            }
+        }
+        const fk: Node[] = [];
+        const tk: Node[] = [];
+        walkChildren(f, (c) => {
+            fk.push(c);
+        });
+        walkChildren(t, (c) => {
+            tk.push(c);
+        });
+        const n = Math.min(fk.length, tk.length);
+        for (let i = 0; i < n; i++) mint(fk[i], tk[i], inner);
+    };
+    mint(from, to, parentScope);
+
+    if (rebound.size === 0) return;
+    const remap = (n: Node): void => {
+        if (n.type === N.IdentifierReference) {
+            const next = rebound.get((n as { sym: number }).sym);
+            if (next !== undefined) (n as { sym: number }).sym = next;
+        }
+        walkChildren(n, remap);
+    };
+    remap(to);
 }
 
 /** Retire a symbol whose declaration has been erased: `scope = 0`, "owned by no lexical scope".
