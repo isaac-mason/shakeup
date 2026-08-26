@@ -205,6 +205,50 @@ export const substituteAlternateSyntax: Visitor = {
         // `Boolean(x)` → `!!x` (global `Boolean`, EXACTLY one non-spread argument). `Boolean(a, b)`
         // ignores `b`, but we conservatively bail on any arity ≠ 1; a spread `Boolean(...xs)` has
         // unknown arity, so it bails too; and an optional call `Boolean?.(x)` is left alone.
+        // `Number.X` well-known constants, and a regex literal's `.source` (oxc
+        // `replace_known_methods`: `try_fold_number_constants` at lib.rs:480 and the `"source"` arm at
+        // :445). Both are pure spellings of a value the engine already fixes, so the rewrite is a
+        // spelling change only.
+        //
+        // Neither `Infinity` nor `NaN` has a LITERAL form (see fold-constants.ts), so they are emitted
+        // as the arithmetic spellings every minifier uses — `1/0` and `0/0` — which are also shorter
+        // than the identifiers they replace and cannot be shadowed the way a bare `NaN` can.
+        //
+        // Gated on the GLOBAL `Number` (`sym === 0`) and a non-optional, non-computed `.X`, so a local
+        // `const Number = …` or `Number?.EPSILON` is left alone.
+        [N.StaticMemberExpression]: (n, ctx: TransformCtx) => {
+            const m = n.data as { object: Node; property: Node; optional: boolean };
+            if (m.optional) return;
+            const prop = m.property.name;
+            if (m.object.type === N.RegExpLiteral) {
+                // `.name` on a regex literal is its RAW source including delimiters and flags
+                // (`/ab+/gi`), so the pattern is the slice between the first and last `/`.
+                if (prop !== 'source') return;
+                const raw = m.object.name;
+                const end = raw.lastIndexOf('/');
+                if (end <= 0) return;
+                const pattern = raw.slice(1, end);
+                // Only when the pattern can be re-spelled as a double-quoted string WITHOUT escaping:
+                // a `"`, a backslash, or a line terminator would need re-encoding we are not doing.
+                if (/["\\\n\r\u2028\u2029]/.test(pattern)) return;
+                // A literal's VALUE is its raw source text in `.name` (the printer emits it verbatim).
+                ctx.replaceWith(node(N.StringLiteral, n.start, n.end, `"${pattern}"`, null));
+                return;
+            }
+            if (!isGlobalRef(m.object, 'Number')) return;
+            const NUM = (v: string): Node => node(N.NumericLiteral, n.start, n.end, v, null);
+            const div = (a: string, b: string): Node => create.BinaryExpression(n.start, n.end, '/', NUM(a), NUM(b));
+            const pow = (a: string, b: Node): Node => create.BinaryExpression(n.start, n.end, '**', NUM(a), b);
+            switch (prop) {
+                case 'NaN': ctx.replaceWith(div('0', '0')); return;
+                case 'POSITIVE_INFINITY': ctx.replaceWith(div('1', '0')); return;
+                case 'EPSILON': ctx.replaceWith(pow('2', UnaryExpression(n.start, n.end, OP.NEG, NUM('52')))); return;
+                case 'MAX_SAFE_INTEGER':
+                    ctx.replaceWith(create.BinaryExpression(n.start, n.end, '-', pow('2', NUM('53')), NUM('1')));
+                    return;
+                default: return;
+            }
+        },
         [N.CallExpression]: (n, ctx: TransformCtx) => {
             const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
             // `Math.pow(a, b)` → `a ** b` (oxc `replace_known_methods`; terser/esbuild do the same).
