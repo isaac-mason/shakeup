@@ -39,6 +39,7 @@ import { minimizeExitPoints } from './minimize-exit-points.ts';
 import { minimizeNot } from './minimize-not.ts';
 import { normalize } from './normalize.ts';
 import { minimizeLogical } from './minimize-logical.ts';
+import { removeUnusedPrivateMembers } from './private-members.ts';
 import { removeUnusedExpr } from './remove-unused-expr.ts';
 
 /** How much of the pipeline to run.
@@ -87,6 +88,9 @@ const LOOP_PASSES: TaggedPass[] = [
     // full-mode branch of `exit_expression`, outside the tree-shake branch.
     { pass: inline, cosmetic: true },
     { pass: removeUnusedExpr },
+    // NOT cosmetic: dropping a private member can make its initialiser's references unread, which
+    // `dropUnused` then acts on next round.
+    { pass: removeUnusedPrivateMembers },
     { pass: joinVars, cosmetic: true },
     { pass: dropUnused },
 ];
