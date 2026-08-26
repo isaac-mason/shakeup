@@ -18,6 +18,7 @@
         "cjsdiff": "tsx scripts/cjs-diff.ts",
         "parserdiff": "tsx scripts/parser-diff.ts",
         "parsercorpus": "tsx scripts/parser-corpus.ts",
+        "parserfuzz": "tsx scripts/parser-fuzz.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {
