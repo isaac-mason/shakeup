@@ -855,18 +855,40 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // arguments and dropping the now-unreferenced declaration. This is the same ordering
                 // compilecat's `run_all` uses (inline first, then the simplify loop).
                 let expanded = false;
+                // DIAGNOSTIC, not a gate: `SEMANTIC_VERIFY_TIER=1`.
+                //
+                // Per-pass checking here names an offender directly — `flowInlineVariables` moved a
+                // block-scoped local out of its block, a real miscompile, and it only surfaced two
+                // stages later against compress round 1. But the optimize tier is followed by a REBUILD
+                // (`if (expanded)`), so these passes do not owe a current semantic and 32 tests report
+                // drift the rebuild legitimately absorbs. Demanding currency here would be asserting an
+                // invariant the design does not have.
+                //
+                // Turn it on when touching a tier pass; it is the fastest way to localise this class of
+                // bug. Promote it to the standard gate only if the tier's rebuilds are ever removed.
+                const verifyAfter = (passName: string): void => {
+                    if (process.env.SEMANTIC_VERIFY_TIER !== '1') return;
+                    const problems = verifySemantic(semantic, program);
+                    if (problems.length > 0)
+                        throw new Error(`maintained semantic diverged after ${passName} in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                };
                 if (optimizeTier) {
                     expanded = inlineFunctions(program, semantic, source);
+                    verifyAfter('inlineFunctions');
                     if (unrollLoops(program, semantic, source)) expanded = true;
+                    verifyAfter('unrollLoops');
                     if (scalarReplaceAggregates(program, semantic, source, shapes)) expanded = true;
+                    verifyAfter('scalarReplaceAggregates');
                     // Flow-sensitive inlining runs AFTER the structural expanders (function-inline,
                     // unroll, sroa) so it sees the straight-line code they produce; the compress fixed
                     // point then folds each substituted RHS. Directive-gated like the rest of the tier.
                     if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
                     if (flowInlineVariables(program, semantic, source)) expanded = true;
+                    verifyAfter('flowInlineVariables');
                     // Dead-store LAST in the tier: its job is cleaning up the `result = X; break L;`
                     // scaffolding the inliners emit, so it must see their output.
                     if (eliminateDeadStores(program, semantic, source)) expanded = true;
+                    verifyAfter('eliminateDeadStores');
                 }
                 if (expanded) {
                     semantic = createSemantic();

@@ -15,7 +15,7 @@
 // refreshed mid-loop; today we refresh ONCE at the end (returning a fresh `Semantic` when anything
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
-import { emitRefFacts, REF, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
+import { emitRefFacts, REF, semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
 import type { RefCounts } from '../../analysis/movement.ts';
 import { type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
@@ -197,12 +197,8 @@ const MAX_ITERS = 8;
 /** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` after
  *  every compress round. Off by default (it rebuilds the whole semantic per round); the point is to run
  *  it in CI and whenever a pass that mutates structure is touched. */
-let SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
-
-/** Enable the check programmatically. The env var is read at MODULE LOAD, so a test that sets
- *  `process.env` in its body has no effect — the first version of `tst/semantic-verify.test.ts` did
- *  exactly that and was vacuous (and racy, since it mutated a global while other files ran). */
-export const setSemanticVerify = (on: boolean): void => { SEMANTIC_VERIFY = on; };
+/** Re-exported so existing callers keep working; the flag itself lives with `verifySemantic`. */
+export { setSemanticVerify } from '../../analysis/ref-facts.ts';
 
 /** Run the compress passes over `program` (loop to a fixed point, then the one-shot final pass).
  *  Returns a FRESH {@link Semantic} rebuilt from the compressed AST when anything changed (the caller
@@ -317,7 +313,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // The compress loop is where the AST is mutated most and where the maintained semantic has
         // drifted before (`blockFlatten` shipped two miscompiles), so the boundary is worth checking:
         // it names the offending stage instead of surfacing as a crash three stages later.
-        if (SEMANTIC_VERIFY) {
+        if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
                 throw new Error(`maintained semantic diverged after compress round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`);
@@ -334,13 +330,13 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // than in the fixed point, so a round-boundary-only check never saw it — and its known
         // `STALE SYM` defect therefore still surfaced as `Cannot read properties of undefined` in a
         // later stage instead of being named here.
-        if (SEMANTIC_VERIFY) {
+        if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
                 throw new Error(`maintained semantic diverged after the final traversal:\n  ${problems.slice(0, 20).join('\n  ')}`);
         }
         if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
-        if (SEMANTIC_VERIFY) {
+        if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
                 throw new Error(`maintained semantic diverged after coalesceVariableNames:\n  ${problems.slice(0, 20).join('\n  ')}`);
