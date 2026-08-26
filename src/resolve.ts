@@ -107,6 +107,15 @@ export type CommonOptions = {
 
 /** Inputs to {@link buildGraph}. */
 export type GraphOptions = CommonOptions & {
+    /** Compile-time global replacement (esbuild/Vite `define`). Keys are a bare identifier
+     *  (`__DEV__`) or a dotted global chain (`process.env.NODE_ENV`); VALUES ARE JS SOURCE, so a
+     *  string replacement needs its own quotes: `{ 'process.env.NODE_ENV': '"production"' }`.
+     *
+     *  Only FREE references are replaced, so a local binding of the same name is untouched, and
+     *  assignment targets are never substituted. Runs before compress, so the substituted literal
+     *  feeds constant folding and dead-code elimination — which is what actually shrinks (and, on a
+     *  browser target where `process` does not exist, un-breaks) real dependencies. */
+    define?: Record<string, string>;
     /** One or more entry modules. Exactly one of `input` / `entry` must be set. */
     input?: InputOption;
     /** @deprecated single-entry alias for `input`. Normalized into `input`. */

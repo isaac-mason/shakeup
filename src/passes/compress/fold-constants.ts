@@ -51,9 +51,29 @@ function numValue(n: Node): number | null {
 // exotic-escape raws return null (bail). JSON.parse of a valid double-quoted JS string is exact.
 function strValue(n: Node): string | null {
     const raw = n.name;
-    if (raw.length < 2 || raw.charCodeAt(0) !== 34 /* " */) return null;
+    if (raw.length < 2) return null;
+    const quote = raw.charCodeAt(0);
+    // SINGLE-quoted literals are re-quoted rather than rejected. Requiring `"` here silently
+    // disabled string folding for most real code — `'x' === 'x'` survived to the output while
+    // `"x" === "x"` folded — and it defeated `define` outright, since the substituted value and the
+    // source it is compared against rarely share a quote style.
+    let json: string;
+    if (quote === 34 /* " */) {
+        json = raw;
+    } else if (quote === 39 /* ' */) {
+        // `\'` is a JS escape but not a JSON one, and a bare `"` is legal inside single quotes but
+        // must be escaped once re-quoted. Every OTHER escape is passed through untouched so that
+        // `JSON.parse` remains the validator: JS-only forms (`\x41`, `\0`, `\u{1F600}`, a line
+        // continuation) fail there and bail to `null`, which costs a fold and never risks a wrong one.
+        const inner = raw.slice(1, -1).replace(/\\(.)|(")/gs, (m, esc: string | undefined, dq: string | undefined) =>
+            dq !== undefined ? '\\"' : esc === "'" ? "'" : m,
+        );
+        json = `"${inner}"`;
+    } else {
+        return null;
+    }
     try {
-        const v = JSON.parse(raw) as unknown;
+        const v = JSON.parse(json) as unknown;
         return typeof v === 'string' ? v : null;
     } catch {
         return null;
