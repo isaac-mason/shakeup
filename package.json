@@ -17,6 +17,7 @@
         "oxcdiff": "tsx scripts/oxc-diff.ts",
         "cjsdiff": "tsx scripts/cjs-diff.ts",
         "parserdiff": "tsx scripts/parser-diff.ts",
+        "parsercorpus": "tsx scripts/parser-corpus.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {

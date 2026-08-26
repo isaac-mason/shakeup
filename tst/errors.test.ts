@@ -88,3 +88,36 @@ describe('unterminated literals', () => {
         expect(msgs(src)).not.toMatch(/unterminated/);
     });
 });
+
+// Found by `pnpm parsercorpus` — parsing every JS file in webpack/rspack/vite with shakeup and with
+// the real oxc parser. 38 real files failed on this alone.
+//
+// The grammar's restriction is `async [no LineTerminator here] ArrowFunction`: it sits BETWEEN
+// `async` and its parameters. shakeup tested `F_NL` on the `async` token itself, which asks whether
+// there was a newline BEFORE `async` — always legal. So any multiline call taking an async arrow
+// argument failed with `expected ')'`, which is about as common a shape as JavaScript has.
+describe('async arrows after a line break', () => {
+    const ok = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each([
+        ['a newline before the argument', 'f("P",\n async (d) => { return 1; });'],
+        ['every argument on its own line', 'f(\n "P",\n async (d) => {\n  return 1;\n }\n);'],
+        ['a bare-parameter async arrow after a newline', 'f(\n async d => d);'],
+        ['a zero-parameter async arrow after a newline', 'f(\n async () => 1);'],
+        ['assignment across a line break', 'const g =\n async (d) => d;'],
+        ['inside an array literal', '[\n async (d) => d,\n];'],
+    ])('accepts %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+
+    it.each([
+        ['a single-line call', 'f("P", async (d) => 1);'],
+        ['`async` as a plain identifier', 'var async = 1; async;'],
+        ['`async` then a newline then a call', 'async\n(d);'],
+        ['an async function declaration', 'async function f() {}'],
+        ['`async` then a newline then `function`', 'async\nfunction f() {}'],
+        ['an async method', 'const o = { async m() {} };'],
+    ])('does not regress %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+});
