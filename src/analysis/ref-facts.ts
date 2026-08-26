@@ -210,6 +210,41 @@ export function verifyRefFacts(
     return out;
 }
 
+/** Subtract from `sem` every reference the subtree `root` makes, because it is leaving the tree.
+ *
+ *  The counterpart of `ctx.dropRefs` for passes that are NOT traverse-based — the optimize tier walks
+ *  the program itself, so it has no `Ctx` and no `RefDelta` to accumulate into. Without this a pass
+ *  that splices a statement out leaves its references counted, which `DELTA_MODE=verify` reports as
+ *  `over(safe)`: harmless for correctness (oxc's rule — stale EXTRA references cost optimizations, a
+ *  MISSING one miscompiles) but it means a symbol looks live when it is dead, so `dropUnused` declines
+ *  to remove it and the output is bigger than it should be. */
+export function subtractRefFacts(sem: { refs: ({ reads: number; writes: number } | undefined)[]; uses: number[] }, root: Node): void {
+    emitRefFacts(root, (sym, flags) => {
+        const c = sem.refs[sym];
+        if (c !== undefined) {
+            if ((flags & REF.READ) !== 0) c.reads--;
+            if ((flags & REF.WRITE) !== 0) c.writes--;
+        }
+        const u = sem.uses[sym];
+        if (u !== undefined) sem.uses[sym] = u - 1;
+    });
+}
+
+/** Add to `sem` every reference the subtree `root` makes, because it has just entered the tree.
+ *  The counterpart of `subtractRefFacts`, and of `ctx.addRefs` for passes that are not traverse-based. */
+export function addRefFacts(sem: { refs: ({ reads: number; writes: number } | undefined)[]; uses: number[] }, root: Node): void {
+    emitRefFacts(root, (sym, flags) => {
+        let c = sem.refs[sym];
+        if (c === undefined) {
+            c = { reads: 0, writes: 0 };
+            sem.refs[sym] = c;
+        }
+        if ((flags & REF.READ) !== 0) c.reads++;
+        if ((flags & REF.WRITE) !== 0) c.writes++;
+        sem.uses[sym] = (sem.uses[sym] ?? 0) + 1;
+    });
+}
+
 /** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` at
  *  every mutation boundary. Off by default (it rebuilds the whole semantic each time); the point is to
  *  run it in CI and whenever a pass that mutates structure is touched.

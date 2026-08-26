@@ -119,12 +119,19 @@ const fnHook = (fn: Node, ctx: TransformCtx): void => {
             if (cand === null) continue;
             const after = liveOut(stmts[i]);
             if (after === null || after.has(cand.sym)) continue; // no answer, or still read — keep it
+            // Account for what LEAVES, then for what stays. The statements are spliced RAW (this hook
+            // restructures a list it is holding, so `ctx.remove()` does not apply), and `dropRefs`
+            // records into the `RefDelta` regardless of how the node leaves. Without it the dropped
+            // store's WRITE reference stays counted ("writes maintained=1 truth=0 over(safe)"), leaving
+            // a dead symbol looking live so `dropUnused` declines to remove it.
+            ctx.dropRefs(stmts[i]);
             if (isPureExpr(cand.value)) {
                 stmts.splice(i, 1);
                 i--;
             } else {
                 // The value is dead but the computation is not: keep only its effects.
                 stmts[i] = create.ExpressionStatement(stmts[i].start, stmts[i].end, 0, cand.value);
+                ctx.addRefs(stmts[i]);
             }
             changed = true;
         }

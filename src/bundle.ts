@@ -47,7 +47,6 @@ import {
 } from './sourcemap';
 import { resetInferredPure } from './analysis/effects';
 import { stampPureCallsGraph } from './analysis/purity';
-import { analyze, createSemantic } from './analysis/semantic';
 import { runCompress } from './passes/compress';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
@@ -577,9 +576,14 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 }
                 entry.transformDependencies = deps;
             }
-            const fresh = createSemantic();
-            analyze(fresh, mod.program);
-            mod.semantic = fresh;
+            // NO REBUILD. `inlineCrossModule` splices an imported `@inline` helper through the same
+            // `inline-functions` machinery as the per-module tier, which now MAINTAINS the semantic —
+            // fresh scopes and symbols per splice, references accounted through a `RefDelta`. This was
+            // the last per-module `analyze` outside the initial one.
+            //
+            // Neither corpus takes this branch (both run exactly one `analyze` per module), so
+            // `tst/cross-module-inline-semantic.test.ts` exists to exercise it: a green gate proves
+            // nothing about a path nothing walks.
             if (compressMode !== false) {
                 const refreshed = runCompress(mod.program, mod.semantic, compressMode);
                 if (refreshed !== null) mod.semantic = refreshed;
