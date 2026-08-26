@@ -225,6 +225,36 @@ const strValue = (source: string, node: Node): string =>
     node.end > node.start ? source.slice(node.start + 1, node.end - 1) : node.name.slice(1, -1);
 
 /** Extract import/export records from the module's top-level statements. */
+/** Warn when an ES module references the CommonJS globals `module` / `exports`
+ *  (rolldown `commonjs_variable_in_esm`, `ast_scanner/mod.rs:302-322`; esbuild has no equivalent).
+ *
+ *  An ESM export keyword makes the file ESM outright — that is tier 1 of the CJS kind rule, and
+ *  neither bundler reclassifies on the strength of a stray `module.exports =`. But in an ES module
+ *  those names are just undeclared globals: `module.exports = x` throws, and `exports.foo = x`
+ *  writes to a global object nobody reads. Silently emitting that is the worst option, so warn.
+ *
+ *  Reads `semantic.unresolved`, which is already populated — a free identifier is exactly one that
+ *  bound to no declaration, which is rolldown's `is_global_identifier_reference`. A module that
+ *  declares its own `exports` therefore does NOT warn, correctly. */
+function warnCjsVarsInEsm(mod: Module, warnings: string[]): void {
+    let hasEsmExport = false;
+    for (const stmt of mod.program.data.body) {
+        if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration) {
+            hasEsmExport = true;
+            break;
+        }
+    }
+    if (!hasEsmExport) return;
+    for (const node of mod.semantic.unresolved) {
+        if (node.name !== 'module' && node.name !== 'exports') continue;
+        warnings.push(
+            `${mod.id}:${node.start}: '${node.name}' is a CommonJS variable and is not defined in an ES module ` +
+                `(this file uses ESM \`export\`, so it is treated as ESM)`,
+        );
+        return; // one per module is enough to make the point
+    }
+}
+
 function extractRecords(mod: Module): void {
     const { semantic, source } = mod;
     for (const stmt of mod.program.data.body) {
@@ -941,8 +971,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.namedExports = c.namedExports;
             mod.starExports = c.starExports;
             mod.jsxRuntime = c.jsxRuntime;
+            warnCjsVarsInEsm(mod, graph.warnings);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
+            warnCjsVarsInEsm(mod, graph.warnings);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its
