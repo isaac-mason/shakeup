@@ -82,6 +82,16 @@ export type ParserState = {
      *  be moved inside a synchronous wrapper closure (`__commonJS` / `__esm`), which is a build
      *  error rather than something to discover as `Unexpected reserved word` at load. */
     sawTopLevelAwait: boolean;
+    /** The SOURCE contained an `import`/`export` DECLARATION. Recorded at parse time because a
+     *  module's format is a property of its source, not of what survives lowering: an `export` after
+     *  an unconditional top-level `throw` is unreachable and gets eliminated, and classifying from
+     *  the surviving AST then decided a genuine ES module was CommonJS. Excludes `import()`, which
+     *  is legal in a CommonJS file and settles nothing. */
+    sawEsmExport: boolean;
+    /** Same, for an `import` DECLARATION. Kept separate from {@link sawEsmExport} because the two
+     *  feed DIFFERENT classification tiers: an export decides ESM outright, while an import only
+     *  breaks the final tie — a file with `import` AND `module.exports` is CommonJS. */
+    sawEsmImport: boolean;
     /** Nesting depth of scopes that REBIND `this` — non-arrow function bodies and class bodies.
      *  Arrows are excluded because they inherit `this` from the enclosing scope, so an arrow at the
      *  module top level still sees the module's `this`. */

@@ -277,8 +277,13 @@ const strValue = (source: string, node: Node): string =>
 /** Does the module's own source carry an ESM `export` / `import` keyword? Tier 1 and tier 4 of the
  *  CommonJS kind rule. One body scan, shared by the classifier and both diagnostics. */
 function esmSyntaxOf(mod: Module): { hasExport: boolean; hasImport: boolean } {
-    let hasExport = false;
-    let hasImport = false;
+    // The AST scan below can only LOSE declarations, never gain them: an `export` after an
+    // unconditional top-level `throw` is unreachable and is eliminated during lowering, and
+    // classifying from the surviving body then made a genuine ES module CommonJS — it got a
+    // `__commonJS` wrapper and every importer read the wrong shape, silently. `hasEsmExport` is
+    // recorded at PARSE time, so it settles the tier-1 question from the source.
+    let hasExport = mod.hasEsmExport;
+    let hasImport = mod.hasEsmImport;
     for (const stmt of mod.program.data.body) {
         if (stmt.type === N.ImportDeclaration) hasImport = true;
         else if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration)
@@ -914,6 +919,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasTopLevelReturn = false;
         let hasRequire = false;
         let hasTopLevelAwait = false;
+        let hasEsmExport = false;
+        let hasEsmImport = false;
         let topLevelThis: Node[] = [];
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
@@ -983,6 +990,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasTopLevelReturn = hit.hasTopLevelReturn;
                 hasRequire = hit.hasRequire;
                 hasTopLevelAwait = hit.hasTopLevelAwait;
+                hasEsmExport = hit.hasEsmExport;
+                hasEsmImport = hit.hasEsmImport;
                 topLevelThis = hit.topLevelThis;
                 graph.parseStats.reused++;
             } else {
@@ -1002,6 +1011,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
                 hasRequire = parsed.hasRequire;
                 hasTopLevelAwait = parsed.hasTopLevelAwait;
+                hasEsmExport = parsed.hasEsmExport;
+                hasEsmImport = parsed.hasEsmImport;
                 topLevelThis = parsed.topLevelThis;
                 semantic = createSemantic();
                 analyze(semantic, program);
@@ -1170,6 +1181,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasTopLevelReturn,
             hasRequire,
             hasTopLevelAwait,
+            hasEsmExport,
+            hasEsmImport,
             topLevelThis,
             jsxRuntime: null,
             sideEffects,
@@ -1232,6 +1245,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasTopLevelReturn: mod.hasTopLevelReturn,
                 hasRequire: mod.hasRequire,
                 hasTopLevelAwait: mod.hasTopLevelAwait,
+                hasEsmExport: mod.hasEsmExport,
+                hasEsmImport: mod.hasEsmImport,
                 topLevelThis: mod.topLevelThis,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
