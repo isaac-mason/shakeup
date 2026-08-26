@@ -30,7 +30,7 @@
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
 import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
-import { N, type Node, walk } from '../../ast.ts';
+import { N, type Node } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -120,38 +120,17 @@ function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
     for (let i = 0; i < decls.length; i++) if (verdicts[i] !== DROP_PURE) kept.push(decls[i]);
 
     if (kept.length === 0) {
-        for (const d of decls) evictBindings(d, ctx);
-        ctx.remove(); // the declaration is now empty → drop the whole statement
+        // `ctx.remove()` retires the whole statement — references AND bindings — so nothing to do here.
+        ctx.remove();
         return;
     }
     // Rewrite in place with the surviving declarators. The dropped ones leave the tree here without
     // passing through any `ctx` mutation helper, so their references are subtracted explicitly —
     // otherwise the maintained counts keep counting reads that no longer exist.
-    for (let i = 0; i < decls.length; i++) {
-        if (verdicts[i] !== DROP_PURE) continue;
-        ctx.dropRefs(decls[i]);
-        evictBindings(decls[i], ctx);
-    }
+    // `retire` = drop references AND evict the bindings; these declarators are gone for good.
+    for (let i = 0; i < decls.length; i++) if (verdicts[i] === DROP_PURE) ctx.retire(decls[i]);
     n.data.declarations = kept;
     ctx.changed = true;
-}
-
-/** Evict the symbols a deleted declarator BOUND, using the established convention (`scope = 0`,
- *  "owned by no lexical scope" — still a valid index, see `strip-ts.ts` `evictSym`).
- *
- *  `dropRefs` moves reference COUNTS; it does not retire the BINDING. Left live, the symbol keeps
- *  claiming a slot from the mangler for a declaration that no longer exists, which is why the
- *  maintained table carried 11 more live symbols than a rebuild after two compress rounds — and why
- *  the post-compress rebuild could not be removed without changing every mangled name. */
-function evictBindings(declarator: Node, ctx: TransformCtx): void {
-    walk(declarator, (x) => {
-        if (x.type === N.BindingIdentifier) {
-            const sym = (x as { sym: number }).sym;
-            const rec = sym > 0 ? ctx.semantic.symbols[sym] : undefined;
-            if (rec !== undefined) rec.scope = 0;
-        }
-        return undefined;
-    });
 }
 
 export const dropUnused: Visitor = {

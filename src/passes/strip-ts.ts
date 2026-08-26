@@ -317,12 +317,15 @@ export const tsStrip: Visitor = {
             evictSubtreeBindings(ctx, n); // the id AND its type parameters
             ctx.remove();
         },
-        // NOTE: `declare` forms are erased but their symbols are deliberately NOT evicted. A
-        // TYPE-ONLY declaration (`interface` / `type X =` / `import type`) leaves no reference behind,
-        // so a rebuilt semantic reserves nothing for it and the maintained one must not either. A
-        // `declare const g` is the opposite: references to `g` SURVIVE the strip as unresolved, so a
-        // rebuild reserves the name via `Semantic.unresolved` — and keeping the symbol reserves it
-        // exactly the same way. Evicting here instead left the name free for capture.
+        // NOTE, superseded — kept because the REASONING still matters. This used to say `declare`
+        // forms are erased but their symbols deliberately NOT evicted, because references to
+        // `declare const g` survive the strip and a live symbol reserves the name. True, but it also
+        // left the reference looking like an ordinary local, so once the post-compress rebuild was
+        // removed the mangler renamed `g` and the output called a global that does not exist.
+        //
+        // The name is now reserved the way a REBUILD reserves it: the Program-exit hook turns those
+        // references into unresolved globals (`sym = 0`, pushed to `Semantic.unresolved`) and evicts
+        // the symbols. `ctx.remove()` also retires bindings now, so eviction here is automatic.
         [N.FunctionDeclaration]: (n, ctx) => {
             if (isErasedStmt(n)) {
                 // ONLY a genuine `declare function` is ambient. `isErasedStmt` is also true for an
