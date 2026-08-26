@@ -34,6 +34,7 @@ import { inline } from './inline.ts';
 import { joinVars, joinVarsOnExit } from './join-vars.ts';
 import { minimizeConditionalExpr } from './minimize-conditional.ts';
 import { minimizeConditions } from './minimize-conditions.ts';
+import { minimizeForStatement } from './minimize-for-statement.ts';
 import { minimizeExitPoints } from './minimize-exit-points.ts';
 import { minimizeNot } from './minimize-not.ts';
 import { normalize } from './normalize.ts';
@@ -77,6 +78,9 @@ const LOOP_PASSES: TaggedPass[] = [
     { pass: foldConstants },
     // Turns an early-return guard into a negated `if`; the passes below finish the job.
     { pass: minimizeExitPoints, cosmetic: true },
+    // Hoisting a leading `if (…) break;` into the loop test must follow `minimizeConditions`, which is
+    // what folds a preceding expression statement into that `if`'s test in the first place.
+    { pass: minimizeForStatement, cosmetic: true },
     { pass: minimizeConditions, cosmetic: true },
     { pass: minimizeNot, cosmetic: true },
     { pass: minimizeConditionalExpr, cosmetic: true },

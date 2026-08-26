@@ -95,7 +95,7 @@ function toBool(n: Node, v: boolean): void {
 
 // The truthiness of a recognised literal (for `!`). Notably EXCLUDES BigInt/RegExp/template
 // literals — those bail (return null).
-function boolCoerce(n: Node): boolean | null {
+export function boolCoerce(n: Node): boolean | null {
     if (isBool(n)) return n.name === 'true';
     if (isNull(n)) return false; // `!null` → true
     if (isNum(n)) {

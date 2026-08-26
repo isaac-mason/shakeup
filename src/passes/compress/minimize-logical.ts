@@ -35,6 +35,7 @@
 //
 // NOT De Morgan (`!(a||b)` → `!a&&!b`): that is `minimize-not`'s lane; doing it here would oscillate.
 import { N, type Node } from '../../ast.ts';
+import { boolCoerce } from './fold-constants.ts';
 import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -118,6 +119,36 @@ function collapseNullPair(left: Node, right: Node, start: number, end: number, f
     return create.BinaryExpression(start, end, replaceOp, ls.ref, nullLit);
 }
 
+/** Fold a logical whose LEFT operand is a known constant (oxc `try_fold_and_or`).
+ *
+ *   `true && x`  → `x`        `false && x` → `false`
+ *   `true || x`  → `true`     `false || x` → `x`
+ *
+ *  Only when the left side is a recognised LITERAL, so dropping it can discard no side effect — a
+ *  `!0` counts, because `substituteAlternateSyntax` rewrites `true` to it and the unary folds away.
+ *
+ *  Absent, `normalize`'s `while (true)` → `for (; !0;)` left the `!0` sitting in every hoisted loop
+ *  test forever: `minimizeForStatement` produced `for (; !0 && !(x);)` where oxc reaches
+ *  `for (; !x;)`. It is a general fold though, not a loop one — `true && f()` was not reducing either.
+ *
+ *  `??` is excluded: it tests NULLISH, not truthiness, so `0 ?? x` is `0` while `0 || x` is `x`. */
+function tryFoldConstantOperand(n: Node): Node | null {
+    const d = n.data as LogicalData;
+    if (d.operator !== '&&' && d.operator !== '||') return null;
+    // `!<literal>` is a literal for this purpose — see above.
+    let left = d.left;
+    let negations = 0;
+    while (left.type === N.UnaryExpression && (left.data as { operator: string }).operator === '!') {
+        left = (left.data as { argument: Node }).argument;
+        negations++;
+    }
+    const base = boolCoerce(left);
+    if (base === null) return null;
+    const truthy = negations % 2 === 0 ? base : !base;
+    if (d.operator === '&&') return truthy ? d.right : d.left;
+    return truthy ? d.left : d.right;
+}
+
 /** Attempt the null/undefined collapse on a `LogicalExpression`. Handles the direct pair and the
  *  left-nested chain (`(a===null || a===undefined) || rest` → `a==null || rest`). */
 function tryNullCollapse(n: Node): Node | null {
@@ -195,6 +226,11 @@ export const minimizeLogical: Visitor = {
     enter: null,
     exit: hookTable({
         [N.LogicalExpression]: (n, ctx: TransformCtx) => {
+            const folded = tryFoldConstantOperand(n);
+            if (folded !== null) {
+                ctx.replaceWith(folded);
+                return;
+            }
             const rewritten = tryNullCollapse(n);
             if (rewritten !== null) ctx.replaceWith(rewritten);
         },
