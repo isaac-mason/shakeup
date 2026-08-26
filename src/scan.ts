@@ -880,7 +880,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     // Flow-sensitive inlining runs AFTER the structural expanders (function-inline,
                     // unroll, sroa) so it sees the straight-line code they produce; the compress fixed
                     // point then folds each substituted RHS. Directive-gated like the rest of the tier.
-                    if (expanded) { semantic = createSemantic(); analyze(semantic, program); }
+                    // NO REBUILD between the structural expanders and flow-inline: all four tier
+                    // passes now MAINTAIN the semantic (verified per pass under `SEMANTIC_VERIFY`).
+
                     if (flowInlineVariables(program, semantic, source)) expanded = true;
                     verifyAfter('flowInlineVariables');
                     // Dead-store LAST in the tier: its job is cleaning up the `result = X; break L;`
@@ -888,10 +890,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     if (eliminateDeadStores(program, semantic, source)) expanded = true;
                     verifyAfter('eliminateDeadStores');
                 }
-                if (expanded) {
-                    semantic = createSemantic();
-                    analyze(semantic, program);
-                }
+                // NO REBUILD after the optimize tier either — same reason. This and the one above
+                // were the last two per-module rebuilds outside the initial `analyze`.
+                void expanded;
                 if (compress !== false) {
                     const refreshed = runCompress(program, semantic, compress);
                     if (refreshed !== null) semantic = refreshed;
