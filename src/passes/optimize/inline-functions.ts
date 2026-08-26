@@ -30,7 +30,7 @@
 import { isPureExpr } from '../../analysis/effects.ts';
 import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
 import { cloneNode, N, type Node, node, walk, walkChildren } from '../../ast.ts';
-import { attachScopeNode, cloneSemanticSubtree, createScope, declareLocal, SCOPE, SYM } from '../../analysis/semantic.ts';
+import { attachScopeNode, createScope, declareLocal, SCOPE, SYM } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
 import { VAR_KIND } from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
@@ -302,19 +302,24 @@ function blockIsInlinable(cand: BlockCandidate, args: readonly Node[], scope: nu
     return true;
 }
 
-/** Give the nodes `block-mutate` SYNTHESIZED their scopes and symbols.
+/** Make one spliced block a self-contained lexical region: its own scopes, its own symbols.
  *
- *  `block-mutate` is a pure AST builder with no `Semantic`: it mints the wrapper `BlockStatement`, the
- *  `let <result>;` prologue and the `ref(name)` reads as plain nodes — blocks with no `scopeId`, and
- *  identifiers with `sym === 0`. To the verifier that reads as "scope-owning node has no scopeId" and
- *  "'_r0' unbound in maintained, bound in truth", both UNSAFE: unbound in the table is the direction
- *  where a live symbol looks dead and `dropUnused` deletes a declaration still in use.
+ *  A splice mixes three kinds of node and all three need binding:
+ *   * the wrapper `BlockStatement` and `let <result>;` prologue that `block-mutate` SYNTHESIZED — plain
+ *     nodes with no `scopeId` and `sym === 0`;
+ *   * the PARAMETER bindings, which the prologue introduces (`const p = arg`) OUTSIDE the cloned body;
+ *   * the cloned body itself, whose bindings still carry the ORIGINAL callee's symbols.
  *
- *  Binding by NAME is safe here precisely because these names are freshly minted and unique
- *  (`freshName` -> `_r{seq}` / `_L{seq}`), and only identifiers still carrying `sym === 0` are touched —
- *  a reference to something OUTER legitimately has no symbol and must keep it. Two passes, because a
- *  reference can appear before its binding. */
-function bindSynthesized(sem: Semantic, root: Node, scope: number): void {
+ *  Binding all of them here, after `block-mutate` has finished, avoids an ordering trap: seeding the
+ *  clone with parameter symbols cannot work, because the prologue that declares them is built later.
+ *
+ *  Every binding gets a FRESH symbol, so the callee and each of its call sites stop sharing one symbol
+ *  per local — "maintained 2 -> truth 8, but maintained 2 already maps to 2", an UNSAFE partition
+ *  mismatch. References are then rebound BY NAME within the block, which is exactly the shadowing rule:
+ *  if the block declares `x`, a reference to `x` inside it binds to that declaration.
+ *
+ *  Two passes, because a reference can appear before its binding. */
+function bindSplicedBlock(sem: Semantic, root: Node, scope: number): void {
     const minted = new Map<string, number>();
     const declare = (n: Node, sc: number): void => {
         const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
@@ -325,7 +330,7 @@ function bindSynthesized(sem: Semantic, root: Node, scope: number): void {
         } else if (own !== 0) {
             inner = own;
         }
-        if (n.type === N.BindingIdentifier && (n as { sym: number }).sym === 0 && n.name !== '') {
+        if (n.type === N.BindingIdentifier && n.name !== '') {
             minted.set(n.name, declareLocal(sem, n, inner, SYM.LET));
         }
         walkChildren(n, (c) => {
@@ -334,11 +339,20 @@ function bindSynthesized(sem: Semantic, root: Node, scope: number): void {
     };
     declare(root, scope);
 
-    if (minted.size === 0) return;
     const stamp = (n: Node): void => {
-        if (n.type === N.IdentifierReference && (n as { sym: number }).sym === 0) {
+        if (n.type === N.IdentifierReference) {
             const sym = minted.get(n.name);
-            if (sym !== undefined) (n as { sym: number }).sym = sym;
+            if (sym !== undefined) {
+                // Declared inside the block — shadowing wins.
+                (n as { sym: number }).sym = sym;
+            } else if ((n as { sym: number }).sym === 0 && n.name !== '') {
+                // NOT declared here, and still unbound: `block-mutate` writes the call's result into
+                // the CALLER's binding (`const x = callee(...)` makes `x` the result name), so it emits
+                // `x = …` with a synthesized node that has no symbol. Resolve it against the enclosing
+                // scope — leaving it at 0 reads as "'x' unbound in maintained, bound in truth", the
+                // direction where a live symbol looks dead and its declaration gets deleted.
+                (n as { sym: number }).sym = lookupValue(sem, scope, n.name);
+            }
         }
         walkChildren(n, stamp);
     };
@@ -369,18 +383,17 @@ function buildSplice(
         // every other call site: "no scopeId in maintained" plus "symbol partition mismatch", both
         // UNSAFE. Done here, before `block-mutate` rewrites the statements, while the clone still
         // pairs structurally with its source.
-        bodyStmts: cand.body.map((st) => {
-            const copy = cloneNode(st) as Node;
-            cloneSemanticSubtree(sem, st, copy, scope);
-            return copy;
-        }),
+        // Plain clone: `bindSplicedBlock` below rebinds the whole spliced block in one pass, so
+        // seeding scopes/symbols here would only be overwritten (and could not cover the PARAMETERS,
+        // which the prologue declares after this point).
+        bodyStmts: cand.body.map((st) => cloneNode(st) as Node),
         params: cand.paramNames.slice(0, Math.max(args.length, 0)),
         args: args.map((a) => cloneNode(a) as Node),
         label,
         resultName: result,
         needsResult: resultName !== null,
     });
-    bindSynthesized(sem, out.block, scope);
+    bindSplicedBlock(sem, out.block, scope);
     return out.block;
 }
 
@@ -435,9 +448,22 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
             const name = d.id.name;
             const block = buildSplice(cand, argsOf(call), scope, semantic, name, seq++);
             if (block === null) continue;
-            list.splice(i, 1, letDecl(name), block);
+            // `const x = callee(...)` becomes `let x; { … x = … }` — the SAME binding, re-spelled. So
+            // carry the original symbol onto the new declarator and repoint the table's `decl` at it,
+            // rather than leaving a synthesized `BindingIdentifier` with `sym === 0` ("'x' unbound in
+            // maintained, bound in truth", the direction where a live symbol looks dead).
+            const decl = letDecl(name);
+            const origSym = (d.id as { sym: number }).sym;
+            if (origSym > 0) {
+                const idNode = ((decl.data as { declarations: Node[] }).declarations[0].data as { id: Node }).id;
+                (idNode as { sym: number }).sym = origSym;
+                const rec = semantic.symbols[origSym];
+                if (rec !== undefined) rec.decl = idNode;
+            }
+            // `ctx.spliceStatements`, not a raw splice: the replaced declaration's references have to
+            // leave the maintained counts and the spliced block's have to enter them.
+            ctx.spliceStatements(list, i, 1, decl, block);
             i++; // skip the block we just inserted
-            ctx.changed = true;
         }
     };
 
