@@ -66,3 +66,54 @@ describe('known Number/RegExp members fold (oxc replace_known_methods)', () => {
         expect(evaluate(code)).toBe(String.raw`a\d"b`);
     });
 });
+describe('known call folds (oxc replace_known_methods)', () => {
+    it('Array.of(a,b) -> [a,b]', async () => {
+        const code = await build('o = Array.of(1, 2);');
+        expect(code).toContain('[1,2]');
+        expect(evaluate(code)).toEqual([1, 2]);
+    });
+
+    it('Array.of with a SPREAD still folds', async () => {
+        // `Array.of(...xs)` and `[...xs]` build the same array — unlike `Array(...)`, whose
+        // single-numeric-argument form means a length.
+        const code = await build('const xs = [1, 2]; o = Array.of(...xs);');
+        expect(evaluate(code)).toEqual([1, 2]);
+    });
+
+    it('leaves a SHADOWED Array.of alone', async () => {
+        const code = await build('{ const Array = { of: () => 9 }; o = Array.of(1, 2); }');
+        expect(evaluate(code)).toBe(9);
+    });
+
+    it('"a".concat("b","c") -> "abc"', async () => {
+        const code = await build('o = "a".concat("b", "c");');
+        expect(code).toContain('"abc"');
+        expect(code).not.toContain('concat');
+        expect(evaluate(code)).toBe('abc');
+    });
+
+    it('folds a concat whose parts contain escapes', async () => {
+        // The fold splices RAW inner text, so an escape must survive verbatim rather than be decoded.
+        const code = await build('o = "a\\n".concat("b");');
+        expect(evaluate(code)).toBe('a\nb');
+    });
+
+    it('leaves MIXED quote delimiters alone', async () => {
+        // Splicing `"a"` with `'b"c'` would terminate the literal early at the inner `"`.
+        const code = await build(`o = "a".concat('b"c');`);
+        expect(evaluate(code)).toBe('ab"c');
+    });
+
+    it('leaves a non-literal concat argument alone', async () => {
+        const code = await build('o = "a".concat(String(globalThis.x));');
+        expect(code).toContain('concat');
+        expect(evaluate(code)).toBe('aundefined');
+    });
+
+    it('folds a concat CHAIN across fixed-point rounds', async () => {
+        // Innermost folds first; the outer call sees a CallExpression object and bails that round.
+        const code = await build('o = "a".concat("b").concat("c");');
+        expect(code).not.toContain('concat');
+        expect(evaluate(code)).toBe('abc');
+    });
+});
