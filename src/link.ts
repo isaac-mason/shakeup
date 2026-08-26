@@ -242,6 +242,27 @@ export function linkGraph(graph: Graph): Linked {
     // (`Esm -> WrapKind::Esm`, `CommonJs`/`None -> WrapKind::Cjs`); with an ESM-only emit the CJS
     // wrapper serves both, since an ESM module's bindings are already hoisted into the closure.
     const warnedEagerEsm = new Set<number>();
+    // LINK-STAGE KIND PROMOTION, then wrapping — rolldown's `determine_module_exports_kind`
+    // (`:36-96` **[V]**). A module with `ExportsKind::None` (no ESM syntax, no CommonJS feature use)
+    // is genuinely undecided after scanning; how it is IMPORTED settles it:
+    //   · `import`ed  → promote to Esm
+    //   · `require`d  → promote to CommonJs, and wrap
+    //
+    // Without the require-side promotion an exports-less script reached `__toCommonJS(ns)`, so
+    // `require('./e.js')` produced `{ __esModule: true }` where Node gives a bare `{}` — and that
+    // marker flips a consumer's default-interop to the `.default` branch, yielding `undefined`.
+    //
+    // Iterated in `linked.order` so an earlier importer's promotion is visible to a later one, which
+    // is the ordering rolldown's own comment calls out as load-bearing.
+    for (const idx of linked.order) {
+        for (const rec of graph.modules[idx].importRecords) {
+            if (rec.external || rec.resolved < 0) continue;
+            const target = graph.modules[rec.resolved];
+            if (target.exportsKind !== 'none') continue;
+            target.exportsKind = rec.kind === 'require' ? 'commonjs' : 'esm';
+        }
+    }
+
     for (const idx of linked.order) {
         for (const rec of graph.modules[idx].importRecords) {
             if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
