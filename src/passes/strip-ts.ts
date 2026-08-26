@@ -6,7 +6,7 @@
 // A1a (this file): the functional strip — unwrap type-assertion expressions, remove type-only
 // statements + class members, filter type-only import/export specifiers, and lower constructor
 // parameter properties. A1b (annotation-field clearing, for a fully plain-JS AST) is layered on top.
-import { N, type Node, node } from '../ast.ts';
+import { N, type Node, node, walk } from '../ast.ts';
 import * as create from '../parser/create.ts';
 import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
@@ -133,6 +133,21 @@ function evictSymbol(ctx: TransformCtx, specifier: Node): void {
 }
 
 /** Same eviction for a type declaration erased whole (`interface` / `type X =`). */
+/** Evict every binding DECLARED anywhere inside an erased subtree, not just the declaration's own id.
+ *
+ *  `interface I<C>` / `type X<C> = …` also bind their TYPE PARAMETERS. Evicting only the id left `C`
+ *  LIVE with a `decl` pointing at a node no longer in the tree, so the chunk mangler still allocated a
+ *  slot for it. Safe direction (a wasted name), but it is drift, and `verifySemantic` reports it.
+ *
+ *  Deliberately NOT used for `declare` forms — see the note at the erasure sites: a `declare const g`
+ *  keeps its symbol so the name stays RESERVED, because references to `g` survive the strip. */
+function evictSubtreeBindings(ctx: TransformCtx, root: Node): void {
+    walk(root, (x) => {
+        if (x.type === N.BindingIdentifier) evictSym(ctx, (x as { sym: number }).sym);
+        return undefined;
+    });
+}
+
 function evictDeclSymbol(ctx: TransformCtx, decl: Node): void {
     evictSym(ctx, ((decl.data as { id?: Node }).id as { sym: number } | undefined)?.sym ?? 0);
 }
@@ -187,10 +202,25 @@ function unwrapAssertions(n: Node): Node {
 function dropTypeRefs(ctx: TransformCtx, t: unknown): void {
     if (t === null || t === undefined) return;
     if (Array.isArray(t)) {
-        for (const x of t) if (x !== null && x !== undefined) ctx.dropRefs(x as Node);
+        for (const x of t) if (x !== null && x !== undefined) dropOne(ctx, x as Node);
         return;
     }
-    ctx.dropRefs(t as Node);
+    dropOne(ctx, t as Node);
+}
+
+/** Detach one type subtree: subtract the references it made AND evict the bindings it DECLARED.
+ *
+ *  `ctx.dropRefs` only moves reference counts. A type parameter (`function f<T>(…)`) is a BINDING, and
+ *  erasing its declaration list left the symbol LIVE with a `decl` pointing at a node no longer in the
+ *  tree — so the mangler still allocated a slot for it. Benign (a wasted name, oxc's safe direction),
+ *  but it is the same drift that shipped the `deconflict` type-only miscompile, and the generalised
+ *  `verifySemantic` reports it. Evicting here is the point-of-erasure fix. */
+function dropOne(ctx: TransformCtx, n: Node): void {
+    ctx.dropRefs(n);
+    walk(n, (x) => {
+        if (x.type === N.BindingIdentifier) evictSym(ctx, (x as { sym: number }).sym);
+        return undefined;
+    });
 }
 
 function clearTypes(n: Node, ctx: TransformCtx): void {
@@ -263,11 +293,11 @@ export const tsStrip: Visitor = {
         [N.TSInstantiationExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         // Type-only statements → removed.
         [N.TSInterfaceDeclaration]: (n, ctx) => {
-            evictDeclSymbol(ctx, n);
+            evictSubtreeBindings(ctx, n); // the id AND its type parameters
             ctx.remove();
         },
         [N.TSTypeAliasDeclaration]: (n, ctx) => {
-            evictDeclSymbol(ctx, n);
+            evictSubtreeBindings(ctx, n); // the id AND its type parameters
             ctx.remove();
         },
         // NOTE: `declare` forms are erased but their symbols are deliberately NOT evicted. A
@@ -313,7 +343,18 @@ export const tsStrip: Visitor = {
                 // never runs — `export interface X {}` must be evicted from here or its symbol
                 // survives at module scope and claims `X` during deconfliction.
                 const inner = (n.data as { declaration?: Node }).declaration;
-                if (inner !== null && inner !== undefined) evictDeclSymbol(ctx, inner);
+                if (inner !== null && inner !== undefined) {
+                    // A TYPE-ONLY declaration also binds its TYPE PARAMETERS (`export type P<C> = …`),
+                    // and those never reach the `TSTypeAliasDeclaration` hook either — the whole
+                    // wrapper is erased without descending. Evicting only the id left `C` LIVE with a
+                    // detached decl and the mangler allocating a slot for it.
+                    //
+                    // Narrowed to type-only decls on purpose: `stripExport` also returns true for
+                    // `declare` forms, whose symbols are deliberately NOT evicted (see the note above)
+                    // because references to them survive the strip and the name must stay reserved.
+                    if (isTypeOnlyDecl(inner)) evictSubtreeBindings(ctx, inner);
+                    else evictDeclSymbol(ctx, inner);
+                }
                 for (const sp of ((n.data as { specifiers?: Node[] }).specifiers ?? [])) evictSymbol(ctx, sp);
                 ctx.remove();
             }

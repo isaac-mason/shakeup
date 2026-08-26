@@ -205,7 +205,8 @@ export function verifyRefFacts(
 }
 
 /**
- * Differential check for the TS/JSX lowering stage: does the MAINTAINED semantic (built before the
+ * Differential check for ANY stage that mutates the AST while maintaining the semantic: does the
+ * MAINTAINED semantic (built before the
  * lowerings, then kept current by `attachScopeNode` + the `RefDelta` the lowering traversals record)
  * still describe the tree well enough to replace a from-scratch `analyze()`?
  *
@@ -226,7 +227,7 @@ export function verifyRefFacts(
  * Builds its own ground truth and RESTORES the maintained `node.sym` association afterwards, so it
  * is side-effect free on the tree and safe to run inside a normal build.
  */
-export function verifyLowerSemantic(maintained: Semantic, program: Node): string[] {
+export function verifySemantic(maintained: Semantic, program: Node): string[] {
     const out: string[] = [];
 
     // Snapshot before the rebuild — `analyze` overwrites `node.sym` with ITS OWN ids.
@@ -289,6 +290,80 @@ export function verifyLowerSemantic(maintained: Semantic, program: Node): string
             out.push(`node ${n.type} @${n.start} '${n.name}' symbol partition mismatch (UNSAFE): maintained ${m} -> truth ${t}, but maintained ${m} already maps to ${pm} and truth ${t} maps back to ${pt}`);
         }
     }
+
+    // ── Checks the PARTITION cannot see ────────────────────────────────────────────────────────────
+    // The partition compares which NODES share a symbol. It says nothing about which SCOPE a symbol
+    // CLAIMS, which scopes still exist, or whether a `decl` is still attached — and those are exactly
+    // the facts `treeshake`, `deconflict` and the mangler read. `blockFlatten` lifting a block without
+    // repointing `symbols[sym].scope` shipped two miscompiles that this function, as written, could
+    // not see: the partition was intact the whole time.
+    //
+    // Scope ids differ between builds just as symbol ids do, so the comparison goes through a scope
+    // partition built from the scope-OWNING nodes, which carry `data.scopeId` in both builds. This
+    // must run BEFORE the restore below, while the tree still holds TRUTH's scope ids.
+    {
+        const mScopeToT = new Map<number, number>();
+        for (const n of nodes) {
+            const d = n.data as { scopeId?: number } | null;
+            const t = d?.scopeId ?? 0;
+            const m = beforeScope.get(n) ?? 0;
+            if (t === 0 || m === 0) continue;
+            const prev = mScopeToT.get(m);
+            if (prev === undefined) mScopeToT.set(m, t);
+            else if (prev !== t)
+                out.push(`scope ${m} maps to two truth scopes (${prev} and ${t}) (UNSAFE: scope tree diverged)`);
+        }
+
+        // A symbol's OWNING SCOPE must agree with truth, mapped through both partitions.
+        for (const [mSym, tSym] of mToT) {
+            const mRec = maintained.symbols[mSym];
+            const tRec = truth.symbols[tSym];
+            if (mRec === undefined || tRec === undefined) continue;
+            const expected = mScopeToT.get(mRec.scope);
+            // `expected === undefined` means the maintained scope has no counterpart in truth — the
+            // scope was removed from the tree and the symbol still claims it. That is the blockFlatten
+            // shape exactly.
+            if (mRec.scope !== 0 && expected === undefined)
+                out.push(`sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope}, which does not exist in truth (UNSAFE: stale after a structural move)`);
+            else if (expected !== undefined && expected !== tRec.scope)
+                out.push(`sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope} (truth ${tRec.scope}) (UNSAFE: wrong owning scope)`);
+        }
+
+        // Every scope's parent must still exist. A removed scope left as a parent breaks the chain
+        // walk that `resolveRef` and `lookupValue` depend on.
+        for (let sc = 1; sc < maintained.scopes.length; sc++) {
+            const parent = maintained.scopes[sc].parent;
+            if (parent < 0 || parent >= maintained.scopes.length)
+                out.push(`scope ${sc} has out-of-range parent ${parent} (table size ${maintained.scopes.length}) (UNSAFE)`);
+        }
+    }
+
+    // Every `sym` a node still holds must be IN BOUNDS. This is the `STALE SYM 65 (table size 64)`
+    // crash that keeps `coalesceVariableNames` disabled — a pass shrank the table while nodes held
+    // old ids. Cheap, and it turns a downstream crash into a named divergence at the causing stage.
+    for (const n of nodes) {
+        const m = before.get(n) ?? 0;
+        if (m >= maintained.symbols.length)
+            out.push(`node ${n.type} @${n.start} '${n.name}' holds sym ${m} beyond the table (size ${maintained.symbols.length}) (UNSAFE)`);
+    }
+
+    // A LIVE symbol's `decl` must still be ATTACHED to the tree. `deconflict.ts:134` and `link.ts:210`
+    // read `decl!.name` with a non-null assertion, and treeshake keys module-scope liveness off it.
+    //
+    // An EVICTED symbol is exempt. The established convention (`strip-ts.ts:140` `evictSym`) is
+    // `rec.scope = 0` — "owned by no lexical scope", deliberately still a VALID index because an
+    // out-of-range sentinel crashed chunk-graph. Every consumer filters on the owning scope, so a
+    // detached `decl` behind scope 0 is unreachable, not stale. Flagging it produced a false positive
+    // on the very first run (`sym 4 'T'`, a type-only decl `tsStrip` had correctly evicted).
+    // NOT CHECKED: "a live symbol's decl is still in the tree". It is NOT an invariant here, and
+    // trying to make it one produced three false positives against deliberate designs:
+    //   • `mintParam` (`lower-ts.ts:23`) builds a throwaway `bindId` purely so `symbolName()` has a
+    //     name to read; that node is never inserted.
+    //   • `declare const g` KEEPS a live symbol with an erased decl ON PURPOSE, because references to
+    //     `g` survive the strip and the symbol is what reserves the name (see `strip-ts.ts`).
+    //   • an erased type PARAMETER was a genuine miss — fixed at the erasure sites instead.
+    // A verifier that needs to know intent cannot be trusted to fail loudly, so it checks only facts
+    // that are unambiguous: owning scope, scope-parent validity, and sym bounds.
 
     // Restore the maintained associations BEFORE deriving ref facts — they must be keyed by the
     // maintained symbol ids, not the throwaway rebuild's. Scope ids are restored for the same reason:

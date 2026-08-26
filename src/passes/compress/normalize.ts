@@ -6,6 +6,7 @@
 //   • strip `EmptyStatement`s from statement lists (`;`)
 import { N, type Node, statementListOf } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
+import { attachScopeNode, createScope, SCOPE } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** A `return` whose value is `undefined` however spelled: bare `return;`, `return undefined` (the
@@ -135,7 +136,17 @@ export const normalize: Visitor = {
         [N.SequenceExpression]: flattenSequence,
         [N.WhileStatement]: (n, ctx: TransformCtx) => {
             const d = n.data as { test: Node; body: Node };
-            ctx.replaceWith(create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body) as Node);
+            const f = create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body) as Node;
+            // A `ForStatement` OWNS A SCOPE (it can declare `for (let i …)`); a `WhileStatement` does
+            // not. So minting one here without a scope leaves a scope-owning node with `scopeId` 0,
+            // which a fresh `analyze()` would give a real scope — drift, and the differential
+            // `verifySemantic` reports it on three.core.js at compress round 1.
+            //
+            // Harmless in practice (the minted `for` has no init, so its scope is empty and resolution
+            // is unchanged), but "harmless drift" is what the other five miscompiles all looked like
+            // right up until they were not. Mint the scope so the table matches the tree.
+            attachScopeNode(ctx.semantic, createScope(ctx.semantic, ctx.currentScope, SCOPE.BLOCK), f);
+            ctx.replaceWith(f);
         },
         [N.FunctionDeclaration]: fnHook,
         [N.FunctionExpression]: fnHook,
