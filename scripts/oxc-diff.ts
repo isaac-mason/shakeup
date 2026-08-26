@@ -34,6 +34,32 @@ const CASES: Case[] = [
     ['for_statement', 'if in for body', 'for (let i = 0; i < 3; i++) { if (a) o = i; }'],
     ['statements', 'if -> logical', 'if (a) { o = 1; }'],
     ['statements', 'return merge', 'function f(){ if (a) return 1; return 2; } o = f();'],
+    ['statements', 'if/else -> ternary', 'if (a) { o = 1; } else { o = 2; }'],
+    ['statements', 'dead after return', 'function f(){ return 1; o = 2; } o = f();'],
+    ['statements', 'dead after throw', 'function f(){ throw a; o = 2; } try { f(); } catch {}'],
+    ['statements', 'nested if collapse', 'if (a) { if (a > 1) { o = 1; } }'],
+    ['statements', 'empty else', 'if (a) { o = 1; } else {}'],
+    // ── substitute_alternate_syntax ──
+    ['alternate_syntax', 'Boolean(x)', 'o = Boolean(a);'],
+    ['alternate_syntax', 'new Object()', 'o = new Object();'],
+    ['alternate_syntax', 'new Array()', 'o = new Array();'],
+    ['alternate_syntax', 'undefined', 'o = undefined;'],
+    ['alternate_syntax', 'a["b"]', 'o = ({ b: a }).b;'],
+    ['alternate_syntax', 'String(x)', 'o = String(a);'],
+    ['alternate_syntax', 'x === undefined', 'o = a === undefined;'],
+    ['alternate_syntax', 'typeof undefined', 'o = typeof a === "undefined";'],
+    // ── fold_constants ──
+    ['fold_constants', 'arithmetic', 'o = 2 * 3 + 4;'],
+    ['fold_constants', 'string concat', 'o = "a" + "b" + a;'],
+    ['fold_constants', 'big number', 'o = 1000000;'],
+    ['fold_constants', 'small float', 'o = 0.5;'],
+    ['fold_constants', 'comparison', 'o = 1 < 2;'],
+    ['fold_constants', 'template', 'o = `x${1 + 1}y`;'],
+    // ── minimize_conditions ──
+    ['conditions', '!a ? b : c', 'o = !a ? 1 : 2;'],
+    ['conditions', 'a ? a : b', 'o = a ? a : 2;'],
+    ['conditions', 'ternary same branches', 'o = a ? 1 : 1;'],
+    ['conditions', 'double negation', 'o = !!a;'],
 ];
 
 /** Drop the shared prologue/epilogue so only the construct under test shows. Best-effort: this is a
