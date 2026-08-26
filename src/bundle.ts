@@ -5,6 +5,7 @@ import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
 import {
     externalKey,
     type Graph,
+    NAME_NAMESPACE,
     type ImportBind,
     type Linked,
     type Module,
@@ -914,7 +915,7 @@ function renderChunk(
             }
         }
         let nsCode: string | null = null;
-        if (linked.namespaceOf.has(idx)) {
+        if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
             nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight);
             out += `\n${nsCode}`;
         }
@@ -946,7 +947,12 @@ function renderChunk(
     const crossImportLines: string[] = [];
     for (const [producerChunk, specs] of chunk.imports) {
         const path = pathToChunk(producerChunk);
-        const parts = specs.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
+        // A `*` specifier is a NATIVE namespace import (chunk-graph `nsNative`): the host builds the
+        // Module namespace, so it gets its own statement rather than joining the named clause.
+        for (const s of specs) if (s.imported === NAME_NAMESPACE) crossImportLines.push(importStmt(`* as ${s.local}`, path, tight));
+        const named = specs.filter((s) => s.imported !== NAME_NAMESPACE);
+        if (named.length === 0) continue;
+        const parts = named.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
         const inner = parts.join(clauseSep(tight));
         crossImportLines.push(importStmt(tight ? `{${inner}}` : `{ ${inner} }`, path, tight));
     }
@@ -981,6 +987,21 @@ function renderChunk(
                 exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
                 exportedNames.push(name);
             }
+        }
+    }
+    // Native-namespace producers: surface the module's OWN export names so a consumer's
+    // `import * as ns from './thisChunk'` sees the real surface. `nativeNsEligible` guarantees this
+    // chunk holds exactly that module and every member is one of its own locals, so these names
+    // cannot collide with a sibling's.
+    for (const modIdx of chunk.nsNative ?? []) {
+        for (const [name, bind] of linked.exportMaps.get(modIdx) ?? []) {
+            if (seenExport.has(name)) continue;
+            const local = nameOfBind(linked, bind, chunk);
+            if (local === null) continue;
+            seenExport.add(name);
+            const exported = isIdentName(name) ? name : JSON.stringify(name);
+            exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
+            exportedNames.push(name);
         }
     }
     // Producer exports for cross-chunk consumers (`export { local as t }`).

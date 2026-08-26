@@ -1,6 +1,6 @@
 import { deconflictChunk } from './deconflict';
 import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
-import { type Graph, type ImportBind, type Linked, packRef, refMod, refSym } from './graph-types';
+import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 import { finalNameOf, reprName } from './link';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
@@ -38,6 +38,12 @@ export type Chunk = {
     exportNameOfRef?: Map<number, string>;
     /** Producer-side: chosen export name per exported namespace module (memo, dedup). */
     nsExportName?: Map<number, string>;
+    /** Producer-side: modules whose FULL export surface this chunk must surface as named exports so
+     *  a consumer can take a NATIVE `import * as ns from './thisChunk'` instead of importing a
+     *  synthesized namespace object. Also suppresses emitting that object here — the host builds a
+     *  real Module namespace, which is smaller and spec-exact (live bindings, `[object Module]`,
+     *  non-writable) with no help from us. See {@link wireBind}. */
+    nsNative?: Set<number>;
 };
 
 /** The full chunk partition + lookup structures. */
@@ -539,6 +545,26 @@ function wireAndDeconflict(
     }
 }
 
+/** Whether module `modIdx`'s namespace can be handed to another chunk as a NATIVE `import * as`
+ *  rather than a synthesized object. Two conditions, both conservative — a false negative only
+ *  costs the old synthesized form:
+ *
+ *  1. `modIdx` is the producer chunk's ONLY module. Otherwise its export names could collide with a
+ *     sibling module's in the chunk's single flat export namespace, and a star import needs the
+ *     module's real names, unrenamed. (`preserveModules` always satisfies this.)
+ *  2. Every member of its export surface is one of its OWN local symbols. A re-export, an external,
+ *     or a nested namespace would need its provider wired into this chunk's exports first, which
+ *     is not guaranteed at this point in wiring. */
+function nativeNsEligible(linked: Linked, producer: Chunk, modIdx: number): boolean {
+    if (producer.modules.length !== 1 || producer.modules[0] !== modIdx) return false;
+    const map = linked.exportMaps.get(modIdx);
+    if (map === undefined || map.size === 0) return false;
+    for (const bind of map.values()) {
+        if (bind.kind !== 'found' || refMod(bind.ref) !== modIdx) return false;
+    }
+    return true;
+}
+
 /** Record one cross-chunk binding (consumer import + producer export) if it crosses a
  *  chunk boundary. Idempotent per (consumerChunk, ref). */
 function wireBind(
@@ -558,9 +584,25 @@ function wireBind(
 
     // Producer export name (deconflicted in producer). Key on ref (found) or module (ns).
     let exportedName: string;
+    if (isNs && nativeNsEligible(linked, producer, cross.module)) {
+        // NATIVE namespace across a chunk boundary: the producer surfaces the module's own export
+        // names and the consumer takes `import * as local from './producer'`. The runtime then
+        // supplies a real Module namespace — live bindings, `[object Module]`, non-writable — with
+        // no synthesized object, no `Object.freeze`, no accessors. This is what `preserveModules`
+        // (one module per chunk) wants for library output, and it is already what a cross-chunk
+        // `import()` gets for free by virtue of landing on a dynamic-entry chunk.
+        producer.nsNative ??= new Set();
+        producer.nsNative.add(cross.module);
+        if (consumer.nsImportLocalOf.has(cross.module)) return;
+        const local = chunkClaim[consumerChunk](producerBaseName(graph, linked, cross.ref, true));
+        consumer.nsImportLocalOf.set(cross.module, local);
+        addImport(consumer, cross.producerChunk, NAME_NAMESPACE, local);
+        return;
+    }
     if (isNs) {
         // Producer builds the namespace object under its OWN deconflicted namespaceOf name and
         // exports it under that name; consumer imports it under a local.
+        const surfaceWired = producer.nsExportName?.has(cross.module) ?? false;
         const producerNs = linked.namespaceOf.get(cross.module);
         exportedName = producerNs ?? chunkClaim[cross.producerChunk](producerBaseName(graph, linked, cross.ref, true));
         if (producerNs === undefined) linked.namespaceOf.set(cross.module, exportedName);
@@ -568,6 +610,16 @@ function wireBind(
             producer.nsExportName ??= new Map();
             producer.nsExportName.set(cross.module, exportedName);
             producer.exports.set(exportedName, { ref: cross.ref, exportedName, local: exportedName });
+        }
+        // The producer WRITES the object literal, so it must be able to name every member. A member
+        // whose binding lives in a THIRD chunk (a barrel that re-exports, which is the common shape
+        // under preserveModules) was never wired into the producer, so the emitted object referenced
+        // an undeclared local — a ReferenceError at runtime, silently. Wire each member into the
+        // producer chunk. Guarded on `nsExportName` so it runs once per (producer, module) and
+        // terminates on namespace cycles.
+        if (!surfaceWired) {
+            for (const member of linked.exportMaps.get(cross.module)?.values() ?? [])
+                wireBind(graph, linked, chunks, chunkByModule, chunkClaim, cross.producerChunk, member);
         }
     } else {
         const existing = producer.exportNameOfRef?.get(cross.ref);
