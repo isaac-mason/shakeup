@@ -123,3 +123,72 @@ describe('bundle — minify', () => {
         expect(entry.code).toContain(' as lazy'); // public export name preserved
     });
 });
+
+describe('emit-layer glue respects minify.whitespace', () => {
+    // The AST printer is whitespace-aware, but the bundle's hand-built glue (import/export clauses,
+    // the namespace object) carried readable padding regardless — 1,366 bytes on crashcat, 331 on
+    // three.js, measured against oxc-minify on identical input.
+    const files = {
+        '/main.ts': [
+            "import { one, two } from 'ext';",
+            "import def from 'ext2';",
+            "import * as ns from './lib.ts';",
+            'export const out = one() + two() + def() + ns.a;',
+        ].join('\n'),
+        '/lib.ts': 'export const a = 1;\nexport const b = 2;',
+    };
+    const build = async (minify: boolean | Record<string, unknown>) => {
+        const r = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: ['ext', 'ext2'], output: { minify } });
+        expect(r.errors).toEqual([]);
+        return r.code;
+    };
+
+    it('emits import and export clauses with no readability padding', async () => {
+        const code = await build(true);
+        expect(code).toMatch(/import\{one as \w+,two as \w+\}from'ext';/);
+        expect(code).not.toMatch(/import \{ /);
+        expect(code).not.toMatch(/, \w+ as /);
+    });
+
+    it('keeps the space a DEFAULT import actually needs', async () => {
+        // `import{a}from'x'` is fine, but a bare default local cannot be glued to the keyword —
+        // `importd from'x'` is a different token stream.
+        const code = await build(true);
+        expect(code).toMatch(/import \w+ from'ext2';/);
+        expect(code).not.toMatch(/import\w+ from/);
+    });
+
+    it('emits a compact namespace object', async () => {
+        const code = await build(true);
+        expect(code).toMatch(/Object\.freeze\(\{\w+:/);
+        expect(code).not.toContain('Object.freeze({ ');
+    });
+
+    it('leaves the readable form alone when whitespace minification is off', async () => {
+        const code = await build({ whitespace: false, mangle: false, compress: false });
+        expect(code).toContain("import { one, two } from 'ext';");
+    });
+
+    it('still parses and evaluates', async () => {
+        const files2 = { '/main.ts': "import * as ns from './lib.ts';\nexport const out = ns.a + ns.b;", '/lib.ts': 'export const a = 1;\nexport const b = 2;' };
+        const r = await bundle({ entry: '/main.ts', fs: createMemoryFs(files2), output: { minify: true } });
+        expect(r.errors).toEqual([]);
+        expect((await evalModule(r.code)).out).toBe(3);
+    });
+
+    it('produces a source map whose line count matches the minified code', async () => {
+        // The sourcemap suites never exercised `minify`, so this pairing was untested. Compacting the
+        // glue moves COLUMNS only — if it ever added or dropped a line, the map would describe a
+        // different number of generated lines than the code has and every segment below would shift.
+        const r = (await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(files),
+            external: ['ext', 'ext2'],
+            output: { minify: true, sourcemap: true },
+        })) as unknown as { code: string; map?: { mappings: string } };
+        const mappings = r.map?.mappings;
+        expect(mappings).toBeTruthy();
+        // The emitter appends a trailing newline, which `split` turns into an extra empty entry.
+        expect(mappings!.split(';').length).toBe(r.code.replace(/\n$/, '').split('\n').length);
+    });
+});

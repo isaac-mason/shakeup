@@ -401,7 +401,7 @@ function pruneUnusedExternals(graph: Graph, linked: Linked, liveRefs: Set<number
     }
 }
 
-function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): string[] {
+function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>, tight: boolean): string[] {
     const bySpec = new Map<string, { name: string; local: string }[]>();
     for (const [key, local] of linked.externalLocals) {
         const sep = key.indexOf('\x00');
@@ -418,25 +418,45 @@ function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): st
     for (const [spec, entries] of bySpec) {
         sideEffectSpecs.delete(spec);
         const star = entries.find((e) => e.name === '*');
-        if (star !== undefined) lines.push(`import * as ${star.local} from '${spec}';`);
+        if (star !== undefined) lines.push(importStmt(`* as ${star.local}`, spec, tight));
         const def = entries.find((e) => e.name === 'default');
         const named = entries.filter((e) => e.name !== '*' && e.name !== 'default');
         if (def !== undefined || named.length > 0) {
-            const namedPart =
-                named.length > 0
-                    ? `{ ${named.map((e) => (e.name === e.local ? e.name : `${e.name} as ${e.local}`)).join(', ')} }`
-                    : '';
-            const clauses = [def !== undefined ? def.local : '', namedPart].filter((s) => s !== '').join(', ');
-            lines.push(`import ${clauses} from '${spec}';`);
+            const inner = named.map((e) => (e.name === e.local ? e.name : `${e.name} as ${e.local}`)).join(clauseSep(tight));
+            const namedPart = named.length > 0 ? (tight ? `{${inner}}` : `{ ${inner} }`) : '';
+            const clauses = [def !== undefined ? def.local : '', namedPart].filter((s) => s !== '').join(clauseSep(tight));
+            lines.push(importStmt(clauses, spec, tight));
         }
     }
-    for (const spec of sideEffectSpecs) lines.push(`import '${spec}';`);
+    for (const spec of sideEffectSpecs) lines.push(tight ? `import'${spec}';` : `import '${spec}';`);
     return lines;
 }
 
 const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
 
-function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | null, nsMembers: Set<string> | undefined): string {
+/** Emit-layer spacing. The AST printer is whitespace-aware, but this hand-built glue (import and
+ *  export clauses, the namespace object) carried readable padding regardless of `minify.whitespace`
+ *  — 1.4KB on crashcat measured against oxc-minify. Only COLUMNS move: every one of these is a
+ *  single line before and after, so the line-counting the source-map parts rely on is untouched. */
+const clauseSep = (tight: boolean): string => (tight ? ',' : ', ');
+
+/** `import <clauses> from '<spec>';`, dropping the separators that only exist for readability.
+ *  A clause list starting with `{`/`*` needs no space after `import`, and one ending in `}` needs
+ *  none before `from`; a bare default local (`import d from …`) needs both. */
+function importStmt(clauses: string, spec: string, tight: boolean): string {
+    if (!tight) return `import ${clauses} from '${spec}';`;
+    const lead = clauses.startsWith('{') || clauses.startsWith('*') ? '' : ' ';
+    const tail = clauses.endsWith('}') ? '' : ' ';
+    return `import${lead}${clauses}${tail}from'${spec}';`;
+}
+
+function renderNamespaceObject(
+    linked: Linked,
+    modIdx: number,
+    chunk: Chunk | null,
+    nsMembers: Set<string> | undefined,
+    tight: boolean,
+): string {
     const nsName = linked.namespaceOf.get(modIdx)!;
     const map = linked.exportMaps.get(modIdx);
     const entries: string[] = [];
@@ -447,10 +467,11 @@ function renderNamespaceObject(linked: Linked, modIdx: number, chunk: Chunk | nu
             if (nsMembers !== undefined && !nsMembers.has(name)) continue;
             const value = nameOfBind(linked, bind, chunk);
             if (value === null) continue;
-            entries.push(`${isIdentName(name) ? name : JSON.stringify(name)}: ${value}`);
+            entries.push(`${isIdentName(name) ? name : JSON.stringify(name)}${tight ? ':' : ': '}${value}`);
         }
     }
-    return `const ${nsName} = Object.freeze({ ${entries.join(', ')} });`;
+    const inner = entries.join(clauseSep(tight));
+    return tight ? `const ${nsName}=Object.freeze({${inner}});` : `const ${nsName} = Object.freeze({ ${inner} });`;
 }
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
@@ -679,7 +700,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         mrc.namesHash = namesHash;
     }
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
-        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, naming, pathToChunk, prelim, inc?.mod ?? null);
+        renderChunk(graph, linked, chunkGraph, chunk, ci, shaken, warnings, want, min.whitespace, naming, pathToChunk, prelim, inc?.mod ?? null);
 
     let outputChunks: OutputChunk[];
     let assets: OutputAsset[];
@@ -756,6 +777,7 @@ function renderChunk(
     shaken: TreeshakeResult | null,
     warnings: string[],
     wantMap: boolean,
+    tight: boolean,
     naming: NormalizedOutputNaming,
     pathToChunk: (targetChunkIdx: number) => string,
     prelim: PreliminaryFileName,
@@ -853,7 +875,7 @@ function renderChunk(
         }
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx)) {
-            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx));
+            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight);
             out += `\n${nsCode}`;
         }
         if (out !== '') moduleTexts.push(out);
@@ -885,14 +907,15 @@ function renderChunk(
     for (const [producerChunk, specs] of chunk.imports) {
         const path = pathToChunk(producerChunk);
         const parts = specs.map((s) => (s.imported === s.local ? s.imported : `${s.imported} as ${s.local}`));
-        crossImportLines.push(`import { ${parts.join(', ')} } from '${path}';`);
+        const inner = parts.join(clauseSep(tight));
+        crossImportLines.push(importStmt(tight ? `{${inner}}` : `{ ${inner} }`, path, tight));
     }
     for (const producerChunk of chunk.sideEffectImports) {
-        crossImportLines.push(`import '${pathToChunk(producerChunk)}';`);
+        crossImportLines.push(tight ? `import'${pathToChunk(producerChunk)}';` : `import '${pathToChunk(producerChunk)}';`);
     }
 
     // External imports, scoped to this chunk's used external locals.
-    const extImports = renderExternalImports(linked, sideEffectSpecs);
+    const extImports = renderExternalImports(linked, sideEffectSpecs, tight);
 
     // `exports: 'none'` suppresses the entry export line entirely (validation-only shaping for
     // pure ESM — cross-chunk producer exports still emit so shared chunks keep working). For a
@@ -929,8 +952,9 @@ function renderChunk(
         exportSpecs.push(local === exportedName ? exported : `${local} as ${exported}`);
         exportedNames.push(exportedName);
     }
-    const exportLine = exportSpecs.length > 0 ? `export { ${exportSpecs.join(', ')} };` : null;
-    const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => `export * from '${spec}';`);
+    const exportInner = exportSpecs.join(clauseSep(tight));
+    const exportLine = exportSpecs.length > 0 ? (tight ? `export{${exportInner}};` : `export { ${exportInner} };`) : null;
+    const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => (tight ? `export*from'${spec}';` : `export * from '${spec}';`));
 
     // Empty non-entry chunk with nothing to emit: drop it.
     const isEmpty = moduleTexts.length === 0 && exportLine === null && starLines.length === 0;
