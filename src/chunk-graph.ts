@@ -1,5 +1,6 @@
 import { deconflictChunk } from './deconflict';
 import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
+import { helpersNeededBy } from './bundle';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 import { finalNameOf, reprName } from './link';
 
@@ -44,6 +45,12 @@ export type Chunk = {
      *  real Module namespace, which is smaller and spec-exact (live bindings, `[object Module]`,
      *  non-writable) with no help from us. See {@link wireBind}. */
     nsNative?: Set<number>;
+    /** THIS chunk is the shared runtime: it holds no modules, defines the union of every consumer's
+     *  CommonJS helpers and exports them. Minted only when two or more chunks would otherwise each
+     *  carry their own copy (D5). */
+    runtimeHelpers?: Set<string>;
+    /** This chunk takes its helpers from the shared runtime chunk instead of defining them. */
+    importsRuntime?: boolean;
 };
 
 /** The full chunk partition + lookup structures. */
@@ -365,6 +372,51 @@ function producerBaseName(graph: Graph, linked: Linked, ref: number, isNs: boole
 /** Build the full chunk graph: color → atoms → chunks → wire imports/exports → per-chunk
  *  deconflict. `linked.finalNames` / `namespaceOf` / `externalLocals` are (re)populated by
  *  the per-chunk deconflict; for a single chunk this reproduces the whole-bundle names. */
+/** Mint a SHARED RUNTIME chunk when two or more chunks would otherwise each carry their own copy of
+ *  the CommonJS helpers (D5). Measured before this existed: six identical helper sets across seven
+ *  chunks in a code-split CommonJS build.
+ *
+ *  rolldown reaches the same place by making the runtime a real MODULE in the graph
+ *  (`runtime_module_task.rs`), which additionally lets it be tree-shaken and renamed per chunk.
+ *  shakeup keeps the helpers as text — the duplication was the cost, not the representation — so the
+ *  runtime is a module-less chunk that defines the union and exports it. Same shape in the output:
+ *  rolldown's `cjs_compat/dynamic_cjs_entry` ships `rolldown-runtime.js` and consumers import from it.
+ *
+ *  Deliberately skipped for a single consumer: an import statement plus a second file is bigger than
+ *  the helpers it would save. */
+function addRuntimeChunk(graph: Graph, linked: Linked, chunks: Chunk[]): void {
+    const needs = chunks.map((c) => helpersNeededBy(graph, linked, c));
+    const consumers = needs.map((n, i) => (n.size > 0 ? i : -1)).filter((i) => i >= 0);
+    if (consumers.length < 2) return;
+    const union = new Set<string>();
+    for (const i of consumers) for (const name of needs[i]) union.add(name);
+    const ri = chunks.length;
+    chunks.push({
+        name: 'runtime',
+        modules: [],
+        color: ZERO,
+        entryModule: -1,
+        isEntry: false,
+        isDynamicEntry: false,
+        imports: new Map(),
+        sideEffectImports: new Set(),
+        exports: new Map(),
+        dynamicImports: new Set(),
+        importLocalOf: new Map(),
+        nsImportLocalOf: new Map(),
+        runtimeHelpers: union,
+    });
+    for (const i of consumers) {
+        chunks[i].importsRuntime = true;
+        // Each consumer imports only what it uses, under the helper's own name — the names are
+        // fixed strings, so there is nothing to deconflict.
+        chunks[i].imports.set(
+            ri,
+            [...needs[i]].map((name) => ({ imported: name, local: name })),
+        );
+    }
+}
+
 export function buildChunkGraph(
     graph: Graph,
     linked: Linked,
@@ -378,6 +430,7 @@ export function buildChunkGraph(
         const formed = formPreserveModulesChunks(graph, linked);
         const color: bigint[] = graph.modules.map(() => ZERO);
         wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf, mangle);
+        addRuntimeChunk(graph, linked, formed.chunks);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
 
@@ -459,6 +512,7 @@ export function buildChunkGraph(
     );
 
     wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, mangle);
+    addRuntimeChunk(graph, linked, chunks);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
 
