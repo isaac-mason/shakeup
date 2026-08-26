@@ -140,9 +140,33 @@ const isNum = (n: Node, v: number): boolean => n.type === N.NumericLiteral && Nu
 
 /** Rewrite a `ConditionalExpression`, or return `null` to leave it untouched. Applied on EXIT (after
  *  children are simplified) so the arms are already in their most-reduced form. */
+/** `t ? (x = a) : (x = b)` → `x = t ? a : b`, for a plain identifier target. See the call site. */
+function hoistCommonAssign(n: Node, test: Node, consequent: Node, alternate: Node): Node | null {
+    if (consequent.type !== N.AssignmentExpression || alternate.type !== N.AssignmentExpression) return null;
+    const c = consequent.data as { operator: string; left: Node; right: Node };
+    const a = alternate.data as { operator: string; left: Node; right: Node };
+    if (c.operator !== '=' || a.operator !== '=') return null;
+    if (c.left.type !== N.IdentifierReference || a.left.type !== N.IdentifierReference) return null;
+    // Same binding, not merely the same spelling — a shadowed name would be a different variable.
+    if ((c.left as { sym: number }).sym !== (a.left as { sym: number }).sym) return null;
+    if (c.left.name !== a.left.name) return null;
+    const inner = create.ConditionalExpression(n.start, n.end, 0, test, c.right, a.right) as Node;
+    return create.AssignmentExpression(n.start, n.end, '=', c.left, inner) as Node;
+}
+
 function minimizeConditional(n: Node): Node | null {
     const d = n.data as CondData;
     const { test, consequent, alternate } = d;
+
+    // `t ? (x = a) : (x = b)` → `x = t ? a : b` (oxc `minimize_conditional_expression`, the
+    // AssignmentExpression arm). Both arms must use the SAME operator and assign to the SAME target.
+    //
+    // Restricted to a plain IDENTIFIER target with `=`. oxc also handles member targets, but only after
+    // proving the reorder is unobservable — hoisting `a.b = …` moves evaluation of `a` (and a computed
+    // key) BEFORE the test, which is visible if either side can affect the other. An identifier target
+    // has nothing to evaluate, so it is unconditionally safe.
+    const hoisted = hoistCommonAssign(n, test, consequent, alternate);
+    if (hoisted !== null) return hoisted;
 
     // 5. `!a ? b : c` → `a ? c : b` -- drop the `!`, swap arms. Monotonic: the new test isn't a `!`.
     //    Take this first so a negated test is normalized before the other shape probes run.
