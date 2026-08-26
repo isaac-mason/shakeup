@@ -177,7 +177,13 @@ function inlineBody(body: Node[], refs: Map<number, RefCounts>, ctx: TransformCt
                 break;
             }
             ctx.addRefs(use);
-            // the decl is dead — its init moved into the use, which shifts down
+            // the decl is dead — its init moved into the use, which shifts down.
+            // EVICT the binding too: `spliceStatements` retires the STATEMENT and `dropRefs` moves the
+            // COUNTS, but neither retires the SYMBOL. Left live it keeps claiming a mangler slot for a
+            // declaration that no longer exists, which is what made the maintained table carry more
+            // live symbols than a rebuild — and so what kept `refreshFull` load-bearing.
+            const rec = ctx.semantic.symbols[cand.sym];
+            if (rec !== undefined) rec.scope = 0;
             ctx.spliceStatements(body, u - 1, 1);
             u--;
             changed = true;
