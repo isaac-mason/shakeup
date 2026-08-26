@@ -15,7 +15,14 @@ import { parseSync } from 'oxc-parser';
 import { parse } from '../src/parser/index.ts';
 
 const root = process.argv[2] ?? 'node_modules';
-const MAX_BYTES = 4_000_000;
+// Skipped files are reported, never silently dropped.
+//
+// KNOWN: a run over a populated `node_modules` DIES — `FATAL ERROR: Ineffective mark-compacts near
+// heap limit`. It is not accumulation and not a leak (both were measured and ruled out); a single
+// 347-byte input sends shakeup's parser into unbounded allocation. See `parser-perf-plan.md` and the
+// fixture at `llm/repro/parser-oom.js`. Until that is fixed, point this at a source tree
+// (`pnpm parsercorpus llm/libs/webpack`) rather than at `node_modules`.
+const MAX_BYTES = Number(process.env.MAX_BYTES ?? 4_000_000);
 
 const files: string[] = [];
 const walk = (d: string, depth = 0): void => {
@@ -78,7 +85,15 @@ const norm = (m: string) =>
         .replace(/"[^"]*"/g, '"…"')
         .slice(0, 70);
 
+let sinceYield = 0;
 for (const f of files) {
+    // Hand control back to the event loop every so often. Each iteration allocates a whole AST and
+    // drops it; without a yield V8 sees an unbroken synchronous run, grows the heap instead of
+    // collecting, and dies with `Ineffective mark-compacts near heap limit` on a large tree.
+    if (++sinceYield >= 50) {
+        sinceYield = 0;
+        await new Promise((r) => setImmediate(r));
+    }
     let src: string;
     try {
         if (statSync(f).size > MAX_BYTES) {
@@ -144,7 +159,7 @@ const report = (title: string, m: Map<string, Bucket>) => {
     }
 };
 
-console.log(`scanned ${scanned} files under ${root} (${skipped} skipped)`);
+console.log(`scanned ${scanned} files under ${root} (${skipped} skipped: unreadable, or over MAX_BYTES=${MAX_BYTES})`);
 console.log(`  both accept: ${both} · both reject: ${neither}`);
 report('SHAKEUP REJECTS, oxc accepts  ← the harmful direction', shakeupOnly);
 report('oxc rejects, shakeup accepts  ← missing early errors', oxcOnly);
