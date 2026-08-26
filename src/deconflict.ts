@@ -190,6 +190,11 @@ export function deconflictChunk(
 
     const topLevel: { ref: number; original: string }[] = [];
     for (const idx of memberOrder) {
+        // A CJS-wrapped module's body is a closure: its top-level bindings are function-scoped and
+        // cannot collide with the chunk root, so renaming them here would be noise. (rolldown skips
+        // them for the same reason — `deconflict_chunk_symbols.rs:132-135`.) Its wrapper and
+        // namespace names ARE chunk-root bindings and are claimed below.
+        if (linked.cjsWrap.has(idx)) continue;
         const mod = graph.modules[idx];
         const moduleScope = scopeOf(mod.semantic, mod.program);
         const sem = mod.semantic;
@@ -222,6 +227,12 @@ export function deconflictChunk(
         for (const [key, base] of extBase) queue.push({ w: extWeight.get(key) ?? 0, run: () => claimExternal(key, base) });
         queue.sort((a, b) => b.w - a.w);
         for (const q of queue) q.run();
+    }
+    for (const [idx, base] of linked.cjsWrap) {
+        if (memberSet !== null && !memberSet.has(idx)) continue;
+        linked.cjsWrap.set(idx, claim(base));
+        const ns = linked.cjsNamespace.get(idx);
+        if (ns !== undefined) linked.cjsNamespace.set(idx, claim(ns));
     }
     for (const [ref, base] of linked.syntheticNames) {
         if (memberSet !== null && !memberSet.has(refMod(ref))) continue;

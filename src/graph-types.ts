@@ -250,6 +250,11 @@ export const refSym = (ref: number): number => ref % MOD_SHIFT;
 /** Where an import resolves: a graph symbol, an external, a module namespace, or unresolved. */
 export type ImportBind =
     | { kind: 'found'; ref: number }
+    /** A member read off a WRAPPED CommonJS module's interop namespace. A CJS module's export
+     *  surface is not statically known — its `exports` object is built imperatively at runtime — so
+     *  `import { x } from 'cjs'` cannot bind to a symbol and becomes `ns.x` instead. Both oracles do
+     *  this (esbuild's `NamespaceAlias`, rolldown's runtime member). */
+    | { kind: 'cjs-member'; module: number; name: string }
     | { kind: 'external'; specifier: string; name: string }
     | { kind: 'namespace'; module: number }
     | { kind: 'none' };
@@ -263,6 +268,14 @@ export type Linked = {
     namespaceOf: Map<number, string>;
     exportMaps: Map<number, Map<string, ImportBind>>;
     syntheticNames: Map<number, string>;
+    /** Modules lowered to a `__commonJS` wrapper, mapped to the name of the wrapper function
+     *  (`require_foo`). rolldown's `WrapKind::Cjs`. A wrapped module is NOT concatenated as
+     *  top-level statements: its body becomes a closure evaluated on first `require`, which is what
+     *  gives CommonJS its lazy, once-only, partial-exports-on-cycle semantics. */
+    cjsWrap: Map<number, string>;
+    /** For each wrapped CJS module reached by an ESM import, the local holding its interop
+     *  namespace — `var import_foo = __toESM(require_foo())`. */
+    cjsNamespace: Map<number, string>;
     externalLocals: Map<string, string>;
     defaultRefs: Map<number, number>;
     errors: string[];

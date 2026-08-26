@@ -279,25 +279,6 @@ function classifyExportsKind(mod: Module, warnings: string[]): ExportsKind {
     return hasImport ? 'esm' : 'none';
 }
 
-/** Report a module whose source is CommonJS. shakeup consumes ESM only today: the `__commonJS`
- *  wrapper, `require` lowering and `__toESM` interop are the P3/P4 vertical in `llm/notes/cjs.md`.
- *
- *  This exists because the ALTERNATIVE IS SILENT. Without it a real CJS dependency bundles into a
- *  no-op — `module.exports = {…}` becomes an assignment to an undeclared global, the module appears
- *  to build, and the failure surfaces as a missing export somewhere downstream at runtime. Naming
- *  the file and the reason is strictly better than that until the wrapper lands.
- *
- *  Deliberately keyed on the module's own CJS FEATURE USE, not on `exportsKind` alone: a `.cjs` file
- *  that merely runs side effects (no `module`/`exports`, no top-level `return`) classifies CommonJS
- *  by tier 3 but needs none of the missing machinery, so it still bundles. */
-function errorUnsupportedCjs(mod: Module, errors: string[]): void {
-    if (mod.exportsKind !== 'commonjs') return;
-    const cjsGlobal = cjsGlobalIn(mod);
-    const why = cjsGlobal !== null ? `it references the CommonJS global '${cjsGlobal.name}'` : mod.hasTopLevelReturn ? 'it has a top-level return' : null;
-    if (why === null) return; // declared CJS but uses no CJS feature — nothing to lower
-    errors.push(`${mod.id}:${cjsGlobal?.start ?? 0}: CommonJS modules are not supported yet (${why})`);
-}
-
 /** Error on an `import`/`export` statement in a file DECLARED CommonJS — a `.cjs`/`.cts` extension
  *  or the nearest `package.json#type: "commonjs"`. Port of oxc's `module_code` check
  *  (`oxc_semantic/src/checker/javascript.rs:532-548` **[V]**), whose message this mirrors.
@@ -1099,12 +1080,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.jsxRuntime = c.jsxRuntime;
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
-            errorUnsupportedCjs(mod, graph.errors);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
-            errorUnsupportedCjs(mod, graph.errors);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its
