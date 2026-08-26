@@ -698,3 +698,47 @@ describe('require() of an ES module evaluates eagerly (known divergence)', () =>
         expect(r.warnings).toHaveLength(1);
     });
 });
+
+// Link-stage kind PROMOTION — rolldown's `determine_module_exports_kind:36-96`. A module with no ESM
+// syntax and no CommonJS feature use is genuinely undecided after scanning (`ExportsKind::None`);
+// how it is IMPORTED settles it. `require`d → CommonJS (and wrapped); `import`ed → ESM.
+describe('an undecided module is promoted by how it is imported', () => {
+    const runFiles = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
+    };
+
+    it('require() of an exports-less script yields a bare {}, without an __esModule marker', async () => {
+        // Untreated this reached `__toCommonJS(ns)` and produced `{ __esModule: true }`. That marker
+        // is not cosmetic: a consumer's `x.__esModule ? x.default : x` interop then takes the
+        // `.default` branch and gets `undefined`.
+        const ns = await runFiles({
+            '/e.js': 'globalThis.__side = 1;',
+            '/d.cjs': "const e = require('./e.js');\nmodule.exports = { esm: e.__esModule, keys: Object.keys(e) };",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toEqual({ esm: undefined, keys: [] });
+    });
+
+    it('still runs the promoted module’s side effects', async () => {
+        const ns = await runFiles({
+            '/e.js': 'globalThis.__promoted = 41;',
+            '/d.cjs': "require('./e.js');\nmodule.exports = globalThis.__promoted + 1;",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(ns.x).toBe(42);
+    });
+
+    it('an exports-less script that is IMPORTED stays ESM', async () => {
+        // The other half of the rule: an `import` promotes to Esm, so no CommonJS wrapper appears.
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/e.js': 'globalThis.__imported = 1;', '/main.js': "import './e.js';\nexport const x = globalThis.__imported;" }),
+            external: [],
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).not.toContain('__commonJS');
+        expect((await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)).x).toBe(1);
+    });
+});
