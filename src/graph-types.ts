@@ -173,6 +173,10 @@ export type CachedParse = {
     /** Whether compress passes were applied when this AST was produced — part of the cache key, so
      *  a `minify` toggle across builds re-parses instead of reusing a wrongly-(un)compressed AST. */
     compress: CompressMode | false;
+    /** Declared module format at the time this AST was produced. A KEY component, not just a
+     *  record: the parse goal gates top-level `return`/`new.target`, so the AST depends on it — and
+     *  a `package.json#type` edit changes it with no change to the module's own id or source. */
+    defFormat: ModuleDefFormat;
     /** Whether the optimize tier ran when this AST was produced — part of the cache key for the same
      *  reason: toggling `output.optimize` must re-parse rather than reuse an AST built the other way. */
     optimize: boolean;

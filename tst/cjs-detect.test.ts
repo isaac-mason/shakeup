@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
+import { parse } from '../src/parser/index.ts';
 
 const build = async (files: Record<string, string>) => {
     const result = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] });
@@ -133,5 +134,67 @@ describe('ESM syntax in a CommonJS-declared file', () => {
             '/main.js': "import { x } from './sub/a.js';\nexport { x };",
         });
         expect(errors.filter((e) => e.includes('/sub/a.js'))).toEqual([]);
+    });
+});
+
+// Parse-goal gating (cjs.md §7.1c), ported from oxc's `default_context`
+// (`oxc_parser/src/lib.rs:866-882`): a CommonJS file's body is wrapped in a function, so top-level
+// `return` and `new.target` are legal there and illegal in an ES module. Accepting them everywhere
+// is not neutral — it destroys the very signal CJS kind detection reads (tier 2, §2.1).
+describe('parse goal gates top-level return / new.target', () => {
+    const parseErrs = (src: string, kind?: 'module' | 'commonjs') => parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);
+
+    it('rejects top-level return in an ES module', () => {
+        expect(parseErrs('return 1;', 'module')).toEqual(['return statement is only allowed inside a function body']);
+    });
+
+    it('allows top-level return in a CommonJS file', () => {
+        expect(parseErrs('return 1;', 'commonjs')).toEqual([]);
+    });
+
+    it('stays permissive by default (unambiguous)', () => {
+        // The migration property: adopting the gate is not a breaking change for plain `.js`.
+        expect(parseErrs('return 1;')).toEqual([]);
+        expect(parseErrs('new.target;')).toEqual([]);
+    });
+
+    it('allows return inside any function form, in any goal', () => {
+        for (const src of ['function f(){ return 1 }', 'const f = () => { return 1 };', 'const o = { m(){ return 1 } };']) {
+            expect(parseErrs(src, 'module')).toEqual([]);
+        }
+    });
+
+    it('treats a plain block as still top level', () => {
+        // A `{ }` block is not a function body — depth must not be bumped for it.
+        expect(parseErrs('{ return 1 }', 'module')).toEqual(['return statement is only allowed inside a function body']);
+    });
+
+    it('rejects top-level new.target in an ES module, allows it in CommonJS', () => {
+        expect(parseErrs('new.target;', 'module')).toEqual(["'new.target' is only allowed inside a function body"]);
+        expect(parseErrs('new.target;', 'commonjs')).toEqual([]);
+    });
+
+    it('a class static block enables new.target but not return', () => {
+        // oxc's asymmetry (`js/function.rs:285` vs `js/statement.rs:710-713`) — hence two counters.
+        expect(parseErrs('class C { static { new.target } }', 'module')).toEqual([]);
+        expect(parseErrs('class C { static { return } }', 'module')).toEqual(['return statement is only allowed inside a function body']);
+    });
+
+    it('applies the goal end-to-end from the declared format', async () => {
+        const errorsFor = async (files: Record<string, string>) =>
+            (await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [] })).errors;
+        const body = 'if (1) { return }\n';
+        // `.cjs` → allowed; `.mjs` → rejected; plain `.js` with no declaration → permissive.
+        expect(await errorsFor({ '/a.cjs': `${body}globalThis.x = 1;`, '/main.js': "import './a.cjs';\nexport const y = 1;" })).toEqual([]);
+        expect(await errorsFor({ '/a.mjs': `${body}export const x = 1;`, '/main.js': "import './a.mjs';\nexport const y = 1;" })).toHaveLength(1);
+        expect(await errorsFor({ '/a.js': `${body}export const x = 1;`, '/main.js': "import './a.js';\nexport const y = 1;" })).toEqual([]);
+        // …and `"type": "module"` makes a plain `.js` strict.
+        expect(
+            await errorsFor({
+                '/package.json': '{"type":"module"}',
+                '/a.js': `${body}export const x = 1;`,
+                '/main.js': "import './a.js';\nexport const y = 1;",
+            }),
+        ).toHaveLength(1);
     });
 });

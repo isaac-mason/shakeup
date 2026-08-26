@@ -30,6 +30,8 @@ export const ParseErrorCode = enumeration(
     'UnexpectedInObjectLiteral',
     'UnexpectedInClassBody',
     'UnexpectedInTypeMember',
+    'TopLevelReturn',
+    'TopLevelNewTarget',
     'UnterminatedJSXElement',
     'UnterminatedRegex',
 );
@@ -57,6 +59,8 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.UnexpectedInObjectLiteral]: 'unexpected %0 in object literal',
     [ParseErrorCode.UnexpectedInClassBody]: 'unexpected %0 in class body',
     [ParseErrorCode.UnexpectedInTypeMember]: 'unexpected %0 in type member',
+    [ParseErrorCode.TopLevelReturn]: 'return statement is only allowed inside a function body',
+    [ParseErrorCode.TopLevelNewTarget]: "'new.target' is only allowed inside a function body",
     [ParseErrorCode.UnterminatedJSXElement]: 'unterminated JSX element',
     [ParseErrorCode.UnterminatedRegex]: 'unterminated regex',
 };
