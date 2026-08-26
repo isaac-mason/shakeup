@@ -17,7 +17,7 @@ import {
     refSym,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
-import { isRequireCall } from './scan';
+import { isAnyRequireCall, isRequireCall } from './scan';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,
@@ -283,11 +283,38 @@ function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[
  *  the call site's VALUE is already what `require` should produce — no interop conversion, because
  *  the consumer is CommonJS and expects a CommonJS exports object. (`__toCommonJS` is the other
  *  direction — CJS requiring an ESM module — and is not lowered yet.) */
+/** Identifier references to a FREE `require` that are NOT the callee of a `require(...)` call —
+ *  `typeof require`, `require.resolve(x)`, `require.cache`, a bare `require` passed as a value.
+ *
+ *  esbuild swaps exactly these for its `__require` stub: `ref == p.requireRef && !opts.isCallTarget`
+ *  (`js_parser.go:17181-17189` → `valueToSubstituteForRequire`, `:1863`), gated on bundle mode with
+ *  a non-CommonJS output format (`config.go:696`). rolldown inherits the same stub. Without it a
+ *  UMD header's `typeof require === 'function'` is FALSE and it silently takes the browser-global
+ *  branch, and every `require.X` throws `require is not defined` at load.
+ *
+ *  A `require("literal")` CALL is not here: it is either lowered to the target's wrapper or reported
+ *  as an unresolvable specifier. Keeping the stub off call position is what preserves shakeup's
+ *  deliberate divergence — a dynamic `require(expr)` stays a LOUD BUILD ERROR rather than becoming a
+ *  runtime throw from inside `__require`. */
+function freeRequireRefs(mod: Module): Node[] {
+    const found: Node[] = [];
+    if (!mod.hasRequire && !mod.semantic.unresolved.some((n) => n.name === 'require')) return found;
+    const callees = new Set<Node>();
+    walk(mod.program, (n) => {
+        if (isAnyRequireCall(n)) callees.add((n.data as { callee: Node }).callee);
+    });
+    walk(mod.program, (n) => {
+        if (n.type === N.IdentifierReference && n.name === 'require' && n.sym === 0 && !callees.has(n)) found.push(n);
+    });
+    return found;
+}
+
 function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
     const { mod, linked } = ctx;
     // Top-level `this` means `module.exports` in CommonJS (cjs.md §2.4). Only meaningful once the
     // body is a wrapper closure, which is where `exports` is bound.
     if (linked.cjsWrap.has(mod.idx)) for (const n of mod.topLevelThis) map.set(n, 'exports');
+    for (const n of freeRequireRefs(mod)) map.set(n, '__require');
     if (!mod.hasRequire) return;
     walk(mod.program, (n) => {
         if (!isRequireCall(n)) return;
@@ -650,6 +677,32 @@ const CJS_HELPERS: Record<string, string> = {
         ');',
     ].join('\n'),
 };
+
+/** The `require` shim, in its two platform forms — both transcribed, neither derived.
+ *
+ *  On `platform: 'node'` an ESM bundle can build a REAL require: rolldown's `runtime-tail-node.js`
+ *  is `createRequire(import.meta.url)`, selected by `is_esm_format_with_node_platform()`
+ *  (`runtime_module_task.rs:42-44`). `require.resolve`, `require.cache` and a dynamic call then all
+ *  genuinely work, because it IS Node's require.
+ *
+ *  Everywhere else it is the Proxy stub esbuild wrote and rolldown inherited verbatim
+ *  (`runtime-tail.js` / `runtime.go:123-133`). Two things it is careful about, both from linked
+ *  issues: `typeof require` must be `'function'` even off Node (esbuild #1202) — hence a function
+ *  target — and it must pick up a `require` that appears LATER, including through property access
+ *  (esbuild #1614) — hence the Proxy rather than a captured value. */
+const REQUIRE_SHIM_NODE = "var __require = /* @__PURE__ */ (() => createRequire(import.meta.url))();";
+const REQUIRE_SHIM_NODE_IMPORT = "import { createRequire } from 'node:module';";
+const REQUIRE_SHIM = [
+    'var __require = /* @__PURE__ */ ((x) =>',
+    "    typeof require !== 'undefined'",
+    '        ? require',
+    "        : typeof Proxy !== 'undefined'",
+    "          ? new Proxy(x, { get: (a, b) => (typeof require !== 'undefined' ? require : a)[b] })",
+    '          : x)(function (x) {',
+    "    if (typeof require !== 'undefined') return require.apply(this, arguments);",
+    '    throw Error(\'Dynamic require of "\' + x + \'" is not supported\');',
+    '});',
+].join('\n');
 
 /** Helpers `__toESM` needs, in dependency order. */
 const TO_ESM_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__toESM'];
@@ -1243,7 +1296,14 @@ function renderChunk(
     // that declares the init function, which may wrap nothing and require nothing itself. Gating this
     // on `needsCjs`/`needsToCjs` left the helper out of exactly that chunk.
     const needsEsm = chunk.modules.some((i) => linked.esmInit.has(i));
+    // A free `require` reference anywhere in the chunk pulls in the shim. Independent of every gate
+    // above: an ESM module can perfectly well contain `typeof require` without wrapping anything.
+    const needsRequireShim = chunk.modules.some((i) => freeRequireRefs(graph.modules[i]).length > 0);
     const helperLines: string[] = [];
+    if (needsRequireShim) {
+        if (graph.platform === 'node') helperLines.push(REQUIRE_SHIM_NODE_IMPORT, REQUIRE_SHIM_NODE);
+        else helperLines.push(REQUIRE_SHIM);
+    }
     if (needsCjs || needsToCjs || needsEsm) {
         const wanted = new Set<string>();
         if (needsCjs) wanted.add('__commonJS');
