@@ -508,5 +508,10 @@ export function traverse(
     descend(program, ctx);
     ctx.op = OP_NONE;
     fireExit(program, ctx);
+    // Any mutation invalidates `analyze`'s recorded reference/declaration scopes: a rewrite can move a
+    // reference into another scope or delete it outright. Counts survive (compress maintains them via
+    // `applyRefDelta`), but scopes are not maintained, so consumers must re-derive them. Cleared here
+    // rather than at each mutation site so no pass can forget.
+    if (ctx.changed) semantic.refsCurrent = false;
     return ctx.changed;
 }

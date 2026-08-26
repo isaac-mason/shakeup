@@ -23,6 +23,14 @@ import { type Graph, type Linked, packRef, refMod, refSym } from '../graph-types
 import { hookTable, traverse, type TransformCtx, type Visitor } from '../passes/traverse.ts';
 import { assignSlots, SLOT_UNASSIGNED } from './slots.ts';
 
+/** `verify` runs BOTH collectors on every current module and compares them; the walk is the reference
+ *  implementation. Mirrors `DELTA_MODE`/`VERIFY_SYMBOL_INIT` — the divergence must be findable, not argued. */
+// `verify` runs BOTH collectors on every current module and compares them as multisets; the walk is the
+// reference implementation. It reported 0 divergences on crashcat and three.core.js once `analyze` was
+// aligned to oxc's class/function scope ordering — see llm/notes/mangle-collect-elimination-design.md.
+const MANGLE_SCOPES = process.env.MANGLE_SCOPES ?? 'semantic';
+
+
 /** Direct `eval` can see every binding by its source name, so mangling any of them is unsafe.
  *  shakeup's semantic does not track direct eval (oxc reserves per-scope, lib.rs:604-608), so we
  *  bail conservatively for the whole chunk — matching the correctness requirement, not the precision. */
@@ -98,10 +106,14 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
         }
     }
 
-    // ── 3. Reference + declaration scopes (cross-module resolved) via one scope-tracking walk ──
+    // ── 3. Reference + declaration scopes (cross-module resolved), read off the semantic ──
+    // oxc's mangler never walks the AST for these: `SlotAssignment::compute` reads
+    // `get_resolved_references(sym).map(Reference::scope_id)` plus the declaring/redeclaring scopes
+    // straight off `Scoping` (`oxc_mangler/src/lib.rs:665-672`). `analyze` now records the same pairs,
+    // so the dedicated traversal this used to run (97 calls, 122,202 node visits, 14.3% of ALL node
+    // visits in a crashcat bundle) is gone for every module whose semantic is current.
     const refScopes: number[][] = Array.from({ length: symbolCount }, () => []);
     const declScopes: number[][] = Array.from({ length: symbolCount }, () => []);
-    const refCount = new Float64Array(symbolCount);
 
     for (const idx of chunkModules) {
         const mod = graph.modules[idx];
@@ -128,32 +140,83 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
             if (bind === undefined || bind.kind !== 'found') return 0;
             return refToUnified(bind.ref);
         };
-        const uScopeOf = (ctx: TransformCtx): number => {
-            const s = ctx.currentScope;
-            return s <= 0 ? ROOT : (sm[s] ?? ROOT);
+        const uScope = (localScope: number): number => (localScope <= 0 ? ROOT : (sm[localScope] ?? ROOT));
+
+        /** Today's path: recover the scopes by walking the module. Kept as the fallback for a semantic
+         *  that is not current, and as the reference implementation `MANGLE_SCOPES=verify` checks. */
+        const collectByWalk = (rOut: number[][], dOut: number[][]): void => {
+            const uScopeOf = (ctx: TransformCtx): number => uScope(ctx.currentScope);
+            const visitor: Visitor = {
+                name: 'mangle-collect',
+                enter: hookTable({
+                    [N.IdentifierReference]: (n: Node, ctx: TransformCtx) => {
+                        const s = (n as { sym: number }).sym;
+                        if (s <= 0) return;
+                        const u = resolve(s);
+                        if (u <= 0) return;
+                        rOut[u].push(uScopeOf(ctx));
+                    },
+                    [N.BindingIdentifier]: (n: Node, ctx: TransformCtx) => {
+                        const s = (n as { sym: number }).sym;
+                        if (s <= 0) return;
+                        const u = ym[s];
+                        if (u <= 0) return;
+                        dOut[u].push(uScopeOf(ctx));
+                    },
+                }),
+                exit: null,
+            };
+            traverse(mod.program, sem, [visitor]);
         };
-        const visitor: Visitor = {
-            name: 'mangle-collect',
-            enter: hookTable({
-                [N.IdentifierReference]: (n: Node, ctx: TransformCtx) => {
-                    const s = (n as { sym: number }).sym;
-                    if (s <= 0) return;
-                    const u = resolve(s);
-                    if (u <= 0) return;
-                    refScopes[u].push(uScopeOf(ctx));
-                    refCount[u]++;
-                },
-                [N.BindingIdentifier]: (n: Node, ctx: TransformCtx) => {
-                    const s = (n as { sym: number }).sym;
-                    if (s <= 0) return;
-                    const u = ym[s];
-                    if (u <= 0) return;
-                    declScopes[u].push(uScopeOf(ctx));
-                },
-            }),
-            exit: null,
+
+        /** oxc's path: read the scopes off the semantic (`get_resolved_references(sym).scope_id`),
+         *  no traversal. Valid only while `refsCurrent` holds. */
+        const collectFromSemantic = (rOut: number[][], dOut: number[][]): void => {
+            const rs = sem.refSyms, rsc = sem.refScopeIds;
+            for (let i = 0; i < rs.length; i++) {
+                const u = resolve(rs[i]);
+                if (u <= 0) continue;
+                rOut[u].push(uScope(rsc[i]));
+            }
+            const ds = sem.declSyms, dsc = sem.declScopeIds;
+            for (let i = 0; i < ds.length; i++) {
+                const u = ym[ds[i]];
+                if (u <= 0) continue;
+                dOut[u].push(uScope(dsc[i]));
+            }
         };
-        traverse(mod.program, sem, [visitor]);
+
+        if (!sem.refsCurrent || MANGLE_SCOPES === 'walk') {
+            // Not current: a traversal mutated the tree without a re-analyze, so the recorded scopes may
+            // describe a shape that no longer exists. Measured on crashcat: 6 of 97 modules.
+            collectByWalk(refScopes, declScopes);
+        } else if (MANGLE_SCOPES === 'verify') {
+            // Both, then compare as MULTISETS — `assignSlots` only ever tests set membership
+            // (`slotLiveness[s].has(scopeId)`), so order and duplicates are not observable, but a
+            // MISSING or EXTRA scope is.
+            // BOTH into fresh per-module arrays. `refScopes`/`declScopes` ACCUMULATE across the module
+            // loop, so comparing this module's walk against them would compare one module's output
+            // against every module so far — a guaranteed mismatch that says nothing.
+            const rw: number[][] = Array.from({ length: symbolCount }, () => []);
+            const dw: number[][] = Array.from({ length: symbolCount }, () => []);
+            const rs: number[][] = Array.from({ length: symbolCount }, () => []);
+            const ds: number[][] = Array.from({ length: symbolCount }, () => []);
+            collectByWalk(rw, dw);
+            collectFromSemantic(rs, ds);
+            const key = (a: number[]): string => [...a].sort((x, y) => x - y).join(',');
+            for (let u = 1; u < symbolCount; u++) {
+                if (key(rw[u]) !== key(rs[u]))
+                    throw new Error(`mangle refScopes diverged, unified sym ${u} in ${mod.id}: walk [${key(rw[u])}] vs semantic [${key(rs[u])}]`);
+                if (key(dw[u]) !== key(ds[u]))
+                    throw new Error(`mangle declScopes diverged, unified sym ${u} in ${mod.id}: walk [${key(dw[u])}] vs semantic [${key(ds[u])}]`);
+            }
+            for (let u = 1; u < symbolCount; u++) {
+                for (const v of rs[u]) refScopes[u].push(v);
+                for (const v of ds[u]) declScopes[u].push(v);
+            }
+        } else {
+            collectFromSemantic(refScopes, declScopes);
+        }
     }
 
     // ── 4. Slot assignment (the oxc algorithm) ──
