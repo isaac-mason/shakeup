@@ -43,7 +43,7 @@ import {
     buildLineTable,
     encodeMappings,
     inlineSourceMapComment,
-    joinParts,
+    indentMappings, joinParts,
     type Part,
     type SourceMap,
     trimMappings,
@@ -1204,6 +1204,9 @@ function renderChunk(
             const params = uses.has('module') ? '(exports, module)' : '(exports)';
             const indented = out === '' ? '' : `\n${out.replace(/^/gm, '    ')}\n`;
             out = `var ${wrapName} = /* @__PURE__ */ __commonJS(${params} => {${indented}});`;
+            // The body moved down one line and right four columns; its mappings must follow, or the
+            // part's line count stops matching its text and the whole chunk's map desynchronizes.
+            if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, 1, 4) };
             // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
             // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
             //
@@ -1219,6 +1222,9 @@ function renderChunk(
                 if (nsRef === undefined) continue;
                 out += `\nvar ${finalNameOf(linked, nsRef)} = /* @__PURE__ */ __toESM(${wrapName}()${arg});`;
             }
+            // Generated-only lines appended after the body: `joinParts` reads their count from the
+            // text, and a line with no entry is already unmapped, so only `code` needs updating.
+            if (mapPart !== null) mapPart = { code: out, map: mapPart.map! };
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
@@ -1242,6 +1248,9 @@ function renderChunk(
             const nsName = linked.namespaceOf.get(idx);
             const body = out.replace(/^/gm, '    ');
             out = `${nsName === undefined ? '' : `var ${nsName};\n`}var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
+            // Same splice, same correction — one or two header lines depending on whether the
+            // namespace binding is hoisted, plus the four-column indent.
+            if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, nsName === undefined ? 1 : 2, 4) };
             nsCode = null;
         }
         if (out !== '') moduleTexts.push(out);
@@ -1432,6 +1441,11 @@ function renderChunk(
         if (intro !== '') mapParts.push({ code: intro });
         for (const s of crossImportLines) mapParts.push({ code: s });
         for (const s of extImports) mapParts.push({ code: s });
+        // The CommonJS runtime helpers are in `parts` but were MISSING here, so every mapped line
+        // sat ~30 generated lines above where it belonged and the whole chunk's map pointed at the
+        // wrong source lines — silently, since a map that decodes fine looks fine. `joinParts`
+        // derives each part's line span from its `code`, so the two lists have to agree exactly.
+        for (const s of helperLines) mapParts.push({ code: s });
         mapParts.push(...moduleParts);
         if (exportLine !== null) mapParts.push({ code: exportLine });
         for (const s of starLines) mapParts.push({ code: s });
