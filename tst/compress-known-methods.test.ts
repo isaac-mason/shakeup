@@ -117,3 +117,29 @@ describe('known call folds (oxc replace_known_methods)', () => {
         expect(evaluate(code)).toBe('abc');
     });
 });
+
+describe('a constant interpolation folds into the template text', () => {
+    it.each([
+        ['`x${2}y`', 'x2y'],
+        ['`a${1 + 1}b${3}c`', 'a2b3c'],
+        ['`${true}`', 'true'],
+        ['`${null}`', 'null'],
+    ])('%s', async (expr, want) => {
+        const code = await build(`o = ${expr};`);
+        expect(code).not.toContain('${');
+        expect(evaluate(code)).toBe(want);
+    });
+
+    it('leaves a STRING interpolation alone', async () => {
+        // A string's text can contain a backtick, a backslash or a `${`, and folding it in without
+        // escaping would produce a syntax error — or worse, an injected interpolation.
+        const code = await build('o = `a${"`b"}c`;');
+        expect(evaluate(code)).toBe('a`bc');
+    });
+
+    it('leaves a NON-constant interpolation alone', async () => {
+        const code = await build('o = `n${String(globalThis.x)}m`;');
+        expect(code).toContain('${');
+        expect(evaluate(code)).toBe('nundefinedm');
+    });
+});

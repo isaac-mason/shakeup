@@ -275,6 +275,42 @@ function foldUnary(n: Node): boolean {
     return false;
 }
 
+/** Splice a constant expression into the surrounding template text: `` `x${2}y` `` → `` `x2y` ``.
+ *
+ *  oxc folds these; we were emitting the hole. Restricted to NUMBER / BOOLEAN / NULL, whose string
+ *  forms cannot contain a character that is special inside a template — a backtick, a backslash, or a
+ *  `${`. Folding a STRING would need those escaped, and a mis-escape here produces a syntax error or,
+ *  worse, an injected interpolation; not worth it for the bytes.
+ *
+ *  `TemplateElement.name` carries the RAW text, so the merge is a plain splice of the two neighbours
+ *  around the hole. */
+function foldTemplate(n: Node): boolean {
+    const d = n.data as { quasis: Node[]; expressions: Node[] };
+    let changed = false;
+    for (let i = d.expressions.length - 1; i >= 0; i--) {
+        const e = d.expressions[i];
+        let text: string | null = null;
+        if (isNum(e)) {
+            const v = numValue(e);
+            if (v !== null && Number.isFinite(v)) text = String(v);
+        } else if (isBool(e)) {
+            text = e.name;
+        } else if (isNull(e)) {
+            text = 'null';
+        }
+        if (text === null) continue;
+        // Merge quasis[i] + text + quasis[i+1], then drop the hole.
+        const left = d.quasis[i];
+        const right = d.quasis[i + 1];
+        if (left === undefined || right === undefined) continue;
+        (left as { name: string }).name = left.name + text + right.name;
+        d.quasis.splice(i + 1, 1);
+        d.expressions.splice(i, 1);
+        changed = true;
+    }
+    return changed;
+}
+
 export const foldConstants: Visitor = {
     name: 'foldConstants',
     // EXIT phase: children are folded first, so `1 + 2 + 3` collapses bottom-up in one traversal
@@ -286,6 +322,9 @@ export const foldConstants: Visitor = {
         },
         [N.UnaryExpression]: (node, ctx) => {
             if (foldUnary(node)) ctx.replaceWith(node);
+        },
+        [N.TemplateLiteral]: (node, ctx) => {
+            if (foldTemplate(node)) ctx.changed = true;
         },
         [N.StaticMemberExpression]: (node, ctx) => {
             if (foldStaticMember(node)) ctx.replaceWith(node);
