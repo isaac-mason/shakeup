@@ -39,7 +39,10 @@ export const runChunks = async (
 ): Promise<{ ns: Record<string, unknown>; dir: string; dispose: () => void }> => {
     const dir = mkdtempSync(join(tmpdir(), 'shakeup-chunks-'));
     writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
-    for (const c of chunks) writeFileSync(join(dir, c.fileName), c.code);
+    // Strip the `sourceMappingURL` comment: the map ASSETS are not written here (only chunks are),
+    // so leaving it makes Node's loader — and vitest's — chase a file that is not there and log a
+    // read error that has nothing to do with the test. Assertions read `r.code`, not the file.
+    for (const c of chunks) writeFileSync(join(dir, c.fileName), c.code.replace(/^\/\/# sourceMappingURL=.*$/gm, ''));
     const ns = (await import(pathToFileURL(join(dir, entry)).href)) as Record<string, unknown>;
     return { ns, dir, dispose: () => rmSync(dir, { recursive: true, force: true }) };
 };

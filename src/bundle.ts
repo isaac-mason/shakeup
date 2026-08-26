@@ -784,6 +784,40 @@ const REQUIRE_SHIM = [
     '});',
 ].join('\n');
 
+/** Sentinel key for the `require` shim, which is not in {@link CJS_HELPERS} because it has two
+ *  platform-dependent bodies and one of them needs an accompanying import statement. */
+export const REQUIRE_SHIM_KEY = '__require';
+
+/** The `__require` shim's lines for this build's platform. */
+function requireShimLines(graph: Graph): string[] {
+    return graph.platform === 'node' ? [REQUIRE_SHIM_NODE_IMPORT, REQUIRE_SHIM_NODE] : [REQUIRE_SHIM];
+}
+
+/** Which runtime helpers this chunk's own modules require. Pure function of `graph`/`linked`/the
+ *  chunk's module list, so chunk-graph can call it before rendering to decide whether a shared
+ *  runtime chunk is worth minting. */
+export function helpersNeededBy(graph: Graph, linked: Linked, chunk: Chunk): Set<string> {
+    const wanted = new Set<string>();
+    const has = (f: (i: number) => boolean) => chunk.modules.some(f);
+    const needsCjs = has((i) => linked.cjsWrap.has(i)) || has((i) => linked.dynamicExports.has(i));
+    // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
+    const needsToCjs = has((i) =>
+        graph.modules[i].importRecords.some(
+            (r) => r.kind === 'require' && !r.external && r.resolved >= 0 && !linked.cjsWrap.has(r.resolved) && linked.namespaceOf.has(r.resolved),
+        ),
+    );
+    // A lazily-initialised module (§7.20/D1) carries its own `__esm` — and it is the PRODUCER chunk
+    // that declares the init function, which may wrap nothing and require nothing itself.
+    const needsEsm = has((i) => linked.esmInit.has(i));
+    if (needsCjs) wanted.add('__commonJS');
+    if (has((i) => linked.cjsNamespace.has(i) || linked.cjsNamespaceNode.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+    if (needsEsm) wanted.add('__esm');
+    if (has((i) => linked.dynamicExports.has(i))) for (const d of EXPORT_ALL_DEPS) wanted.add(d);
+    if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);
+    if (has((i) => needsRequireShim(graph.modules[i]))) wanted.add(REQUIRE_SHIM_KEY);
+    return wanted;
+}
+
 /** Helpers namespace mode 2 needs, in dependency order. */
 const EXPORT_ALL_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__exportAll', '__reExport', '__toESM'];
 
@@ -1369,12 +1403,40 @@ function renderChunk(
         exportSpecs.push(local === exportedName ? exported : `${local} as ${exported}`);
         exportedNames.push(exportedName);
     }
+    // The shared runtime chunk exports the helpers it defines, under their own names. Not routed
+    // through `chunk.exports`, which is keyed on symbol refs — a helper has no ref, it is text.
+    if (chunk.runtimeHelpers !== undefined) {
+        for (const name of chunk.runtimeHelpers) {
+            if (seenExport.has(name)) continue;
+            seenExport.add(name);
+            exportSpecs.push(name);
+            exportedNames.push(name);
+        }
+    }
     const exportInner = exportSpecs.join(clauseSep(tight));
     const exportLine = exportSpecs.length > 0 ? (tight ? `export{${exportInner}};` : `export { ${exportInner} };`) : null;
     const starLines = suppressEntryExports ? [] : entryStarSpecs.map((spec) => (tight ? `export*from'${spec}';` : `export * from '${spec}';`));
 
+    // CommonJS runtime helpers. Which ones a chunk needs is decided by `helpersNeededBy`, shared
+    // with chunk-graph so the SHARED-RUNTIME decision (below) uses the same answer the render does.
+    const wanted = helpersNeededBy(graph, linked, chunk);
+    const helperLines: string[] = [];
+    if (chunk.runtimeHelpers !== undefined) {
+        // THIS is the runtime chunk: it defines the union of every consumer's helpers and exports
+        // them. rolldown does the same, as a real module in the graph (`runtime_module_task.rs`);
+        // shakeup keeps them as text but gives them their own chunk, which is where the DUPLICATION
+        // was — measured at 6 identical copies of the helper set across 7 chunks (D5).
+        for (const name of chunk.runtimeHelpers) if (name === REQUIRE_SHIM_KEY) helperLines.push(...requireShimLines(graph));
+        for (const [name, src] of Object.entries(CJS_HELPERS)) if (chunk.runtimeHelpers.has(name)) helperLines.push(src);
+    } else if (chunk.importsRuntime) {
+        // A consumer: the helpers arrive as a cross-chunk import, already in `crossImportLines`.
+    } else {
+        if (wanted.has(REQUIRE_SHIM_KEY)) helperLines.push(...requireShimLines(graph));
+        for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
+    }
+
     // Empty non-entry chunk with nothing to emit: drop it.
-    const isEmpty = moduleTexts.length === 0 && exportLine === null && cjsEntryDefault === null && starLines.length === 0;
+    const isEmpty = moduleTexts.length === 0 && exportLine === null && cjsEntryDefault === null && starLines.length === 0 && helperLines.length === 0;
     if (isEmpty && !chunk.isEntry) return null;
 
     // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. Order:
@@ -1394,37 +1456,6 @@ function renderChunk(
     const footer = naming.footer(preInfo);
 
     const parts: string[] = [];
-    // CommonJS runtime helpers, emitted only into a chunk that actually wraps something. Ordered by
-    // dependency: `__toESM` calls `__copyProps`, which calls the property primitives.
-    const needsCjs = chunk.modules.some((i) => linked.cjsWrap.has(i)) || chunk.modules.some((i) => linked.dynamicExports.has(i));
-    // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
-    const needsToCjs = chunk.modules.some((i) =>
-        graph.modules[i].importRecords.some(
-            (r) => r.kind === 'require' && !r.external && r.resolved >= 0 && !linked.cjsWrap.has(r.resolved) && linked.namespaceOf.has(r.resolved),
-        ),
-    );
-    // A lazily-initialised module (§7.20/D1) carries its own `__esm` — and it is the PRODUCER chunk
-    // that declares the init function, which may wrap nothing and require nothing itself. Gating this
-    // on `needsCjs`/`needsToCjs` left the helper out of exactly that chunk.
-    const needsEsm = chunk.modules.some((i) => linked.esmInit.has(i));
-    // A free `require` reference anywhere in the chunk pulls in the shim. Independent of every gate
-    // above: an ESM module can perfectly well contain `typeof require` without wrapping anything.
-    const wantRequireShim = chunk.modules.some((i) => needsRequireShim(graph.modules[i]));
-    const helperLines: string[] = [];
-    if (wantRequireShim) {
-        if (graph.platform === 'node') helperLines.push(REQUIRE_SHIM_NODE_IMPORT, REQUIRE_SHIM_NODE);
-        else helperLines.push(REQUIRE_SHIM);
-    }
-    if (needsCjs || needsToCjs || needsEsm) {
-        const wanted = new Set<string>();
-        if (needsCjs) wanted.add('__commonJS');
-        if (chunk.modules.some((i) => linked.cjsNamespace.has(i) || linked.cjsNamespaceNode.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
-        if (needsEsm) wanted.add('__esm');
-        if (chunk.modules.some((i) => linked.dynamicExports.has(i))) for (const d of EXPORT_ALL_DEPS) wanted.add(d);
-        if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);
-        for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
-    }
-
     if (banner !== '') parts.push(banner);
     if (intro !== '') parts.push(intro);
     parts.push(...crossImportLines);
