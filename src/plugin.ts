@@ -172,7 +172,9 @@ export type Plugin = {
     load?: WithFilter<(ctx: PluginCtx, id: string) => MaybePromise<LoadResult>>;
     transform?: WithFilter<(ctx: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
     moduleParsed?: (ctx: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
-    renderChunk?: (ctx: PluginCtx, code: string) => string | null | undefined;
+    /** Return the rewritten code, or rollup's `{ code, map }` object form. A returned `map` is NOT
+     *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
+    renderChunk?: (ctx: PluginCtx, code: string) => string | { code: string; map?: unknown } | null | undefined;
     buildEnd?: (ctx: PluginCtx) => MaybePromise<void>;
 };
 

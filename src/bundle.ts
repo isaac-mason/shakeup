@@ -1046,7 +1046,12 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     for (let i = 0; i < outputChunks.length; i++) {
         const oc = outputChunks[i];
         for (const hook of pipeline.renderChunk) {
-            const result = hook.handler(pluginCtx, oc.code);
+            const raw = hook.handler(pluginCtx, oc.code);
+            // rollup's `renderChunk` may return either a string or `{ code, map }`, and plugins
+            // written against rollup return the object form. It used to be assigned straight to
+            // `oc.code`, so the chunk was emitted as the string `[object Object]` — no error, no
+            // warning, just a destroyed bundle.
+            const result = typeof raw === 'object' && raw !== null ? raw.code : raw;
             if (result !== null && result !== undefined && result !== oc.code) {
                 oc.code = result;
                 if (oc.map !== undefined) {
