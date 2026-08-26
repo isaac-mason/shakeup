@@ -20,7 +20,7 @@
 // produces. Each iteration is wrapped in its own block so body-level `let`/`const` declarations don't
 // collide across copies.
 import { cloneNode, N, type Node, node, statementListOf, walk } from '../../ast.ts';
-import { attachScopeNode, cloneScopeTree, createScope, SCOPE } from '../../analysis/semantic.ts';
+import { attachScopeNode, cloneSemanticSubtree, createScope, SCOPE } from '../../analysis/semantic.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
@@ -163,7 +163,7 @@ function iteration(body: Node, varSym: number, value: number, sem: Semantic, sco
     // which is the whole reason it is wrapped.
     if (wrapped !== substituted) attachScopeNode(sem, createScope(sem, scope, SCOPE.BLOCK), wrapped);
     const inner = (wrapped.data as { scopeId?: number } | null)?.scopeId ?? scope;
-    cloneScopeTree(sem, body, substituted, wrapped === substituted ? scope : inner);
+    cloneSemanticSubtree(sem, body, substituted, wrapped === substituted ? scope : inner);
     return wrapped;
 }
 
