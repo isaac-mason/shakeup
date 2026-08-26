@@ -17,7 +17,7 @@
 import { stampPureCalls } from '../../analysis/purity.ts';
 import { emitRefFacts, REF, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
 import type { RefCounts } from '../../analysis/movement.ts';
-import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
+import { type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
@@ -275,10 +275,19 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     /** Fold one round's signed movements into the maintained counts. */
     const applyDeltas = (delta: Map<number, RefDelta>): void => applyRefDelta(cur, delta);
 
-    const refreshFull = (): void => {
-        cur = createSemantic();
-        analyze(cur, program);
-    };
+    // NO POST-COMPRESS REBUILD. This used to be `cur = createSemantic(); analyze(cur, program)` —
+    // a full re-analyze of every module after compress, 91 of 97 modules on a crashcat bundle and
+    // roughly half of all `analyze` time. It existed because the maintained table still listed symbols
+    // whose declarations compress had deleted, so the mangler allocated names against a stale set.
+    //
+    // It is gone because the passes now MAINTAIN instead: `dropUnused` and the single-use `inline`
+    // evict the bindings they retire (`scope = 0`), `coalesce` folds merged symbols into the survivor,
+    // `blockFlatten` repoints scopes it dissolves, and `analyze` clears `node.sym` when a reference
+    // stops resolving. Measured after those: the maintained table's live-symbol count matches a fresh
+    // `analyze` exactly, and dropping the rebuild leaves all five corpus configs BYTE-IDENTICAL.
+    //
+    // oxc's model, and its words: the compressor "refreshes scoping incrementally — it only prunes
+    // references for nodes it drops, and no longer rebuilds liveness from scratch each pass".
     for (let i = 0; i < MAX_ITERS; i++) {
         // No pre-pass at all: the reference facts every pass here reads (`refs`/`uses`/`shorthand`/
         // `exported`) are now maintained by `analyze` itself, which already walks every node and
@@ -336,10 +345,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
             if (problems.length > 0)
                 throw new Error(`maintained semantic diverged after coalesceVariableNames:\n  ${problems.slice(0, 20).join('\n  ')}`);
         }
-        if (finalChanged) {
-            any = true;
-            refreshFull();
-        }
+        if (finalChanged) any = true;
     }
     return any ? cur : null;
 }
