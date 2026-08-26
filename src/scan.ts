@@ -4,6 +4,7 @@ import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
     type CachedParse,
+    type ExportsKind,
     isCommonJsFormat,
     isEsmFormat,
     type ModuleDefFormat,
@@ -228,17 +229,74 @@ const strValue = (source: string, node: Node): string =>
     node.end > node.start ? source.slice(node.start + 1, node.end - 1) : node.name.slice(1, -1);
 
 /** Extract import/export records from the module's top-level statements. */
-/** Warn when an ES module references the CommonJS globals `module` / `exports`
- *  (rolldown `commonjs_variable_in_esm`, `ast_scanner/mod.rs:302-322`; esbuild has no equivalent).
+/** Does the module's own source carry an ESM `export` / `import` keyword? Tier 1 and tier 4 of the
+ *  CommonJS kind rule. One body scan, shared by the classifier and both diagnostics. */
+function esmSyntaxOf(mod: Module): { hasExport: boolean; hasImport: boolean } {
+    let hasExport = false;
+    let hasImport = false;
+    for (const stmt of mod.program.data.body) {
+        if (stmt.type === N.ImportDeclaration) hasImport = true;
+        else if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration || stmt.type === N.ExportAllDeclaration)
+            hasExport = true;
+        if (hasExport && hasImport) break;
+    }
+    return { hasExport, hasImport };
+}
+
+/** Does the module reference `module` / `exports` as FREE identifiers? Tier 2's other half.
+ *  `semantic.unresolved` holds exactly the references that bound to no declaration, which is
+ *  rolldown's `is_global_identifier_reference` (`ast_scanner/mod.rs:1073-1076`) — so a module that
+ *  declares its own `exports` is correctly not counted. */
+function cjsGlobalIn(mod: Module): Node | null {
+    for (const node of mod.semantic.unresolved) if (node.name === 'module' || node.name === 'exports') return node;
+    return null;
+}
+
+/** Classify a module's source (cjs.md §2.1), porting rolldown's four tiers in order
+ *  (`ast_scanner/mod.rs:297-345`). DERIVED PER BUILD — never cached, because tier 3 reads
+ *  {@link Module.defFormat}, which comes from another file (§7.1b).
  *
- *  An ESM export keyword makes the file ESM outright — that is tier 1 of the CJS kind rule, and
- *  neither bundler reclassifies on the strength of a stray `module.exports =`. But in an ES module
- *  those names are just undeclared globals: `module.exports = x` throws, and `exports.foo = x`
- *  writes to a global object nobody reads. Silently emitting that is the worst option, so warn.
+ *  Also emits the tier-1 warning: an ESM export keyword wins outright and the module IS ESM, but a
+ *  free `module`/`exports` reference in one is a CommonJS habit that silently does nothing —
+ *  `module.exports = x` throws and `exports.foo = x` writes to a global nobody reads. rolldown warns
+ *  rather than reclassifying (`commonjs_variable_in_esm`); esbuild has no equivalent. */
+function classifyExportsKind(mod: Module, warnings: string[]): ExportsKind {
+    const { hasExport, hasImport } = esmSyntaxOf(mod);
+    const cjsGlobal = cjsGlobalIn(mod);
+    if (hasExport) {
+        if (cjsGlobal !== null) {
+            warnings.push(
+                `${mod.id}:${cjsGlobal.start}: '${cjsGlobal.name}' is a CommonJS variable and is not defined in an ES module ` +
+                    '(this file uses ESM `export`, so it is treated as ESM)',
+            );
+        }
+        return 'esm';
+    }
+    if (cjsGlobal !== null || mod.hasTopLevelReturn) return 'commonjs';
+    if (isCommonJsFormat(mod.defFormat)) return 'commonjs';
+    if (isEsmFormat(mod.defFormat)) return 'esm';
+    return hasImport ? 'esm' : 'none';
+}
+
+/** Report a module whose source is CommonJS. shakeup consumes ESM only today: the `__commonJS`
+ *  wrapper, `require` lowering and `__toESM` interop are the P3/P4 vertical in `llm/notes/cjs.md`.
  *
- *  Reads `semantic.unresolved`, which is already populated — a free identifier is exactly one that
- *  bound to no declaration, which is rolldown's `is_global_identifier_reference`. A module that
- *  declares its own `exports` therefore does NOT warn, correctly. */
+ *  This exists because the ALTERNATIVE IS SILENT. Without it a real CJS dependency bundles into a
+ *  no-op — `module.exports = {…}` becomes an assignment to an undeclared global, the module appears
+ *  to build, and the failure surfaces as a missing export somewhere downstream at runtime. Naming
+ *  the file and the reason is strictly better than that until the wrapper lands.
+ *
+ *  Deliberately keyed on the module's own CJS FEATURE USE, not on `exportsKind` alone: a `.cjs` file
+ *  that merely runs side effects (no `module`/`exports`, no top-level `return`) classifies CommonJS
+ *  by tier 3 but needs none of the missing machinery, so it still bundles. */
+function errorUnsupportedCjs(mod: Module, errors: string[]): void {
+    if (mod.exportsKind !== 'commonjs') return;
+    const cjsGlobal = cjsGlobalIn(mod);
+    const why = cjsGlobal !== null ? `it references the CommonJS global '${cjsGlobal.name}'` : mod.hasTopLevelReturn ? 'it has a top-level return' : null;
+    if (why === null) return; // declared CJS but uses no CJS feature — nothing to lower
+    errors.push(`${mod.id}:${cjsGlobal?.start ?? 0}: CommonJS modules are not supported yet (${why})`);
+}
+
 /** Error on an `import`/`export` statement in a file DECLARED CommonJS — a `.cjs`/`.cts` extension
  *  or the nearest `package.json#type: "commonjs"`. Port of oxc's `module_code` check
  *  (`oxc_semantic/src/checker/javascript.rs:532-548` **[V]**), whose message this mirrors.
@@ -775,6 +833,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let semantic: Semantic;
         let hasJSX: boolean;
         let hasImportSyntax: boolean;
+        let hasTopLevelReturn = false;
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -840,6 +899,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 ({ program, nodeCount, semantic } = hit);
                 hasJSX = hit.hasJSX;
                 hasImportSyntax = hit.hasImportSyntax;
+                hasTopLevelReturn = hit.hasTopLevelReturn;
                 graph.parseStats.reused++;
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
@@ -855,6 +915,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 nodeCount = parsed.nodeCount;
                 hasJSX = parsed.hasJSX;
                 hasImportSyntax = parsed.hasImportSyntax;
+                hasTopLevelReturn = parsed.hasTopLevelReturn;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
@@ -1000,6 +1061,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             execOrder: -1,
             hasJSX,
             hasImportSyntax,
+            hasTopLevelReturn,
             jsxRuntime: null,
             sideEffects,
             meta: metaVal,
@@ -1008,6 +1070,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             entryName: null,
             external: false,
             defFormat,
+            exportsKind: 'none', // classified below, once records are extracted
             importers: new Set(),
         };
         graph.modules.push(mod);
@@ -1027,12 +1090,14 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.namedExports = c.namedExports;
             mod.starExports = c.starExports;
             mod.jsxRuntime = c.jsxRuntime;
-            warnCjsVarsInEsm(mod, graph.warnings);
+            mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorUnsupportedCjs(mod, graph.errors);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
-            warnCjsVarsInEsm(mod, graph.warnings);
+            mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorUnsupportedCjs(mod, graph.errors);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);
             // A changed module (had a prior cache entry) whose export surface differs marks its
@@ -1055,6 +1120,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 starExports: mod.starExports,
                 hasJSX: mod.hasJSX,
                 hasImportSyntax: mod.hasImportSyntax,
+                hasTopLevelReturn: mod.hasTopLevelReturn,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
                 source,

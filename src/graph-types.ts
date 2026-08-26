@@ -47,6 +47,15 @@ export const isEsmFormat = (f: ModuleDefFormat): boolean => f === 'esm-mjs' || f
 /** Declared as CommonJS by extension or `package.json#type` (rolldown `ModuleDefFormat::is_commonjs`). */
 export const isCommonJsFormat = (f: ModuleDefFormat): boolean => f === 'cjs' || f === 'cts' || f === 'cjs-package-json';
 
+/** What a module's SOURCE looks like, as opposed to how it was declared ({@link ModuleDefFormat}).
+ *  Mirrors rolldown's `ExportsKind`. `none` is a real third state, not a synonym for `esm`: a module
+ *  with neither ESM syntax nor CJS feature use is genuinely undecided, and rolldown's link stage
+ *  PROMOTES it based on how it is imported (cjs.md §2.2).
+ *
+ *  DERIVED PER BUILD and never cached (§7.1b): one of its inputs is the nearest `package.json#type`,
+ *  which lives in another file. The per-file facts it is derived from are cacheable; this is not. */
+export type ExportsKind = 'esm' | 'commonjs' | 'none';
+
 /** A resolved edge to another module (deduped per specifier for `static`/`dynamic`). */
 export type ImportRecord = {
     specifier: string;
@@ -117,6 +126,9 @@ export type Module = {
      *  whole-program walk for dynamic-import edges and `new URL(…, import.meta.url)` assets — both
      *  nest arbitrarily deep, so they need a walk, and both are absent from most modules. */
     hasImportSyntax: boolean;
+    /** Module contained a `return` outside any function body (set by the parser). Tier 2 of the
+     *  CommonJS kind rule — only a CJS body can legally contain one. */
+    hasTopLevelReturn: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
     sideEffects: ModuleSideEffects;
@@ -133,6 +145,9 @@ export type Module = {
     /** Declared module format (extension / nearest `package.json#type`). A per-build RESOLVE output,
      *  deliberately absent from {@link CachedParse} — see {@link ModuleDefFormat}. */
     defFormat: ModuleDefFormat;
+    /** What the source looks like (cjs.md §2.1). Derived per build from cached per-file facts plus
+     *  {@link defFormat}; never cached itself. */
+    exportsKind: ExportsKind;
     /** Reverse edges: ids of modules that statically import this one (filled during build). */
     importers: Set<string>;
 };
@@ -189,6 +204,8 @@ export type CachedParse = {
     starExports: number[];
     hasJSX: boolean;
     hasImportSyntax: boolean;
+    /** Source-derived, so cacheable — unlike the {@link ExportsKind} computed from it. */
+    hasTopLevelReturn: boolean;
     jsxRuntime: JSXRuntime | null;
     /** Stable digest of the module's export surface (named-export keys + `export *`
      *  specifiers). A change here means importers' link/shake/render is stale. */
