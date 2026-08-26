@@ -16,8 +16,7 @@
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
 import { emitRefFacts, REF, semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
-import type { RefCounts } from '../../analysis/movement.ts';
-import { type Semantic } from '../../analysis/semantic.ts';
+import { refFor, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
@@ -234,26 +233,23 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
      * that reads `symbolInit` WITHOUT checking counts would need this revisited.
      */
     const refreshRefs = (): void => {
-        const refs = new Map<number, RefCounts>();
-        const uses = new Map<number, number>();
+        // Reset IN PLACE rather than building fresh tables: `refs`/`uses` are symbol-indexed arrays
+        // whose capacity (and `refsPool`'s records) is worth keeping across rounds. `refs` clears to
+        // `undefined` — absent — never to zeroed records, which `movement.ts` distinguishes.
+        for (let i = 1; i < cur.refs.length; i++) cur.refs[i] = undefined;
+        for (let i = 1; i < cur.uses.length; i++) cur.uses[i] = 0;
         const shorthand = new Set<number>();
         const exported = new Set<number>();
         emitRefFacts(program, (sym, flags) => {
             if ((flags & (REF.READ | REF.WRITE)) !== 0) {
-                let c = refs.get(sym);
-                if (c === undefined) {
-                    c = { reads: 0, writes: 0 };
-                    refs.set(sym, c);
-                }
+                const c = refFor(cur, sym);
                 if ((flags & REF.READ) !== 0) c.reads++;
                 if ((flags & REF.WRITE) !== 0) c.writes++;
             }
-            uses.set(sym, (uses.get(sym) ?? 0) + 1);
+            cur.uses[sym] = (cur.uses[sym] ?? 0) + 1;
             if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
             if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
         });
-        cur.refs = refs;
-        cur.uses = uses;
         cur.shorthand = shorthand;
         cur.exported = exported;
     };

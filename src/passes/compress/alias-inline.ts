@@ -80,9 +80,9 @@ export const aliasInline: Visitor = {
                 if (aliasSym === 0 || aliasedSym === 0 || aliasSym === aliasedSym) continue;
                 if (exported.has(aliasSym) || shorthand.has(aliasSym)) continue;
 
-                const a = refs.get(aliasSym);
+                const a = refs[aliasSym];
                 if (a === undefined || a.writes > 0 || a.reads === 0) continue;
-                const target = refs.get(aliasedSym);
+                const target = refs[aliasedSym];
                 if (target !== undefined && target.writes > 0) continue;
 
                 const rec = sem.symbols[aliasedSym];

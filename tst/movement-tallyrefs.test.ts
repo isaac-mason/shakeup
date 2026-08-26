@@ -11,7 +11,9 @@ function counts(src: string): Map<string, { reads: number; writes: number }> {
     analyze(sem, program);
     const bySym = tallyRefs(program);
     const out = new Map<string, { reads: number; writes: number }>();
-    for (const [sym, c] of bySym) {
+    for (let sym = 1; sym < bySym.length; sym++) {
+        const c = bySym[sym];
+        if (c === undefined) continue;
         const decl = sem.symbols[sym]?.decl;
         if (decl?.name) out.set(decl.name, c);
     }

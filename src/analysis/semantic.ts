@@ -55,10 +55,29 @@ export type Semantic = {
     // not widen `Node`). But the mangler needs the SCOPE each reference occurred in, which is oxc's
     // `Reference::scope_id` (`builder.rs:2921` records it as the semantic is built), so that much is
     // recorded below as flat pairs — no per-reference object, no node identity.
-    /** Read/write counts per symbol. A compound assign / update counts as BOTH. */
-    refs: Map<number, RefCounts>;
-    /** Reference-node count per symbol — NOT reads+writes (`x += 1` is 2 there, 1 here). */
-    uses: Map<number, number>;
+    /**
+     * Read/write counts, INDEXED BY SYMBOL ID rather than keyed in a Map.
+     *
+     * Symbol ids are dense (`1..symbols.length`), so a plain array is the natural container — benched
+     * at 2.8x a `Map<sym, RefCounts>`, 3.6x with the records pooled
+     * (`benches/micro/semantic-reset.bench.ts`). A plain ARRAY, not a typed one: it grows on write, so
+     * there is no capacity to manage and no bounds hazard for a symbol id past the table (`link.ts`
+     * mints synthetic ids exactly there).
+     *
+     * `undefined` means ABSENT and is LOAD-BEARING — `movement.ts:119` reads
+     * `c === undefined || c.writes > 0`, i.e. "unknown, do not reorder", which is NOT the same as
+     * `{reads:0,writes:0}`. Keeping the record OBJECT (rather than parallel numeric arrays) preserves
+     * that for free, because a hole reads back as `undefined` exactly like `Map.get` did — and every
+     * consumer of `.reads`/`.writes` keeps working untouched.
+     */
+    refs: (RefCounts | undefined)[];
+    /** Pooled `RefCounts` records, indexed by symbol id. Reused across `analyze` calls so a module's
+     *  worth of records is allocated once rather than per call; `resetSem` clears `refs` to `undefined`
+     *  (NOT to zeroed records, which would destroy the absent distinction above) and leaves this alone. */
+    refsPool: RefCounts[];
+    /** Reference-node count per symbol — NOT reads+writes (`x += 1` is 2 there, 1 here).
+     *  Indexed by symbol id; absent reads as 0, which is what every consumer already means by `?? 0`. */
+    uses: number[];
     /** Symbols read as a shorthand-property VALUE (`{ x }`), which cannot be substituted by span. */
     shorthand: Set<number>;
     /** Locals re-exported by a bare `export { X }` — renaming one would rewrite the public name. */
@@ -141,13 +160,34 @@ export function lookupValue(sem: Semantic, scope: number, name: string): number 
     }
 }
 
+/** The `RefCounts` record for `sym`, minted from the pool on first use in this analyze pass.
+ *
+ *  Every site that CREATES a refs entry goes through here, so the pooling and the "absent means
+ *  undefined" rule are stated once. A pooled record is zeroed on hand-out, not on reset — resetting
+ *  writes `undefined` into `refs` instead, which is what keeps absent distinguishable from `{0,0}`. */
+export function refFor(sem: Semantic, sym: number): RefCounts {
+    let c = sem.refs[sym];
+    if (c !== undefined) return c;
+    c = sem.refsPool[sym];
+    if (c === undefined) {
+        c = { reads: 0, writes: 0 };
+        sem.refsPool[sym] = c;
+    } else {
+        c.reads = 0;
+        c.writes = 0;
+    }
+    sem.refs[sym] = c;
+    return c;
+}
+
 /** Allocate an empty {@link Semantic}; reuse it across analyze() calls to keep warm capacity. */
 export function createSemantic(): Semantic {
     return {
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
-        refs: new Map(),
-        uses: new Map(),
+        refs: [],
+        refsPool: [],
+        uses: [],
         shorthand: new Set(),
         exported: new Set(),
         symbolInit: new Map(),
@@ -307,8 +347,11 @@ function resetSem(out: Semantic): void {
     out.unresolved.length = 0;
     out.names.clear();
     out.bindings.clear();
-    out.refs.clear();
-    out.uses.clear();
+    // Capacity KEPT: clear in place rather than reallocating. `refs` is reset to `undefined` (absent),
+    // never to zeroed records — see the field docs. `refsPool` is deliberately untouched so the record
+    // objects survive to be reused.
+    for (let i = 1; i < out.refs.length; i++) out.refs[i] = undefined;
+    for (let i = 1; i < out.uses.length; i++) out.uses[i] = 0;
     out.shorthand.clear();
     out.exported.clear();
     out.symbolInit.clear();
@@ -345,15 +388,11 @@ export function analyze(out: Semantic, program: Node): void {
         out.refScopeIds.push(state.scope);
         const f = state.pendFlags[i];
         if ((f & (REF_READ | REF_WRITE)) !== 0) {
-            let c = out.refs.get(sym);
-            if (c === undefined) {
-                c = { reads: 0, writes: 0 };
-                out.refs.set(sym, c);
-            }
+            const c = refFor(out, sym);
             if ((f & REF_READ) !== 0) c.reads++;
             if ((f & REF_WRITE) !== 0) c.writes++;
         }
-        out.uses.set(sym, (out.uses.get(sym) ?? 0) + 1);
+        out.uses[sym] = (out.uses[sym] ?? 0) + 1;
         if ((f & REF_SHORTHAND) !== 0) out.shorthand.add(sym);
         if ((f & REF_EXPORTED) !== 0) out.exported.add(sym);
     }

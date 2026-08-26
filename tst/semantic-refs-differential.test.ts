@@ -18,19 +18,23 @@ function diff(src: string, ts: boolean): string[] {
     const p = computePrelude(program);
     const problems: string[] = [];
 
-    const syms = new Set<number>([...p.refs.keys(), ...sem.refs.keys()]);
+    // Symbol-INDEXED arrays now, so sweep the union of lengths rather than Map keys.
+    const syms: number[] = [];
+    for (let i = 1; i < Math.max(p.refs.length, sem.refs.length); i++) {
+        if (p.refs[i] !== undefined || sem.refs[i] !== undefined) syms.push(i);
+    }
     for (const s of syms) {
-        const a = sem.refs.get(s);
-        const b = p.refs.get(s);
+        const a = sem.refs[s];
+        const b = p.refs[s];
         if ((a?.reads ?? 0) !== (b?.reads ?? 0) || (a?.writes ?? 0) !== (b?.writes ?? 0))
             problems.push(
                 `sym ${s}: refs analyze={r:${a?.reads ?? 0},w:${a?.writes ?? 0}} prelude={r:${b?.reads ?? 0},w:${b?.writes ?? 0}}`,
             );
     }
-    const useSyms = new Set<number>([...p.uses.keys(), ...sem.uses.keys()]);
+    const useSyms = (() => { const o: number[] = []; for (let i = 1; i < Math.max(p.uses.length, sem.uses.length); i++) o.push(i); return o; })();
     for (const s of useSyms) {
-        if ((sem.uses.get(s) ?? 0) !== (p.uses.get(s) ?? 0))
-            problems.push(`sym ${s}: uses analyze=${sem.uses.get(s) ?? 0} prelude=${p.uses.get(s) ?? 0}`);
+        if ((sem.uses[s] ?? 0) !== (p.uses[s] ?? 0))
+            problems.push(`sym ${s}: uses analyze=${sem.uses[s] ?? 0} prelude=${p.uses[s] ?? 0}`);
     }
     for (const s of new Set([...p.shorthand, ...sem.shorthand]))
         if (p.shorthand.has(s) !== sem.shorthand.has(s)) problems.push(`sym ${s}: shorthand mismatch`);

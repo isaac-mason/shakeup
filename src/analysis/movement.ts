@@ -18,14 +18,16 @@ export type RefCounts = { reads: number; writes: number };
 /** Tally read/write references per SymbolId across `program`. Global/unresolved refs (`sym === 0`)
  *  are ignored. This is the write-detection oxc gets from its reference table; shakeup's
  *  `walkRefIdents` doesn't distinguish targets, so we walk with target-position awareness here. */
-export function tallyRefs(program: Node): Map<number, RefCounts> {
-    const out = new Map<number, RefCounts>();
+export function tallyRefs(program: Node): (RefCounts | undefined)[] {
+    // Symbol-INDEXED, matching `Semantic.refs`. `undefined` (absent) stays distinguishable from a
+    // zeroed record, which `readBlocksReorder` below depends on.
+    const out: (RefCounts | undefined)[] = [];
     const bump = (sym: number, kind: 'reads' | 'writes'): void => {
         if (sym === 0) return;
-        let c = out.get(sym);
+        let c = out[sym];
         if (c === undefined) {
             c = { reads: 0, writes: 0 };
-            out.set(sym, c);
+            out[sym] = c;
         }
         c[kind]++;
     };
@@ -114,9 +116,9 @@ export function tallyRefs(program: Node): Map<number, RefCounts> {
  *  the replacement past it (oxc `identifier_read_blocks_reorder` + `symbol_value_may_change`,
  *  mod.rs:200-242). A global/unresolved read (sym 0) may be a getter / change; a mutated local (any
  *  write) may hold a different value once the replacement moves later. Conservative default: block. */
-function readBlocksReorder(sym: number, refs: Map<number, RefCounts>): boolean {
+function readBlocksReorder(sym: number, refs: (RefCounts | undefined)[]): boolean {
     if (sym === 0) return true;
-    const c = refs.get(sym);
+    const c = refs[sym];
     return c === undefined || c.writes > 0;
 }
 
@@ -124,7 +126,7 @@ function readBlocksReorder(sym: number, refs: Map<number, RefCounts>): boolean {
  *  is evaluated (a global/unresolved read, or a local that's reassigned somewhere). A replacement
  *  that reads only immutable symbols and has no side effects is "freely movable": its value and
  *  effects are position-independent, so it can be substituted anywhere. */
-export function readsMutableSymbol(node: Node, refs: Map<number, RefCounts>): boolean {
+export function readsMutableSymbol(node: Node, refs: (RefCounts | undefined)[]): boolean {
     let found = false;
     const v = (n: Node): void => {
         if (found) return;
@@ -173,7 +175,7 @@ export function substituteSingleUse(
     replacement: Node,
     replacementImpure: boolean,
     replacementReadsMutable: boolean,
-    refs: Map<number, RefCounts>,
+    refs: (RefCounts | undefined)[],
 ): SubstResult {
     // A "freely movable" replacement (no side effects AND reads only immutable symbols) is
     // position-independent — it can be substituted anywhere with no reorder hazard. Otherwise the

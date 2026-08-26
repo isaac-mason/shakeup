@@ -11,7 +11,7 @@
 //     by `node.type`; each node fires every visitor's hook in order (fused), and hooks mutate via
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
 import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
-import type { Semantic } from '../analysis/semantic.ts';
+import { refFor, type Semantic } from '../analysis/semantic.ts';
 import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast.ts';
 
 type Hook = (node: Node, ctx: TransformCtx) => void;
@@ -279,20 +279,17 @@ class Ctx {
     mergeSymbol(from: number, to: number): void {
         if (from === to || from <= 0 || to <= 0) return;
         const sem = this.semantic;
-        const fRefs = sem.refs.get(from);
+        const fRefs = sem.refs[from];
         if (fRefs !== undefined) {
-            const tRefs = sem.refs.get(to);
-            if (tRefs === undefined) sem.refs.set(to, { reads: fRefs.reads, writes: fRefs.writes });
-            else {
-                tRefs.reads += fRefs.reads;
-                tRefs.writes += fRefs.writes;
-            }
-            sem.refs.delete(from);
+            const tRefs = refFor(sem, to);
+            tRefs.reads += fRefs.reads;
+            tRefs.writes += fRefs.writes;
+            sem.refs[from] = undefined; // absent again, not a zeroed record
         }
-        const fUses = sem.uses.get(from);
-        if (fUses !== undefined) {
-            sem.uses.set(to, (sem.uses.get(to) ?? 0) + fUses);
-            sem.uses.delete(from);
+        const fUses = sem.uses[from];
+        if (fUses !== undefined && fUses !== 0) {
+            sem.uses[to] = (sem.uses[to] ?? 0) + fUses;
+            sem.uses[from] = 0;
         }
         if (sem.shorthand.has(from)) {
             sem.shorthand.add(to);
@@ -346,15 +343,11 @@ export type RefDelta = { reads: number; writes: number; uses: number };
 export function applyRefDelta(semantic: Semantic, delta: Map<number, RefDelta>): void {
     for (const [sym, d] of delta) {
         if (d.reads !== 0 || d.writes !== 0) {
-            let c = semantic.refs.get(sym);
-            if (c === undefined) {
-                c = { reads: 0, writes: 0 };
-                semantic.refs.set(sym, c);
-            }
+            const c = refFor(semantic, sym);
             c.reads += d.reads;
             c.writes += d.writes;
         }
-        if (d.uses !== 0) semantic.uses.set(sym, (semantic.uses.get(sym) ?? 0) + d.uses);
+        if (d.uses !== 0) semantic.uses[sym] = (semantic.uses[sym] ?? 0) + d.uses;
     }
 }
 

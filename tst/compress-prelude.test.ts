@@ -50,17 +50,24 @@ function diffs(src: string, ts = false): string[] {
     const bad: string[] = [];
 
     const refs = tallyRefs(program);
-    for (const [sym, c] of refs) {
-        const g = p.refs.get(sym);
-        if (g === undefined) bad.push(`refs sym${sym}: missing`);
-        else if (g.reads !== c.reads || g.writes !== c.writes)
+    // `refs` is symbol-INDEXED now; sweep the union of lengths. `undefined` means absent, exactly as
+    // `Map.get` used to return, so the missing/extra checks read the same.
+    for (let sym = 1; sym < Math.max(refs.length, p.refs.length); sym++) {
+        const c = refs[sym];
+        const g = p.refs[sym];
+        if (c !== undefined && g === undefined) bad.push(`refs sym${sym}: missing`);
+        else if (c !== undefined && g !== undefined && (g.reads !== c.reads || g.writes !== c.writes))
             bad.push(`refs sym${sym}: prelude r${g.reads}/w${g.writes} vs tally r${c.reads}/w${c.writes}`);
+        else if (c === undefined && g !== undefined) bad.push(`refs sym${sym}: extra`);
     }
-    for (const [sym] of p.refs) if (!refs.has(sym)) bad.push(`refs sym${sym}: extra`);
 
     const uses = countUses(program);
-    for (const [sym, n] of uses) if ((p.uses.get(sym) ?? 0) !== n) bad.push(`uses sym${sym}: ${p.uses.get(sym)} vs ${n}`);
-    for (const [sym] of p.uses) if (!uses.has(sym)) bad.push(`uses sym${sym}: extra`);
+    // `p.uses` is symbol-INDEXED; absent reads as 0, which is what `?? 0` already meant.
+    for (const [sym, n] of uses) if ((p.uses[sym] ?? 0) !== n) bad.push(`uses sym${sym}: ${p.uses[sym]} vs ${n}`);
+    for (let sym = 1; sym < p.uses.length; sym++) {
+        const n = p.uses[sym] ?? 0;
+        if (n !== 0 && !uses.has(sym)) bad.push(`uses sym${sym}: extra`);
+    }
 
     const sh = shorthandOf(program);
     for (const s of sh) if (!p.shorthand.has(s)) bad.push(`shorthand sym${s}: missing`);

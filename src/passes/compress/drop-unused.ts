@@ -37,7 +37,7 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 // Use-count snapshot for the current traversal, keyed by SymbolId. Set on Program-enter (fires once,
 // before we descend into any declaration), read by the VariableDeclaration hook. The paired
 // `semantic` is captured alongside so scope lookups use the exact table the counts were built from.
-let USES: Map<number, number> | null = null;
+let USES: number[] | null = null;
 let SEM: Semantic | null = null;
 
 /** Tally, per SymbolId, how many `IdentifierReference` nodes resolve to it across the whole module.
@@ -66,7 +66,7 @@ const DROP_PURE = 1; // dead binding, pure init — delete the declarator outrig
 const DROP_IMPURE = 2; // dead binding, impure init — the init's side effect must be preserved
 
 /** Classify a single declarator of a `let`/`const` declaration. */
-function classify(decl: Node, sem: Semantic, uses: Map<number, number>): number {
+function classify(decl: Node, sem: Semantic, uses: number[]): number {
     if (decl.type !== N.VariableDeclarator) return KEEP;
     const id = decl.data.id;
     // Only PLAIN identifier bindings — destructuring patterns may run getter/iterator side effects,
@@ -75,7 +75,7 @@ function classify(decl: Node, sem: Semantic, uses: Map<number, number>): number 
     const sym = id.sym;
     if (sym === 0) return KEEP; // no resolved symbol — bail
     if (inModuleScope(sem, sym)) return KEEP; // treeshake owns module-scope bindings
-    if ((uses.get(sym) ?? 0) !== 0) return KEEP; // ≥1 reference (incl. a self-ref in its own init)
+    if ((uses[sym] ?? 0) !== 0) return KEEP; // ≥1 reference (incl. a self-ref in its own init)
     // Dead binding in a function/block scope. Pure init → drop; impure init → keep the effect.
     return isPureExpr(decl.data.init) ? DROP_PURE : DROP_IMPURE;
 }
