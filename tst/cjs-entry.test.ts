@@ -1,8 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
-import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
 import { runChunks } from './exec-helpers.ts';
 
 // Track 4 — CommonJS ENTRY points, checked against the three rolldown fixtures that cover them,
@@ -15,7 +13,7 @@ import { runChunks } from './exec-helpers.ts';
 // Every assertion executes the built chunks from disk and compares VALUES, mirroring the `_test.mjs`
 // each fixture ships.
 const build = async (files: Record<string, string>, entry: string | string[]) => {
-    const r = await bundle({ entry, external: [], fs: createMemoryFs(files) });
+    const r = await bundle({ input: entry, external: [], fs: createMemoryFs(files) });
     expect(r.errors).toEqual([]);
     return r;
 };

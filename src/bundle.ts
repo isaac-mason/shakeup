@@ -378,7 +378,13 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                             ctx.pathToChunk !== null
                                 ? ctx.pathToChunk(targetChunk)
                                 : `./${chunkGraph.chunks[targetChunk].name}.js`;
-                        map.set(source, `'${path}'`);
+                        // A mode-2 target's chunk exports the runtime namespace OBJECT under a
+                        // single name — its members are not knowable as chunk exports — so the
+                        // import site unwraps it and the caller's `m.a` reads the object.
+                        const nsExport = chunkGraph.chunks[targetChunk].nsExportName?.get(rec.resolved);
+                        if (nsExport !== undefined && ctx.linked.dynamicExports.has(rec.resolved)) {
+                            map.set(n, `import('${path}').then((m) => m.${nsExport})`);
+                        } else map.set(source, `'${path}'`);
                     }
                 }
             }
@@ -553,6 +559,7 @@ function isImmutableBind(linked: Linked, bind: ImportBind): boolean {
 }
 
 function renderNamespaceObject(
+    graph: Graph,
     linked: Linked,
     modIdx: number,
     chunk: Chunk | null,
@@ -604,6 +611,41 @@ function renderNamespaceObject(
     // `export * from 'cjs'` (namespace mode 2) needs to extend the object.
     const tag = `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
     const decl = preDeclared ? '' : 'const ';
+    // MODE 2 (cjs.md §4.4) — the module `export *`s from CommonJS, so its surface is not knowable
+    // here. The statically-known names become getter THUNKS handed to `__exportAll`, which is the
+    // one place shakeup uses accessors for everything: the object has to stay extensible so
+    // `__reExport` can copy the CommonJS members in at runtime, and a value snapshot taken now would
+    // predate them. This does NOT touch the ordinary namespace above, which keeps plain values for
+    // provably-immutable members.
+    //
+    // rolldown's `cjs_compat/reexport_commonjs` is the shape, verbatim:
+    //     var foo_exports = /* @__PURE__ */ __exportAll({ bar: () => import_commonjs.bar, … });
+    //     __reExport(foo_exports, /* @__PURE__ */ __toESM(require_commonjs()));
+    // `__exportAll` stamps `Symbol.toStringTag` itself, so no separate `defineProperty` here.
+    if (linked.dynamicExports.has(modIdx)) {
+        const thunks: string[] = [];
+        for (const [name, bind] of map ?? []) {
+            if (nsMembers !== undefined && !nsMembers.has(name)) continue;
+            const value = nameOfBind(linked, bind, chunk);
+            if (value !== null) thunks.push(`${name}${tight ? ':' : ': '}()${tight ? '=>' : ' => '}${value}`);
+        }
+        const body = tight ? `{${thunks.join(',')}}` : `{ ${thunks.join(', ')} }`;
+        const lines = [`${decl}${nsName} = /* @__PURE__ */ __exportAll(${thunks.length === 0 ? '{}' : body});`];
+        for (const recIdx of graph.modules[modIdx].starExports) {
+            const rec = graph.modules[modIdx].importRecords[recIdx];
+            if (rec.external || rec.resolved < 0) continue;
+            const wrapRef = linked.cjsWrap.get(rec.resolved);
+            if (wrapRef !== undefined) {
+                const wrapper = chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
+                lines.push(`__reExport(${nsName},${tight ? '' : ' '}/* @__PURE__ */ __toESM(${wrapper}()));`);
+            } else if (linked.dynamicExports.has(rec.resolved)) {
+                // Chained: the star source is itself a mode-2 re-exporter, so copy from ITS object.
+                const inner = nameOfBind(linked, { kind: 'namespace', module: rec.resolved }, chunk);
+                if (inner !== null) lines.push(`__reExport(${nsName},${tight ? '' : ' '}${inner});`);
+            }
+        }
+        return lines.join('\n');
+    }
     return tight ? `${decl}${nsName}={${inner}};${tag}` : `${decl}${nsName} = { ${inner} };${tag}`;
 }
 
@@ -659,6 +701,19 @@ const CJS_HELPERS: Record<string, string> = {
         '    return to;',
         '};',
     ].join('\n'),
+    // Transcribed from rolldown `runtime-base.js:34-43` and `:58-60`. `__exportAll` builds the
+    // mode-2 namespace: every entry is a getter, and the object stays EXTENSIBLE so `__reExport` can
+    // add to it (which is also why nothing here is frozen). `__reExport` copies with `'default'` as
+    // the `except` key — `export *` never forwards `default`, in any bundler or in Node.
+    __exportAll: [
+        'var __exportAll = (all, no_symbols) => {',
+        '    let target = {};',
+        '    for (var name in all) __defProp(target, name, { get: all[name], enumerable: true });',
+        "    if (!no_symbols) __defProp(target, Symbol.toStringTag, { value: 'Module' });",
+        '    return target;',
+        '};',
+    ].join('\n'),
+    __reExport: "var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, 'default'), secondTarget && __copyProps(secondTarget, mod, 'default'));",
     __toCommonJS: [
         'var __toCommonJS = (mod) =>',
         "    __hasOwnProp.call(mod, 'module.exports')",
@@ -703,6 +758,9 @@ const REQUIRE_SHIM = [
     '    throw Error(\'Dynamic require of "\' + x + \'" is not supported\');',
     '});',
 ].join('\n');
+
+/** Helpers namespace mode 2 needs, in dependency order. */
+const EXPORT_ALL_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__exportAll', '__reExport', '__toESM'];
 
 /** Helpers `__toESM` needs, in dependency order. */
 const TO_ESM_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__toESM'];
@@ -1130,7 +1188,7 @@ function renderChunk(
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
-            nsCode = renderNamespaceObject(linked, idx, chunk, shaken?.nsUsage.get(idx), tight, lazyRef !== undefined);
+            nsCode = renderNamespaceObject(graph, linked, idx, chunk, shaken?.nsUsage.get(idx), tight, lazyRef !== undefined);
             out += `\n${nsCode}`;
         }
         // LAZY INIT — an ESM module reached only through `require()` (§7.20/D1). Its whole body,
@@ -1289,7 +1347,7 @@ function renderChunk(
     const parts: string[] = [];
     // CommonJS runtime helpers, emitted only into a chunk that actually wraps something. Ordered by
     // dependency: `__toESM` calls `__copyProps`, which calls the property primitives.
-    const needsCjs = chunk.modules.some((i) => linked.cjsWrap.has(i));
+    const needsCjs = chunk.modules.some((i) => linked.cjsWrap.has(i)) || chunk.modules.some((i) => linked.dynamicExports.has(i));
     // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
     const needsToCjs = chunk.modules.some((i) =>
         graph.modules[i].importRecords.some(
@@ -1313,6 +1371,7 @@ function renderChunk(
         if (needsCjs) wanted.add('__commonJS');
         if (chunk.modules.some((i) => linked.cjsNamespace.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
         if (needsEsm) wanted.add('__esm');
+        if (chunk.modules.some((i) => linked.dynamicExports.has(i))) for (const d of EXPORT_ALL_DEPS) wanted.add(d);
         if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);
         for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
     }
