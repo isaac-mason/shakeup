@@ -1,5 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
-import { verifySemantic } from './analysis/ref-facts';
+import { semanticVerifyOn, verifySemantic } from './analysis/ref-facts';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
 import type { Fs, MaybePromise } from './fs';
 import {
@@ -855,19 +855,17 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // arguments and dropping the now-unreferenced declaration. This is the same ordering
                 // compilecat's `run_all` uses (inline first, then the simplify loop).
                 let expanded = false;
-                // DIAGNOSTIC, not a gate: `SEMANTIC_VERIFY_TIER=1`.
+                // Part of the standard `SEMANTIC_VERIFY` gate. It began as a diagnostic because the
+                // tier reported 32 divergences the following rebuild absorbed — but every one was an
+                // UNSAFE class (unbound / UNDER / partition / missing scopeId), and the rebuild does
+                // NOT protect against the dangerous case: `flowInlineVariables` moved a block-scoped
+                // local out of its block, and a rebuild cannot fix tree corruption, it just makes the
+                // semantic agree with the broken tree.
                 //
-                // Per-pass checking here names an offender directly — `flowInlineVariables` moved a
-                // block-scoped local out of its block, a real miscompile, and it only surfaced two
-                // stages later against compress round 1. But the optimize tier is followed by a REBUILD
-                // (`if (expanded)`), so these passes do not owe a current semantic and 32 tests report
-                // drift the rebuild legitimately absorbs. Demanding currency here would be asserting an
-                // invariant the design does not have.
-                //
-                // Turn it on when touching a tier pass; it is the fastest way to localise this class of
-                // bug. Promote it to the standard gate only if the tier's rebuilds are ever removed.
+                // All four passes now maintain, so checking per pass names an offender directly instead
+                // of surfacing two stages later against a compress round.
                 const verifyAfter = (passName: string): void => {
-                    if (process.env.SEMANTIC_VERIFY_TIER !== '1') return;
+                    if (!semanticVerifyOn()) return;
                     const problems = verifySemantic(semantic, program);
                     if (problems.length > 0)
                         throw new Error(`maintained semantic diverged after ${passName} in ${id}:\n  ${problems.slice(0, 20).join('\n  ')}`);
