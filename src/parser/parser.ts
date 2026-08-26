@@ -326,7 +326,15 @@ function parseAssign(state: ParserState, noIn = false): Node {
         const maybe = parseIdent(state, R_BIND);
         return parseArrowAfterSingleParam(state, idStart, maybe, 0);
     }
-    if (isK(state, K.ASYNC) && (state.tokFlags & F_NL) === 0) {
+    // The grammar's restriction is `async [no LineTerminator here] ArrowFunction` — it sits BETWEEN
+    // `async` and its parameters, which is the check below on the NEXT token. Testing `F_NL` on the
+    // `async` token itself asked a different question ("was there a newline before `async`") and a
+    // newline there is perfectly legal, so every multiline call taking an async arrow argument —
+    //     f('PLUGIN',
+    //       async (data) => { … })
+    // — a newline anywhere before `async` — failed with `expected ')'`. Measured against oxc across
+    // webpack/rspack/vite: 131 real files.
+    if (isK(state, K.ASYNC)) {
         const s = saveState(state);
         const asyncStart = state.tokStart;
         nextToken(state);
