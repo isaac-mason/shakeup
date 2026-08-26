@@ -114,6 +114,9 @@ export function deconflictChunk(
     seed: Iterable<string>,
     mangle = false,
     taken: Set<string> = new Set<string>(),
+    /** Per-top-level-symbol claim weight (`packRef` → its SLOT's total reference count), from
+     *  `topLevelSlotWeights`. Null keeps the historical module/symbol-id claim order. */
+    weights: Map<number, number> | null = null,
 ): (base: string) => string {
     for (const name of RESERVED) taken.add(name);
     for (const name of seed) taken.add(name);
@@ -124,6 +127,68 @@ export function deconflictChunk(
     // Mangling reassigns the shortest base54 names instead of readable deconflicted ones;
     // both share the same collision-free `taken` discipline (esbuild/oxc_mangler model).
     const claim = mangle ? makeMangleClaim(taken) : makeClaim(taken);
+    // Top-level claims, hottest slot first (oxc Phase 3, `SlotRanking::tally`). `makeMangleClaim`
+    // ignores its base and hands out base54 names in CALL order, and base54 names get LONGER as they
+    // are consumed — 54 one-character names, then two-character. Claiming in module/symbol-id order
+    // therefore spent every one-character name on whichever symbols came first: measured on crashcat,
+    // all 54 were in use and the coldest of them was referenced 7 times.
+    //
+    // The weight is the SLOT's traffic, not the symbol's — see `topLevelSlotWeights`. Collecting the
+    // list first and sorting it is what makes this a reordering and nothing more; the claims issued
+    // are exactly the same ones, and `taken` (not order) is what keeps them collision-free.
+    // External locals, deduped to one entry per (specifier, name) — several modules importing the
+    // same name share ONE emitted local. Discovery only READS `binds`/`exportMaps`, so hoisting it
+    // above the claim phase changes nothing; it just makes the set available to rank.
+    const extBase = new Map<string, string>();
+    const offerExternal = (specifier: string, name: string, base: string): void => {
+        const key = externalKey(specifier, name);
+        if (linked.externalLocals.has(key) || extBase.has(key)) return;
+        extBase.set(key, base);
+    };
+    for (const [ref, bind] of linked.binds) {
+        if (bind.kind !== 'external') continue;
+        if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
+        offerExternal(bind.specifier, bind.name, graph.modules[refMod(ref)].semantic.symbols[refSym(ref)].decl!.name);
+    }
+    for (const [modIdx, map] of linked.exportMaps) {
+        if (memberSet !== null && !memberSet.has(modIdx)) continue;
+        for (const bind of map.values()) {
+            if (bind.kind !== 'external') continue;
+            offerExternal(
+                bind.specifier,
+                bind.name,
+                bind.name === '*'
+                    ? `${bind.specifier.replace(/[^A-Za-z0-9_$]/g, '_')}_ns`
+                    : bind.name === 'default'
+                      ? `${bind.specifier.replace(/[^A-Za-z0-9_$]/g, '_')}_default`
+                      : bind.name,
+            );
+        }
+    }
+
+    // An external local anchors no slot — nothing inherits its name — so the number of times it is
+    // PRINTED is simply its own reference count, which is directly comparable to a slot's weight.
+    // Without this they were claimed after every module symbol and landed deep in the two-character
+    // range: crashcat's `vec3`, at 2483 uses, came out as `$G`.
+    const extWeight = new Map<string, number>();
+    if (weights !== null) {
+        for (const idx of memberOrder) {
+            const mod = graph.modules[idx];
+            for (const sym of mod.semantic.refSyms) {
+                if (sym <= 0 || !mod.namedImports.has(sym)) continue;
+                const bind = linked.binds.get(packRef(idx, sym));
+                if (bind?.kind !== 'external') continue;
+                const key = externalKey(bind.specifier, bind.name);
+                extWeight.set(key, (extWeight.get(key) ?? 0) + 1);
+            }
+        }
+    }
+
+    const claimExternal = (key: string, base: string): void => {
+        if (!linked.externalLocals.has(key)) linked.externalLocals.set(key, claim(base));
+    };
+
+    const topLevel: { ref: number; original: string }[] = [];
     for (const idx of memberOrder) {
         const mod = graph.modules[idx];
         const moduleScope = scopeOf(mod.semantic, mod.program);
@@ -131,10 +196,32 @@ export function deconflictChunk(
         for (let sym = 1; sym < sem.symbols.length; sym++) {
             if (sem.symbols[sym].scope !== moduleScope) continue;
             if (mod.namedImports.has(sym)) continue;
-            const original = sem.symbols[sym].decl!.name;
-            const final = claim(original);
-            if (final !== original) linked.finalNames.set(packRef(idx, sym), final);
+            topLevel.push({ ref: packRef(idx, sym), original: sem.symbols[sym].decl!.name });
         }
+    }
+    if (weights === null) {
+        // No ranking: claim in exactly the historical order (readable names depend on it).
+        for (const { ref, original } of topLevel) {
+            const final = claim(original);
+            if (final !== original) linked.finalNames.set(ref, final);
+        }
+    } else {
+        // Module symbols and external locals compete in ONE queue — they draw from the same base54
+        // sequence, so ranking either alone just moves the misallocation to the other. Stable sort,
+        // so equal weights keep the deterministic order the lists were built in.
+        const queue: { w: number; run: () => void }[] = [];
+        for (const { ref, original } of topLevel) {
+            queue.push({
+                w: weights.get(ref) ?? 0,
+                run: () => {
+                    const final = claim(original);
+                    if (final !== original) linked.finalNames.set(ref, final);
+                },
+            });
+        }
+        for (const [key, base] of extBase) queue.push({ w: extWeight.get(key) ?? 0, run: () => claimExternal(key, base) });
+        queue.sort((a, b) => b.w - a.w);
+        for (const q of queue) q.run();
     }
     for (const [ref, base] of linked.syntheticNames) {
         if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
@@ -144,31 +231,7 @@ export function deconflictChunk(
         if (memberSet !== null && !memberSet.has(modIdx)) continue;
         linked.namespaceOf.set(modIdx, claim(base));
     }
-    const claimExternal = (specifier: string, name: string, base: string): void => {
-        const key = externalKey(specifier, name);
-        if (linked.externalLocals.has(key)) return;
-        linked.externalLocals.set(key, claim(base));
-    };
-    for (const [ref, bind] of linked.binds) {
-        if (bind.kind !== 'external') continue;
-        if (memberSet !== null && !memberSet.has(refMod(ref))) continue;
-        const mod = graph.modules[refMod(ref)];
-        const localName = mod.semantic.symbols[refSym(ref)].decl!.name;
-        claimExternal(bind.specifier, bind.name, localName);
-    }
-    for (const [modIdx, map] of linked.exportMaps) {
-        if (memberSet !== null && !memberSet.has(modIdx)) continue;
-        for (const bind of map.values()) {
-            if (bind.kind !== 'external') continue;
-            const base =
-                bind.name === '*'
-                    ? `${bind.specifier.replace(/[^A-Za-z0-9_$]/g, '_')}_ns`
-                    : bind.name === 'default'
-                      ? `${bind.specifier.replace(/[^A-Za-z0-9_$]/g, '_')}_default`
-                      : bind.name;
-            claimExternal(bind.specifier, bind.name, base);
-        }
-    }
+    if (weights === null) for (const [key, base] of extBase) claimExternal(key, base);
     return claim;
 }
 
