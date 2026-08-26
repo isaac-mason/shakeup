@@ -196,9 +196,15 @@ function formChunks(
     // Key each module: a grouped module keys on its group; the rest key on color. Modules
     // with equal color always load together → one chunk. An entry module keys on its color
     // like everything else — a module reached ONLY by that entry shares the entry's color and
-    // merges into the entry chunk; a shared module gets its own color and its own chunk. Two
-    // entries with identical color (mutual static import cycle) merge into one chunk — both
-    // map to it via entryChunkOf.
+    // merges into the entry chunk; a shared module gets its own color and its own chunk.
+    //
+    // ~~Two entries with identical color (mutual static import cycle) merge into one chunk — both
+    // map to it via entryChunkOf.~~ CORRECTED: they cannot. The user asked for N output files and
+    // got N-1 — `bundle({ entry: ['/a.js', '/b.js'] })` where a and b import each other emitted
+    // `a.js` ALONE, with no error, and anything importing `b.js` hit a missing file. The second
+    // entry gets a FACADE chunk instead (below), which is what rolldown emits:
+    // `cjs_compat/multiple_circle_cjs_entries` ships `b.js` as
+    // `import { t as require_b } from "./a.js"; export default require_b();`.
     const keyOf = (idx: number): string => {
         if (groupOf !== null && groupOf[idx] >= 0) return `group:${groupOf[idx]}`;
         return `color:${color[idx].toString(16)}`;
@@ -240,8 +246,31 @@ function formChunks(
     for (const [m, em] of entryModuleOf) {
         const ci = chunkByModule[m];
         if (ci < 0) continue;
-        entryChunkOf.set(m, ci);
         const chunk = chunks[ci];
+        // A second static entry landing in a chunk another static entry already owns gets a facade:
+        // an entry chunk holding NO modules, which re-exports its entry module's surface from the
+        // chunk that does hold it. The cross-chunk export wiring below treats it like any other
+        // consumer, since `chunkByModule[m]` still points at the real producer.
+        if (em.isEntry && chunk.isEntry && chunk.entryModule !== m) {
+            const fi = chunks.length;
+            chunks.push({
+                name: em.name ?? reprName(graph.modules[m]),
+                modules: [],
+                color: color[m],
+                entryModule: m,
+                isEntry: true,
+                isDynamicEntry: false,
+                imports: new Map(),
+                sideEffectImports: new Set(),
+                exports: new Map(),
+                dynamicImports: new Set(),
+                importLocalOf: new Map(),
+                nsImportLocalOf: new Map(),
+            });
+            entryChunkOf.set(m, fi);
+            continue;
+        }
+        entryChunkOf.set(m, ci);
         if (chunk.entryModule < 0) chunk.entryModule = m;
         if (em.isEntry) {
             if (!chunk.isEntry) {
@@ -522,6 +551,11 @@ function wireAndDeconflict(
     // in another chunk. The entry's export map is materialized below in bundle.ts; here we
     // ensure such producer exports exist and the entry chunk imports them.
     for (const [entryModule, chunkIdx] of entryChunkOf) {
+        // A CommonJS entry emits `export default require_x()`, so the WRAPPER is what its chunk
+        // depends on — and for a facade chunk the wrapper lives elsewhere. Not a named import, so
+        // nothing else carries it; without this the facade called an undeclared `require_b`.
+        const wrapRef = linked.cjsWrap.get(entryModule);
+        if (wrapRef !== undefined) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, chunkIdx, { kind: 'found', ref: wrapRef });
         const map = linked.exportMaps.get(entryModule);
         if (map === undefined) continue;
         for (const bind of map.values()) {
