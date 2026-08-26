@@ -214,8 +214,16 @@ function addRecord(mod: Module, specifier: string, kind: ImportRecordKind): numb
         if (asset) return i; // same asset referenced twice → one record
         // Static dominance: a specifier seen statically stays static regardless of a later dynamic
         // hit; a dynamic-first record flips to static when the static import arrives.
-        if (!dynamic) r.kind = 'static';
-        else r.hasDynamicLiteral = true;
+        //
+        // A `require` edge is NOT subject to that downgrade. It is what forces the target to be
+        // wrapped, and that consequence outlives the fact that the same specifier may also be
+        // imported statically — rolldown likewise lets `ImportKind::Require` drive `WrapKind`
+        // regardless of the other edges. Losing it here silently un-lowered every `require` after
+        // the first for a given specifier. `require` still counts as a static edge everywhere that
+        // matters (`staticDeps` tests only for `dynamic`), so chunking is unaffected.
+        if (dynamic) r.hasDynamicLiteral = true;
+        if (kind === 'require' || r.kind === 'require') r.kind = 'require';
+        else if (!dynamic) r.kind = 'static';
         return i;
     }
     mod.importRecords.push({ specifier, resolved: -1, external: false, kind, hasDynamicLiteral: dynamic });
@@ -451,6 +459,15 @@ function extractRecords(mod: Module): void {
     // Both shapes below require `import(` or `import.meta`, which the parser already noted. Without
     // either, this whole-program walk cannot match — 97 of 97 modules on a crashcat bundle, 167,349
     // nodes for nothing.
+    // `require("lit")` edges, and dynamic-import / asset edges, both need a whole-program walk
+    // (either can nest arbitrarily deep). Each is gated by a parser flag so a module with neither
+    // pays nothing.
+    if (mod.hasRequire) {
+        walk(mod.program, (n) => {
+            if (!isRequireCall(n)) return;
+            addRecord(mod, strValue(source, (n.data as { arguments: Node[] }).arguments[0]), 'require');
+        });
+    }
     if (!mod.hasImportSyntax) return;
     walk(mod.program, (n) => {
         if (n.type === N.ImportExpression && n.data.source.type === N.StringLiteral) {
@@ -464,6 +481,16 @@ function extractRecords(mod: Module): void {
 /** Match `new URL('./relative', import.meta.url)` — the web-standard asset-reference idiom. The
  *  callee must be the GLOBAL `URL` (unresolved symbol), arg0 a relative string literal, and arg1
  *  exactly `import.meta.url`. Non-literal / non-relative / bare `URL()` are left verbatim. */
+/** A `require("literal")` call with a FREE `require` — a local binding of that name is somebody
+ *  else's function, not Node's. Only a string-literal specifier is an edge; a computed one cannot be
+ *  resolved statically and is diagnosed separately. */
+export function isRequireCall(n: Node): boolean {
+    if (n.type !== N.CallExpression) return false;
+    const d = n.data as { callee: Node; arguments: Node[] };
+    if (d.callee.type !== N.IdentifierReference || d.callee.name !== 'require' || d.callee.sym !== 0) return false;
+    return d.arguments.length === 1 && d.arguments[0].type === N.StringLiteral;
+}
+
 function isNewUrlAsset(mod: Module, n: Node): boolean {
     if (n.type !== N.NewExpression || n.data.arguments.length !== 2) return false;
     const callee = n.data.callee;
@@ -818,6 +845,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasJSX: boolean;
         let hasImportSyntax: boolean;
         let hasTopLevelReturn = false;
+        let hasRequire = false;
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -884,6 +912,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = hit.hasJSX;
                 hasImportSyntax = hit.hasImportSyntax;
                 hasTopLevelReturn = hit.hasTopLevelReturn;
+                hasRequire = hit.hasRequire;
                 graph.parseStats.reused++;
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
@@ -900,6 +929,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = parsed.hasJSX;
                 hasImportSyntax = parsed.hasImportSyntax;
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
+                hasRequire = parsed.hasRequire;
                 semantic = createSemantic();
                 analyze(semantic, program);
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
@@ -1050,6 +1080,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasJSX,
             hasImportSyntax,
             hasTopLevelReturn,
+            hasRequire,
             jsxRuntime: null,
             sideEffects,
             meta: metaVal,
@@ -1107,6 +1138,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX: mod.hasJSX,
                 hasImportSyntax: mod.hasImportSyntax,
                 hasTopLevelReturn: mod.hasTopLevelReturn,
+                hasRequire: mod.hasRequire,
                 jsxRuntime: mod.jsxRuntime,
                 exportSig,
                 source,

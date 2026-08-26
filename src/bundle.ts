@@ -16,6 +16,7 @@ import {
     refSym,
 } from './graph-types';
 import { finalNameOf, linkGraph } from './link';
+import { isRequireCall } from './scan';
 import {
     DEFAULT_HASH_SIZE,
     getHashPlaceholderGenerator,
@@ -273,6 +274,25 @@ function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[
  *  retargeting ({@link rewriteDynamicImports}) and `new URL` asset URLs ({@link rewriteNewUrlAssets})
  *  — into a node→text map the printer consults. Keyed on the exact node whose text is replaced
  *  (the whole `import()` for same-chunk/dropped; the specifier string otherwise). */
+/** Rewrite `require("./x")` to the target's wrapper call. The wrapper returns `module.exports`, so
+ *  the call site's VALUE is already what `require` should produce — no interop conversion, because
+ *  the consumer is CommonJS and expects a CommonJS exports object. (`__toCommonJS` is the other
+ *  direction — CJS requiring an ESM module — and is not lowered yet.) */
+function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
+    const { mod, linked } = ctx;
+    if (!mod.hasRequire) return;
+    walk(mod.program, (n) => {
+        if (!isRequireCall(n)) return;
+        const spec = (n.data as { arguments: Node[] }).arguments[0].name;
+        const text = spec.length >= 2 ? spec.slice(1, -1) : spec;
+        const rec = mod.importRecords.find((r) => r.kind === 'require' && r.specifier === text);
+        if (rec === undefined || rec.external || rec.resolved < 0) return;
+        const wrapper = linked.cjsWrap.get(rec.resolved);
+        if (wrapper === undefined) return;
+        map.set(n, `${wrapper}()`);
+    });
+}
+
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunk, chunkGraph } = ctx;
     const map = new Map<Node, string>();
@@ -937,6 +957,7 @@ function renderChunk(
             const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
+            collectRequireOverrides(ctx, overrides);
             const renameCache: (string | null | undefined)[] = [];
             const printer = createPrinter(
                 { minify: naming.minify },
