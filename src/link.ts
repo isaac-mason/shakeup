@@ -95,6 +95,10 @@ function sameBind(a: ImportBind, b: ImportBind): boolean {
 function wantsCjsWrap(mod: Module): boolean {
     if (mod.exportsKind !== 'commonjs') return false;
     if (mod.hasTopLevelReturn) return true;
+    // Top-level `this` IS a CommonJS export mechanism: the body is called with `module.exports` as
+    // its receiver, so `this.v = 1` is an export. Without wrapping there is no `exports` object for
+    // it to mean, and the UMD probe `typeof this === "object"` silently takes the wrong branch.
+    if (mod.topLevelThis.length > 0) return true;
     for (const node of mod.semantic.unresolved) if (node.name === 'module' || node.name === 'exports') return true;
     return false;
 }

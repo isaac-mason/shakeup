@@ -485,3 +485,52 @@ describe('require() that cannot be resolved statically', () => {
         ).toEqual([]);
     });
 });
+
+// cjs.md §2.4 — a whole missing lowering, found by auditing §7.14 rather than by the audit's own
+// hypothesis. A CommonJS body is CALLED with `module.exports` as its receiver, so top-level `this`
+// is an export mechanism. Untreated, `this.v = 1` exported nothing and the UMD probe
+// `typeof this === "object"` silently took the wrong branch — pattern 10, "must work".
+describe('top-level `this` in a CommonJS module', () => {
+    const runDep = async (dep: string) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/d.cjs': dep, '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }), external: [] });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
+    };
+
+    it('treats `this.v = …` as an export', async () => {
+        expect((await runDep('this.v = 42;')).x).toBe(42);
+    });
+
+    it('makes the UMD `typeof this === "object"` probe take the CommonJS branch', async () => {
+        expect((await runDep('if (typeof this === "object") { module.exports = { v: 42 } } else { this.v = 0 }')).x).toBe(42);
+    });
+
+    it('rewrites `this` inside an arrow, which does not rebind it', async () => {
+        expect((await runDep('const f = () => { this.v = 42 };\nf();')).x).toBe(42);
+    });
+
+    it('leaves `this` alone inside a function, which DOES rebind it', async () => {
+        expect((await runDep('function f(){ return this === undefined }\nmodule.exports = { v: f.call(undefined) ? 42 : 0 };')).x).toBe(42);
+    });
+
+    it('leaves a method`s own `this` alone', async () => {
+        expect((await runDep('const o = { m(){ return this.k }, k: 42 };\nmodule.exports = { v: o.m() };')).x).toBe(42);
+    });
+
+    it('leaves a class field`s `this` alone', async () => {
+        expect((await runDep('class C { k = 42; get(){ return this.k } }\nmodule.exports = { v: new C().get() };')).x).toBe(42);
+    });
+
+    it('leaves an arrow nested inside a function bound to that function', async () => {
+        expect((await runDep('function f(){ const g = () => this; return g() }\nmodule.exports = { v: f.call({ k: 42 }).k };')).x).toBe(42);
+    });
+
+    it('wraps a module whose ONLY CommonJS signal is top-level `this`', async () => {
+        // No `module`/`exports` reference and no top-level return — tier 3 classifies it CommonJS by
+        // extension, but without counting `this` it was never wrapped, and the import failed with
+        // "'default' is not exported".
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/d.cjs': 'this.v = 42;', '/main.js': "import d from './d.cjs';\nexport const x = d.v;" }), external: [] });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toContain('__commonJS');
+    });
+});

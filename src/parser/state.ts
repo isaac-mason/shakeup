@@ -78,6 +78,15 @@ export type ParserState = {
      *  {@link sawJSX} / `sawImportSyntax` — so the whole-program walk that finds `require("lit")`
      *  edges runs only on modules that could have one. rolldown's `sawRequire` equivalent. */
     sawRequire: boolean;
+    /** Nesting depth of scopes that REBIND `this` — non-arrow function bodies and class bodies.
+     *  Arrows are excluded because they inherit `this` from the enclosing scope, so an arrow at the
+     *  module top level still sees the module's `this`. */
+    thisDepth: number;
+    /** `this` expressions at the module top level. In CommonJS these mean `module.exports` (the body
+     *  is called with it as the receiver); in an ES module they are `undefined`. Collected here
+     *  because the predicate is a parse-time fact — oxc/rolldown likewise gather them during
+     *  scanning and defer the rewrite (`ast_scanner/mod.rs:352-362`). */
+    topLevelThis: Node[];
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];

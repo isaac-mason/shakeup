@@ -280,6 +280,9 @@ function trackChunkSpecs(ctx: EmitCtx, isEntry: boolean, entryStarSpecs: string[
  *  direction — CJS requiring an ESM module — and is not lowered yet.) */
 function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
     const { mod, linked } = ctx;
+    // Top-level `this` means `module.exports` in CommonJS (cjs.md §2.4). Only meaningful once the
+    // body is a wrapper closure, which is where `exports` is bound.
+    if (linked.cjsWrap.has(mod.idx)) for (const n of mod.topLevelThis) map.set(n, 'exports');
     if (!mod.hasRequire) return;
     walk(mod.program, (n) => {
         if (!isRequireCall(n)) return;
