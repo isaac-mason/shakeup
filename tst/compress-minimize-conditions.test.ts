@@ -192,3 +192,21 @@ describe('minimize-conditions (compress)', () => {
         expect(code).not.toMatch(/c\s*&&/);
     });
 });
+
+describe('an empty `else` is normalised away', () => {
+    it('lets the usual reductions fire on `if (a) { x } else {}`', async () => {
+        // Every reduction in `minimizeConditions` branches on `alternate === null`, and an EMPTY BLOCK
+        // is not null — so this used to print as `if(a)x;else{}` where oxc reaches `a&&(x)`.
+        const r = await bundle({
+            entry: '/e.js',
+            fs: createMemoryFs({ '/e.js': 'let o;\nif (Number(globalThis.x)) { o = 1; } else {}\nglobalThis.sink = o;' }),
+            external: [],
+            output: { minify: true, optimize: true },
+        } as never);
+        const code = (r as { code: string }).code;
+        expect(code).not.toContain('else');
+        const g: Record<string, unknown> = { x: 1 };
+        new Function('globalThis', code)(g);
+        expect(g.sink).toBe(1);
+    });
+});

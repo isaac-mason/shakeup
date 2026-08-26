@@ -151,7 +151,20 @@ export const normalize: Visitor = {
         [N.FunctionDeclaration]: fnHook,
         [N.FunctionExpression]: fnHook,
         [N.ArrowFunctionExpression]: fnHook,
-        [N.IfStatement]: clauseHook(['consequent', 'alternate']),
+        [N.IfStatement]: (n: Node, ctx: TransformCtx) => {
+            // An `else` that runs NOTHING is no else at all. Every reduction in `minimizeConditions`
+            // branches on `alternate === null`, and an EMPTY BLOCK is not null — so `if (a) { x } else {}`
+            // skipped all of them and printed as `if(a)x;else{}` where oxc reaches `a&&(x)`.
+            // Normalising it away here lets the existing paths fire unchanged.
+            const d = n.data as { alternate: Node | null };
+            const alt = d.alternate;
+            if (alt !== null && alt.type === N.BlockStatement && (alt.data as { body: Node[] }).body.length === 0) {
+                ctx.dropRefs(alt);
+                d.alternate = null;
+                ctx.changed = true;
+            }
+            clauseHook(['consequent', 'alternate'])(n, ctx);
+        },
         [N.ForStatement]: clauseHook(['body'], true),
         [N.ForInStatement]: clauseHook(['body'], true),
         [N.ForOfStatement]: clauseHook(['body'], true),
