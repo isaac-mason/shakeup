@@ -23,11 +23,11 @@
 // after `tsStrip` like any other pass. compilecat additionally derives shapes from TS type
 // annotations (`const v: Vec3 = mk()`) and across modules; that needs the typed AST captured at the
 // transform stage and is tracked separately.
-import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
+import { declareLocal, lookupValue, SYM, type Semantic } from '../../analysis/semantic.ts';
 import { N, type Node, node, walk } from '../../ast.ts';
 import * as create from '../../parser/create.ts';
 import { VAR_KIND } from '../../parser/create.ts';
-import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
+import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
 import type { ShapeTable } from './shapes.ts';
@@ -209,6 +209,14 @@ export function scalarReplaceAggregates(
     const declPlans = new Map<Node, Plan>(plans.map((p) => [p.decl, p]));
     const allRewrites = new Map<Node, string>();
     for (const p of plans) for (const [m, name] of p.rewrites) allRewrites.set(m, name);
+    // Scalar NAME -> the symbol minted for it. Both halves of the rewrite need it: the binding, so the
+    // table knows the declaration exists, and every member access rewritten to reference it.
+    //
+    // Without this the scalars were pure text — bindings with no symbol and references with `sym === 0`
+    // — so a fresh `analyze` bound them while the maintained table did not, which `verifySemantic`
+    // reports as "'v_x' unbound in maintained, bound in truth (UNSAFE)". Unbound in the table is the
+    // MISCOMPILE direction: a live symbol looks dead and `dropUnused` deletes a declaration still in use.
+    const scalarSyms = new Map<string, number>();
 
     const rewriter: Visitor = {
         name: 'sroa',
@@ -216,8 +224,14 @@ export function scalarReplaceAggregates(
             [N.VariableDeclaration]: (n, ctx: TransformCtx) => {
                 const plan = declPlans.get(n);
                 if (plan === undefined) return;
-                const bind = (key: string): Node =>
-                    node(N.BindingIdentifier, n.start, n.start, plan.names.get(key)!, null);
+                const bind = (key: string): Node => {
+                    const name = plan.names.get(key)!;
+                    const id = node(N.BindingIdentifier, n.start, n.start, name, null);
+                    // Declare into the scope the original binding lived in, so the scalar is a real
+                    // binding rather than free text.
+                    scalarSyms.set(name, declareLocal(semantic, id, ctx.currentScope, SYM.LET));
+                    return id;
+                };
                 if (plan.mode === 'literal') {
                     const decls = plan.inits.map(([key, init]) =>
                         create.VariableDeclarator(n.start, n.end, 0, bind(key), null, init),
@@ -246,14 +260,27 @@ export function scalarReplaceAggregates(
             },
             [N.StaticMemberExpression]: (n, ctx: TransformCtx) => {
                 const name = allRewrites.get(n);
-                if (name !== undefined) ctx.replaceWith(node(N.IdentifierReference, n.start, n.end, name, null));
+                if (name === undefined) return;
+                const ref = node(N.IdentifierReference, n.start, n.end, name, null);
+                (ref as { sym: number }).sym = scalarSyms.get(name) ?? 0;
+                ctx.replaceWith(ref);
             },
             [N.ComputedMemberExpression]: (n, ctx: TransformCtx) => {
                 const name = allRewrites.get(n);
-                if (name !== undefined) ctx.replaceWith(node(N.IdentifierReference, n.start, n.end, name, null));
+                if (name === undefined) return;
+                const ref = node(N.IdentifierReference, n.start, n.end, name, null);
+                (ref as { sym: number }).sym = scalarSyms.get(name) ?? 0;
+                ctx.replaceWith(ref);
             },
         }),
         exit: null,
     };
-    return traverse(program, semantic, [rewriter]);
+    // Thread a `RefDelta` through: without one, `ctx.dropRefs`/`addRefs` are NO-OPS, so the references
+    // this rewrite moves never reach the maintained counts. That is the UNDER-count direction — a live
+    // symbol looks dead and `dropUnused` deletes a declaration still in use — and it is only invisible
+    // today because the optimize tier is followed by a full rebuild.
+    const delta = new Map<number, RefDelta>();
+    const changed = traverse(program, semantic, [rewriter], delta);
+    applyRefDelta(semantic, delta);
+    return changed;
 }
