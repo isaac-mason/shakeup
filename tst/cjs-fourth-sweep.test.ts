@@ -56,7 +56,37 @@ describe('exports kind comes from the source, not the surviving AST', () => {
     });
 });
 
+describe('the __esm error cache', () => {
+    it('an evaluation failure is STICKY — the module runs once and rethrows', async () => {
+        // Why `__esm` was transcribed from rolldown (`runtime-base.js:17-23`) rather than written:
+        // the obvious one-liner `(fn && (res = fn((fn = 0))), res)` drops the `err` cache, so a
+        // second `require()` of a module whose body threw RE-EVALUATES it. The ESM spec requires the
+        // same error every time. Asserted by the counter in the message: two `boom1`, not `boom1`
+        // then `boom2`, and not a single entry.
+        const r = await build({
+            '/e.js': "globalThis.__stickyN = (globalThis.__stickyN ?? 0) + 1;\nthrow new Error('boom' + globalThis.__stickyN);\nexport const a = 1;",
+            '/d.cjs': "const out = [];\nfor (let i = 0; i < 2; i++) { try { require('./e.js') } catch (e) { out.push(e.message) } }\nmodule.exports = out;",
+            '/main.js': "import d from './d.cjs';\nexport const x = d;",
+        });
+        expect(r.code).toMatch(/__esm\(/);
+        expect((await import(`data:text/javascript,${encodeURIComponent(r.code)}`)).x).toEqual(['boom1', 'boom1']);
+    });
+});
+
 describe('fourth sweep — configurations verified correct', () => {
+    it('a plugin with an explicitly-null hook is tolerated', async () => {
+        // `{ transform: cond ? fn : null }` is a common shape and rollup treats null as absent. It
+        // used to take the object branch of the hook normalizer and crash the entire build.
+        const r = await bundle({
+            entry: '/main.js',
+            external: [],
+            fs: createMemoryFs({ '/main.js': 'export const x = 1;' }),
+            plugins: [{ name: 'p', transform: null, resolveId: null, renderChunk: null } as never],
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.code).toContain('const x = 1;');
+    });
+
     it('mode-2 alongside an external star source', async () => {
         const r = await build(
             { '/d.cjs': 'module.exports = { a: 1 };', '/b.js': "export * from './d.cjs';\nexport * from 'ext';", '/main.js': "import { a } from './b.js';\nexport const x = a;" },

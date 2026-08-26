@@ -197,8 +197,11 @@ function compileMatcher(filter: HookFilter | undefined): ((id: string) => boolea
     return (id: string) => patterns.some((p) => p.test(id));
 }
 
-function normalize<F>(plugin: string, hook: WithFilter<F> | undefined): Compiled<F> | null {
-    if (hook === undefined) return null;
+function normalize<F>(plugin: string, hook: WithFilter<F> | undefined | null): Compiled<F> | null {
+    // `null` as well as `undefined`: rollup treats an explicitly-null hook as absent, and plugins
+    // written as `{ transform: cond ? fn : null }` are common. It used to reach `compileMatcher`
+    // through the object branch and crash the whole build with `Cannot read properties of null`.
+    if (hook === undefined || hook === null) return null;
     if (typeof hook === 'function') return { plugin, matches: null, handler: hook as F };
     const h = hook as { filter?: HookFilter; handler: F };
     return { plugin, matches: compileMatcher(h.filter), handler: h.handler };
