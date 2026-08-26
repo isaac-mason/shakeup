@@ -358,18 +358,47 @@ function pruneUnusedExternals(graph: Graph, linked: Linked, liveRefs: Set<number
     // drop keys whose every importer is a dead side-effect-free binding.
     const kept = new Set<string>();
     const candidates = new Set<string>();
+    // Named specifiers grouped by module, plus the subset some importer actually references. Star and
+    // default locals are registered by `deconflict` but are not in `namedImports`, so they never
+    // appear here — they are only ever left alone, never dropped, by the sibling rule below.
+    const keysBySpec = new Map<string, Set<string>>();
+    const liveKeys = new Set<string>();
     for (const mod of graph.modules) {
         for (const [sym, imp] of mod.namedImports) {
             const rec = mod.importRecords[imp.rec];
             if (!rec.external) continue;
             const key = externalKey(rec.specifier, imp.name);
             const ref = packRef(mod.idx, sym);
+            let group = keysBySpec.get(rec.specifier);
+            if (group === undefined) {
+                group = new Set();
+                keysBySpec.set(rec.specifier, group);
+            }
+            group.add(key);
             const sideEffectFree = graph.externalSideEffects.get(rec.specifier) === false || runtimeSyms.has(ref);
+            if (liveRefs.has(ref)) liveKeys.add(key);
             if (!sideEffectFree || liveRefs.has(ref)) kept.add(key);
             else candidates.add(key);
         }
     }
     for (const key of candidates) if (!kept.has(key)) linked.externalLocals.delete(key);
+
+    // A named specifier carries NO side effect of its own — the MODULE does. So when some sibling
+    // specifier keeps `import { … } from 'spec'` alive, every unreferenced specifier on it is
+    // droppable whether or not the external is side-effect-free: the statement still runs. Without
+    // this we emitted `vec4` in crashcat's `math` import with zero uses, where oxc-minify drops it.
+    //
+    // Gated on a live sibling deliberately. If NOTHING on the specifier is live the statement itself
+    // would disappear, and a side-effectful external then needs a bare `import 'spec';` — but
+    // `sideEffectSpecs` is only populated from source-level bare imports (`trackChunkSpecs`), and
+    // `renderExternalImports` emits those AFTER the named ones, which would move the side effect
+    // relative to its siblings. That case stays on the conservative path above.
+    for (const keys of keysBySpec.values()) {
+        let anyLive = false;
+        for (const key of keys) if (liveKeys.has(key)) anyLive = true;
+        if (!anyLive) continue;
+        for (const key of keys) if (!liveKeys.has(key)) linked.externalLocals.delete(key);
+    }
 }
 
 function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>): string[] {

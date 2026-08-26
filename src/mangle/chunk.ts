@@ -271,6 +271,36 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
     unnamed.sort((a, b) => slotFreq[b] - slotFreq[a]);
     for (const s of unnamed) slotName[s] = fresh();
 
+    // ── 5b. Ceiling measurement (MANGLE_STATS=1) ──────────────────────────────────────────────
+    // Increment 1 leaves every top-level name as `deconflictChunk` set it. Against oxc-minify on the
+    // same input that costs real bytes: a hot external-import binding (`vec3`, 2163 uses) keeps its
+    // 2-char deconflict name while oxc gives it a 1-char one. This reports the UPPER BOUND on
+    // increment 2 — it ignores export/cross-chunk safety, so the achievable win is smaller.
+    if (process.env.MANGLE_STATS) {
+        const freq = new Float64Array(totalSlots);
+        let top = 0;
+        for (let u = 1; u < symbolCount; u++) {
+            const slot = slots[u];
+            if (slot === SLOT_UNASSIGNED) continue;
+            freq[slot] += refScopes[u].length;
+            if (isTopLevel[u]) top += refScopes[u].length;
+        }
+        let now = 0;
+        for (let u = 1; u < symbolCount; u++) {
+            const slot = slots[u];
+            if (slot === SLOT_UNASSIGNED) continue;
+            now += refScopes[u].length * slotName[slot]!.length;
+        }
+        // Ideal: every slot competes in one frequency ranking, hottest slot takes `base54(0)`.
+        const order = [...freq.keys()].sort((a, b) => freq[b] - freq[a]);
+        let ideal = 0;
+        for (let i = 0; i < order.length; i++) ideal += freq[order[i]] * base54(i).length;
+        console.error(
+            `[mangle] slots=${totalSlots} anchored=${slotName.filter((n, i) => n !== null && freq[i] > 0).length}` +
+                ` topLevelUses=${top} identBytes now=${now} ideal=${ideal} ceiling=${now - ideal}`,
+        );
+    }
+
     // ── 6. Write back — nested symbols only; top-level naming is left exactly as deconflict set it ──
     for (let u = 1; u < symbolCount; u++) {
         if (isTopLevel[u]) continue;
