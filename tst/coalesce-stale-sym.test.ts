@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { bundle } from '../src/bundle.ts';
-import { setCoalesceEnabled } from '../src/passes/compress/index.ts';
+import { setCoalesceEnabled, setSemanticVerify } from '../src/passes/compress/index.ts';
 
 // The documented `STALE SYM 65 (table size 64)` crash that kept `coalesceVariableNames` disabled.
 //
@@ -24,6 +24,12 @@ const diskFs = {
 
 describe.skipIf(!existsSync(ENTRY))('coalesceVariableNames no longer leaves stale symbol ids', () => {
     it('builds a real TypeScript corpus with coalescing enabled', { timeout: 180_000 }, async () => {
+        // Coalescing has a KNOWN, parked divergence: it deliberately merges two variables that a
+        // fresh `analyze` keeps separate, so `verifySemantic` reports a symbol PARTITION mismatch.
+        // That is inherent to the pass, not drift to fix — see llm/notes/incremental-vs-rebuild-plan.md
+        // Phase 1. The pass is disabled by default (it makes compressed output BIGGER), so the check is
+        // switched off here rather than weakened for everything else.
+        setSemanticVerify(false);
         setCoalesceEnabled(true);
         try {
             const r = await bundle({

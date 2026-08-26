@@ -40,7 +40,8 @@ const build = () =>
     }).then((r) => r.code);
 
 describe('mangler ranks slots by reference frequency (oxc Phase 3)', () => {
-    it('spends one-character names on the hottest slots', async () => {
+    // Timeout raised for SEMANTIC_VERIFY=1 runs, which rebuild the semantic every round.
+    it('spends one-character names on the hottest slots', { timeout: 120_000 }, async () => {
         const code = await build();
         // `v199` is the hottest (200 references) but the LAST declared, so slot-index ordering would
         // hand it a two-character name; frequency ranking must give it a one-character name.
@@ -51,7 +52,7 @@ describe('mangler ranks slots by reference frequency (oxc Phase 3)', () => {
         expect(decl![1].length).toBe(1);
     });
 
-    it('produces semantically identical output', async () => {
+    it('produces semantically identical output', { timeout: 120_000 }, async () => {
         const code = await build();
         const g = { x: 7 } as Record<string, unknown>;
         // Re-entry: strip the ESM export so the body can run in a plain Function.
