@@ -235,6 +235,28 @@ function statementLists(body: Node): Node[][] {
     return lists;
 }
 
+/** Map every node under `root` to the scope that CONTAINS it.
+ *
+ *  `scopeOf(sem, n)` reports the scope a node OWNS — `0` for a `return`, an assignment, or any other
+ *  non-scope-owner — so it cannot answer "what is in scope here". This threads the cursor down instead,
+ *  matching `descend`'s rule exactly: a scope-owning node itself belongs to the ENCLOSING scope, while
+ *  its CHILDREN belong to the scope it owns.
+ *
+ *  Built once per function, alongside the CFG this pass already constructs. */
+function enclosingScopes(root: Node, outer: number): Map<Node, number> {
+    const out = new Map<Node, number>();
+    const rec = (n: Node, scope: number): void => {
+        out.set(n, scope);
+        const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
+        const inner = own !== 0 ? own : scope;
+        walkChildren(n, (c) => {
+            rec(c, inner);
+        });
+    };
+    rec(root, outer);
+    return out;
+}
+
 const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): boolean => {
     const body = (fn.data as { body: Node | null }).body;
     if (body === null || body.type !== N.BlockStatement) return false;
@@ -243,6 +265,9 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
     // the BODY block, while parameters live in the function scope, so both count as "function level".
     const fnScope = scopeOf(sem, fn);
     const fnBodyScope = scopeOf(sem, body);
+    // Accurate "what scope is this node in" for the whole function body.
+    const enclosing = enclosingScopes(body, fnScope !== 0 ? fnScope : scopeOfUse(fn));
+    const scopeAt = (n: Node): number => enclosing.get(n) ?? fnBodyScope;
     const { locals, escaped } = scopeSymbols(fn);
     const tracked = new Set([...locals].filter((s) => !escaped.has(s)));
     if (tracked.size === 0) return false;
@@ -300,48 +325,42 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
             // at nested function boundaries, matching `countReads`.
             if (writesAny(useNode, new Set([sym]))) continue;
 
-            // scope: every free symbol the RHS reads must resolve to the SAME binding at the use site.
+            // SCOPE: every free symbol the RHS reads must still resolve to the SAME binding at the
+            // use site. Both halves need the ENCLOSING scope of the use, which `scopeAt` supplies —
+            // `scopeOf` reports the scope a node OWNS (`0` for a `return`), which is why the previous
+            // version exempted tracked locals outright and let a real miscompile through: block-inline
+            // wraps a spliced callee body in a block, so `{ let jv; … } r = jv;` then `return r`
+            // became `return jv`, referencing a block-scoped binding from OUTSIDE its block. It only
+            // looked correct because `blockFlatten` later hoisted the declaration by accident.
             const rhsReads = new Set<number>();
             readSyms(loc.rhs, rhsReads);
             let scopeOk = true;
             for (const r of rhsReads) {
-                // EVERY free symbol is checked, tracked locals included. The previous exemption
-                // ("a tracked local of this function is fine") holds for `var`, which is
-                // function-scoped, but NOT for `let`/`const` in a nested block: substituting such a
-                // local into a use site OUTSIDE its block moves a reference out of the scope that
-                // binds it.
-                //
-                // That is not hypothetical. Block-inlining wraps a spliced callee body in a block, so
-                // `{ let jv; … }  r = jv;` then `return r` inlined to `return jv` — referencing a
-                // block-scoped binding from outside the block. The output only came out correct
-                // because `blockFlatten` later hoisted the declaration and repaired it by accident;
-                // with that pass skipped the emitted code was `function t(e,n){{let i;…}return jv}`.
-                //
-                // For a TRACKED local the test is structural, not by name: is the scope that DECLARES
-                // it an ancestor-or-self of the use site's scope? A name lookup is unreliable here
-                // because inlining renames bindings, so `decl.name` need not match the current text.
                 if (tracked.has(r)) {
-                    // A tracked local is only safe to substitute if it is visible EVERYWHERE in the
-                    // function — i.e. declared at the function's own level, not inside a nested block.
-                    //
-                    // The old code exempted every tracked local outright. That holds for `var` but not
-                    // for `let`/`const` in a nested block: block-inlining wraps a spliced callee body
-                    // in a block, so `{ let jv; … } r = jv;` then `return r` became `return jv`,
-                    // referencing a block-scoped binding from OUTSIDE its block. The emitted code was
-                    // only correct because `blockFlatten` later hoisted the declaration by accident —
-                    // with that pass skipped it was `function t(e,n){{let i;…}return jv}`.
-                    //
-                    // A precise test would compare the declaring scope against the USE's enclosing
-                    // scope, but `scopeOfUse` reports the scope a node OWNS (0 for a `return`), so no
-                    // accurate use-scope is available here. This is the conservative sound form: it
-                    // refuses some valid substitutions of nested-block locals, and never permits one
-                    // that leaves its block.
+                    // A tracked local: is the scope that DECLARES it an ancestor-or-self of the use's
+                    // scope? Structural rather than by name, because inlining renames bindings so
+                    // `decl.name` need not match the current text.
                     const declScope = sem.symbols[r]?.scope ?? 0;
-                    if (declScope !== fnScope && declScope !== fnBodyScope) { scopeOk = false; break; }
+                    let sc = scopeAt(useNode);
+                    let visible = false;
+                    while (sc !== 0) {
+                        if (sc === declScope) {
+                            visible = true;
+                            break;
+                        }
+                        const parent = sem.scopes[sc]?.parent ?? 0;
+                        if (parent === sc) break;
+                        sc = parent;
+                    }
+                    if (!visible) {
+                        scopeOk = false;
+                        break;
+                    }
                     continue;
                 }
+                // A free/outer name: it must resolve to the same symbol from the use's scope.
                 const nm = sem.symbols[r]?.decl?.name;
-                if (nm !== undefined && lookupValue(sem, scopeOfUse(useNode), nm) !== r) {
+                if (nm !== undefined && lookupValue(sem, scopeAt(useNode), nm) !== r) {
                     scopeOk = false;
                     break;
                 }
