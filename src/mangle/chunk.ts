@@ -48,8 +48,20 @@ function chunkHasDirectEval(graph: Graph, chunkModules: number[]): boolean {
  * `taken` is the chunk's fully-populated top-level name set (globals + reserved + top-level names +
  * cross-chunk locals + namespace/external names) — fresh names avoid all of it.
  */
-export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: number[], taken: Set<string>): void {
-    if (chunkHasDirectEval(graph, chunkModules)) return; // leave names alone (see above)
+export type ChunkSlots = {
+    slots: Int32Array;
+    totalSlots: number;
+    symbolCount: number;
+    unifiedToRef: number[];
+    isTopLevel: Uint8Array;
+    refScopes: number[][];
+};
+
+/** §1-4: the chunk's unified scope/symbol space and its slot assignment. Depends only on SHAPE —
+ *  scopes, bindings and reference sites — never on names, so it can run BEFORE `deconflictChunk`
+ *  chooses any. `null` when the chunk contains direct `eval` and must keep its names. */
+export function computeChunkSlots(graph: Graph, linked: Linked, chunkModules: number[]): ChunkSlots | null {
+    if (chunkHasDirectEval(graph, chunkModules)) return null; // leave names alone (see above)
 
     // ── 1. Unified scope + symbol id spaces across the chunk's modules ──
     // Unified scope 0 is the chunk's single top-level scope; every module scope maps onto it.
@@ -229,6 +241,40 @@ export function mangleChunkScopes(graph: Graph, linked: Linked, chunkModules: nu
         declScopes,
         symbolCount,
     });
+
+    return { slots, totalSlots, symbolCount, unifiedToRef, isTopLevel, refScopes };
+}
+
+/** Weight per top-level symbol for `deconflictChunk`'s claim ORDER: the total reference count of the
+ *  symbol's whole SLOT, not of the symbol itself.
+ *
+ *  This distinction is the entire point. A slot holding a top-level symbol lends that name to every
+ *  nested symbol sharing it, so the name's real traffic is the slot's. Measured on crashcat, the
+ *  top-level symbol printed as `e` is `NONE_FLAG`, whose OWN reference count is zero — `e` appears
+ *  7359 times because the nested symbols in its slot inherit it. Ranking by the symbol's own count
+ *  instead of its slot's made the bundle 30,563 bytes BIGGER.
+ *
+ *  Keyed by `packRef` so `deconflictChunk` can look up the symbols it is about to claim for. */
+export function topLevelSlotWeights(pre: ChunkSlots): Map<number, number> {
+    const { slots, totalSlots, symbolCount, unifiedToRef, isTopLevel, refScopes } = pre;
+    const freq = new Float64Array(totalSlots);
+    for (let u = 1; u < symbolCount; u++) {
+        const slot = slots[u];
+        if (slot !== SLOT_UNASSIGNED) freq[slot] += refScopes[u].length;
+    }
+    const out = new Map<number, number>();
+    for (let u = 1; u < symbolCount; u++) {
+        if (!isTopLevel[u]) continue;
+        const slot = slots[u];
+        if (slot === SLOT_UNASSIGNED) continue;
+        out.set(unifiedToRef[u], freq[slot]);
+    }
+    return out;
+}
+
+/** §5-6: choose a name per slot and write it back. */
+export function mangleChunkScopes(graph: Graph, linked: Linked, taken: Set<string>, pre: ChunkSlots): void {
+    const { slots, totalSlots, symbolCount, unifiedToRef, isTopLevel, refScopes } = pre;
 
     // ── 5. Names: a slot holding a top-level symbol inherits that symbol's existing name (the win);
     //    every other slot gets a fresh base54 name avoiding `taken`. ──

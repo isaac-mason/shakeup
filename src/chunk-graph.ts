@@ -1,5 +1,5 @@
 import { deconflictChunk } from './deconflict';
-import { mangleChunkScopes } from './mangle/chunk';
+import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
 import { type Graph, type ImportBind, type Linked, packRef, refMod, refSym } from './graph-types';
 import { finalNameOf, reprName } from './link';
 
@@ -457,12 +457,21 @@ function wireAndDeconflict(
     // here (producer role), then in a second pass add the cross-chunk import locals (consumer
     // role) with the producer names already reserved in that chunk's taken set — reusing the
     // same `taken` via seed.
+    // Slot assignment runs FIRST. It depends only on the chunk's shape — scopes, bindings, reference
+    // sites — never on names, so it is free to precede deconflict, and the per-slot weights it yields
+    // are what let deconflict spend its shortest names on the busiest slots instead of on whichever
+    // module happened to be ordered first. The same computation is handed to the mangler below, so
+    // slots are assigned once per chunk, not twice.
+    const chunkSlots: (ChunkSlots | null)[] = [];
     const chunkClaim: ((base: string) => string)[] = [];
     const chunkTaken: Set<string>[] = [];
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
         chunkTaken.push(taken);
-        const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], mangle, taken);
+        const pre = mangle ? computeChunkSlots(graph, linked, chunks[c].modules) : null;
+        chunkSlots.push(pre);
+        const weights = pre === null ? null : topLevelSlotWeights(pre);
+        const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], mangle, taken, weights);
         chunkClaim.push(claim);
     }
 
@@ -523,7 +532,10 @@ function wireAndDeconflict(
     // complete — including cross-chunk import locals claimed above — so no local shadows a
     // chunk-top name it references.
     if (mangle) {
-        for (let c = 0; c < chunks.length; c++) mangleChunkScopes(graph, linked, chunks[c].modules, chunkTaken[c]);
+        for (let c = 0; c < chunks.length; c++) {
+            const pre = chunkSlots[c];
+            if (pre !== null) mangleChunkScopes(graph, linked, chunkTaken[c], pre);
+        }
     }
 }
 
