@@ -30,6 +30,7 @@ import { computeReachingDefs, TOP } from '../../analysis/reaching-defs.ts';
 import { computeReachingUses } from '../../analysis/reaching-uses.ts';
 import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast.ts';
 import { attachScopeNode, lookupValue, retireSymbol, type Semantic, scopeOf } from '../../analysis/semantic.ts';
+import { addRefFacts, subtractRefFacts } from '../../analysis/ref-facts.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
 
@@ -195,12 +196,22 @@ function locateDef(list: Node[], stmt: Node, sym: number, sem: Semantic): DefLoc
                         if (d.declarations.length === 1) {
                             retireSymbol(sem, sym);
                             const idx = list.indexOf(stmt);
-                            if (idx >= 0) list.splice(idx, 1);
+                            if (idx >= 0) {
+                                // Subtract what leaves. This pass is not traverse-based, so there is no
+                                // `ctx.dropRefs` — without this the removed statement's references stay
+                                // counted and `DELTA_MODE=verify` reports `over(safe)`: a dead symbol
+                                // still looks live, so `dropUnused` declines to remove it.
+                                subtractRefFacts(sem, stmt);
+                                list.splice(idx, 1);
+                            }
                         } else if (d.kind === 'const') {
                             retireSymbol(sem, sym);
+                            subtractRefFacts(sem, d.declarations[i]);
                             d.declarations.splice(i, 1);
                         } else {
-                            // `let` — keep the binding, null the init (it might be read before reassigned).
+                            // `let` — keep the binding, null the init (it might be read before
+                            // reassigned). The init expression still LEAVES, so its references go too.
+                            if (dec.init !== null) subtractRefFacts(sem, dec.init);
                             (dec as { init: Node | null }).init = null;
                         }
                     },
@@ -221,7 +232,10 @@ function locateDef(list: Node[], stmt: Node, sym: number, sem: Semantic): DefLoc
                 rhs: (e.data as { right: Node }).right,
                 drop: () => {
                     const idx = list.indexOf(stmt);
-                    if (idx >= 0) list.splice(idx, 1);
+                    if (idx >= 0) {
+                        subtractRefFacts(sem, stmt);
+                        list.splice(idx, 1);
+                    }
                 },
             };
         }
@@ -425,11 +439,16 @@ const fnInline = (fn: Node, sem: Semantic, scopeOfUse: (use: Node) => number): b
         const replace = (n: Node): void => {
             if (done) return;
             if (n.type === N.IdentifierReference && (n as { sym: number }).sym === d.useSym) {
+                // The reference `n` LEAVES and the cloned RHS ARRIVES in its place; neither is
+                // accounted automatically because this pass walks the program itself rather than
+                // through `traverse`, so there is no `ctx` and no `RefDelta`.
+                subtractRefFacts(sem, n);
                 const clone = cloneNode(d.rhs) as Node;
                 set(n, clone.type, clone.data as never);
                 (n as { name: string }).name = clone.name;
                 (n as { sym: number }).sym = clone.sym;
                 transferScopes(d.rhs, n);
+                addRefFacts(sem, n);
                 done = true;
                 return;
             }
