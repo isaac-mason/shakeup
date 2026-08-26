@@ -29,6 +29,13 @@ describe.skipIf(!existsSync(ENTRY))('the maintained semantic matches the tree', 
     // this is inherently far slower than a normal build. It is a correctness guard, not a benchmark.
     it('survives a full compress of a real TypeScript corpus', { timeout: 180_000 }, async () => {
         setSemanticVerify(true);
+        // Also demand ZERO stale extras on a real corpus. This is the SAFE direction (an extra live
+        // symbol costs a mangled name, not correctness), so it is not a suite-wide gate — a handful of
+        // synthetic branch-collapse fixtures still leave one, because `collapseIf` drops a statement
+        // transactionally and lifts the survivors back out. But corpus-level zero is the bar that
+        // actually mattered: it is what made the post-compress rebuild removable, and a regression here
+        // would silently make it load-bearing again.
+        process.env.VERIFY_EXTRAS = '1';
         try {
             const r = await bundle({
                 entry: ENTRY,
@@ -39,6 +46,7 @@ describe.skipIf(!existsSync(ENTRY))('the maintained semantic matches the tree', 
             expect((r as { code: string }).code.length).toBeGreaterThan(0);
         } finally {
             setSemanticVerify(false);
+            delete process.env.VERIFY_EXTRAS;
         }
     });
 });
