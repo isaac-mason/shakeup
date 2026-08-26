@@ -20,6 +20,7 @@
 // produces. Each iteration is wrapped in its own block so body-level `let`/`const` declarations don't
 // collide across copies.
 import { cloneNode, N, type Node, node, statementListOf, walk } from '../../ast.ts';
+import { attachScopeNode, cloneScopeTree, createScope, SCOPE } from '../../analysis/semantic.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import * as create from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
@@ -148,13 +149,22 @@ function bodySize(body: Node): number {
 
 /** One unrolled iteration: the body with the loop variable replaced by `value`, wrapped in a block so
  *  its declarations stay per-iteration. */
-function iteration(body: Node, varSym: number, value: number): Node {
+function iteration(body: Node, varSym: number, value: number, sem: Semantic, scope: number): Node {
     const substituted = cloneNode(body, (n) =>
         n.type === N.IdentifierReference && (n as { sym: number }).sym === varSym
             ? node(N.NumericLiteral, n.start, n.end, String(value), null)
             : null,
     ) as Node;
-    return substituted.type === N.BlockStatement ? substituted : create.BlockStatement(0, 0, 0, [substituted]);
+    const wrapped =
+        substituted.type === N.BlockStatement ? substituted : create.BlockStatement(0, 0, 0, [substituted]);
+    // Each iteration is a SEPARATE copy of the body, so it needs FRESH scopes — not the original's,
+    // which N copies cannot share. `cloneNode` cleared them; mirror the structure under `scope`.
+    // The wrapper block owns a scope of its own so per-iteration declarations stay per-iteration,
+    // which is the whole reason it is wrapped.
+    if (wrapped !== substituted) attachScopeNode(sem, createScope(sem, scope, SCOPE.BLOCK), wrapped);
+    const inner = (wrapped.data as { scopeId?: number } | null)?.scopeId ?? scope;
+    cloneScopeTree(sem, body, substituted, wrapped === substituted ? scope : inner);
+    return wrapped;
 }
 
 /** Unroll `@unroll`-annotated loops. Returns whether anything changed. */
@@ -164,7 +174,7 @@ export function unrollLoops(program: Node, semantic: Semantic, source: string): 
     const consts = numericConsts(program);
 
     /** Expand one loop into its iterations, or `null` to leave it alone. */
-    const expand = (loop: Node): Node[] | null => {
+    const expand = (loop: Node, scope: number): Node[] | null => {
         if (loop.type !== N.ForStatement || !spans.has(loop.start)) return null;
         const shape = parseShape(loop, consts);
         if (shape === null) return null;
@@ -176,18 +186,19 @@ export function unrollLoops(program: Node, semantic: Semantic, source: string): 
         if (values.length > 0 && (values.length > MAX_TRIP || values.length * bodySize(body) > MAX_PRODUCT)) {
             return null;
         }
-        return values.map((v) => iteration(body, shape.varSym, v));
+        return values.map((v) => iteration(body, shape.varSym, v, semantic, scope));
     };
 
     const listHook = (n: Node, ctx: TransformCtx): void => {
         const list = statementListOf(n);
         if (list === null) return;
         for (let i = 0; i < list.length; i++) {
-            const expanded = expand(list[i]);
+            const expanded = expand(list[i], ctx.currentScope);
             if (expanded === null) continue;
-            list.splice(i, 1, ...expanded);
+            // `ctx.spliceStatements`, not a raw `list.splice`: the loop's references have to leave the
+            // maintained counts and the iterations' have to enter them. A raw splice moves neither.
+            ctx.spliceStatements(list, i, 1, ...expanded);
             i += expanded.length - 1;
-            ctx.changed = true;
         }
     };
 
