@@ -227,9 +227,22 @@ export function linkGraph(graph: Graph): Linked {
     for (const idx of linked.order) {
         for (const rec of graph.modules[idx].importRecords) {
             if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
-            if (!linked.cjsWrap.has(rec.resolved)) {
-                linked.cjsWrap.set(rec.resolved, `require_${reprName(graph.modules[rec.resolved])}`);
+            const target = graph.modules[rec.resolved];
+            if (target.exportsKind === 'commonjs') {
+                // CJS requiring CJS: the wrapper's return value IS the exports object.
+                if (!linked.cjsWrap.has(rec.resolved)) linked.cjsWrap.set(rec.resolved, `require_${reprName(target)}`);
+                continue;
             }
+            // CJS requiring ESM. Do NOT give it a CommonJS wrapper — an ES module has no `exports`
+            // object to populate, so wrapping it produced an empty one and the require silently
+            // yielded `{}`. It needs its ESM namespace instead, converted at the call site by
+            // `__toCommonJS` (which stamps the `__esModule` marker the requiring code checks for).
+            //
+            // rolldown additionally gives such a target an `__esm` lazy-init wrapper. shakeup does
+            // not need one: a `require` edge is ordered like a static import (`sortModules` treats
+            // every non-dynamic edge alike), so the target is already evaluated before the requirer
+            // runs, and the init call would be a no-op.
+            if (!linked.namespaceOf.has(rec.resolved)) linked.namespaceOf.set(rec.resolved, `${reprName(target)}_ns`);
         }
     }
 

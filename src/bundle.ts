@@ -291,8 +291,16 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         const rec = mod.importRecords.find((r) => r.kind === 'require' && r.specifier === text);
         if (rec === undefined || rec.external || rec.resolved < 0) return;
         const wrapper = linked.cjsWrap.get(rec.resolved);
-        if (wrapper === undefined) return;
-        map.set(n, `${wrapper}()`);
+        if (wrapper !== undefined) {
+            map.set(n, `${wrapper}()`);
+            return;
+        }
+        // Requiring an ES module: hand back its namespace wrapped so the requiring CommonJS code
+        // sees `__esModule: true` and its own default-interop resolves. `__toCommonJS` builds a
+        // FRESH object per call rather than stamping the namespace itself — the importing side must
+        // never see `__esModule` (cjs.md §4.3's asymmetry).
+        const ns = linked.namespaceOf.get(rec.resolved);
+        if (ns !== undefined) map.set(n, `__toCommonJS(${ns})`);
     });
 }
 
@@ -583,6 +591,12 @@ const CJS_HELPERS: Record<string, string> = {
         '    return to;',
         '};',
     ].join('\n'),
+    __toCommonJS: [
+        'var __toCommonJS = (mod) =>',
+        "    __hasOwnProp.call(mod, 'module.exports')",
+        "        ? mod['module.exports']",
+        "        : __copyProps(__defProp({}, '__esModule', { value: true }), mod);",
+    ].join('\n'),
     __toESM: [
         'var __toESM = (mod, isNodeMode, target) => (',
         '    (target = mod != null ? __create(__getProtoOf(mod)) : {}),',
@@ -598,6 +612,9 @@ const CJS_HELPERS: Record<string, string> = {
 
 /** Helpers `__toESM` needs, in dependency order. */
 const TO_ESM_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__create', '__getProtoOf', '__copyProps', '__toESM'];
+
+/** Helpers `__toCommonJS` needs, in dependency order. */
+const TO_CJS_DEPS = ['__getOwnPropNames', '__getOwnPropDesc', '__hasOwnProp', '__defProp', '__copyProps', '__toCommonJS'];
 
 /** Build, link, tree-shake, and assemble the entry module into a single ESM chunk. */
 export async function bundle(options: BundleOptions): Promise<BundleResult> {
@@ -1141,10 +1158,18 @@ function renderChunk(
     // CommonJS runtime helpers, emitted only into a chunk that actually wraps something. Ordered by
     // dependency: `__toESM` calls `__copyProps`, which calls the property primitives.
     const needsCjs = chunk.modules.some((i) => linked.cjsWrap.has(i));
+    // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
+    const needsToCjs = chunk.modules.some((i) =>
+        graph.modules[i].importRecords.some(
+            (r) => r.kind === 'require' && !r.external && r.resolved >= 0 && !linked.cjsWrap.has(r.resolved) && linked.namespaceOf.has(r.resolved),
+        ),
+    );
     const helperLines: string[] = [];
-    if (needsCjs) {
-        const wanted = new Set<string>(['__commonJS']);
+    if (needsCjs || needsToCjs) {
+        const wanted = new Set<string>();
+        if (needsCjs) wanted.add('__commonJS');
         if (chunk.modules.some((i) => linked.cjsNamespace.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+        if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);
         for (const [name, src] of Object.entries(CJS_HELPERS)) if (wanted.has(name)) helperLines.push(src);
     }
 
