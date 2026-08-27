@@ -131,7 +131,11 @@ export const DEFS = [
     def('AwaitExpression', { argument: child }),
     def('ImportExpression', { source: child, options: nullable(child) }),
     def('ExpressionStatement', { expression: child }),
-    def('VariableDeclaration', { declarations: list(child), kind: scalar<'var' | 'let' | 'const'>(), declare: boolean }),
+    def('VariableDeclaration', {
+        declarations: list(child),
+        kind: scalar<'var' | 'let' | 'const' | 'using' | 'await using'>(),
+        declare: boolean,
+    }),
     def('VariableDeclarator', { id: child, typeAnnotation: nullable(child), init: nullable(child), definite: boolean }),
     def('BlockStatement', { body: list(child), scopeId: scalar<number>() }),
     def('IfStatement', { test: child, consequent: child, alternate: nullable(child) }),

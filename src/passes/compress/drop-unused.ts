@@ -85,6 +85,12 @@ function classify(decl: Node, sem: Semantic, uses: number[]): number {
 function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
     if (n.type !== N.VariableDeclaration) return;
     if (n.data.kind === 'var') return; // HARD BAIL: `var` hoists / can redeclare
+    // HARD BAIL on `using` / `await using`: the BINDING is the observable thing. Dropping an unused
+    // one and keeping its initializer for side effects — correct for `let`/`const` — deletes the
+    // `[Symbol.dispose]()` call that runs at scope exit, which is the entire purpose of the
+    // declaration. Measured: `using r = { [Symbol.dispose]() {…} }` was rewritten to a bare
+    // expression statement and the disposal never ran.
+    if (n.data.kind === 'using' || n.data.kind === 'await using') return;
     const sem = SEM;
     const uses = USES;
     if (sem === null || uses === null) return; // snapshot not built (shouldn't happen) — bail
