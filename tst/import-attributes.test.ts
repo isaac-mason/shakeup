@@ -184,9 +184,18 @@ describe('import attributes have an effect, not just a parse', () => {
         });
 
         it('a .txt with NO attribute is still not JSON', async () => {
-            // The override must come from the attribute, not from the loader guessing.
-            const r = await build({ '/d.txt': 'hello', '/main.js': 'import d from "./d.txt";\nexport const x = d;' });
-            expect(r.errors.length).toBeGreaterThan(0);
+            // The override must come from the attribute, not from the loader guessing. `.txt` DOES
+            // now have a default type — `text`, which is in both oracles' built-in extension maps
+            // (`prepare_build_context.rs:234`, `bundler.go:2968`) — so the check is that the
+            // document arrives as its own source text rather than as the parsed object.
+            expect(
+                (
+                    await run({
+                        '/d.txt': '{"k":5}',
+                        '/main.js': 'import d from "./d.txt";\nexport const x = d;',
+                    })
+                ).x,
+            ).toBe('{"k":5}');
         });
 
         it('a .json file with no attribute still works', async () => {

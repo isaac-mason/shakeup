@@ -12,14 +12,28 @@ export type Fs = {
     read(id: string): MaybePromise<string | null>;
     exists(id: string): MaybePromise<boolean>;
     realpath?(id: string): MaybePromise<string>;
+    /** Raw bytes, for the module types whose loader cannot go through text: `base64`, `binary` and
+     *  `dataurl`. rolldown splits its read the same way — `StrOrBytes::Bytes` for exactly those
+     *  three (`load_source.rs:187`) — because decoding a PNG as UTF-8 corrupts every byte above
+     *  0x7F. Optional: an Fs that omits it still bundles those types, from the UTF-8 encoding of
+     *  `read`, which is right for text-shaped input and lossy for anything else. */
+    readBytes?(id: string): MaybePromise<Uint8Array | null>;
 };
 
-/** In-memory Fs over a map of id -> source; the browser default. */
-export function createMemoryFs(files: Map<string, string> | Record<string, string>): Fs {
+/** In-memory Fs over a map of id -> source; the browser default. A `Uint8Array` value is a binary
+ *  file: `read` decodes it as UTF-8 and `readBytes` hands it back untouched. */
+export function createMemoryFs(files: Map<string, string | Uint8Array> | Record<string, string | Uint8Array>): Fs {
     const map = files instanceof Map ? files : new Map(Object.entries(files));
     return {
-        read: (id) => map.get(id) ?? null,
+        read: (id) => {
+            const v = map.get(id);
+            return v === undefined ? null : typeof v === 'string' ? v : new TextDecoder().decode(v);
+        },
         exists: (id) => map.has(id),
+        readBytes: (id) => {
+            const v = map.get(id);
+            return v === undefined ? null : typeof v === 'string' ? new TextEncoder().encode(v) : v;
+        },
     };
 }
 
