@@ -30,7 +30,7 @@ import { analyze, createSemantic } from './analysis/semantic';
 import type { Node } from './ast';
 import { RESERVED } from './deconflict';
 import { mangleProgram } from './mangle/program';
-import { buildLineTable } from './sourcemap';
+import { buildLineTable, trimMappings } from './sourcemap';
 import type { Mappings } from './sourcemap';
 import { runCompress } from './passes/compress';
 import { parse } from './parser';
@@ -58,5 +58,9 @@ export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean
     if (names !== null) cfg.nameOf = (idNode: Node) => (idNode.sym === 0 ? idNode.name : (names.get(idNode.sym) ?? idNode.name));
     const printer = createPrinter(opts, cfg);
     printModule(printer, parsed.program);
-    return { code: finishPrinter(printer), map: printer.map };
+    const raw = finishPrinter(printer);
+    // `trimMappings` drops the printer's trailing newline AND the mapping line that goes with it —
+    // without it the composed map claims one more generated line than the chunk has, which shifts
+    // nothing visibly but makes the map disagree with the code. `renderBody` does the same.
+    return printer.map === null ? { code: raw, map: null } : { code: trimMappings(raw, printer.map), map: printer.map };
 }
