@@ -1445,8 +1445,8 @@ function renderChunk(
                 // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
                 // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
                 // in its pipeline. Building it here means the mappings fall out of printing instead of
-                // being patched up afterwards with `indentMappings`, which is what used to desynchronize
-                // the whole chunk's map when it was missed.
+                // being patched up afterwards to account for the added header line and indent, which
+                // is what used to desynchronize the whole chunk's map when it was missed.
                 //
                 // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
                 // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
@@ -1511,7 +1511,7 @@ function renderChunk(
                 // AST, not a text splice — same reason as the CommonJS wrapper above. `lazySplit`
                 // already hands back STATEMENT ARRAYS, so the hoisted bindings, the kept function
                 // declarations and the closure render as one body and the mappings fall out of
-                // printing instead of needing `indentMappings` to shove them down and right.
+                // printing instead of needing the mappings shoved down and right afterwards.
                 const headAndClosure = renderStmts!(
                     [
                         ...splitRender.hoisted,

@@ -1,10 +1,11 @@
 // Build a module wrapper as AST — `var <name> = <helper>(<params> => { <body> })`.
 //
-// shakeup used to splice these as TEXT: take the rendered module, indent it four columns, and wrap
-// it in a template string, then repair the source map afterwards with `indentMappings(map, 1, 4)`.
-// That repair existed only because of the splice, and its own comment records what it cost when it
-// was missing: "the map desynchronized for the WHOLE chunk: in a bundle with one wrapped module, no
-// output line mapped to anything, including untouched ES modules alongside it."
+// shakeup used to splice these as TEXT: take the rendered module, indent it four columns, wrap it in
+// a template string, and then repair the source map afterwards by prepending the header line and
+// shifting every segment right. That repair existed only because of the splice, and its own comment
+// recorded what it cost when it was missed: "the map desynchronized for the WHOLE chunk: in a bundle
+// with one wrapped module, no output line mapped to anything, including untouched ES modules
+// alongside it." The repair function is deleted now — nothing splices.
 //
 // rolldown builds both of its wrappers as AST — `new_commonjs_wrapper_stmt` and
 // `new_esm_wrapper_stmt` in `rolldown_ecmascript_utils/src/ast_factory.rs`, called from
