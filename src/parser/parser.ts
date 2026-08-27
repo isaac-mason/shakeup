@@ -1851,6 +1851,21 @@ function parseStatement(state: ParserState): Node {
                 return parseStatement(state);
         }
     }
+    // `using r = res()` — explicit resource management. `using` is NOT a reserved word, so it is an
+    // ordinary identifier token and cannot join the keyword switch below.
+    //
+    // Contextual, and more narrowly than `let`: the spec allows only a BindingIdentifier (no
+    // destructuring) and forbids a LineTerminator after the keyword. Verified against `oxc-parser`,
+    // which parses `using [a] = r()` as a MEMBER assignment, `using = 1` as an assignment and
+    // `using\n a = r()` as two statements — each of those has to stay an expression here. Both
+    // oracles PARSE AND BUNDLE `using`, emitting it verbatim, so there is nothing to lower.
+    if (state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart)) {
+        const save = saveState(state);
+        nextToken(state);
+        const isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
+        restoreState(state, save);
+        if (isDecl) return parseVarDecl(state, VAR_KIND.USING, 0);
+    }
     if (isKeyword(state.tok)) {
         switch (state.tok as number) {
             case K.VAR:

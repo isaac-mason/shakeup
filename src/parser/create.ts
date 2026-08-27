@@ -31,7 +31,13 @@ export const FL = {
     PURE: 1 << 16,
 } as const;
 
-export const VAR_KIND = { VAR: 1, LET: 2, CONST: 3, KIND_MASK: 3 } as const;
+/** Declaration kind, packed into the low bits of a node's `flags`.
+ *
+ *  The mask is 3 BITS to fit `using` / `await using` (explicit resource management). That overlaps
+ *  `FL.COMPUTED` (1 << 2) in the shared flag namespace, which is safe because `COMPUTED` is a
+ *  property-key flag and is never set on a `VariableDeclaration` — the only bits a declaration
+ *  carries are the kind and `FL.DECLARE` (1 << 6). */
+export const VAR_KIND = { VAR: 1, LET: 2, CONST: 3, USING: 4, AWAIT_USING: 5, KIND_MASK: 7 } as const;
 
 // Unary & update operator ids (their text lives in UNARY_OP_NAME/UPDATE_OP_NAME).
 // Binary/logical/assignment operators no longer need an id — their text comes
@@ -63,7 +69,7 @@ function accessibilityOf(flags: number): Accessibility {
 // `kind` lookup tables — module-level so decoding a flags int is an index, not a
 // fresh array allocation on every node build.
 const PROPERTY_KIND = ['init', 'get', 'set'] as const;
-const VAR_DECL_KIND = ['var', 'var', 'let', 'const'] as const;
+const VAR_DECL_KIND = ['var', 'var', 'let', 'const', 'using', 'await using'] as const;
 const METHOD_KIND = ['method', 'get', 'set', 'constructor'] as const;
 const SIGNATURE_KIND = ['method', 'get', 'set'] as const;
 /** The null-data TS keyword/leaf type ids the `keyword` helper materializes. */
