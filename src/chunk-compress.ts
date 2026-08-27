@@ -22,10 +22,26 @@
 // SO: `dce` stays per module and cached (it feeds the purity analysis tree-shaking depends on); the
 // cosmetic tier runs here instead, once, over the assembled chunk.
 //
-// RE-PARSING IS THE POINT, not a limitation routed around. By the time a chunk is assembled every
-// per-module concern — renames, dropped imports, unwrapped exports, `linked` maps keyed by
-// `(mod, sym)` — is already baked into the text, so the compressor needs none of it. rolldown's
-// `dce_or_minify` takes `source_text` for the same reason.
+// RE-PARSING, AND WHY — this REVERSES an earlier recorded decision, so it needs its reasons stated.
+//
+// Architecturally it decouples: by the time a chunk is assembled every per-module concern — renames,
+// dropped imports, unwrapped exports, `linked` maps keyed by `(mod, sym)` — is already baked into the
+// text, so the compressor needs none of it. rolldown does the same, and composes the two maps the
+// same way (`minify_chunks.rs` -> `dce_or_minify(source_text)` -> `collapse_sourcemaps`).
+//
+// But "rolldown does it" is NOT sufficient here, and `llm/notes/chunk-level-compress-plan.md` was
+// right to say so: peers decide ORDERING, JavaScript's cost model decides IMPLEMENTATION. That plan
+// chose to concatenate module ASTs instead, on a measured spike where re-parse + re-analyse was 60%
+// of the pass (parse 199ms, analyze 139ms, of 563ms).
+//
+// That premise expired. The parser perf work moved those numbers; measured in situ on the real input
+// (crashcat, 1,176,861b of dce-only chunk text -> 445,872b out, 469.4ms total):
+//
+//     parse 46.9ms (10%)   analyze 33.0ms (7%)   compress 334.7ms (71%)   mangle 24.5ms   print 30.3ms
+//
+// Re-parse + re-analyse is 17%, not 60%, and COMPRESS is now the cost. Concatenating module ASTs
+// would buy back ~80ms of a ~240ms regression and would entangle the compressor with per-module link
+// state to do it. If this is revisited, the target is the 335ms compressor, not the 47ms parse.
 import { analyze, createSemantic } from './analysis/semantic';
 import type { Node } from './ast';
 import { RESERVED } from './deconflict';
