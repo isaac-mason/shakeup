@@ -17,8 +17,8 @@ describe('plugin pipeline', () => {
     it('virtual modules via resolveId + load', async () => {
         const virtual: Plugin = {
             name: 'virtual-config',
-            resolveId: (_ctx, spec) => (spec === 'virtual:config' ? '\0virtual:config' : null),
-            load: (_ctx, id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
+            resolveId: (spec) => (spec === 'virtual:config' ? '\0virtual:config' : null),
+            load: (id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
         const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
         const mod = await run(code);
@@ -28,11 +28,11 @@ describe('plugin pipeline', () => {
     it('transform chain: string replacement then Edit[] patches, in order', async () => {
         const replacer: Plugin = {
             name: 'define',
-            transform: (_ctx, code) => code.replace('__BUILD__', '"1.2.3"'),
+            transform: (code) => code.replace('__BUILD__', '"1.2.3"'),
         };
         const patcher: Plugin = {
             name: 'patcher',
-            transform: (_ctx, code) => {
+            transform: (code) => {
                 const at = code.indexOf('MARK');
                 return at < 0 ? null : [{ start: at, end: at + 4, text: 'PATCHED' }];
             },
@@ -52,7 +52,7 @@ describe('plugin pipeline', () => {
             name: 'special-only',
             transform: {
                 filter: { id: /\.special\.ts$/ },
-                handler: (_ctx, code) => {
+                handler: (code) => {
                     calls++;
                     return code;
                 },
@@ -83,7 +83,7 @@ describe('plugin pipeline', () => {
     it('resolveId returning false marks a specifier external', async () => {
         const externalize: Plugin = {
             name: 'externalize-lodash',
-            resolveId: (_ctx, spec) => (spec === 'lodash-esque' ? false : null),
+            resolveId: (spec) => (spec === 'lodash-esque' ? false : null),
         };
         const { code } = await build({ '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" }, [
             externalize,
@@ -98,7 +98,7 @@ describe('plugin pipeline', () => {
             buildStart: () => {
                 order.push('start');
             },
-            renderChunk: (_ctx, code) => {
+            renderChunk: (code) => {
                 order.push('render');
                 return `/* built by shakeup */\n${code}`;
             },
@@ -115,7 +115,7 @@ describe('plugin pipeline', () => {
         const seen: string[] = [];
         const spy: Plugin = {
             name: 'spy',
-            moduleParsed: (_ctx, info) => {
+            moduleParsed: (info) => {
                 seen.push(info.id);
                 expect(info.nodeCount).toBeGreaterThan(1);
                 expect(info.semantic.symbols.length).toBeGreaterThan(0);
@@ -134,8 +134,8 @@ describe('plugin pipeline', () => {
     it('ctx.warn lands in result warnings', async () => {
         const warner: Plugin = {
             name: 'warner',
-            transform: (ctx, code) => {
-                ctx.warn('something smells');
+            transform: function (code) {
+                this.warn('something smells');
                 return code;
             },
         };

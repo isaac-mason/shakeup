@@ -28,7 +28,7 @@ describe('renderChunk return shapes', () => {
         // Plugins written against rollup return the object form. It used to be assigned straight to
         // the chunk's code, so the emitted bundle WAS the string `[object Object]` — no error, no
         // warning. A returned `map` is still not composed; the existing warning covers that.
-        const plugin: Plugin = { name: 'rc', renderChunk: (_c, code) => ({ code: `/*H*/\n${code}`, map: null }) };
+        const plugin: Plugin = { name: 'rc', renderChunk: (code) => ({ code: `/*H*/\n${code}`, map: null }) };
         const r = await build(
             { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
             { plugins: [plugin] },
@@ -38,7 +38,7 @@ describe('renderChunk return shapes', () => {
     });
 
     it('still accepts a plain string', async () => {
-        const plugin: Plugin = { name: 'rc', renderChunk: (_c, code) => `/*H*/\n${code}` };
+        const plugin: Plugin = { name: 'rc', renderChunk: (code) => `/*H*/\n${code}` };
         const r = await build(
             { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
             { plugins: [plugin] },
@@ -68,8 +68,8 @@ describe('configurations verified correct, now pinned', () => {
     it('a plugin-supplied virtual module can be required AND imported', async () => {
         const virt: Plugin = {
             name: 'v',
-            resolveId: (_c, spec) => (spec === 'virtual:cjs' ? '\0virtual:cjs' : null),
-            load: (_c, id) => (id === '\0virtual:cjs' ? 'module.exports = { z: 5 };' : null),
+            resolveId: (spec) => (spec === 'virtual:cjs' ? '\0virtual:cjs' : null),
+            load: (id) => (id === '\0virtual:cjs' ? 'module.exports = { z: 5 };' : null),
         };
         expect(
             await run(

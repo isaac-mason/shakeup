@@ -161,7 +161,7 @@ describe('fifth sweep', () => {
     it('require of a module a plugin marked side-effect-free', async () => {
         const plugin = {
             name: 'se',
-            resolveId: (_c: unknown, spec: string) => (spec === './o.cjs' ? { id: '/o.cjs', moduleSideEffects: false } : null),
+            resolveId: (spec: string) => (spec === './o.cjs' ? { id: '/o.cjs', moduleSideEffects: false } : null),
         };
         expect(
             (

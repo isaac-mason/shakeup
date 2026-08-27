@@ -6,7 +6,7 @@ export function json(): Plugin {
         name: 'json',
         transform: {
             filter: { id: /\.json$/ },
-            handler: (_ctx, code) => `export default ${code.trim()};`,
+            handler: (code) => `export default ${code.trim()};`,
         },
     };
 }

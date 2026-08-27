@@ -1,6 +1,6 @@
 import { bundle } from '../bundle';
-import type { JSXOptions } from '../resolve';
 import type { Plugin } from '../plugin';
+import type { JSXOptions } from '../resolve';
 
 /** Virtual-id prefixes for a resolved `?worker` entry — inline (blob) vs chunk (emitted file). */
 const INLINE_PREFIX = '\0worker-inline:';
@@ -29,16 +29,16 @@ export function worker(options: WorkerOptions = {}): Plugin {
         name: 'worker',
         resolveId: {
             filter: { id: /[?&]worker(&|$)/ },
-            handler: async (ctx, spec, importer) => {
+            handler: async function (spec, importer) {
                 const q = spec.indexOf('?');
                 const inline = /[?&]inline(&|$)/.test(spec.slice(q));
-                const resolved = await ctx.resolve(spec.slice(0, q), importer);
+                const resolved = await this.resolve(spec.slice(0, q), importer);
                 return (inline ? INLINE_PREFIX : CHUNK_PREFIX) + (resolved?.id ?? spec.slice(0, q));
             },
         },
         load: {
             filter: { id: /^\0worker-(inline|chunk):/ },
-            handler: async (ctx, id) => {
+            handler: async function (id) {
                 const hit = cache.get(id);
                 if (hit !== undefined) return { code: hit, moduleType: 'js' };
                 const inline = id.startsWith(INLINE_PREFIX);
@@ -46,14 +46,14 @@ export function worker(options: WorkerOptions = {}): Plugin {
 
                 const result = await bundle({
                     input: path,
-                    fs: ctx.fs,
+                    fs: this.fs,
                     plugins: options.plugins ?? [],
                     jsx: options.jsx,
                     external: (s) => s.startsWith('node:'),
                     output: { inlineDynamicImports: true },
                 });
                 if (result.errors.length > 0) {
-                    return ctx.error(`worker bundle failed for ${path}:\n${result.errors.join('\n')}`);
+                    return this.error(`worker bundle failed for ${path}:\n${result.errors.join('\n')}`);
                 }
 
                 let wrapper: string;
@@ -63,7 +63,7 @@ export function worker(options: WorkerOptions = {}): Plugin {
                     // Emit a sibling chunk + `new Worker(new URL(fileName, import.meta.url))`. The dev
                     // server has no output sink (emitFile throws), so fall back to an inline blob.
                     try {
-                        const fileName = ctx.emitFile({ type: 'asset', name: workerName(path), source: result.code });
+                        const fileName = this.emitFile({ type: 'asset', name: workerName(path), source: result.code });
                         wrapper = urlWrapperModule(fileName);
                     } catch {
                         wrapper = inlineWrapperModule(result.code);

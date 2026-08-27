@@ -18,7 +18,7 @@ const build = async (files: Record<string, string>, plugins: Plugin[] = []) => {
 /** Mark a resolved module id side-effect-free (the package.json `sideEffects: false` equivalent). */
 const markPure = (specifier: string, id: string): Plugin => ({
     name: 'mark-pure',
-    resolveId: (_ctx, spec, importer) => (spec === specifier && importer !== null ? { id, moduleSideEffects: false } : null),
+    resolveId: (spec, importer) => (spec === specifier && importer !== null ? { id, moduleSideEffects: false } : null),
 });
 
 describe('dead pure dynamic-import elimination', () => {

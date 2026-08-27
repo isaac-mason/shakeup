@@ -102,7 +102,7 @@ describe('import elision leaves externals and JavaScript alone', () => {
         // the scan pass, and why this case regressed when it did.
         const plugin: Plugin = {
             name: 'ext-side-effects',
-            resolveId: (_ctx, spec) => (spec === 'clean-lib' ? { id: 'clean-lib', external: true, moduleSideEffects: false } : null),
+            resolveId: (spec) => (spec === 'clean-lib' ? { id: 'clean-lib', external: true, moduleSideEffects: false } : null),
         };
         const { code } = await buildWith({ '/main.ts': "import { a } from 'clean-lib';\nexport const out = 1;" }, [], [plugin]);
         expect(code).not.toContain('clean-lib');

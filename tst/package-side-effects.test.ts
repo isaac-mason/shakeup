@@ -58,7 +58,7 @@ describe('package.json sideEffects', () => {
 
     it('a plugin outranks the manifest', async () => {
         // rolldown precedence (`normalize_side_effects`): hook, then option, then package.json.
-        const keepAll: Plugin = { name: 'keep', resolveId: (_c, spec, imp) => (spec === './register.js' && imp ? { id: `${REAL}/register.js`, moduleSideEffects: true } : null) };
+        const keepAll: Plugin = { name: 'keep', resolveId: (spec, imp) => (spec === './register.js' && imp ? { id: `${REAL}/register.js`, moduleSideEffects: true } : null) };
         const code = await build(false, [keepAll]);
         expect(code).toContain('__REGISTER__');
     });
@@ -68,7 +68,7 @@ describe('package.json sideEffects', () => {
 // the shapes that fooled a statement-shape matcher, in the order they were discovered — `compress`
 // runs BEFORE treeshake, so by then the writes have been folded far from the top level.
 describe('bindings keep their augmentations under sideEffects: false', () => {
-    const sef: Plugin = { name: 'sef', resolveId: (_c, spec, imp) => (spec === './lib.js' && imp ? { id: '/lib.js', moduleSideEffects: false } : null) };
+    const sef: Plugin = { name: 'sef', resolveId: (spec, imp) => (spec === './lib.js' && imp ? { id: '/lib.js', moduleSideEffects: false } : null) };
     const run = async (lib: string, compress: boolean) => {
         const r = await bundle({
             entry: '/main.js',

@@ -25,23 +25,23 @@ export function asset(options: AssetOptions = {}): Plugin {
         // `?url`, `?url&v=1`, `?foo&url` — but not `?foo=url`.
         resolveId: {
             filter: { id: /[?&]url(&|$)/ },
-            handler: async (ctx, spec, importer) => {
+            handler: async function (spec, importer) {
                 const base = spec.slice(0, spec.indexOf('?'));
-                const resolved = await ctx.resolve(base, importer);
+                const resolved = await this.resolve(base, importer);
                 return PREFIX + (resolved?.id ?? base);
             },
         },
         load: {
             filter: { id: /^\0asset-url:/ },
-            handler: async (ctx, id) => {
+            handler: async function (id) {
                 const path = id.slice(PREFIX.length);
                 // moduleType 'js' forces JS handling despite the asset extension in the id tail.
                 if (options.url !== undefined) {
                     return { code: `export default ${JSON.stringify(options.url(path))};`, moduleType: 'js' };
                 }
-                const source = await ctx.fs.read(path);
-                if (source === null) return ctx.error(`asset not found: ${path}`);
-                const fileName = ctx.emitFile({ type: 'asset', name: baseName(path), source });
+                const source = await this.fs.read(path);
+                if (source === null) return this.error(`asset not found: ${path}`);
+                const fileName = this.emitFile({ type: 'asset', name: baseName(path), source });
                 return { code: `export default ${JSON.stringify(fileName)};`, moduleType: 'js' };
             },
         },

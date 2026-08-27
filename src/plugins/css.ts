@@ -19,9 +19,9 @@ export function css(options: CssOptions = {}): Plugin {
         name: 'css',
         load: {
             filter: { id: /\.css$/ },
-            handler: async (ctx, id) => {
+            handler: async function (id) {
                 if (mode === 'empty') return { code: '', moduleType: 'js', moduleSideEffects: false };
-                const text = (await ctx.fs.read(id)) ?? '';
+                const text = (await this.fs.read(id)) ?? '';
                 return { code: injectModule(text), moduleType: 'js', moduleSideEffects: true };
             },
         },

@@ -37,7 +37,7 @@ function loadFixtures(): Record<string, string> {
  * returning null for everything else falls through to default relative resolution. */
 const reactShimPlugin = {
     name: 'react-shim',
-    resolveId(_ctx: unknown, spec: string): string | null {
+    resolveId(spec: string): string | null {
         if (spec === 'react/jsx-runtime') return '/react/jsx-runtime.ts';
         if (spec === 'react') return '/react.ts';
         return null;

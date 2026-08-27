@@ -1224,7 +1224,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     for (let i = 0; i < outputChunks.length; i++) {
         const oc = outputChunks[i];
         for (const hook of pipeline.renderChunk) {
-            const raw = hook.handler(pluginCtx, oc.code);
+            const raw = hook.handler.call(pluginCtx, oc.code);
             // rollup's `renderChunk` may return either a string or `{ code, map }`, and plugins
             // written against rollup return the object form. It used to be assigned straight to
             // `oc.code`, so the chunk was emitted as the string `[object Object]` — no error, no
@@ -1245,7 +1245,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // rejection escaped as an unhandled one and took the whole process down, well after `bundle()`
     // had already returned a clean result. Found by `pnpm rollupsuite`, which crashed on
     // `validate-resolved-by-logic` rather than reporting it.
-    await Promise.all(pipeline.buildEnd.map((hook) => hook.handler(pluginCtx)));
+    await Promise.all(pipeline.buildEnd.map((hook) => hook.handler.call(pluginCtx)));
     warnings.push(...warningsOut.splice(0));
 
     // plugin ctx.emitFile assets (content-hashed fileName → source), collected across graph build +

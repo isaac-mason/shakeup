@@ -23,7 +23,7 @@ import type { Plugin } from '../src/plugin.ts';
 //     live-filtered list — nothing that merges statements may run before liveness is computed.
 const sideEffectFree: Plugin = {
     name: 'sef',
-    resolveId: (_c, spec, importer) => (spec === './pure.js' && importer ? { id: '/pure.js', moduleSideEffects: false } : null),
+    resolveId: (spec, importer) => (spec === './pure.js' && importer ? { id: '/pure.js', moduleSideEffects: false } : null),
 };
 
 const build = async (pure: string, minify: boolean, external: string[] = []) => {
