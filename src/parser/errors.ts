@@ -53,6 +53,9 @@ export const ParseErrorCode = enumeration(
     'IdentifierInGenerator',
     'IdentifierInAsync',
     'PrivateNameConstructor',
+    'InvalidUnicodeEscape',
+    'InvalidEscapedIdentChar',
+    'EscapedKeyword',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -101,6 +104,9 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.IdentifierInGenerator]: 'cannot use `yield` as an identifier in a generator context',
     [ParseErrorCode.IdentifierInAsync]: 'cannot use `await` as an identifier in an async context',
     [ParseErrorCode.PrivateNameConstructor]: "classes can't have an element named '#constructor'",
+    [ParseErrorCode.InvalidUnicodeEscape]: 'invalid unicode escape sequence',
+    [ParseErrorCode.InvalidEscapedIdentChar]: "invalid character '%0' in an escaped identifier",
+    [ParseErrorCode.EscapedKeyword]: 'keywords cannot contain escape characters',
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */

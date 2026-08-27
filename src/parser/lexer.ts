@@ -3,6 +3,7 @@
 // Shared state substrate lives in state.ts; token identities in token.ts.
 import { ParseErrorCode } from './errors.ts';
 import {
+    F_ESCAPED,
     F_NL,
     P,
     type ParserState,
@@ -157,6 +158,156 @@ const KW_TOK = new Int32Array(KW_MASK + 1);
     }
 }
 
+/**
+ * Scan an identifier containing at least one `\uXXXX` / `\u{…}` escape, from `state.tokStart`.
+ *
+ * A cold path in every sense: entered only from the branch that was already ending the identifier
+ * loop, or from the punctuator switch's `default`, so the ordinary identifier pays nothing for it.
+ * That matters — `\u0061` is valid JavaScript that shakeup rejected with `unexpected character '\'`,
+ * but it is also vanishingly rare, and the identifier scan is the parser's hottest loop.
+ *
+ * The decoded name cannot be interned by source range like every other identifier (the source says
+ * `\u0061`, the name is `a`), so it goes through {@link internString} and rides on the token as
+ * `tokCooked` + `F_ESCAPED`.
+ *
+ * Deliberately NOT validated against the Unicode ID_Start/ID_Continue tables. shakeup's lexer
+ * treats EVERY non-ASCII character as an identifier character already (`nextToken`'s
+ * `c < 128 ? CHAR[c] === C_ID : true`), so applying real tables to escapes alone would reject
+ * `\u{1F600}` while accepting the same emoji written literally. ASCII is checked against the same
+ * `CHAR` table the raw path uses, which keeps `\u0031` (a leading digit) an error, as it is in oxc.
+ */
+function scanEscapedIdent(state: ParserState): void {
+    const src = state.src,
+        srcLen = state.srcLen;
+    const start = state.tokStart;
+    let pos = start;
+    let name = '';
+    let first = true;
+    while (pos < srcLen) {
+        const c = src.charCodeAt(pos);
+        if (c === 92) {
+            // Only `\u` — `\x61` is not an identifier escape, which is why the check is on the
+            // literal `u` and not on "some escape".
+            if (src.charCodeAt(pos + 1) !== 117) {
+                raise(state, ParseErrorCode.InvalidUnicodeEscape);
+                return;
+            }
+            let cp: number;
+            let next: number;
+            if (src.charCodeAt(pos + 2) === 123) {
+                // `\u{...}`: one to six hex digits, any code point up to 0x10FFFF.
+                let i = pos + 3;
+                let v = 0;
+                let digits = 0;
+                for (;;) {
+                    const d = hexVal(src.charCodeAt(i));
+                    if (d < 0) break;
+                    v = v * 16 + d;
+                    digits++;
+                    i++;
+                }
+                if (digits === 0 || v > 0x10ffff || src.charCodeAt(i) !== 125) {
+                    raise(state, ParseErrorCode.InvalidUnicodeEscape);
+                    return;
+                }
+                cp = v;
+                next = i + 1;
+            } else {
+                let v = 0;
+                for (let k = 0; k < 4; k++) {
+                    const d = hexVal(src.charCodeAt(pos + 2 + k));
+                    if (d < 0) {
+                        raise(state, ParseErrorCode.InvalidUnicodeEscape);
+                        return;
+                    }
+                    v = v * 16 + d;
+                }
+                // A lone surrogate is not a code point. Two escaped surrogates do NOT combine into
+                // one either — oxc rejects `\uD83D\uDE00` — so rejecting each half is the rule.
+                if (v >= 0xd800 && v <= 0xdfff) {
+                    raise(state, ParseErrorCode.InvalidUnicodeEscape);
+                    return;
+                }
+                cp = v;
+                next = pos + 6;
+            }
+            if (cp < 128) {
+                const cl = CHAR[cp];
+                if (cl !== C_ID && (first || cl !== C_DIG)) {
+                    raise(state, ParseErrorCode.InvalidEscapedIdentChar, String.fromCodePoint(cp));
+                    return;
+                }
+            }
+            name += String.fromCodePoint(cp);
+            pos = next;
+            first = false;
+            continue;
+        }
+        if (c < 128) {
+            const cl = CHAR[c];
+            if (cl !== C_ID && (first || cl !== C_DIG)) break;
+        } else if (c === 0x2028 || c === 0x2029) break;
+        name += src[pos];
+        pos++;
+        first = false;
+    }
+    if (name === '') {
+        raise(state, ParseErrorCode.InvalidUnicodeEscape);
+        return;
+    }
+    state.pos = pos;
+    state.tokStart = start;
+    state.tokEnd = pos;
+    state.tokCooked = name;
+    state.tokFlags |= F_ESCAPED;
+    // An escaped identifier is NEVER the keyword it spells: `\u0069f` is an identifier named `if`,
+    // and the parser rejects it wherever a reserved word would be illegal. Leaving it `T_IDENT` is
+    // what makes `({ \u0069f: 1 })` — a property key, where reserved words are fine — still parse.
+    state.tok = T_IDENT;
+    state.tokHash = 0;
+}
+
+const hexVal = (c: number): number => {
+    if (c >= 48 && c <= 57) return c - 48;
+    if (c >= 97 && c <= 102) return c - 87;
+    if (c >= 65 && c <= 70) return c - 55;
+    return -1;
+};
+
+/** Intern a STRING, for a name that is not a slice of the source (an escaped identifier). */
+export function internString(state: ParserState, s: string): string {
+    let hash = s.charCodeAt(0);
+    for (let k = 1; k < s.length; k++) hash = (Math.imul(hash, 31) + s.charCodeAt(k)) | 0;
+    const itKeys = state.itKeys,
+        itHashes = state.itHashes,
+        itMask = state.itMask;
+    let i = hash & itMask;
+    for (;;) {
+        const k = itKeys[i];
+        if (k === undefined) break;
+        if (itHashes[i] === hash && k === s) return k;
+        i = (i + 1) & itMask;
+    }
+    itKeys[i] = s;
+    itHashes[i] = hash;
+    if (++state.itCount * 4 > (itMask + 1) * 3) internGrow(state);
+    return s;
+}
+
+/** {@link keywordCode} for a STRING rather than a source range — the escaped-identifier path, where
+ *  the name being classified was decoded and is nowhere in the source. */
+export function keywordCodeOf(name: string): number {
+    let h = name.charCodeAt(0);
+    for (let k = 1; k < name.length; k++) h = (Math.imul(h, 31) + name.charCodeAt(k)) | 0;
+    let i = h & KW_MASK;
+    for (;;) {
+        const kw = KW_STR[i];
+        if (kw === undefined) return 0;
+        if (KW_HASH[i] === h && kw === name) return KW_TOK[i];
+        i = (i + 1) & KW_MASK;
+    }
+}
+
 /** Map the just-scanned identifier (src[s,e), hash in `state.tokHash`) to its keyword
  * token, or 0 for a plain identifier. */
 function keywordCode(state: ParserState, s: number, e: number): number {
@@ -256,7 +407,15 @@ export function nextToken(state: ParserState): void {
             const cc = src.charCodeAt(pos);
             if (cc < 128) {
                 const cl = CHAR[cc];
-                if (cl !== C_ID && cl !== C_DIG) break;
+                if (cl !== C_ID && cl !== C_DIG) {
+                    // `a\u0062c` — a `\` in CONTINUE position. One compare, and only on the branch
+                    // that was already ending the loop, so the ordinary identifier costs nothing.
+                    if (cc === 92) {
+                        scanEscapedIdent(state);
+                        return;
+                    }
+                    break;
+                }
             } else if (cc === 0x2028 || cc === 0x2029) break;
             h = (Math.imul(h, 31) + cc) | 0;
             pos++;
@@ -645,6 +804,13 @@ function scanPunct(state: ParserState, c: number): void {
             v = P.COLON;
             break;
         default:
+            // `\u0061` — a `\` where an identifier could START. Handled HERE rather than beside the
+            // identifier test so the hot path never tests for it: reaching this default already
+            // means the character matched nothing else.
+            if (c === 92) {
+                scanEscapedIdent(state);
+                return;
+            }
             raise(state, ParseErrorCode.UnexpectedChar, String.fromCharCode(c));
             state.pos = pos + 1;
             nextToken(state);
