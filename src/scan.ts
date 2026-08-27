@@ -1455,7 +1455,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     };
 
     // buildStart runs with the full graph-backed ctx so `ctx.resolve` works from it.
-    for (const hook of pipe.buildStart) await hook.handler(ctx);
+    // `buildStart` is `async, parallel` in Rollup's own table, like `buildEnd` — the plugins run
+    // concurrently and the build waits for all of them, rather than each waiting for the last.
+    await Promise.all(pipe.buildStart.map((hook) => hook.handler(ctx)));
 
     // Multi-entry rooting: resolve each normalized entry, add its module, mark it an entry, and
     // dedup into graph.entries (same module named twice ⇒ one root, first name wins). Rooting
