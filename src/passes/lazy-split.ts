@@ -136,13 +136,45 @@ function toAssignment(decl: Node): Node[] {
     return out;
 }
 
-export function lazySplit(body: Node[]): LazySplit {
+/**
+ * @param defaultName the binding link mode gives `export default <expr>` (`linked.defaultRefs`).
+ *   Without it a default export's value would stay inside the closure and be invisible to a static
+ *   importer — the same failure the split exists to prevent for named bindings.
+ */
+export function lazySplit(body: Node[], defaultName?: string): LazySplit {
     const hoisted: Node[] = [];
     const functions: Node[] = [];
     const out: Node[] = [];
     const names: string[] = [];
 
+    // `export const v = 1` is an ExportNamedDeclaration WRAPPING the declaration. Link mode drops the
+    // `export` keyword and prints the inner declaration, so the split has to see through the wrapper
+    // — otherwise the binding stays inside the closure and the static importer reads `undefined`.
+    const unwrapped: Node[] = [];
     for (const stmt of body) {
+        if (stmt.type === N.ExportNamedDeclaration) {
+            const decl = (stmt.data as { declaration: Node | null }).declaration;
+            unwrapped.push(decl ?? stmt);
+        } else if (stmt.type === N.ExportDefaultDeclaration && defaultName !== undefined) {
+            const decl = (stmt.data as { declaration: Node }).declaration;
+            // A default FUNCTION declaration hoists like any other; a default class or expression
+            // becomes an assignment to the synthesized default binding.
+            if (decl.type === N.FunctionDeclaration) unwrapped.push(decl);
+            else {
+                names.push(defaultName);
+                out.push(
+                    create.ExpressionStatement(
+                        stmt.start,
+                        stmt.end,
+                        0,
+                        create.AssignmentExpression(stmt.start, stmt.end, '=', ident(defaultName, stmt.start), decl),
+                    ) as Node,
+                );
+            }
+        } else unwrapped.push(stmt);
+    }
+
+    for (const stmt of unwrapped) {
         if (stmt.type === N.FunctionDeclaration) {
             functions.push(stmt);
             continue;

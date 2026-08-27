@@ -35,6 +35,7 @@ import {
     resolveMinify,
 } from './output-options';
 import { runCompress } from './passes/compress';
+import { lazySplit } from './passes/lazy-split';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
@@ -48,6 +49,7 @@ import {
     indentMappings,
     inlineSourceMapComment,
     joinParts,
+    type Mappings,
     type Part,
     type SourceMap,
     trimMappings,
@@ -611,6 +613,11 @@ function renderNamespaceObject(
     tight: boolean,
     /** The `var` is already declared outside (lazy-init form) — assign, do not redeclare. */
     preDeclared = false,
+    /** Force accessors for every member. A SPLIT lazy module's bindings are hoisted `var`s that stay
+     *  `undefined` until `init` runs, so a plain value here would snapshot `undefined` — the
+     *  immutability that normally justifies a plain value is about the SYMBOL's kind, which still
+     *  says `const` even though the emitted declaration is now a bare `var`. */
+    forceAccessors = false,
 ): string {
     const nsName = linked.namespaceOf.get(modIdx)!;
     const map = linked.exportMaps.get(modIdx);
@@ -639,7 +646,7 @@ function renderNamespaceObject(
             // exact miscompile above, whereas a symbol's declaration kind cannot go stale. The
             // trade is a getter for a never-reassigned `export let`, which is rare and harmless.
             entries.push(
-                isImmutableBind(linked, bind)
+                !forceAccessors && isImmutableBind(linked, bind)
                     ? `${key}${tight ? ':' : ': '}${value}`
                     : `get ${key}()${tight ? '{' : ' { '}return ${value};${tight ? '}' : ' }'}`,
             );
@@ -1267,6 +1274,11 @@ function renderChunk(
         const srcIdx = mapSources.length;
         let out: string;
         let mapPart: Part | null = null;
+        // Set only for a module needing the declaration/initializer split — see §7.25.
+        let splitRender: ReturnType<typeof lazySplit> | null = null;
+        let headParts: { code: string; map: Mappings | null } | null = null;
+        let tailParts: { code: string; map: Mappings | null } | null = null;
+        let splitMapParts: Part[] | null = null;
         // Printer backend (minify and non-minify): generate every token from the AST, in link mode
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
@@ -1276,41 +1288,65 @@ function renderChunk(
             const overrides = collectLinkOverrides(ctx);
             collectRequireOverrides(ctx, overrides);
             const renameCache: (string | null | undefined)[] = [];
-            const printer = createPrinter(
-                { minify: naming.minify },
-                {
-                    // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
-                    // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
-                    // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
-                    // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
-                    // collapses that to one. Correct per printer because the answer depends on
-                    // `ctx.chunk`, and a printer is created per module PER CHUNK render.
-                    nameOf: (idNode: Node) => {
-                        const sym = idNode.sym;
-                        if (sym === 0) return idNode.name; // unresolved: the name varies per node
-                        const hit = renameCache[sym];
-                        if (hit !== undefined) return hit ?? idNode.name;
-                        const v = renameOf(ctx, idNode) ?? null;
-                        renameCache[sym] = v;
-                        return v ?? idNode.name;
+            // A FACTORY, not a single printer: a module that needs the declaration/initializer split
+            // (cjs.md §7.25) is printed as two regions — hoisted bindings and function declarations
+            // at top level, then the initializers inside the `__esm` closure — and each region needs
+            // its own printer. Everything else makes exactly one.
+            const makePrinter = (liveOverride: typeof live = live) =>
+                createPrinter(
+                    { minify: naming.minify },
+                    {
+                        // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
+                        // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
+                        // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
+                        // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
+                        // collapses that to one. Correct per printer because the answer depends on
+                        // `ctx.chunk`, and a printer is created per module PER CHUNK render.
+                        nameOf: (idNode: Node) => {
+                            const sym = idNode.sym;
+                            if (sym === 0) return idNode.name; // unresolved: the name varies per node
+                            const hit = renameCache[sym];
+                            if (hit !== undefined) return hit ?? idNode.name;
+                            const v = renameOf(ctx, idNode) ?? null;
+                            renameCache[sym] = v;
+                            return v ?? idNode.name;
+                        },
+                        linkModule: true,
+                        defaultName: () => {
+                            const ref = linked.defaultRefs.get(mod.idx);
+                            return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
+                        },
+                        live: liveOverride,
+                        overrides,
+                        srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
+                        sourceIdx: srcIdx,
                     },
-                    linkModule: true,
-                    defaultName: () => {
-                        const ref = linked.defaultRefs.get(mod.idx);
-                        return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
-                    },
-                    live,
-                    overrides,
-                    srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
-                    sourceIdx: srcIdx,
-                },
-            );
-            printModule(printer, mod.program);
-            if (wantMap) {
-                out = trimMappings(finishPrinter(printer), printer.map!);
-                mapPart = { code: out, map: printer.map! };
-            } else {
-                out = finishPrinter(printer).trim();
+                );
+            const renderBody = (body: Node[], liveOverride: typeof live = live): { code: string; map: Mappings | null } => {
+                const pr = makePrinter(liveOverride);
+                const prog =
+                    body === (mod.program.data as { body: Node[] }).body
+                        ? mod.program
+                        : ({ ...mod.program, data: { ...(mod.program.data as object), body } } as Node);
+                printModule(pr, prog);
+                if (!wantMap) return { code: finishPrinter(pr).trim(), map: null };
+                const code = trimMappings(finishPrinter(pr), pr.map!);
+                return { code, map: pr.map! };
+            };
+            const whole = renderBody((mod.program.data as { body: Node[] }).body);
+            out = whole.code;
+            if (wantMap) mapPart = { code: out, map: whole.map! };
+            if (linked.esmInitSplit.has(idx)) {
+                const dref = linked.defaultRefs.get(idx);
+                // Split the LIVE statements only, then render with shaking OFF. The statements the
+                // split synthesizes (`var a, b;`, `a = 1`) are new nodes with fresh ids, so a `live`
+                // set built from the original program would drop every one of them — which is
+                // exactly what happened: the hoisted bindings and all the initializers vanished.
+                const all = (mod.program.data as { body: Node[] }).body;
+                const liveBody = live === null ? all : all.filter((st) => live.has(st.id));
+                splitRender = lazySplit(liveBody, dref === undefined ? undefined : (finalNameOf(linked, dref) ?? undefined));
+                headParts = renderBody([...splitRender.hoisted, ...splitRender.functions], null);
+                tailParts = renderBody(splitRender.body, null);
             }
         }
         // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
@@ -1349,7 +1385,18 @@ function renderChunk(
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
         if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
-            nsCode = renderNamespaceObject(graph, linked, idx, chunk, shaken?.nsUsage.get(idx), tight, lazyRef !== undefined);
+            // `preDeclared` only for the UNSPLIT lazy form, where the binding is hoisted above the
+            // closure and assigned inside it. A split module keeps its namespace at top level.
+            nsCode = renderNamespaceObject(
+                graph,
+                linked,
+                idx,
+                chunk,
+                shaken?.nsUsage.get(idx),
+                tight,
+                lazyRef !== undefined && !linked.esmInitSplit.has(idx),
+                linked.esmInitSplit.has(idx),
+            );
             out += `\n${nsCode}`;
         }
         // LAZY INIT — an ESM module reached only through `require()` (§7.20/D1). Its whole body,
@@ -1366,18 +1413,54 @@ function renderChunk(
         if (lazyRef !== undefined && out !== '') {
             const initName = finalNameOf(linked, lazyRef);
             const nsName = linked.namespaceOf.get(idx);
-            const body = out.replace(/^/gm, '    ');
-            out = `${nsName === undefined ? '' : `var ${nsName};\n`}var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
-            // Same splice, same correction — one or two header lines depending on whether the
-            // namespace binding is hoisted, plus the four-column indent.
-            if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, nsName === undefined ? 1 : 2, 4) };
-            nsCode = null;
+            if (splitRender !== null && headParts !== null && tailParts !== null) {
+                // MIXED: required AND statically imported. Bindings hoisted to bare `var`s and
+                // function declarations kept at top level, so the static importer can name them;
+                // only the initializers go inside the closure. rolldown's `misc/wrapped_esm` shape.
+                //
+                // The namespace object stays OUTSIDE and is built from those hoisted bindings, so it
+                // must use accessors — a value snapshot taken here would capture `undefined`, since
+                // nothing has been assigned until `init` runs.
+                const body = tailParts.code.replace(/^/gm, '    ');
+                const head = headParts.code === '' ? '' : `${headParts.code}\n`;
+                const closure = `var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
+                // `nsCode` was appended to `out` before this block; replacing `out` wholesale dropped
+                // it and left `e_ns is not defined`. Re-append it AFTER the closure — the namespace
+                // reads hoisted bindings, so it may be built at top level, and it must be, because a
+                // consumer names it outside.
+                // `init` is CALLED here too, at the module's own slot. A split module is statically
+                // imported by definition, and ESM guarantees a static import has evaluated by the
+                // time the importer's body runs — so deferring purely to the require site left a
+                // never-taken `require` with the module never evaluated and its bindings `undefined`.
+                // Idempotent: `__esm` returns immediately once it has run.
+                out = `${head}${closure}${nsCode === null ? '' : `\n${nsCode}`}\n${initName}();`;
+                if (mapPart !== null) {
+                    // Two parts, matching how the namespace object is already emitted as its own
+                    // part: `joinParts` derives each span from its own `code`, so they stay aligned.
+                    splitMapParts = [
+                        { code: headParts.code, map: headParts.map ?? undefined },
+                        { code: closure, map: tailParts.map === null ? undefined : indentMappings(tailParts.map, 1, 4) },
+                        ...(nsCode === null ? [] : [{ code: nsCode }]),
+                        { code: `${initName}();` },
+                    ];
+                    mapPart = null;
+                    nsCode = null; // already inside `out`, and its part is covered by the two above
+                }
+            } else {
+                const body = out.replace(/^/gm, '    ');
+                out = `${nsName === undefined ? '' : `var ${nsName};\n`}var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
+                // Same splice, same correction — one or two header lines depending on whether the
+                // namespace binding is hoisted, plus the four-column indent.
+                if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, nsName === undefined ? 1 : 2, 4) };
+                nsCode = null;
+            }
         }
         if (out !== '') moduleTexts.push(out);
         if (wantMap && out !== '') {
             mapSources.push(mod.id);
             mapSourcesContent.push(mod.source);
-            moduleParts.push(mapPart!);
+            if (splitMapParts !== null) moduleParts.push(...splitMapParts);
+            else moduleParts.push(mapPart!);
             if (nsCode !== null) moduleParts.push({ code: nsCode });
         }
         // Cache the render for reuse — unless it carries a per-build hash placeholder (its bytes

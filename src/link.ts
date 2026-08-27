@@ -240,6 +240,13 @@ function sortModules(graph: Graph): number[] {
             // Skip dynamic edges: a dynamic target is not in the importer's synchronous
             // execution order (it loads on its own), and a cycle closed through a dynamic
             // edge must not wrongly serialize. Dynamic targets are seeded separately below.
+            //
+            // `require` edges are NOT skipped, though ESM semantics say they should be — see
+            // cjs.md §7.25. Skipping them puts a requirer before the module defining the wrapper and
+            // init closure it calls, and concatenation order IS definition order here: 27 tests fail
+            // with `… is not defined`. Fixing it properly means separating DEFINITIONS (emitted in
+            // dependency order) from EVALUATION TRIGGERS (emitted in ESM source order), which is the
+            // §6.2 restructure.
             if (!rec.external && rec.kind !== 'dynamic' && rec.resolved >= 0) visit(rec.resolved);
         }
         state[idx] = 2;
@@ -273,6 +280,7 @@ export function linkGraph(graph: Graph): Linked {
         cjsNamespace: new Map(),
         cjsNamespaceNode: new Map(),
         esmInit: new Map(),
+        esmInitSplit: new Set(),
         dynamicExports: new Set(),
         externalLocals: new Map(),
         externalAttributes: new Map(),
@@ -297,7 +305,6 @@ export function linkGraph(graph: Graph): Linked {
     // rolldown's `determine_module_exports_kind` reaches this through `ImportKind::Require`
     // (`Esm -> WrapKind::Esm`, `CommonJs`/`None -> WrapKind::Cjs`); with an ESM-only emit the CJS
     // wrapper serves both, since an ESM module's bindings are already hoisted into the closure.
-    const warnedEagerEsm = new Set<number>();
     // LINK-STAGE KIND PROMOTION, then wrapping — rolldown's `determine_module_exports_kind`
     // (`:36-96` **[V]**). A module with `ExportsKind::None` (no ESM syntax, no CommonJS feature use)
     // is genuinely undecided after scanning; how it is IMPORTED settles it:
@@ -319,6 +326,7 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
+    const warnedEagerEsm = new Set<number>();
     for (const idx of linked.order) {
         for (const rec of graph.modules[idx].importRecords) {
             if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
@@ -345,14 +353,26 @@ export function linkGraph(graph: Graph): Linked {
             // the closure untouched and the namespace can be assigned from within it, which is the
             // same semantics with no rewriting. The split remains outstanding for the mixed case,
             // which is why the warning below still fires there.
+            // LAZY INIT, always. `require()` must evaluate its target AT THE CALL, and it is the
+            // ORDERING that makes this necessary even when the module is also statically imported:
+            // Node's ESM evaluation is a post-order walk in SOURCE order, and a CommonJS module is a
+            // leaf whose `require` calls happen during its own evaluation. shakeup's `sortModules`
+            // treats a `require` edge as a static dependency edge, so it hoists the target above its
+            // requirer — measured divergent from Node in three of four shapes (§7.25).
+            //
+            // A target that is ALSO statically imported additionally needs the declaration/
+            // initializer split, because that importer still has to be able to name its bindings.
+            // Require-ONLY targets are lazy today. The MIXED case (also statically imported) needs
+            // the declaration/initializer split — `src/passes/lazy-split.ts` is written and tested,
+            // and the emit plumbing is in place behind `esmInitSplit` — but it also needs the
+            // ordering fix above, so it stays eager and warns until both land together.
             if (!isStaticallyImported(graph, rec.resolved)) linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
             else if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
                 warnedEagerEsm.add(rec.resolved);
                 graph.warnings.push(
                     `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module that is ALSO statically ` +
-                        'imported, so its bindings must stay hoisted and it cannot go inside a lazy-init closure — it is ' +
-                        'evaluated eagerly with the rest of the bundle rather than at the require() call, so its side ' +
-                        'effects may run earlier than Node would run them, or run even if the require is never reached.',
+                        'imported, so it is evaluated eagerly with the rest of the bundle rather than at the require() ' +
+                        'call — its side effects may run in a different order than Node would run them (cjs.md §7.25).',
                 );
             }
         }

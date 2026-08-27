@@ -325,6 +325,10 @@ export type Linked = {
      *  semantics. Absent for a module that is also statically imported, whose bindings must stay
      *  hoisted (see §7.20's outstanding declaration/initializer split). */
     esmInit: Map<number, number>;
+    /** The subset of {@link esmInit} that is ALSO statically imported. Those need rolldown's
+     *  declaration/initializer split (cjs.md §7.25): the body moves into the closure, but every
+     *  binding is hoisted to a bare `var` first so the static importer can still name it. */
+    esmInitSplit: Set<number>;
     /** ESM modules that `export * from` a CommonJS module. Their export surface is only fully known
      *  at RUNTIME, so their namespace is namespace-construction "mode 2" of cjs.md §4.4: an
      *  `__exportAll({…})` object of getter thunks for the statically-known names, extended by

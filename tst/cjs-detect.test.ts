@@ -814,7 +814,7 @@ describe('require() of an ES module that is also statically imported', () => {
         const w = (await mixed('console.log("hi");\nexport const a = 1;')).warnings;
         expect(w).toHaveLength(1);
         expect(w[0]).toMatch(/ALSO statically imported/);
-        expect(w[0]).toMatch(/may run earlier than Node would run them/);
+        expect(w[0]).toMatch(/may run in a different order than Node would run them/);
     });
 
     it('warns when an initializer is impure', async () => {
