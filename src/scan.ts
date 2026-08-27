@@ -1121,6 +1121,15 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasEsmImport = hit.hasEsmImport;
                 topLevelThis = hit.topLevelThis;
                 graph.parseStats.reused++;
+                // EXPERIMENT (`RECOMPRESS_CACHED=1`): re-run compress on a module restored from the
+                // parse cache, simulating "we cache parse + semantic but NOT compress" — i.e. what an
+                // incremental rebuild would cost if compress moved after tree-shaking the way
+                // rolldown does it. Isolates the value of caching COMPRESS from the value of caching
+                // the parse, which is the question the divergence actually turns on.
+                if (process.env.RECOMPRESS_CACHED && compress !== false) {
+                    const refreshed2 = runCompress(program, semantic, compress);
+                    if (refreshed2 !== null) semantic = refreshed2;
+                }
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
                 // TS-mode parsing there is both wrong (rejects valid JS the TS grammar disallows) and

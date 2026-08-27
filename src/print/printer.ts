@@ -65,7 +65,7 @@ export type Printer = {
      *  subtree being printed, so a NESTED declaration (a `for` init, a declaration inside a function
      *  body) would otherwise be filtered against a set holding none of its declarators and emit a
      *  bare `let;`. */
-    declFilter: { decl: Node; keep: Set<Node> } | null;
+    declFilter: { decl: Node; live: Set<number> } | null;
     overrides: Map<Node, string> | null;
     // Generated position + sourcemap (all null/0 when the map is off).
     map: Mappings | null;
