@@ -93,6 +93,27 @@ const TOOLS: Tool[] = [
             ),
     },
     {
+        // The OTHER honest pairing. `rollup` below does not minify, so the comparable shakeup arm is
+        // this one, not the minifying default: both bundle, resolve, tree-shake and render, neither
+        // minifies. Between the two shakeup rows you can also read the cost of the cosmetic tier
+        // directly, on the same corpus in the same process.
+        name: 'shakeup (no min)',
+        countsCpu: true,
+        run: () =>
+            timed(
+                async () =>
+                    (
+                        await shakeupBundle({
+                            entry: corpus.entry,
+                            fs: diskFs,
+                            external: corpus.external,
+                            output: {},
+                        } as never)
+                    ).code,
+                true,
+            ),
+    },
+    {
         name: 'rolldown',
         countsCpu: true, // napi: native threads live in THIS process
         run: () =>
@@ -355,7 +376,7 @@ async function main(): Promise<void> {
         const r = first[t.name];
         if (r === undefined) continue;
         console.log(
-            `${t.name.padEnd(10)}${r.code.length.toLocaleString().padStart(12)}${gz(r.code).toLocaleString().padStart(10)}${br(r.code).toLocaleString().padStart(10)}   ${assertValid(t.name, r.code, dir)}${t.name === 'rollup' ? '   ← NOT minified' : ''}`,
+            `${t.name.padEnd(10)}${r.code.length.toLocaleString().padStart(12)}${gz(r.code).toLocaleString().padStart(10)}${br(r.code).toLocaleString().padStart(10)}   ${assertValid(t.name, r.code, dir)}${t.name === 'rollup' || t.name === 'shakeup (no min)' ? '   ← NOT minified' : ''}`,
         );
     }
 
@@ -429,6 +450,13 @@ async function main(): Promise<void> {
         console.log(
             `  rollup        ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'}  (rollup is NOT minifying — unequal work, read the next line instead)`,
         );
+        const nmWall = wall['shakeup (no min)'] !== undefined ? med(wall['shakeup (no min)']) : null;
+        if (nmWall !== null) {
+            const nm = rollupWall / nmWall;
+            console.log(
+                `  rollup        ${rollupWall.toFixed(1)}ms vs shakeup-no-min ${nmWall.toFixed(1)}ms — shakeup ${nm.toFixed(2)}x ${nm >= 1 ? 'faster' : 'slower'}  <- THE LIKE-FOR-LIKE NUMBER (neither minifying)`,
+            );
+        }
         const rtWall = wall['rollup+terser'] !== undefined ? med(wall['rollup+terser']) : null;
         if (rtWall !== null) {
             const rt = rtWall / base;
