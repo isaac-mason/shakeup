@@ -106,7 +106,9 @@ export const DEFS = [
         returnType: nullable(child),
         body: child,
         async: boolean,
-        expression: boolean, scopeId: scalar<number>() }),
+        expression: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('FunctionExpression', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -114,7 +116,9 @@ export const DEFS = [
         returnType: nullable(child),
         body: nullable(child),
         async: boolean,
-        generator: boolean, scopeId: scalar<number>() }),
+        generator: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('ClassExpression', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -131,7 +135,13 @@ export const DEFS = [
     def('VariableDeclarator', { id: child, typeAnnotation: nullable(child), init: nullable(child), definite: boolean }),
     def('BlockStatement', { body: list(child), scopeId: scalar<number>() }),
     def('IfStatement', { test: child, consequent: child, alternate: nullable(child) }),
-    def('ForStatement', { init: nullable(child), test: nullable(child), update: nullable(child), body: child, scopeId: scalar<number>() }),
+    def('ForStatement', {
+        init: nullable(child),
+        test: nullable(child),
+        update: nullable(child),
+        body: child,
+        scopeId: scalar<number>(),
+    }),
     def('ForInStatement', { left: child, right: child, body: child, scopeId: scalar<number>() }),
     def('ForOfStatement', { left: child, right: child, body: child, await: boolean, scopeId: scalar<number>() }),
     def('WhileStatement', { test: child, body: child }),
@@ -155,7 +165,9 @@ export const DEFS = [
         body: nullable(child),
         async: boolean,
         generator: boolean,
-        declare: boolean, scopeId: scalar<number>() }),
+        declare: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('ClassDeclaration', {
         id: nullable(child),
         typeParameters: nullable(child),
@@ -164,7 +176,9 @@ export const DEFS = [
         implements: list(child),
         body: list(child),
         abstract: boolean,
-        declare: boolean, scopeId: scalar<number>() }),
+        declare: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('MethodDefinition', {
         key: child,
         value: child,
@@ -201,7 +215,12 @@ export const DEFS = [
         readonly: boolean,
         accessibility: scalar<Accessibility>(),
     }),
-    def('ImportDeclaration', { specifiers: list(child), source: child, importKind: scalar<'value' | 'type'>() }),
+    def('ImportDeclaration', {
+        specifiers: list(child),
+        source: child,
+        attributes: list(child),
+        importKind: scalar<'value' | 'type'>(),
+    }),
     def('ImportSpecifier', { local: child, imported: child, importKind: scalar<'value' | 'type'>() }),
     def('ImportDefaultSpecifier', { local: child }),
     def('ImportNamespaceSpecifier', { local: child }),
@@ -209,11 +228,12 @@ export const DEFS = [
         declaration: nullable(child),
         specifiers: list(child),
         source: nullable(child),
+        attributes: list(child),
         exportKind: scalar<'value' | 'type'>(),
     }),
     def('ExportSpecifier', { local: child, exported: child, exportKind: scalar<'value' | 'type'>() }),
     def('ExportDefaultDeclaration', { declaration: child }),
-    def('ExportAllDeclaration', { source: child, exported: nullable(child) }),
+    def('ExportAllDeclaration', { source: child, exported: nullable(child), attributes: list(child) }),
     def('TSTypeAnnotation', { typeAnnotation: child }),
     def('TSAnyKeyword', null),
     def('TSStringKeyword', null),
@@ -293,10 +313,18 @@ export const DEFS = [
         typeParameters: nullable(child),
         extends: list(child),
         body: list(child),
-        declare: boolean, scopeId: scalar<number>() }),
+        declare: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('TSClassImplements', { expression: child, typeArguments: nullable(child) }),
     def('TSInterfaceHeritage', { expression: child, typeArguments: nullable(child) }),
-    def('TSTypeAliasDeclaration', { id: child, typeParameters: nullable(child), typeAnnotation: child, declare: boolean, scopeId: scalar<number>() }),
+    def('TSTypeAliasDeclaration', {
+        id: child,
+        typeParameters: nullable(child),
+        typeAnnotation: child,
+        declare: boolean,
+        scopeId: scalar<number>(),
+    }),
     def('TSEnumDeclaration', { id: child, members: list(child), const: boolean, declare: boolean }),
     def('TSEnumMember', { id: child, initializer: nullable(child) }),
     def('TSAsExpression', { expression: child, typeAnnotation: child }),
@@ -326,6 +354,13 @@ export const DEFS = [
     // is a value entity name (IdentifierReference / TSQualifiedName) or a TSExternalModuleReference.
     def('TSImportEqualsDeclaration', { id: child, moduleReference: child, importKind: scalar<'value' | 'type'>() }),
     def('TSExternalModuleReference', { expression: child }),
+    // APPEND-ONLY past this point: the numeric ids are frozen (see `tst/ast.test.ts`). Inserting a
+    // `def` mid-list renumbers every type after it.
+    //
+    // `with { type: 'json' }` — and the older `assert { … }`, still widely shipped. oxc's shape: a
+    // list of key/value pairs hanging off the declaration, where the key is an identifier OR a
+    // string literal.
+    def('ImportAttribute', { key: child, value: child }),
 ] as const;
 
 type Defs = typeof DEFS;

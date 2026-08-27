@@ -169,6 +169,7 @@ const ID_SNAPSHOT: Record<string, number> = {
     TSInstantiationExpression: 149,
     TSImportEqualsDeclaration: 150,
     TSExternalModuleReference: 151,
+    ImportAttribute: 152,
 };
 
 describe('DEFS-derived numeric ids match the frozen pre-migration snapshot', () => {

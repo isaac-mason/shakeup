@@ -2286,9 +2286,10 @@ function parseImport(state: ParserState): Node {
     if ((state.tok as number) === T_STR) {
         const source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
+        const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmImport = true;
-        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source) as Node;
+        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source, attrs) as Node;
     }
     if (isIdentLike(state)) {
         const local = parseIdent(state, R_BIND);
@@ -2333,6 +2334,7 @@ function parseImport(state: ParserState): Node {
         source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
     } else raise(state, ParseErrorCode.ExpectedModuleSpecifier);
+    const attrs = parseImportAttributes(state);
     consumeSemi(state);
     state.sawEsmImport = true;
     return create.ImportDeclaration(
@@ -2341,7 +2343,56 @@ function parseImport(state: ParserState): Node {
         flags,
         finishList(state, from),
         source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
+        attrs,
     ) as Node;
+}
+
+/**
+ * An import-attributes clause: `with { type: "json" }`, or the older `assert { … }` spelling that is
+ * still widely shipped (36 of the failing rspack files use it). Returns null when there is none.
+ *
+ * Grammar checked against `oxc-parser`, which accepts all of: identifier keys AND string-literal
+ * keys, several attributes, an EMPTY clause (`with { }`), a trailing comma, and a line break before
+ * the keyword. It attaches to every module-specifier form — `import`, `import *`, bare `import`,
+ * `export … from`, `export *`, `export * as ns`.
+ *
+ * `with` is a reserved word and `assert` is contextual, so they are recognised differently.
+ */
+function parseImportAttributes(state: ParserState): Node[] | null {
+    const isWith = isK(state, K.WITH);
+    // `assert` is not reserved, so guard on it being followed by `{` — otherwise `assert` could be
+    // the start of the next statement entirely (`import 'x'\nassert(y)`).
+    const isAssert =
+        !isWith && state.tok === T_IDENT && state.src.startsWith('assert', state.tokStart) && state.tokEnd - state.tokStart === 6;
+    if (!isWith && !isAssert) return null;
+    if (isAssert) {
+        const save = saveState(state);
+        nextToken(state);
+        if (!isP(state, P.LBRACE)) {
+            restoreState(state, save);
+            return null;
+        }
+    } else nextToken(state);
+    expectP(state, P.LBRACE, "'{'");
+    const from = state.sp;
+    while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+        const mark = state.tokStart;
+        const s = state.tokStart;
+        const key =
+            (state.tok as number) === T_STR
+                ? leaf(state, N.StringLiteral, state.tokStart, state.tokEnd)
+                : parseNameAsIdent(state, R_NAME);
+        if ((state.tok as number) === T_STR) nextToken(state);
+        expectP(state, P.COLON, "':'");
+        const value = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+        if ((state.tok as number) === T_STR) nextToken(state);
+        else raise(state, ParseErrorCode.Expected, 'a string');
+        push(state, create.ImportAttribute(s, state.tokStart, 0, key, value) as Node);
+        if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
+        if (noProgress(state, mark)) break;
+    }
+    expectP(state, P.RBRACE, "'}'");
+    return finishList(state, from);
 }
 
 /** A value entity name (`A` / `A.B.C`) as an IdentifierReference head + chained TSQualifiedName —
@@ -2414,6 +2465,7 @@ function parseExport(state: ParserState): Node {
             source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
             nextToken(state);
         }
+        const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmExport = true;
         return create.ExportAllDeclaration(
@@ -2422,6 +2474,7 @@ function parseExport(state: ParserState): Node {
             0,
             source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
             exported,
+            attrs,
         ) as Node;
     }
     let flags = 0;
@@ -2469,9 +2522,10 @@ function parseExport(state: ParserState): Node {
                 nextToken(state);
             }
         }
+        const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmExport = true;
-        return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source) as Node;
+        return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source, attrs) as Node;
     }
     const decl = parseStatement(state);
     state.sawEsmExport = true;

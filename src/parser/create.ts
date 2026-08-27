@@ -288,12 +288,23 @@ export const FormalParameter = (s: number, e: number, flags: number, pat: Node, 
         readonly: (flags & FL.READONLY) !== 0,
         accessibility: accessibilityOf(flags),
     });
-export const ImportDeclaration = (s: number, e: number, flags: number, specs: Node[] | null, source: Node): Node =>
+export const ImportDeclaration = (
+    s: number,
+    e: number,
+    flags: number,
+    specs: Node[] | null,
+    source: Node,
+    attributes: Node[] | null = null,
+): Node =>
     node(N.ImportDeclaration, s, e, '', {
         specifiers: specs ?? [],
         source,
+        attributes: attributes ?? [],
         importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value',
     });
+/** One `key: value` pair of an import attribute clause. */
+export const ImportAttribute = (s: number, e: number, _f: number, key: Node, value: Node): Node =>
+    node(N.ImportAttribute, s, e, '', { key, value });
 export const ImportSpecifier = (s: number, e: number, flags: number, local: Node, imported: Node): Node =>
     node(N.ImportSpecifier, s, e, '', { local, imported, importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value' });
 export const ExportNamedDeclaration = (
@@ -303,11 +314,13 @@ export const ExportNamedDeclaration = (
     decl: Node | null,
     specs: Node[] | null,
     source: Node | null,
+    attributes: Node[] | null = null,
 ): Node =>
     node(N.ExportNamedDeclaration, s, e, '', {
         declaration: decl ?? null,
         specifiers: specs ?? [],
         source: source ?? null,
+        attributes: attributes ?? [],
         exportKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value',
     });
 export const ExportSpecifier = (s: number, e: number, flags: number, local: Node, exported: Node): Node =>
@@ -522,8 +535,14 @@ export const ImportNamespaceSpecifier = (s: number, e: number, _f: number, local
     node(N.ImportNamespaceSpecifier, s, e, '', { local });
 export const ExportDefaultDeclaration = (s: number, e: number, _f: number, declaration: Node): Node =>
     node(N.ExportDefaultDeclaration, s, e, '', { declaration });
-export const ExportAllDeclaration = (s: number, e: number, _f: number, source: Node, exported: Node | null): Node =>
-    node(N.ExportAllDeclaration, s, e, '', { source, exported: exported ?? null });
+export const ExportAllDeclaration = (
+    s: number,
+    e: number,
+    _f: number,
+    source: Node,
+    exported: Node | null,
+    attributes: Node[] | null = null,
+): Node => node(N.ExportAllDeclaration, s, e, '', { source, exported: exported ?? null, attributes: attributes ?? [] });
 export const TSTypeAnnotation = (s: number, e: number, _f: number, typeAnnotation: Node): Node =>
     node(N.TSTypeAnnotation, s, e, '', { typeAnnotation });
 export const TSTypeReference = (s: number, e: number, _f: number, typeName: Node, typeArguments: Node | null): Node =>

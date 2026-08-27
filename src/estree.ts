@@ -79,6 +79,7 @@ export const ESTREE_NAME = {
     RestElement: 'RestElement',
     FormalParameter: null,
     ImportDeclaration: 'ImportDeclaration',
+    ImportAttribute: 'ImportAttribute',
     ImportSpecifier: 'ImportSpecifier',
     ImportDefaultSpecifier: 'ImportDefaultSpecifier',
     ImportNamespaceSpecifier: 'ImportNamespaceSpecifier',
