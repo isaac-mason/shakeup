@@ -76,6 +76,15 @@ describe('escaped identifiers', () => {
         expect(errOf('var \\uD83D\\uDE00 = 1;')?.code).toBe(ParseErrorCode.InvalidUnicodeEscape);
     });
 
+    it('accepts an escaped PRIVATE name', () => {
+        // `#\u0061` is the same escape in the same grammar position, and the private-name scan is a
+        // separate loop in the lexer — so it needed the same hook. `pnpm test262` scored this at
+        // 800 rejected-but-valid programs, the single largest bucket in the whole suite.
+        expect(ok('class C { #\\u0061; m() { return this.#a; } }')).toEqual([]);
+        expect(ok('class C { #\\u{6F}_; }')).toEqual([]);
+        expect(ok('class C { get #\\u0061() { return 1; } }')).toEqual([]);
+    });
+
     it('rejects an escaped RESERVED word where the word would be reserved', () => {
         expect(errOf('var \\u0069f = 1;')?.code).toBe(ParseErrorCode.EscapedKeyword);
         expect(errOf('var \\u0074his = 1;')?.code).toBe(ParseErrorCode.EscapedKeyword);

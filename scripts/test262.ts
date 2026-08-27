@@ -33,7 +33,9 @@ const LIST = listIdx >= 0 ? args[listIdx + 1] : null;
 const FILTER = args.find((a) => !a.startsWith('--') && a !== LIST) ?? null;
 
 if (!existsSync(ROOT)) {
-    console.error(`test262 is not checked out at ${ROOT}.\n\n  git clone --depth 1 https://github.com/tc39/test262 llm/libs/test262\n`);
+    console.error(
+        `test262 is not checked out at ${ROOT}.\n\n  git clone --depth 1 https://github.com/tc39/test262 llm/libs/test262\n`,
+    );
     process.exit(1);
 }
 
@@ -41,7 +43,10 @@ if (!existsSync(ROOT)) {
  *  `staging` is unreviewed proposal material; `_FIXTURE` files are imported BY tests, never run;
  *  the annexB assignmenttargettype directory is a documentation tree, not tests. */
 const skipPath = (p: string) =>
-    p.includes('/staging/') || p.endsWith('.md') || p.includes('_FIXTURE') || p.includes('annexB/language/expressions/assignmenttargettype');
+    p.includes('/staging/') ||
+    p.endsWith('.md') ||
+    p.includes('_FIXTURE') ||
+    p.includes('annexB/language/expressions/assignmenttargettype');
 
 type Meta = { negativeParse: boolean; flags: Set<string>; features: string[] };
 
@@ -98,7 +103,12 @@ const bump = (key: string, sample: string) => {
 /** Group a failure by the test262 directory it lives in — `language/expressions/class`, say. That
  *  is how the suite is organised by feature, so the bucket names a GRAMMAR AREA rather than a
  *  message, and points straight at what to work on next. */
-const areaOf = (p: string) => p.slice(ROOT.length + 1).split('/').slice(0, 3).join('/');
+const areaOf = (p: string) =>
+    p
+        .slice(ROOT.length + 1)
+        .split('/')
+        .slice(0, 3)
+        .join('/');
 
 let pass = 0;
 let falseReject = 0; // valid program, shakeup rejected it — the harmful direction
@@ -137,7 +147,10 @@ for (const p of files) {
         // A false rejection is bucketed by test262's own `features:` list where it has one — that
         // names the PROPOSAL rather than the directory, which is what decides whether the gap is a
         // bug or an unimplemented feature. Decorators and `with` both surface this way.
-        bump(`REJECTED a valid program  [${/\bwith\s*\(/.test(code) ? '`with`, a stated non-goal' : (meta.features[0] ?? areaOf(p))}]`, p);
+        bump(
+            `REJECTED a valid program  [${/\bwith\s*\(/.test(code) ? '`with`, a stated non-goal' : (meta.features[0] ?? areaOf(p))}]`,
+            p,
+        );
     }
 }
 
@@ -149,7 +162,9 @@ if (LIST !== null) {
 const ran = pass + falseReject + falseAccept;
 console.log(`\ntest262 — ${ran} tests (${negatives} of them negative-at-parse-phase)`);
 console.log(`PASS ${pass} (${((pass / Math.max(ran, 1)) * 100).toFixed(2)}%)`);
-console.log(`  rejected a VALID program:   ${falseReject}   ← the harmful direction (${withRejects} of them \`with\`, a stated non-goal)`);
+console.log(
+    `  rejected a VALID program:   ${falseReject}   ← the harmful direction (${withRejects} of them \`with\`, a stated non-goal)`,
+);
 console.log(`  accepted an INVALID program: ${falseAccept}   ← missing early errors\n`);
 for (const [k, b] of [...buckets.entries()].sort((a, c) => c[1].count - a[1].count).slice(0, 40)) {
     console.log(`${String(b.count).padStart(5)}  ${k}`);
