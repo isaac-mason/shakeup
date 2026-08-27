@@ -27,19 +27,22 @@
 // `(mod, sym)` — is already baked into the text, so the compressor needs none of it. rolldown's
 // `dce_or_minify` takes `source_text` for the same reason.
 import { analyze, createSemantic } from './analysis/semantic';
+import type { Node } from './ast';
+import { RESERVED } from './deconflict';
+import { mangleProgram } from './mangle/program';
 import { buildLineTable } from './sourcemap';
 import type { Mappings } from './sourcemap';
 import { runCompress } from './passes/compress';
 import { parse } from './parser';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
-import type { PrintOptions } from './print/printer';
+import type { PrinterConfig, PrintOptions } from './print/printer';
 
 export type ChunkCompressResult = { code: string; map: Mappings | null };
 
 /** Compress `code` as one program. `wantMap` produces chunk→compressed mappings for the caller to
  *  compose with the module→chunk mappings it already holds. */
-export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean): ChunkCompressResult {
+export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean, mangle: boolean): ChunkCompressResult {
     // The chunk is emitted JavaScript in module goal — never TS, never JSX by this stage.
     const parsed = parse(code, { ts: false, jsx: false, kind: 'module' });
     // A chunk we just emitted must parse; if it does not, that is a printer bug and the right move is
@@ -48,7 +51,12 @@ export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean
     const semantic = createSemantic();
     analyze(semantic, parsed.program);
     runCompress(parsed.program, semantic, 'full');
-    const printer = createPrinter(opts, wantMap ? { srcLines: Uint32Array.from(buildLineTable(code)), sourceIdx: 0 } : {});
+    // MANGLE LAST, after the compressor has finished deleting things — otherwise short names are
+    // spent on bindings that do not survive. See `mangle/program.ts`.
+    const names = mangle ? mangleProgram(parsed.program, semantic, new Set(RESERVED)) : null;
+    const cfg: PrinterConfig = wantMap ? { srcLines: Uint32Array.from(buildLineTable(code)), sourceIdx: 0 } : {};
+    if (names !== null) cfg.nameOf = (idNode: Node) => (idNode.sym === 0 ? idNode.name : (names.get(idNode.sym) ?? idNode.name));
+    const printer = createPrinter(opts, cfg);
     printModule(printer, parsed.program);
     return { code: finishPrinter(printer), map: printer.map };
 }
