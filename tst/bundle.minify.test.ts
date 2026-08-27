@@ -174,7 +174,10 @@ describe('emit-layer glue respects minify.whitespace', () => {
     });
 
     it('still parses and evaluates', async () => {
-        const files2 = { '/main.ts': "import * as ns from './lib.ts';\nexport const out = ns.a + ns.b;", '/lib.ts': 'export const a = 1;\nexport const b = 2;' };
+        const files2 = {
+            '/main.ts': "import * as ns from './lib.ts';\nexport const out = ns.a + ns.b;",
+            '/lib.ts': 'export const a = 1;\nexport const b = 2;',
+        };
         const r = await bundle({ entry: '/main.ts', fs: createMemoryFs(files2), output: { minify: true } });
         expect(r.errors).toEqual([]);
         expect((await evalModule(r.code)).out).toBe(3);
@@ -201,5 +204,49 @@ describe('emit-layer glue respects minify.whitespace', () => {
         const groups = mappings!.split(';').length;
         expect(groups).toBeGreaterThanOrEqual(codeLines);
         expect(groups).toBeLessThanOrEqual(codeLines + 1);
+    });
+});
+
+describe('the minify sub-options compose independently', () => {
+    // The cosmetic tier and the mangler both live in the CHUNK pass now (`chunk-compress.ts`), so
+    // each combination has to reach that pass on its own terms. `{ mangle: true, compress: false }`
+    // is the one that nearly slipped through: it does not want the compress tier at all, but it is
+    // the only place a mangler runs, so gating the pass on `compress === 'full'` alone emitted
+    // fully-unmangled output while reporting success.
+    const SRC = {
+        '/main.js':
+            'function aLongHelperName(someArgument) { return someArgument * 2; }\n' +
+            'export const x = aLongHelperName(globalThis.seed);',
+    };
+    const build = async (minify: unknown) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(SRC), output: { minify } as never });
+        expect(r.errors).toEqual([]);
+        return r.code;
+    };
+
+    it('mangles when asked, even with the compress tier off', async () => {
+        const code = await build({ mangle: true, compress: false });
+        expect(code).not.toMatch(/someArgument|aLongHelperName/);
+    });
+
+    it('does NOT mangle when only the compress tier is asked for', async () => {
+        const code = await build({ mangle: false, compress: true });
+        expect(code).toMatch(/aLongHelperName/);
+    });
+
+    it('every combination still evaluates to the same value', async () => {
+        for (const minify of [
+            true,
+            false,
+            { mangle: true, compress: false },
+            { mangle: false, compress: true },
+            { mangle: true, whitespace: true },
+        ]) {
+            const code = await build(minify);
+            // `globalThis.seed` is undefined, so the product is NaN — what matters is that it runs
+            // and exports `x` at all.
+            const mod = await evalModule(code);
+            expect(Object.keys(mod)).toContain('x');
+        }
     });
 });

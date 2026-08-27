@@ -971,24 +971,27 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // tree-shaking depends on, so it has to precede the shaker — rolldown does exactly this at
     // `pre_process_ecma_ast.rs` step 5, gated on `treeshake.is_some()`. The cosmetic tier runs later,
     // over the assembled chunk (`chunk-compress.ts`), where it can see the whole picture.
-    // CHUNK-LEVEL COSMETIC COMPRESS — infrastructure landed, OFF by default.
+    // TWO COSMETIC TIERS, SPLIT BY PHASE. `dce` runs per module during scan and is cached — it feeds
+    // the purity analysis tree-shaking depends on. The COSMETIC tier runs once over each assembled
+    // chunk, after linking and shaking (`chunk-compress.ts` has the full argument, and the mangler
+    // runs there too, last, which is where every peer puts it).
     //
-    // `CHUNK_COMPRESS=1` runs the cosmetic tier once over the assembled chunk instead of per module
-    // (`chunk-compress.ts` explains why that is the right position). It is not the default yet
-    // because MANGLING still runs before it: the chunk pass then deletes variables whose short names
-    // are already spent, which turns a real win into a loss. Measured on crashcat:
+    // This is what it costs, measured interleaved in one process on crashcat + three:
     //
-    //     mangle OFF   per-module 906,530   chunk 904,171   (-2,359 — the tier move is right)
-    //     mangle ON    per-module 446,621   chunk 447,156   (+535  — mangling order eats it)
+    //     cold crashcat     389ms -> 629ms  (+62%)      size 446,621 -> 445,872  (-749)
+    //     cold three        333ms -> 460ms  (+38%)      size 382,631 -> 382,687  (+56)
+    //     watch, minify:false  32.6ms -> 31.2ms (0.96x — the cosmetic tier is not running)
+    //     watch, minify:true   56.2ms -> 430ms  (7.65x)
     //
-    // Flipping the default needs the mangler relocated after the chunk compress, which is where every
-    // peer runs it (oxc's minifier owns its mangler and runs it last).
-    const LEGACY = process.env.CHUNK_COMPRESS === undefined;
-    const compressForScan = LEGACY
-        ? resolveMinify(options.output?.minify).compress
-        : resolveMinify(options.output?.minify).compress === false
-          ? false
-          : ('dce' as const);
+    // The 7.65x is the honest price and it is not a re-parse problem — by stage, the re-parse is
+    // 38.8ms of 229.7ms (17%) and the compressor itself is 137.9ms (60%). It is the per-module
+    // compress CACHE that is gone: an edited chunk must be re-minified as a whole. Every peer pays
+    // exactly this (rolldown `minify_chunks.rs`, rspack `process_assets`, rollup's `renderChunk`),
+    // and unchanged chunks skip it entirely through the render cache below — rspack's
+    // content-addressed minimize cache, reached through the cache we already keep. Taken
+    // deliberately: correct decisions on whole-chunk information beat cached decisions made per
+    // module on partial information.
+    const compressForScan = resolveMinify(options.output?.minify).compress === false ? false : ('dce' as const);
     // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
     //
     // A module that received a cross-module substitution has its producers recorded on its cache entry
@@ -1131,7 +1134,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, min.mangle && LEGACY);
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, false);
     Timer.end(timer, 'chunk');
 
     // Drop unused side-effect-free externals (the injected jsx runtime) via symbol liveness.
@@ -1188,8 +1191,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             want,
             // Emit-glue spacing and module printing both stay readable when the chunk pass will
             // minify: it re-parses this text, and minified printing loses `@__PURE__`.
-            min.compress === 'full' && !LEGACY ? false : min.whitespace,
-            min.compress === 'full' && !LEGACY,
+            min.compress === 'full' ? false : min.whitespace,
+            min.compress === 'full',
             naming,
             pathToChunk,
             prelim,
@@ -1200,15 +1203,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(
-            chunkGraph,
-            naming,
-            renderer,
-            (i) => graph.modules[i].id,
-            LEGACY ? false : min.compress,
-            !LEGACY && min.mangle,
-            inc,
-        );
+        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, min.compress, min.mangle, inc);
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
@@ -2218,9 +2213,11 @@ export function renderChunks(
         // chunk cache write (so a reused chunk skips it, rspack's content-addressed minimize cache
         // reached through the cache we already keep) and before hashing (placeholders are derived
         // from content, so compressing after would invalidate every hash).
-        if (compressMode === 'full') {
+        // Also runs for `{ mangle: true, compress: false }`: link-time mangling is gone, so this pass
+        // is the only place a mangler runs at all.
+        if (compressMode === 'full' || chunkMangle) {
             const joined = wantMap ? joinParts(rc.parts) : null;
-            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle);
+            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle, compressMode === 'full');
             rc.code = done.code;
             // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
             // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.
