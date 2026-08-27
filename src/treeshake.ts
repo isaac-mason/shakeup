@@ -1,4 +1,4 @@
-import { isPureStatement } from './analysis/effects';
+import { isPureExpr, isPureStatement } from './analysis/effects';
 import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
@@ -126,6 +126,41 @@ function augmentedByAssignment(mod: Module, linked: Linked, expr: Node): number 
         return bind !== undefined && bind.kind === 'found' ? bind.ref : 0;
     }
     return mod.semantic.symbols[sym].scope === scopeOf(mod.semantic, mod.program) ? packRef(mod.idx, sym) : 0;
+}
+
+/** The tree-shaking UNITS of a top-level statement.
+ *
+ *  Normally one: the statement. But a multi-declarator `var a = 1, b = 2` is one STATEMENT holding
+ *  several independent bindings, and shaking whole statements means demanding `a` keeps `b` too.
+ *  esbuild solves this by emitting one PART per declarator (`js_parser.go`, "Split up top-level
+ *  multi-declaration variable statements"); rolldown rewrites the AST into separate statements before
+ *  scanning (`tweak_ast_for_scanning.rs` `split_multi_declarator`).
+ *
+ *  shakeup takes esbuild's shape rather than rolldown's: the UNIT changes, the tree does not. Nothing
+ *  is mutated, so spans and source maps are untouched, no pass ordering moves, and — the reason it
+ *  matters here — `compress` runs BEFORE treeshake and would simply re-merge anything a rewrite had
+ *  split. Keying liveness on the declarator survives that.
+ *
+ *  GUARD (rolldown's): every declarator must bind a plain identifier. A pattern
+ *  (`const [a] = iterable, b = 2`) stays one unit — destructuring performs iterator/property work
+ *  that is not represented once a declarator is considered alone. */
+function shakeUnits(statement: Node): Node[] {
+    const decl =
+        statement.type === N.VariableDeclaration
+            ? statement
+            : statement.type === N.ExportNamedDeclaration && (statement.data.declaration as Node | null)?.type === N.VariableDeclaration
+              ? (statement.data.declaration as Node)
+              : null;
+    if (decl === null) return [statement];
+    const decls = (decl.data as { declarations: Node[] }).declarations;
+    if (decls.length < 2 || !decls.every((d) => (d.data as { id: Node }).id.type === N.BindingIdentifier)) return [statement];
+    return decls;
+}
+
+/** A declarator is pure exactly when its initializer is — the declaration itself binds and nothing more. */
+function unitIsPure(mod: Module, unit: Node, statement: Node): boolean {
+    if (unit === statement) return statementIsPure(mod, statement);
+    return isPureExpr((unit.data as { init: Node | null }).init);
 }
 
 function statementIsPure(mod: Module, statement: Node): boolean {
@@ -293,19 +328,27 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         const body = mod.program.data.body;
         for (let idx = 0; idx < body.length; idx++) {
             const statement = body[idx];
-            const refs: number[] = [];
-            const declared: number[] = [];
-            collectRefs(mod, linked, statement, refs, declared);
-            list.push({ statement, refs, pure: statementIsPure(mod, statement) });
+            // One info per UNIT, not per statement — see `shakeUnits`. `live` therefore holds
+            // DECLARATOR ids for a split declaration, and the printer emits only those.
+            // NOTE indices below are into `list` (units), NOT into `body` — they diverge as soon as
+            // one statement yields several units, and `includeStatement` indexes `list`.
+            const unitStart = list.length;
+            for (const unit of shakeUnits(statement)) {
+                const refs: number[] = [];
+                const declared: number[] = [];
+                collectRefs(mod, linked, unit, refs, declared);
+                list.push({ statement: unit, refs, pure: unitIsPure(mod, unit, statement) });
+                for (const ref of declared) {
+                    declToStatement.set(ref, [mod.idx, list.length - 1]);
+                    localDecls.push([ref, [mod.idx, list.length - 1]]);
+                }
+            }
             for (const aug of augmentedRefs(mod, linked, statement)) {
                 let sites = augmentsOf.get(aug);
                 if (sites === undefined) augmentsOf.set(aug, (sites = []));
-                sites.push([mod.idx, idx]);
+                sites.push([mod.idx, unitStart]);
             }
-            for (const ref of declared) {
-                declToStatement.set(ref, [mod.idx, idx]);
-                localDecls.push([ref, [mod.idx, idx]]);
-            }
+
         }
         const defRef = linked.defaultRefs.get(mod.idx);
         if (defRef !== undefined) {

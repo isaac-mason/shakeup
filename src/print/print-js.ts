@@ -715,7 +715,10 @@ function printVarDecl(p: Printer, n: Node, withSemi: boolean): void {
     const d = data(n);
     write(p, d.kind as string);
     space(p);
-    const decls = d.declarations as Node[];
+    const all = d.declarations as Node[];
+    // Identity-checked: the filter is live for the whole subtree, so only the declaration it names
+    // is filtered — a nested `for` init or function-body declaration prints in full.
+    const decls = p.declFilter === null || p.declFilter.decl !== n ? all : all.filter((x) => p.declFilter!.keep.has(x));
     for (let i = 0; i < decls.length; i++) {
         if (i > 0) {
             write(p, ',');
@@ -882,6 +885,24 @@ function emitsNothing(p: Printer, n: Node): boolean {
     return false;
 }
 
+/** The `VariableDeclaration` inside `stmt` whose declarators are shaken INDEPENDENTLY, or null.
+ *
+ *  Must agree exactly with `treeshake`'s `shakeUnits`: when that emits one info per declarator,
+ *  `live` holds DECLARATOR ids and the statement's own id is never in it, so the printer has to ask
+ *  the same question or it would drop the whole statement. */
+function splitDeclOf(stmt: Node): Node | null {
+    const decl =
+        stmt.type === N.VariableDeclaration
+            ? stmt
+            : stmt.type === N.ExportNamedDeclaration && (data(stmt).declaration as Node | null)?.type === N.VariableDeclaration
+              ? (data(stmt).declaration as Node)
+              : null;
+    if (decl === null) return null;
+    const decls = data(decl).declarations as Node[];
+    if (decls.length < 2 || !decls.every((d) => (data(d).id as Node).type === N.BindingIdentifier)) return null;
+    return decl;
+}
+
 export function printStmt(p: Printer, n: Node): void {
     mark(p, n);
     const d = data(n);
@@ -890,10 +911,24 @@ export function printStmt(p: Printer, n: Node): void {
             const body = d.body as Node[];
             let emitted = false;
             for (const s of body) {
-                if (p.live !== null && !p.live.has(s.id)) continue; // tree-shaken (top-level only)
+                let filter: { decl: Node; keep: Set<Node> } | null = null;
+                if (p.live !== null) {
+                    const split = splitDeclOf(s);
+                    if (split === null) {
+                        if (!p.live.has(s.id)) continue; // tree-shaken (top-level only)
+                    } else {
+                        // Declarator-granular: keep the live ones, drop the statement if none survive.
+                        const decls = data(split).declarations as Node[];
+                        const kept = decls.filter((dcl) => p.live!.has(dcl.id));
+                        if (kept.length === 0) continue;
+                        if (kept.length !== decls.length) filter = { decl: split, keep: new Set(kept) };
+                    }
+                }
                 if (emitsNothing(p, s)) continue;
                 if (emitted) softNewline(p);
+                p.declFilter = filter;
                 printStmt(p, s);
+                p.declFilter = null;
                 emitted = true;
             }
             dropTrailingSemi(p); // module ends — trailing `;` is redundant

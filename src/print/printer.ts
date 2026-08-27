@@ -60,6 +60,12 @@ export type Printer = {
     linkModule: boolean;
     defaultName: (() => string) | null;
     live: Set<number> | null;
+    /** Which declarators to emit for ONE specific declaration node. Set by the `Program` loop and
+     *  consumed by `printVarDecl`, which must check `decl` identity: the filter is live for the whole
+     *  subtree being printed, so a NESTED declaration (a `for` init, a declaration inside a function
+     *  body) would otherwise be filtered against a set holding none of its declarators and emit a
+     *  bare `let;`. */
+    declFilter: { decl: Node; keep: Set<Node> } | null;
     overrides: Map<Node, string> | null;
     // Generated position + sourcemap (all null/0 when the map is off).
     map: Mappings | null;
@@ -94,6 +100,7 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         linkModule: cfg.linkModule ?? false,
         defaultName: cfg.defaultName ?? null,
         live: cfg.live ?? null,
+        declFilter: null,
         // An EMPTY map is normalised to null. `emitExpr` guards on `overrides !== null` and then does
         // a `Map.get` PER EXPRESSION NODE; a module with no dynamic imports and no asset URLs supplies
         // an empty map, which is not null, so every node paid a lookup that could never hit.
