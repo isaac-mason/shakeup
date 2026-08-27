@@ -19,6 +19,7 @@
         "parserdiff": "tsx scripts/parser-diff.ts",
         "parsercorpus": "tsx scripts/parser-corpus.ts",
         "parserfuzz": "tsx scripts/parser-fuzz.ts",
+        "rollupsuite": "tsx scripts/rollup-suite.ts",
         "unchanged": "tsx scripts/output-unchanged.ts"
     },
     "devDependencies": {
