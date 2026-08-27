@@ -268,3 +268,47 @@ describe('new.target continues into a member chain', () => {
         expect(parse('new.target;', { ts: false, jsx: false, kind: 'module' }).errors.length).toBeGreaterThan(0);
     });
 });
+
+// `with` is a documented non-goal (cjs.md §7.18) — and the RIGHT outcome, which is worth stating
+// because the doc's original justification ("both oracles share this") was false. Measured on a
+// `with`-using CommonJS module bundled to ESM:
+//   · esbuild REFUSES:  "With statements cannot be used with the 'esm' output format due to strict mode"
+//   · shakeup REFUSES   (correct outcome; this test is about the MESSAGE)
+//   · rolldown BUILDS   and emits a bundle that dies at load: "Strict mode code may not include a with statement"
+//
+// So shakeup was already second-best of three; only the diagnostic was wrong. It surfaced as a bare
+// `unexpected token 'with' in expression`, which reads like a parser limitation rather than a stated
+// decision.
+describe('`with` statements are refused with a reason', () => {
+    const msg = (src: string) => parse(src, { ts: false, jsx: false, kind: 'commonjs' }).errors[0]?.msg ?? '';
+
+    it.each([
+        ['at the top level', 'with (o) { x }'],
+        ['inside a function', 'function f() { with (o) { x } }'],
+    ])('names the reason %s', (_label, src) => {
+        expect(msg(src)).toMatch(/`with` statements cannot be bundled/);
+        expect(msg(src)).toMatch(/always strict mode/);
+    });
+
+    it('reports it against the right file when bundling', async () => {
+        const { bundle } = await import('../src/bundle.ts');
+        const { createMemoryFs } = await import('../src/fs.ts');
+        const r = await bundle({
+            entry: '/main.js',
+            external: [],
+            fs: createMemoryFs({
+                '/d.cjs': 'const o = { a: 1 };\nwith (o) { module.exports = a }',
+                '/main.js': "import d from './d.cjs';\nexport const x = d;",
+            }),
+        });
+        expect(r.errors.join('\n')).toMatch(/^\/d\.cjs:\d+: `with` statements cannot be bundled/);
+    });
+
+    it.each([
+        ['a property named `with`', 'const o = { with: 1 };\nexport const x = o.with;'],
+        ['an import attribute clause', 'import a from "./m.js" with { type: "json" };'],
+        ['a method named `with`', 'class C { with() {} }'],
+    ])('does not misfire on %s', (_label, src) => {
+        expect(parse(src, { ts: false, jsx: false, kind: 'module' }).errors).toEqual([]);
+    });
+});
