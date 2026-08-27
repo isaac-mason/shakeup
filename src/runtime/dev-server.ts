@@ -282,7 +282,9 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // No plugin resolved it: honour `external`, then the shared config-driven resolver.
         if (isExternalSpecifier(options.external, spec)) return { external: spec };
         const resolved = await baseResolve(spec, importer);
-        if (resolved !== null) return resolved;
+        // Dev serves modules one at a time and never tree-shakes, so the record form's
+        // `moduleSideEffects` is irrelevant here — take the id.
+        if (resolved !== null) return typeof resolved === 'string' ? resolved : resolved.id;
         // Unresolved: a bare specifier is native-imported; a relative one surfaces as a fetch error.
         if (isBare(spec)) return { external: spec };
         return spec.startsWith('/') || importer === null ? spec : joinPath(dirOf(importer), spec);

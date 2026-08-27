@@ -1,6 +1,6 @@
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import type { ParseCache } from './graph-types';
-import { createNodeResolver } from './node-resolve';
+import { createNodeResolver, packageSideEffectsFor } from './node-resolve';
 import type { Plugin } from './plugin';
 import type { CompressMode } from './passes/compress';
 
@@ -21,7 +21,23 @@ export function resolveJSXOptions(jsx: JSXOptions | undefined): { importSource: 
 export type InputOption = string | string[] | Record<string, string>;
 
 /** A low-level resolver override: specifier+importer → resolved id / null. May be sync or async. */
-export type ResolveFn = (specifier: string, importer: string | null) => MaybePromise<string | null>;
+/** What the base resolver discovered, beyond the id itself.
+ *
+ *  rolldown's resolver returns a RECORD, not a path — `ResolveReturn { path, module_def_format,
+ *  package_json }` (`rolldown_resolver/src/resolver.rs:78`) — so facts found while resolving reach
+ *  the loader instead of being recomputed or lost. `package.json#sideEffects` is the one shakeup was
+ *  dropping on the floor: `readPkg` already loads the manifest for `exports`/`main`, then returned
+ *  only a string, which made the field unreachable by construction. */
+export type ResolvedIdInfo = {
+    id: string;
+    /** From `package.json#sideEffects`. Absent = the manifest said nothing; a PLUGIN's value always
+     *  wins over this (rolldown `normalize_side_effects`, `ecma_module_view_factory.rs:171`). */
+    moduleSideEffects?: boolean;
+};
+
+/** A user-supplied `resolve` function may keep returning a bare id — the record form is a superset,
+ *  mirroring how a plugin's `resolveId` may return a string or a `PartialResolvedId`. */
+export type ResolveFn = (specifier: string, importer: string | null) => MaybePromise<string | ResolvedIdInfo | null>;
 
 /** Deployment target picking `mainFields`/`conditionNames` defaults. */
 export type Platform = 'node' | 'browser' | 'neutral';
@@ -213,8 +229,23 @@ export function makeBaseResolve(
     // workspace member) and browser-field remaps, and returns null for a plain relative import
     // (no browser-map owner). Those fall to the built-in probe (alias / extensionAlias /
     // extensions / mainFiles).
-    return async (s, i) =>
-        (await node.resolve(applyAlias(s, normalized.alias), i)) ?? (await defaultResolve(fs, normalized, s, i));
+    return async (s, i) => {
+        const raw = (await node.resolve(applyAlias(s, normalized.alias), i)) ?? (await defaultResolve(fs, normalized, s, i));
+        if (raw === null) return null;
+        // Deref BEFORE looking up the owner. `scan` keys a module — and its pending options — by the
+        // post-realpath id, so reporting `sideEffects` against the symlinked path would file it under
+        // a key nothing reads. Under pnpm those differ for every dependency, which is precisely the
+        // case this is for. `scan` derefs again downstream; realpath is idempotent and memoized.
+        const id = normalized.symlinks ? ((await fs.realpath?.(raw)) ?? raw) : raw;
+        // Enrich BOTH branches: a relative import inside a package inherits that package's
+        // `sideEffects` just as a bare one does, which is what makes `sideEffects: false` apply
+        // package-wide. oxc-resolver returns the owning manifest for every resolve; shakeup splits
+        // bare/relative resolution, so the lookup is applied here where they rejoin.
+        const pkg = await node.packageFor(id);
+        if (pkg === null) return id;
+        const sideEffects = packageSideEffectsFor(pkg, id);
+        return sideEffects === undefined ? id : { id, moduleSideEffects: sideEffects };
+    };
 }
 
 /** Whether a specifier is externalized by the `external` option. */
