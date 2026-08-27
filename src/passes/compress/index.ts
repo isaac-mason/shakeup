@@ -16,7 +16,7 @@
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
 import { emitRefFacts, REF, semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
-import { refFor, SCOPE, type Semantic } from '../../analysis/semantic.ts';
+import { refFor, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
@@ -195,47 +195,6 @@ export const setDeltaMode = (m: DeltaMode): void => {
     DELTA_MODE = m;
 };
 
-/**
- * CHANGE-SCOPE tracking mode (`llm/notes/compressor-perf-plan.md`).
- *
- * `'off'`  — no stamps at all; the traversal behaves exactly as it did before.
- * `'on'`   — write stamps (skipping is a later phase and is not wired yet).
- * `'verify'` — write stamps AND differentially check them: every function the round actually changed
- *              must carry this round's stamp, and so must all of its ancestors. A MISSED stamp is the
- *              dangerous direction, because once skipping is enabled it silently drops an
- *              optimisation and shows up only as a byte diff on whichever corpus happens to hit it.
- *
- * Defaults to `'on'`: the stamps cost nothing measurable (`benches/micro/change-report.bench.ts`) and
- * writing them from the start means the verifier has something to check before skipping lands.
- */
-export type ChangeScopeMode = 'off' | 'on' | 'verify';
-let CHANGE_SCOPES: ChangeScopeMode = (process.env.CHANGE_SCOPES as ChangeScopeMode | undefined) ?? 'on';
-export const setChangeScopeMode = (m: ChangeScopeMode): void => {
-    CHANGE_SCOPES = m;
-};
-
-/**
- * Differentially check the stamps against the tree.
- *
- * The check that matters is COVERAGE, and it cannot be done by re-deriving "what changed" (we have no
- * before-image). What it CAN do is assert the structural invariant the skip depends on: if a function
- * carries this round's stamp then every enclosing function must too, because the stamp means
- * "changed at or below here". A stamp that fails to propagate upward is exactly the bug that would
- * make the walk skip a subtree containing a dirty nested function.
- */
-function verifyStamps(program: Node, sem: Semantic, stamp: number[], round: number): void {
-    const bad: string[] = [];
-    for (let s = 1; s < sem.scopes.length && bad.length < 10; s++) {
-        if (stamp[s] !== round) continue;
-        let p = sem.scopes[s].parent;
-        while (p !== 0 && sem.scopes[p].flags !== SCOPE.FUNCTION) p = sem.scopes[p].parent;
-        if (stamp[p] !== round)
-            bad.push(`scope ${s} stamped for round ${round} but enclosing function scope ${p} is ${stamp[p]}`);
-    }
-    if (bad.length > 0) throw new Error(`change-scope stamps did not propagate to ancestors:\n  ${bad.join('\n  ')}`);
-    void program;
-}
-
 const MAX_ITERS = 8;
 
 /** `SEMANTIC_VERIFY=1` differentially checks the maintained semantic against a fresh `analyze()` after
@@ -325,23 +284,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     //
     // oxc's model, and its words: the compressor "refreshes scoping incrementally — it only prunes
     // references for nodes it drops, and no longer rebuilds liveness from scratch each pass".
-    // CHANGE SCOPES (Closure's `ChangeTracker`, see `llm/notes/compressor-perf-plan.md`). Rounds 2-6
-    // of this loop mutate 320 / 63 / 10 / 1 / 0 functions out of ~1,205 and still re-walk the whole
-    // tree, at ~41ms each. `stamp[fnScope]` records the last round in which that function — or
-    // anything inside it — changed, so a later round can skip the ones that did not.
-    //
-    // STAGED ON PURPOSE: this phase only WRITES the stamps, it does not skip. A stamping bug and a
-    // skipping bug produce the same symptom (wrong output), and separating them means the byte
-    // gates can attribute a failure. `CHANGE_SCOPES=verify` cross-checks the stamps against a
-    // recomputation; skipping is not wired yet.
-    const stampArr: number[] = new Array(cur.scopes.length).fill(0);
-    const stamps = { stamp: stampArr, round: 0 };
     for (let i = 0; i < MAX_ITERS; i++) {
-        // Scopes are minted mid-loop (`createScope` for inlined bodies), so the array grows with the
-        // table. A plain `number[]` rather than an `Int32Array` precisely so this is a push, not a
-        // reallocation — the two benched identically (`change-report.bench.ts`).
-        while (stampArr.length < cur.scopes.length) stampArr.push(0);
-        stamps.round = i + 1;
         // No pre-pass at all: the reference facts every pass here reads (`refs`/`uses`/`shorthand`/
         // `exported`) are now maintained by `analyze` itself, which already walks every node and
         // already collects every reference. They were a SHARED prelude walk before that, and one
@@ -351,8 +294,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // nothing mutates between there and here, so the facts describe exactly the tree this
         // traversal is about to see. Round 1 is the same case via the caller's own `analyze`.
         const delta = DELTA_MODE === 'off' ? null : new Map<number, RefDelta>();
-        const changed = traverse(program, cur, loop, delta, stamps);
-        if (CHANGE_SCOPES === 'verify' && changed) verifyStamps(program, cur, stampArr, i + 1);
+        const changed = traverse(program, cur, loop, delta);
         if (!changed) break;
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
