@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { N, type Node } from '../src/ast.ts';
+import type { Node } from '../src/ast.ts';
 import { parse } from '../src/parser/index.ts';
 import { lazySplit } from '../src/passes/lazy-split.ts';
 import { printStmt } from '../src/print/print-js.ts';
@@ -17,7 +17,7 @@ const split = (src: string) => {
     expect(p.errors).toEqual([]);
     const s = lazySplit(p.program.data.body as Node[]);
     const render = (nodes: Node[]) => {
-        const pr = createPrinter({ source: src, sourceIdx: 0 });
+        const pr = createPrinter({ minify: false });
         for (const n of nodes) printStmt(pr, n);
         return finishPrinter(pr).trim();
     };
