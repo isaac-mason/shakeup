@@ -230,8 +230,13 @@ describe('parse goal gates top-level return / new.target', () => {
         expect(parseErrs('function o(){ return async (a) => (await a) ?? 1 }', 'module')).toEqual([]);
         expect(parseErrs('const f = async x => await x;', 'module')).toEqual([]);
         expect(parseErrs('function o(){ return (a) => await a }', 'module')).not.toEqual([]);
-        // …and the same gap wrongly rejected `new.target` in an expression-bodied arrow.
-        expect(parseErrs('const f = () => new.target;', 'module')).toEqual([]);
+        // …and the same gap wrongly rejected `new.target` in an expression-bodied arrow — but only
+        // when an ENCLOSING function supplies one. An arrow rebinds neither `this` nor `new.target`,
+        // so a top-level arrow has no more access to it than the top level does. Both oracles agree:
+        // `parseSync` rejects `const f = () => new.target;` at module goal, and node says
+        // "SyntaxError: new.target expression is not allowed here". This line asserted the opposite.
+        expect(parseErrs('function o(){ return () => new.target }', 'module')).toEqual([]);
+        expect(parseErrs('const f = () => new.target;', 'module')).not.toEqual([]);
     });
 
     it('applies the goal end-to-end from the declared format', async () => {

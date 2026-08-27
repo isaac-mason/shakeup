@@ -7,6 +7,7 @@ import {
     lineColOf,
     N,
     type Node,
+    type NodeOf,
     type Program,
 } from '../ast.ts';
 import { enumeration } from '../util/enumeration';
@@ -34,6 +35,7 @@ import {
     type ParseError,
     type ParserState,
     raise,
+    raiseAt,
     T_BIGINT,
     T_EOF,
     T_IDENT,
@@ -118,6 +120,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
         awaitOk: options.kind !== 'commonjs',
+        yieldOk: false,
         errors: [],
         baseId: 0,
         itKeys: new Array(cap),
@@ -230,6 +233,19 @@ function parseIdent(state: ParserState, role: number): Identifier {
     if (!isIdentLike(state)) {
         raise(state, ParseErrorCode.ExpectedIdentifier);
         return makeMissingIdent(state, role);
+    }
+    // `yield` and `await` are contextual: ordinary identifiers until the enclosing function makes
+    // them operators, at which point BINDING one is an early error. oxc's `identifier_generator` /
+    // `identifier_async` (`diagnostics.rs:573,578`). Only the binding role — a reference is already
+    // handled by the operator branches in `parseAssign`/`parseUnary`, which consume the token.
+    if (role === R_BIND) {
+        if (state.yieldOk && isK(state, K.YIELD)) raise(state, ParseErrorCode.IdentifierInGenerator);
+        // `await` needs the extra guard because `awaitOk` is seeded TRUE at top level for the
+        // permissive `unambiguous` goal, where `var await = 1` is legal script. Inside a function
+        // body `awaitOk` can only mean `async`, and a declared module is strict either way —
+        // `allowTopReturn` is the flag that is false for exactly the real-module goal.
+        else if (state.awaitOk && isK(state, K.AWAIT) && (state.fnDepth > 0 || !state.allowTopReturn))
+            raise(state, ParseErrorCode.IdentifierInAsync);
     }
     const id = ident(state, role, state.tokStart, state.tokEnd);
     nextToken(state);
@@ -347,6 +363,130 @@ function parseExpression(state: ParserState, noIn = false): Node {
     return expr;
 }
 
+/**
+ * EARLY ERRORS for assignment targets — 13.15.1 and the destructuring cover grammar.
+ *
+ * The grammar parses `f() = 1` happily, because the left-hand side is only known to be an
+ * assignment TARGET once the `=` is seen; the spec handles this with a "cover grammar" that
+ * reinterprets an already-parsed expression, and rejects what cannot be reinterpreted. oxc does the
+ * reinterpretation for real (`js/grammar.rs`, `CoverGrammar::cover`), turning the expression into a
+ * distinct `AssignmentTarget` node. shakeup keeps the expression node — a destructuring assignment
+ * stores its target as the ArrayExpression/ObjectExpression it was parsed as — so what is ported is
+ * the VALIDATION half: the same walk, raising where oxc raises, without the node conversion.
+ *
+ * `simple` distinguishes the two positions: `++x` and `x += 1` take a SimpleAssignmentTarget only,
+ * while `x = 1` and a for-in/of head also accept a destructuring pattern.
+ */
+function checkAssignTarget(state: ParserState, node: Node, simple: boolean): void {
+    switch (node.type) {
+        case N.IdentifierReference:
+        case N.BindingIdentifier:
+            return;
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+        case N.PrivateFieldExpression:
+            // A member inside an optional chain is not assignable: `a?.b = 1` is a SyntaxError even
+            // though `a.b = 1` is fine. shakeup marks the chain with a wrapping ChainExpression,
+            // which the case below rejects, and `optional` on the link itself.
+            if (node.data.optional as boolean) break;
+            return;
+        // TS type-only wrappers are transparent, but only over a SIMPLE target: oxc allows
+        // `(a as T) = 1` and rejects `(f() as T) = 1` (`grammar.rs:47-56`).
+        case N.TSAsExpression:
+        case N.TSSatisfiesExpression:
+        case N.TSNonNullExpression:
+            checkAssignTarget(state, node.data.expression as Node, true);
+            return;
+        case N.ArrayExpression:
+            if (simple) break;
+            checkArrayTarget(state, node);
+            return;
+        case N.ObjectExpression:
+            if (simple) break;
+            checkObjectTarget(state, node);
+            return;
+    }
+    raiseAt(state, node.start, simple ? ParseErrorCode.AssignmentNotSimple : ParseErrorCode.InvalidAssignmentTarget);
+}
+
+/** An element of a destructuring target, which may carry a default: `[a = 1] = b`. */
+function checkMaybeDefault(state: ParserState, node: Node): void {
+    // A default reaches here in one of two shapes. `[a = 1]` parses as an ArrayExpression holding an
+    // AssignmentExpression, but object SHORTHAND with a default (`{a = 1}`) is not expressible as
+    // an object literal at all, so it is parsed straight into an `AssignmentPattern` — a node that
+    // exists only in target position and is therefore already validated.
+    if (node.type === N.AssignmentPattern) {
+        checkAssignTarget(state, node.data.left as Node, false);
+        return;
+    }
+    if (node.type === N.AssignmentExpression) {
+        // `[a ||= 1] = b` — a default is spelled with `=` and nothing else.
+        if (node.data.operator !== '=') raiseAt(state, node.start, ParseErrorCode.DefaultValueOperator);
+        checkAssignTarget(state, node.data.left as Node, false);
+        return;
+    }
+    checkAssignTarget(state, node, false);
+}
+
+function checkArrayTarget(state: ParserState, node: NodeOf<'ArrayExpression'>): void {
+    const elements = node.data.elements as (Node | null)[];
+    for (let i = 0; i < elements.length; i++) {
+        const el = elements[i];
+        if (el === null) continue; // a hole is an elision, and skips its position
+        if (el.type !== N.SpreadElement && el.type !== N.RestElement) {
+            checkMaybeDefault(state, el);
+            continue;
+        }
+        if (i !== elements.length - 1) {
+            raiseAt(state, el.start, ParseErrorCode.SpreadLastElement);
+            return;
+        }
+        // A rest target is wider in an ARRAY than in an object: a nested pattern is allowed
+        // (`[...[a]] = b`), which is why this is not just `checkAssignTarget(.., true)`.
+        const arg = el.data.argument as Node;
+        if (arg.type !== N.ArrayExpression && arg.type !== N.ObjectExpression) checkRestTarget(state, arg);
+        else checkAssignTarget(state, arg, false);
+    }
+}
+
+function checkObjectTarget(state: ParserState, node: NodeOf<'ObjectExpression'>): void {
+    const props = node.data.properties as Node[];
+    for (let i = 0; i < props.length; i++) {
+        const prop = props[i];
+        if (prop.type === N.SpreadElement || prop.type === N.RestElement) {
+            if (i !== props.length - 1) {
+                raiseAt(state, prop.start, ParseErrorCode.SpreadLastElement);
+                return;
+            }
+            // Unlike an array rest, an object rest takes a SIMPLE target only: `({...{a}} = b)` is
+            // an error (`grammar.rs:192-201`).
+            checkRestTarget(state, prop.data.argument as Node);
+            continue;
+        }
+        if (prop.type !== N.ObjectProperty) continue;
+        // A getter/setter cannot appear in a destructuring target; its `value` is a function, which
+        // the target check below rejects on its own.
+        checkMaybeDefault(state, prop.data.value as Node);
+    }
+}
+
+/** The rest target's own rule: identifier or member expression, nothing else. oxc reports this one
+ *  NON-fatally and then still runs the ordinary target check, so the shape is the same either way;
+ *  shakeup's `raise` latches, so only the first message is kept. */
+function checkRestTarget(state: ParserState, arg: Node): void {
+    switch (arg.type) {
+        case N.IdentifierReference:
+        case N.BindingIdentifier:
+            return;
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+        case N.PrivateFieldExpression:
+            if (arg.data.optional as boolean) break;
+            return;
+    }
+    raiseAt(state, arg.start, ParseErrorCode.InvalidRestTarget);
+}
+
 function parseAssign(state: ParserState, noIn = false): Node {
     if (isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, state.tokStart, 0, null);
     if (isIdentLike(state) && !isK(state, K.ASYNC) && identArrowAhead(state)) {
@@ -384,7 +524,10 @@ function parseAssign(state: ParserState, noIn = false): Node {
         if (tp !== null && isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, start, 0, tp);
         restoreState(state, s);
     }
-    if (isK(state, K.YIELD)) {
+    // Only where `yield` is in scope. Elsewhere it is an ordinary identifier — the same shape as
+    // `await` above, and the same reason: `yield => 1` and `var yield = 1` are legal outside a
+    // generator, and `function f(){ yield 1 }` then fails naturally as two adjacent identifiers.
+    if (isK(state, K.YIELD) && state.yieldOk) {
         const start = state.tokStart;
         nextToken(state);
         let flags = 0;
@@ -409,6 +552,9 @@ function parseAssign(state: ParserState, noIn = false): Node {
     const left = parseConditional(state, noIn);
     if (isAssignOp(state.tok)) {
         const op = opTextOf(state.tok);
+        // `x = …` reinterprets the left side through the destructuring cover grammar; every other
+        // operator (`+=`, `&&=`, …) reads the old value first and so needs a SIMPLE target.
+        checkAssignTarget(state, left, op !== '=');
         nextToken(state);
         const right = parseAssign(state, noIn);
         return create.AssignmentExpression(left.start, right.end, op, left, right) as Node;
@@ -474,6 +620,8 @@ function parseUnary(state: ParserState): Node {
                 const op = state.tok === P.PLUSPLUS ? OP.INC : OP.DEC;
                 nextToken(state);
                 const arg = parseUnary(state);
+                // `++f()` / `++1`: an update reads AND writes, so only a simple target will do.
+                checkAssignTarget(state, arg, true);
                 return create.UpdateExpression(start, arg.end, op | FL.PREFIX, arg) as Node;
             }
         }
@@ -502,6 +650,7 @@ function parseUnary(state: ParserState): Node {
     let expr = parsePostfixChain(state);
     if (isPunct(state.tok) && (state.tok === P.PLUSPLUS || state.tok === P.MINUSMINUS) && (state.tokFlags & F_NL) === 0) {
         const op = state.tok === P.PLUSPLUS ? OP.INC : OP.DEC;
+        checkAssignTarget(state, expr, true);
         nextToken(state);
         expr = create.UpdateExpression(expr.start, state.tokStart, op, expr) as Node;
     }
@@ -1231,7 +1380,7 @@ function parseMethodTail(state: ParserState, start: number, flags: number): Node
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
     else consumeSemi(state);
     return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body) as Node;
 }
@@ -1585,7 +1734,7 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0);
+    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
     else consumeSemi(state);
     return isDecl && !isExpr
         ? (create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body) as Node)
@@ -1760,8 +1909,25 @@ function parseClassMember(state: ParserState): Node {
     } else if (state.tok === T_PRIVATE) key = parsePrivate(state);
     else key = parseNameAsIdent(state, R_NAME);
 
-    if (kind === 0 && key.type === N.IdentifierName && src.startsWith('constructor', key.start) && key.end - key.start === 11)
-        kind = 3;
+    // The class's own constructor: an un-computed, NON-STATIC member literally named `constructor`.
+    // `static constructor(){}` is an ordinary method that happens to share the name, and marking it
+    // kind 3 made a static method claim the constructor slot.
+    const namedConstructor =
+        (flags & (FL.STATIC | FL.COMPUTED)) === 0 &&
+        (key.type === N.IdentifierName || key.type === N.StringLiteral) &&
+        src.startsWith('constructor', key.type === N.StringLiteral ? key.start + 1 : key.start) &&
+        key.end - key.start === (key.type === N.StringLiteral ? 13 : 11);
+    if (kind === 0 && namedConstructor) kind = 3;
+    // Early errors on the constructor's FORM (oxc `diagnostics.rs:547,603` and the class checker).
+    // The grammar happily parses each of these; only the name makes them illegal.
+    // `#constructor` is reserved outright — static or not, method or field (`diagnostics.rs:534`).
+    if (key.type === N.PrivateIdentifier && key.end - key.start === 12 && src.startsWith('#constructor', key.start))
+        raise(state, ParseErrorCode.PrivateNameConstructor);
+    if (namedConstructor) {
+        if (generator) raise(state, ParseErrorCode.ConstructorGenerator);
+        else if (async) raise(state, ParseErrorCode.ConstructorAsync);
+        else if (kind === 1 || kind === 2) raise(state, ParseErrorCode.ConstructorAccessor);
+    }
 
     if (state.tsMode && isP(state, P.QUESTION)) {
         flags |= FL.OPTIONAL;
@@ -1802,25 +1968,30 @@ function isAccessModifier(state: ParserState): boolean {
  *  `new.target` exactly like a block body does. Handling only the block form silently let an
  *  expression-bodied async arrow inherit the enclosing scope's `await`, and wrongly rejected
  *  `() => new.target`. */
-function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T, arrow = false): T {
+function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T, arrow = false, isGenerator = false): T {
     state.fnDepth++;
-    state.newTargetDepth++;
-    // An arrow does NOT rebind `this`, so it must not hide the module's own.
+    // An arrow rebinds neither `this` NOR `new.target`: both come from the enclosing function. It
+    // must therefore not INTRODUCE one either — `() => new.target` at the top level is an error,
+    // while `function f(){ () => new.target }` is fine because `f` supplied it.
+    if (!arrow) state.newTargetDepth++;
     if (!arrow) state.thisDepth++;
     const outerAwait = state.awaitOk;
+    const outerYield = state.yieldOk;
     state.awaitOk = isAsync; // REPLACED, not unioned — a non-async function inherits no `await`
+    state.yieldOk = isGenerator; // likewise: an arrow, or a plain function nested in a generator, has none
     const out = parse();
     state.awaitOk = outerAwait;
+    state.yieldOk = outerYield;
     if (!arrow) state.thisDepth--;
+    if (!arrow) state.newTargetDepth--;
     state.fnDepth--;
-    state.newTargetDepth--;
     return out;
 }
 
 /** A FUNCTION body — tracked separately from {@link parseBlock} so top-level-only checks can fire.
  *  A plain `{ }` block at the top level is still top level; a function body is not. */
-function parseFunctionBody(state: ParserState, isAsync: boolean): Node {
-    return inFunctionScope(state, isAsync, () => parseBlock(state));
+function parseFunctionBody(state: ParserState, isAsync: boolean, isGenerator: boolean): Node {
+    return inFunctionScope(state, isAsync, () => parseBlock(state), false, isGenerator);
 }
 
 function parseBlock(state: ParserState): Node {
@@ -2329,6 +2500,9 @@ function parseFor(state: ParserState, start: number): Node {
             init = parseExpression(state, true);
             if (isK(state, K.OF) || isK(state, K.IN)) {
                 const isOf = state.tok === K.OF;
+                // A for-in/of head without a declaration is an assignment target, and takes the
+                // same cover grammar as `=` — `for (f() in {})` is a SyntaxError.
+                checkAssignTarget(state, init, false);
                 nextToken(state);
                 const right = isOf ? parseAssign(state) : parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
