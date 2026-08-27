@@ -13,9 +13,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 const ref = process.argv[2] ?? 'HEAD';
 const root = join(import.meta.dirname, '..');
@@ -25,6 +25,15 @@ execFileSync('bash', ['-c', `git -C ${root} archive ${ref} src | tar -x -C ${dir
 const diskFs = { read: (i: string) => (existsSync(i) ? readFileSync(i, 'utf8') : null), exists: (i: string) => existsSync(i) };
 const CC = '/Users/isaacmason/Development/crashcat/src/index.ts';
 const THREE = join(root, 'llm/spikes/node_modules/three/build/three.core.js');
+
+// LIBRARY-CONSUMER corpus. crashcat and three.core.js are both "everything live"; this one imports 8
+// names from three's 650KB ESM build and discards the rest, which is the shape real applications have
+// and the only one where tree-shaking decides the output. Staged next to `node_modules` so the bare
+// `three` specifier resolves with no bundler-specific alias config — the same file is then usable by
+// rolldown and esbuild in `pnpm standing`.
+const CONSUMER_SRC = join(root, 'scripts/corpora/three-consumer.js');
+const CONSUMER = join(root, 'llm/spikes/three-consumer-entry.js');
+if (existsSync(CONSUMER_SRC) && existsSync(dirname(THREE))) writeFileSync(CONSUMER, readFileSync(CONSUMER_SRC, 'utf8'));
 const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
     {
         name: 'crashcat minify+optimize',
@@ -46,6 +55,8 @@ const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
     },
     { name: 'crashcat plain', opts: () => ({ entry: CC, fs: diskFs, external: ['math', 'math/shapes', 'three'], output: {} }) },
     { name: 'three minify', opts: () => ({ entry: THREE, fs: diskFs, output: { minify: true } }) },
+    { name: 'three-consumer minify', opts: () => ({ entry: CONSUMER, fs: diskFs, output: { minify: true } }) },
+    { name: 'three-consumer plain', opts: () => ({ entry: CONSUMER, fs: diskFs, output: {} }) },
     { name: 'three plain', opts: () => ({ entry: THREE, fs: diskFs, output: {} }) },
 ];
 const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);

@@ -51,7 +51,39 @@ const CORPORA: Record<string, Corpus> = {
         entry: `${import.meta.dirname}/../llm/spikes/node_modules/three/build/three.core.js`,
         external: [],
     },
+    // LIBRARY CONSUMER — the shape the other two corpora do not cover. crashcat bundles an app's own
+    // source and three.core.js bundles a library as itself; both are "everything live", so neither
+    // says anything about tree-shaking. This imports 8 names from three's 650KB ESM build and drops
+    // the rest, which is what real applications do and where bundlers actually differ.
+    //
+    // Staged next to `node_modules` (see the `writeFileSync` below) so the bare `three` specifier
+    // resolves for EVERY tool with no per-bundler alias configuration.
+    consumer: {
+        name: 'three-consumer',
+        entry: `${import.meta.dirname}/../llm/spikes/three-consumer-entry.js`,
+        external: [],
+    },
 };
+
+{
+    const src = `${import.meta.dirname}/corpora/three-consumer.js`;
+    const dest = `${import.meta.dirname}/../llm/spikes/three-consumer-entry.js`;
+    if (existsSync(src) && existsSync(`${import.meta.dirname}/../llm/spikes/node_modules/three`)) {
+        writeFileSync(dest, readFileSync(src, 'utf8'));
+    }
+}
+
+/** Nearest `node_modules/<pkg>/package.json` walking up from `from`. */
+function findPackageJson(from: string, pkg: string): string | null {
+    let dir = from;
+    for (;;) {
+        const cand = join(dir, 'node_modules', pkg, 'package.json');
+        if (existsSync(cand)) return cand;
+        const up = dirname(dir);
+        if (up === dir) return null;
+        dir = up;
+    }
+}
 
 const which = process.argv[2] ?? 'crashcat';
 const corpus = CORPORA[which];
@@ -154,7 +186,33 @@ const TOOLS: Tool[] = [
                             name: 'ts-and-resolve',
                             resolveId(source: string, importer: string | undefined) {
                                 if (importer === undefined || corpus.external.includes(source)) return null;
-                                if (!source.startsWith('.')) return null;
+                                if (!source.startsWith('.')) {
+                                    // BARE SPECIFIER. Rollup has no node_modules resolution of its own
+                                    // (`@rollup/plugin-node-resolve` normally supplies it), and returning
+                                    // null here makes it treat the package as EXTERNAL — which on the
+                                    // library-consumer corpus made rollup "win" with a 1,752-byte bundle
+                                    // that had not bundled three at all.
+                                    //
+                                    // Resolve to the ESM entry, as `@rollup/plugin-node-resolve` does.
+                                    // `require.resolve` alone picks the `require` condition and handed
+                                    // rollup `three.cjs`, which then failed with `"Vector3" is not
+                                    // exported by three.cjs` — a CommonJS build has no named exports to
+                                    // bind. Read the package's own `exports.import` / `module` instead.
+                                    // Found by walking up to `node_modules/<pkg>/package.json` on disk
+                                    // rather than `require.resolve('<pkg>/package.json')`: three's
+                                    // `exports` map has no `./package.json` entry, so that throws
+                                    // ERR_PACKAGE_PATH_NOT_EXPORTED and the catch silently made the
+                                    // package external again — the same 1,752-byte non-result.
+                                    const pkgJson = findPackageJson(dirname(importer), source);
+                                    if (pkgJson === null) return null;
+                                    const pkg = JSON.parse(readFileSync(pkgJson, 'utf8')) as {
+                                        exports?: { '.'?: { import?: string } };
+                                        module?: string;
+                                        main?: string;
+                                    };
+                                    const rel = pkg.exports?.['.']?.import ?? pkg.module ?? pkg.main;
+                                    return rel === undefined ? null : join(dirname(pkgJson), rel);
+                                }
                                 const base = resolve(dirname(importer), source);
                                 for (const ext of ['', '.ts', '.tsx', '.js', '.mjs', '/index.ts', '/index.js']) {
                                     if (existsSync(base + ext) && !existsSync(join(base + ext, 'x'))) return base + ext;
@@ -205,7 +263,33 @@ const TOOLS: Tool[] = [
                             name: 'ts-and-resolve',
                             resolveId(source: string, importer: string | undefined) {
                                 if (importer === undefined || corpus.external.includes(source)) return null;
-                                if (!source.startsWith('.')) return null;
+                                if (!source.startsWith('.')) {
+                                    // BARE SPECIFIER. Rollup has no node_modules resolution of its own
+                                    // (`@rollup/plugin-node-resolve` normally supplies it), and returning
+                                    // null here makes it treat the package as EXTERNAL — which on the
+                                    // library-consumer corpus made rollup "win" with a 1,752-byte bundle
+                                    // that had not bundled three at all.
+                                    //
+                                    // Resolve to the ESM entry, as `@rollup/plugin-node-resolve` does.
+                                    // `require.resolve` alone picks the `require` condition and handed
+                                    // rollup `three.cjs`, which then failed with `"Vector3" is not
+                                    // exported by three.cjs` — a CommonJS build has no named exports to
+                                    // bind. Read the package's own `exports.import` / `module` instead.
+                                    // Found by walking up to `node_modules/<pkg>/package.json` on disk
+                                    // rather than `require.resolve('<pkg>/package.json')`: three's
+                                    // `exports` map has no `./package.json` entry, so that throws
+                                    // ERR_PACKAGE_PATH_NOT_EXPORTED and the catch silently made the
+                                    // package external again — the same 1,752-byte non-result.
+                                    const pkgJson = findPackageJson(dirname(importer), source);
+                                    if (pkgJson === null) return null;
+                                    const pkg = JSON.parse(readFileSync(pkgJson, 'utf8')) as {
+                                        exports?: { '.'?: { import?: string } };
+                                        module?: string;
+                                        main?: string;
+                                    };
+                                    const rel = pkg.exports?.['.']?.import ?? pkg.module ?? pkg.main;
+                                    return rel === undefined ? null : join(dirname(pkgJson), rel);
+                                }
                                 const base = resolve(dirname(importer), source);
                                 for (const ext of ['', '.ts', '.tsx', '.js', '.mjs', '/index.ts', '/index.js']) {
                                     if (existsSync(base + ext) && !existsSync(join(base + ext, 'x'))) return base + ext;
