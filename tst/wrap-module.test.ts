@@ -53,3 +53,54 @@ describe('wrapModuleBody builds the wrapper as AST', () => {
         expect(out).toMatch(/var w=.*__commonJS\(exports=>\{x\(\)\}\)/);
     });
 });
+
+// The parameter rule is rolldown's, and it is not obvious — pinned here because getting it wrong
+// emits a closure whose body references a binding the closure never bound.
+describe('CommonJS wrapper parameters follow rolldown', () => {
+    const build = async (src: string, importer = "import x from './c.cjs';\nexport const out = x;") => {
+        const { bundle } = await import('../src/bundle.ts');
+        const { createMemoryFs } = await import('../src/fs.ts');
+        const r = await bundle({
+            entry: '/main.mjs',
+            fs: createMemoryFs({ '/main.mjs': importer, '/c.cjs': src }),
+        });
+        expect(r.errors).toEqual([]);
+        return r.code;
+    };
+
+    it('binds neither when the module references neither', async () => {
+        // rolldown pushes `exports` only for `ModuleOrExports` (`ast_factory.rs:759`), so this is `()`.
+        // Reaching it needs a module that is WRAPPED but references neither binding: wrapping is
+        // driven by `require`, so a CommonJS module required purely for its side effect qualifies.
+        // Imported for effect from ESM it is not wrapped at all — it inlines.
+        const { bundle } = await import('../src/bundle.ts');
+        const { createMemoryFs } = await import('../src/fs.ts');
+        const r = await bundle({
+            entry: '/main.mjs',
+            fs: createMemoryFs({
+                '/main.mjs': "import x from './c.cjs';\nexport const out = x;",
+                '/c.cjs': "require('./d.cjs');\nmodule.exports = 1;",
+                '/d.cjs': 'globalThis.__hit = 1;',
+            }),
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.code).toMatch(/__commonJS\(\(\)\s*=>/);
+    });
+
+    it('binds `exports` alone when only exports is referenced', async () => {
+        const code = await build('exports.a = 1;');
+        expect(code).toMatch(/__commonJS\(\(?exports\)?\s*=>/);
+        expect(code).not.toMatch(/module\)\s*=>/);
+    });
+
+    it('binds both when `module` is referenced', async () => {
+        expect(await build('module.exports = 1;')).toMatch(/__commonJS\(\(exports,\s*module\)\s*=>/);
+    });
+
+    it('binds `exports` for top-level `this`, which is rewritten to it', async () => {
+        // `this === module.exports` in CommonJS and the emitter rewrites it, so a module that only
+        // ever says `this` still needs the parameter — the case a naive identifier scan misses.
+        const code = await build('this.a = 1;');
+        expect(code).toMatch(/__commonJS\(\(?exports\)?\s*=>/);
+    });
+});
