@@ -273,3 +273,71 @@ describe('import phases', () => {
         });
     });
 });
+
+// String export names, end to end. The parse fix alone was not enough: `export * as "ns name" from`
+// registered its named export under `exported.name`, which is `undefined` for a StringLiteral — so
+// the export existed in the AST and no consumer could find it.
+describe('string export names resolve through a bundle', () => {
+    const DEP = { '/dep.js': 'export const named = 1;\nexport const plain = 2;' };
+    const run = async (files: Record<string, string>, main: string) => {
+        const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs({ ...files, '/main.js': main }) });
+        expect(r.errors).toEqual([]);
+        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+    };
+
+    it('a re-export under a string name is reachable', async () => {
+        expect(
+            (
+                await run(
+                    { ...DEP, '/b.js': 'export { named as "re str" } from "./dep.js";' },
+                    'import * as ns from "./b.js";\nexport const x = ns["re str"];',
+                )
+            ).x,
+        ).toBe(1);
+    });
+
+    it('and importable by that name', async () => {
+        expect(
+            (
+                await run(
+                    { ...DEP, '/b.js': 'export { named as "re str" } from "./dep.js";' },
+                    'import { "re str" as v } from "./b.js";\nexport const x = v;',
+                )
+            ).x,
+        ).toBe(1);
+    });
+
+    it('`export * as "ns name"` materialises the namespace', async () => {
+        expect(
+            (
+                await run(
+                    { ...DEP, '/b.js': 'export * as "ns name" from "./dep.js";' },
+                    'import * as ns from "./b.js";\nexport const x = ns["ns name"].named;',
+                )
+            ).x,
+        ).toBe(1);
+    });
+
+    it('a local binding exported under a string name', async () => {
+        expect(
+            (
+                await run(
+                    { '/b.js': 'const a = 5;\nexport { a as "x y" };' },
+                    'import { "x y" as v } from "./b.js";\nexport const x = v;',
+                )
+            ).x,
+        ).toBe(5);
+    });
+
+    it('plain names are unaffected', async () => {
+        expect((await run(DEP, 'import { named, plain } from "./dep.js";\nexport const x = [named, plain];')).x).toEqual([1, 2]);
+        expect(
+            (
+                await run(
+                    { ...DEP, '/b.js': 'export * as ns from "./dep.js";' },
+                    'import * as ns from "./b.js";\nexport const x = ns.ns.named;',
+                )
+            ).x,
+        ).toBe(1);
+    });
+});

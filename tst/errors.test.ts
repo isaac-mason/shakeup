@@ -312,3 +312,34 @@ describe('`with` statements are refused with a reason', () => {
         expect(parse(src, { ts: false, jsx: false, kind: 'module' }).errors).toEqual([]);
     });
 });
+
+// Arbitrary module namespace names — `export { a as "x y" }`, `export * as "ns name" from …`. One
+// webpack file, and the last non-`with` entry in the parser corpus.
+//
+// Most forms already worked; two did not, and both were off-by-one token bugs rather than missing
+// grammar:
+//   · `export { "a-b" } from './m'` — with no `as`, `exported` IS `local`, and the code advanced once
+//     for the local and AGAIN for a string-valued `exported`, consuming a token too many.
+//   · `export * as "ns name" from './m'` — the namespace name was parsed as an identifier only.
+describe('string export and import names', () => {
+    const ok = (src: string) => parse(src, { ts: false, jsx: false, kind: 'module' }).errors;
+
+    it.each([
+        ['a renamed re-export', 'export { named as "re str" } from "./dep";'],
+        ['a string namespace name', 'export * as "ns name" from "./dep";'],
+        ['a string source name', 'export { "a-b" as c } from "./dep";'],
+        ['a string on both sides', 'export { "a-b" } from "./dep";'],
+        ['a string import name', 'import { "a-b" as ab } from "./dep";'],
+        ['a local renamed to a string', 'const a = 1;\nexport { a as "x y" };'],
+        ['mixed with plain names', 'export { a, "b-c" as d, e } from "./dep";'],
+    ])('parses %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+
+    it.each([
+        ['a plain namespace re-export', 'export * as ns from "./dep";'],
+        ['a plain re-export', 'export { a } from "./dep";'],
+    ])('does not disturb %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+});

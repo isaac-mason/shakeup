@@ -99,9 +99,9 @@ export function compileToModule(
     const DEFAULT_BINDING = '_default';
     const taken = new Set<string>([DEFAULT_BINDING]);
     entries.forEach(([key, v], i) => {
-        // A binding name that is stable, unique, and never a reserved word. Keys that are not plain
-        // identifiers still reach the DEFAULT export — they just have no named export, since naming
-        // them needs arbitrary-module-namespace-name syntax (`export { x as "a-b" }`).
+        // A binding name that is stable, unique, and never a reserved word. A key that is not a
+        // plain identifier is exported under its literal string name — `export { _a_b as "a-b" }` —
+        // which is what arbitrary module namespace names are for.
         let name = isPlainIdent(key) ? key : `_${key.replace(/[^A-Za-z0-9_$]/g, '_')}`;
         if (!IDENT.test(name) || RESERVED.has(name) || taken.has(name)) name = `_json${i}`;
         taken.add(name);
@@ -110,7 +110,13 @@ export function compileToModule(
         // `{"__proto__": …}` JSON file silently produced an object with a mangled prototype instead
         // of a `__proto__` property.
         members.push(key === '__proto__' ? `['__proto__']: ${name}` : `${JSON.stringify(key)}: ${name}`);
-        if (isPlainIdent(key) && name === key) exports.push(key);
+        // A key literally named `default` is NOT re-exported by name: the module already has a
+        // `default` export (the whole document), and emitting `export { x as "default" }` alongside
+        // it is a duplicate. It is still reachable through that default object — which is also what
+        // Node gives you for a JSON module. Caught by a test that read `[undefined, undefined,
+        // undefined]` once every key started being exported.
+        if (key === 'default') return;
+        exports.push(isPlainIdent(key) && name === key ? key : `${name} as ${JSON.stringify(key)}`);
     });
     lines.push(`var ${DEFAULT_BINDING} = { ${members.join(', ')} };`);
     lines.push(`export default ${DEFAULT_BINDING};`);

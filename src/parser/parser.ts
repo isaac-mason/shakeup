@@ -2555,7 +2555,13 @@ function parseExport(state: ParserState): Node {
     if (isP(state, P.STAR)) {
         nextToken(state);
         let exported: Ref = null;
-        if (eatK(state, K.AS)) exported = parseIdent(state, R_NAME);
+        if (eatK(state, K.AS)) {
+            // `export * as "ns name" from './m'` — the namespace name may be a string too.
+            if ((state.tok as number) === T_STR) {
+                exported = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+                nextToken(state);
+            } else exported = parseIdent(state, R_NAME);
+        }
         if (!eatK(state, K.FROM)) raise(state, ParseErrorCode.Expected, "'from'");
         let source: Ref = null;
         if ((state.tok as number) === T_STR) {
@@ -2594,19 +2600,24 @@ function parseExport(state: ParserState): Node {
                 if (isNameLike(state)) specFlags |= FL.TYPE_ONLY;
                 else restoreState(state, st);
             }
-            const local =
-                (state.tok as number) === T_STR
-                    ? leaf(state, N.StringLiteral, state.tokStart, state.tokEnd)
-                    : parseNameAsIdent(state, R_REF);
-            if ((state.tok as number) === T_STR) nextToken(state);
-            const exported: Node = eatK(state, K.AS)
-                ? (state.tok as number) === T_STR
-                    ? leaf(state, N.StringLiteral, state.tokStart, state.tokEnd)
-                    : parseNameAsIdent(state, R_NAME)
-                : local.type === N.StringLiteral
-                  ? local
-                  : ident(state, R_NAME, local.start, local.end);
-            if (exported.type === N.StringLiteral) nextToken(state);
+            // Arbitrary module namespace names: `export { a as "x y" }`, `export { "a-b" as c }`,
+            // and `export { "a-b" }` where the same string is both sides.
+            //
+            // Each leaf advances at the point it is built. The previous shape advanced once for the
+            // local and then AGAIN for a string-valued `exported` — but with no `as` those are the
+            // SAME node, so `export { "a-b" } from './m'` consumed a token too many and failed.
+            let local: Node;
+            if ((state.tok as number) === T_STR) {
+                local = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+                nextToken(state);
+            } else local = parseNameAsIdent(state, R_REF);
+            let exported: Node;
+            if (eatK(state, K.AS)) {
+                if ((state.tok as number) === T_STR) {
+                    exported = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+                    nextToken(state);
+                } else exported = parseNameAsIdent(state, R_NAME);
+            } else exported = local.type === N.StringLiteral ? local : ident(state, R_NAME, local.start, local.end);
             push(state, create.ExportSpecifier(ss, state.tokStart, specFlags, local, exported) as Node);
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
