@@ -199,3 +199,42 @@ describe('`new.target` and arrows', () => {
         expect(ok('class C { static { new.target } }')).toEqual([]);
     });
 });
+
+describe('`import` / `export` outside module scope', () => {
+    // The oracles SPLIT here, which is why this is asserted rather than assumed: oxc's parser
+    // ACCEPTS `function f() { export {} }` (it defers the check), while esbuild rejects it with an
+    // explicit `parseStmtOpts.isModuleScope` guard (`js_parser.go:7211,7338,7380`), Rollup's acorn
+    // rejects it ("'import', and 'export' cannot be used outside of module code"), and node says
+    // "SyntaxError: Unexpected token 'export'". Three to one, with node as the tiebreaker.
+    // Found by `pnpm rollupsuite` — the `export-not-at-top-level-fails` sample.
+    it.each([
+        ['a function body', 'function foo() { export { foo }; }'],
+        ['a function body, import', 'function f() { import a from "b"; }'],
+        ['a plain block', '{ export const a = 1; }'],
+        ['an `if` body', 'if (a) { import "b"; }'],
+        ['a single-statement `if`', 'if (a) import "b";'],
+        ['a class method', 'class C { m() { import "x"; } }'],
+    ])('rejects a declaration in %s', (_label, src) => {
+        expect(errOf(src)?.code).toBe(ParseErrorCode.ImportExportNotTopLevel);
+    });
+
+    it('accepts them at the top level', () => {
+        for (const src of [
+            'import a from "b";',
+            'export const a = 1;',
+            'export default 1;',
+            'export * from "m";',
+            'var a = 1; export { a as "s" };',
+        ]) {
+            expect(ok(src), src).toEqual([]);
+        }
+    });
+
+    it('leaves `import()` and `import.meta` alone, which are EXPRESSIONS', () => {
+        // The gate must land on the declaration only. Both of these are legal anywhere, and an
+        // over-broad check would break every dynamic import inside a function.
+        for (const src of ['function f() { import("x"); }', 'if (a) import("b");', 'function f() { import.meta; }']) {
+            expect(ok(src), src).toEqual([]);
+        }
+    });
+});
