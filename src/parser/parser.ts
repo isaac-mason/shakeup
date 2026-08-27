@@ -2535,13 +2535,29 @@ function finishImportEquals(state: ParserState, start: number, flags: number, id
     return create.TSImportEqualsDeclaration(start, state.tokStart, flags, id as Node, moduleRef) as Node;
 }
 
+/** Is the `async` at the cursor the start of an `async function` declaration, rather than an async
+ *  ARROW or a plain identifier?
+ *
+ *  `export default async` used to assume `function` unconditionally, so
+ *  `export default async (v) => v * 2` failed with `expected '('` — a perfectly ordinary default
+ *  export of an async arrow. The same shape one level in (`const f = async (v) => v`) always worked,
+ *  which is how it survived. A LineTerminator between them means ASI has already ended the
+ *  expression, so `async` is an identifier there. */
+function asyncFunctionFollows(state: ParserState): boolean {
+    const save = saveState(state);
+    nextToken(state);
+    const yes = isK(state, K.FUNCTION) && (state.tokFlags & F_NL) === 0;
+    restoreState(state, save);
+    return yes;
+}
+
 function parseExport(state: ParserState): Node {
     const start = state.tokStart;
     nextToken(state);
     if (eatK(state, K.DEFAULT)) {
         let decl: Node;
         if (isK(state, K.FUNCTION)) decl = parseFunction(state, false, true, false);
-        else if (isK(state, K.ASYNC)) {
+        else if (isK(state, K.ASYNC) && asyncFunctionFollows(state)) {
             nextToken(state);
             decl = parseFunction(state, true, true, false);
         } else if (isK(state, K.CLASS)) decl = parseClass(state, false, 0);
