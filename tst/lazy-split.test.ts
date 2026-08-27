@@ -122,11 +122,45 @@ describe('the split keeps every binding on ONE name', () => {
         expect(mod.x).toEqual([1, 2]);
     });
 
-    it('the hoisted names and the namespace getter bodies agree after mangling', async () => {
+    it('the hoisted binding follows DECONFLICTION renaming', async () => {
+        // The case the symbol matters for now that mangling runs over the whole chunk: two modules
+        // both declare `a`, so deconflict renames one. `lazySplit` SYNTHESIZES the hoisted `var` and
+        // retypes the binding into the assignment target; if either loses its symbol it prints the
+        // raw source name while the namespace getter prints the deconflicted one.
+        //
+        // `other.js` is imported FIRST so it keeps `a` and the lazy module is the one renamed —
+        // the other order leaves the lazy binding on its source name and proves nothing.
+        const { bundle } = await import('../src/bundle.ts');
+        const { createMemoryFs } = await import('../src/fs.ts');
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/e.js': 'export const a = 1;\nexport let m = 2;',
+                '/other.js': 'export let a = globalThis.__seed;\nexport function q() { a += 1; return a; }',
+                '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a, e.m];",
+                '/main.js': "import { q } from './other.js';\nimport d from './d.cjs';\nexport const x = [d, q()];",
+            }),
+            output: {},
+        });
+        expect(r.errors).toEqual([]);
+        // Whatever the getter returns is the authority — the hoisted `var` and the assignment must
+        // both use that same name, and it must NOT be the un-deconflicted `a`.
+        const getter = /get a\(\) \{ return ([A-Za-z$_][\w$]*); \}/.exec(r.code);
+        expect(getter).not.toBeNull();
+        const name = getter![1];
+        expect(name).not.toBe('a');
+        expect(r.code).toMatch(new RegExp(`var ${name.replace('$', '\\$')}, `));
+        expect(r.code).toMatch(new RegExp(`${name.replace('$', '\\$')} = 1;`));
+    });
+
+    it('every namespace getter reads a variable the chunk actually assigns', async () => {
+        // The invariant, stated without depending on how the chunk is printed: a getter body names
+        // the hoisted binding, and the closure assigns that SAME binding. Under the bug the getters
+        // read `a`/`m` (raw source names) while the closure assigned `e`/`t` (mangled) — so each
+        // getter identifier existing as an assignment target is exactly the thing that broke.
         const code = await run(true);
-        const hoisted = /var ([A-Za-z$_][\w$]*),([A-Za-z$_][\w$]*);var \w+=__esm/.exec(code);
-        expect(hoisted).not.toBeNull();
         const getters = [...code.matchAll(/get \w+\(\)\{return ([A-Za-z$_][\w$]*);?\}/g)].map((m) => m[1]);
-        expect(getters.sort()).toEqual([hoisted![1], hoisted![2]].sort());
+        expect(getters).toHaveLength(2);
+        for (const g of getters) expect(code).toMatch(new RegExp(`[,;({]${g}=`));
     });
 });

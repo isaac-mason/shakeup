@@ -30,19 +30,27 @@ import { analyze, createSemantic } from './analysis/semantic';
 import type { Node } from './ast';
 import { RESERVED } from './deconflict';
 import { mangleProgram } from './mangle/program';
-import { buildLineTable, trimMappings } from './sourcemap';
-import type { Mappings } from './sourcemap';
-import { runCompress } from './passes/compress';
 import { parse } from './parser';
+import { runCompress } from './passes/compress';
 import { printModule } from './print/print-js';
-import { createPrinter, finishPrinter } from './print/printer';
 import type { PrinterConfig, PrintOptions } from './print/printer';
+import { createPrinter, finishPrinter } from './print/printer';
+import type { Mappings } from './sourcemap';
+import { buildLineTable, trimMappings } from './sourcemap';
 
 export type ChunkCompressResult = { code: string; map: Mappings | null };
 
 /** Compress `code` as one program. `wantMap` produces chunk→compressed mappings for the caller to
  *  compose with the module→chunk mappings it already holds. */
-export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean, mangle: boolean): ChunkCompressResult {
+export function compressChunk(
+    code: string,
+    opts: PrintOptions,
+    wantMap: boolean,
+    mangle: boolean,
+    /** Run the cosmetic compress tier. False for `{ mangle: true, compress: false }`, which still
+     *  needs this pass — mangling has nowhere else to run now that link-time mangling is gone. */
+    compress: boolean,
+): ChunkCompressResult {
     // The chunk is emitted JavaScript in module goal — never TS, never JSX by this stage.
     const parsed = parse(code, { ts: false, jsx: false, kind: 'module' });
     // A chunk we just emitted must parse; if it does not, that is a printer bug and the right move is
@@ -50,7 +58,7 @@ export function compressChunk(code: string, opts: PrintOptions, wantMap: boolean
     if (parsed.errors !== undefined && parsed.errors.length > 0) return { code, map: null };
     const semantic = createSemantic();
     analyze(semantic, parsed.program);
-    runCompress(parsed.program, semantic, 'full');
+    if (compress) runCompress(parsed.program, semantic, 'full');
     // MANGLE LAST, after the compressor has finished deleting things — otherwise short names are
     // spent on bindings that do not survive. See `mangle/program.ts`.
     const names = mangle ? mangleProgram(parsed.program, semantic, new Set(RESERVED)) : null;
