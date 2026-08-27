@@ -92,6 +92,9 @@ export type ParserState = {
      *  feed DIFFERENT classification tiers: an export decides ESM outright, while an import only
      *  breaks the final tie — a file with `import` AND `module.exports` is CommonJS. */
     sawEsmImport: boolean;
+    /** A syntax error has been recorded and the lexer jumped to EOF. Rewound by `restoreState`, so
+     *  speculative probes that fail do not latch it. See {@link raise}. */
+    fatal: boolean;
     /** Nesting depth of scopes that REBIND `this` — non-arrow function bodies and class bodies.
      *  Arrows are excluded because they inherit `this` from the enclosing scope, so an arrow at the
      *  module top level still sees the module's `this`. */
@@ -126,8 +129,36 @@ export type ParserState = {
 };
 
 /** Push a formatted diagnostic (capped, so a runaway parse can't allocate forever). */
+/**
+ * Record a syntax error and STOP.
+ *
+ * Every reference parser reports one error per file and stops: meriyah throws, esbuild reports
+ * exactly 1, and oxc latches — `set_fatal_error` records the diagnostic and calls
+ * `lexer.advance_to_end()` (`oxc_parser/src/error_handler.rs:84-89`). shakeup used to keep going,
+ * which produced up to 9 cascading errors for one real mistake and, worse, meant every recovery loop
+ * had to be independently proved to terminate. It was not: `llm/repro/parser-oom.js` is 347 bytes
+ * that exhausted a 4GB heap.
+ *
+ * Jumping to EOF is what makes termination STRUCTURAL rather than per-loop — every
+ * `while (!isP(state, <closer>) && tok !== T_EOF)` in the parser exits on its next test, with no
+ * reasoning required at any individual site.
+ *
+ * Safe under speculation because `restoreState` rewinds `fatal` along with `pos` and the error list:
+ * a failed `saveState`/`restoreState` probe leaves no trace, which it must, since speculation raises
+ * errors on purpose.
+ *
+ * Nothing is lost by stopping: BOTH consumers discard the AST when any error is present —
+ * `bundle.ts` returns early on `graph.errors.length > 0`, `transform.ts` returns `emptyResult`.
+ */
 export function raise(state: ParserState, code: ParseErrorCode, ...params: string[]): void {
-    if (state.errors.length < 100) {
-        state.errors.push({ pos: state.tokStart, msg: formatError(code, params), code });
-    }
+    if (state.fatal) return;
+    state.fatal = true;
+    state.errors.push({ pos: state.tokStart, msg: formatError(code, params), code });
+    // Jump the lexer to end-of-input. `tokStart`/`tokEnd` follow so the next `raise` (there will not
+    // be one) and any span built from them stay inside the source.
+    state.pos = state.srcLen;
+    state.tokStart = state.srcLen;
+    state.tokEnd = state.srcLen;
+    state.tok = T_EOF;
+    state.tokFlags = 0;
 }
