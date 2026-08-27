@@ -1419,14 +1419,25 @@ function renderChunk(
                 tailParts = renderBody(splitRender.body, null);
             }
         // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
-        // MINIMAL — bound only when the body references them (§4.3 of cjs.md: rolldown emits
-        // `(exports)` for a module that never mentions `module`). `/* @__PURE__ */` lets an unused
+        // MINIMAL — bound only when the body references them. `/* @__PURE__ */` lets an unused
         // wrapper be dropped entirely.
         const wrapRef = linked.cjsWrap.get(idx);
         if (wrapRef !== undefined) {
             const wrapName = finalNameOf(linked, wrapRef);
+            // rolldown's rule exactly (`ast_factory.rs:759-786`): push `exports` when the module
+            // references EITHER binding (`ModuleOrExports`), push `module` only when it references
+            // `module` (`ModuleRef`). A module touching neither gets NO parameter list. We used to
+            // emit `exports` unconditionally — the comment above claimed to be following rolldown and
+            // described behaviour it does not have.
             const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
-            const params = uses.has('module') ? ['exports', 'module'] : ['exports'];
+            // Top-level `this` counts as referencing `exports`: in CommonJS `this === module.exports`,
+            // and `bundle.ts:323` rewrites every top-level `this` to `exports` — so a module that only
+            // ever says `this` still needs the parameter bound. rolldown folds the same case into
+            // `ModuleOrExports`. Missing it emitted a closure with no `exports` param whose body
+            // referenced `exports`, which the CJS `this` tests caught immediately.
+            const usesModule = uses.has('module');
+            const usesExports = uses.has('exports') || mod.topLevelThis.length > 0;
+            const params = usesModule ? ['exports', 'module'] : usesExports ? ['exports'] : [];
             // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
             // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
             // in its pipeline. Building it here means the mappings fall out of printing instead of
