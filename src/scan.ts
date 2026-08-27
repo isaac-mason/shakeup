@@ -15,7 +15,7 @@ import {
     NAME_DEFAULT,
     NAME_NAMESPACE,
 } from './graph-types';
-import { compileToModule } from './loaders';
+import { compileToModule, loaderWantsBytes } from './loaders';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
 import { parse } from './parser';
 import { runCompress } from './passes/compress';
@@ -174,12 +174,32 @@ function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
     return pending.moduleSideEffects ?? true;
 }
 
-/** Default module type from the id's extension. */
-function moduleTypeOf(id: string): ModuleType {
-    if (id.endsWith('.tsx')) return 'tsx';
-    if (id.endsWith('.jsx')) return 'jsx';
-    if (id.endsWith('.ts')) return 'ts';
-    if (id.endsWith('.json')) return 'json';
+/** `with { type: … }` values that name a module type by a DIFFERENT word than the loader does.
+ *
+ *  esbuild's list (`bundler.go:211-220`) is the whole of it: `json`, `text`, and `bytes` — which is
+ *  the import-bytes proposal's spelling for what the loader calls `binary`. `json` and `text` need
+ *  no entry because the two vocabularies already agree there. Anything else passes through as
+ *  written and reaches the loader as an unknown type. */
+const ATTRIBUTE_TYPES: Record<string, ModuleType> = { bytes: 'binary' };
+
+/** Default module type from the id's extension, plus the caller's `moduleTypes` overrides.
+ *
+ *  The built-in map is rolldown's (`prepare_build_context.rs:224`); `.txt → text` is the only entry
+ *  beyond the JavaScript family and JSON, and it is in esbuild's default map too
+ *  (`bundler.go:2968`). Nothing maps to `base64`/`dataurl`/`binary` by extension in EITHER oracle —
+ *  those are reached through `moduleTypes`, an import attribute, or a plugin, because which of the
+ *  three you want for a `.png` is a build decision, not a property of the file. */
+function moduleTypeOf(id: string, overrides: Record<string, ModuleType>): ModuleType {
+    const dot = id.lastIndexOf('.');
+    const slash = id.lastIndexOf('/');
+    const ext = dot > slash && dot >= 0 ? id.slice(dot + 1).toLowerCase() : '';
+    const override = overrides[ext];
+    if (override !== undefined) return override;
+    if (ext === 'tsx') return 'tsx';
+    if (ext === 'jsx') return 'jsx';
+    if (ext === 'ts' || ext === 'mts' || ext === 'cts') return 'ts';
+    if (ext === 'json') return 'json';
+    if (ext === 'txt') return 'text';
     return 'js';
 }
 
@@ -738,8 +758,13 @@ function memoBuildFs(fs: Fs): Fs {
     const exists = new Map<string, MaybePromise<boolean>>();
     const realpath = fs.realpath === undefined ? undefined : new Map<string, MaybePromise<string>>();
     const rp = fs.realpath;
+    // Every capability of the wrapped fs has to be forwarded, INCLUDING the optional ones: this
+    // wrapper silently dropped `readBytes`, so a `binary`/`dataurl` module read back the lossy
+    // UTF-8 decoding of its own bytes and every byte above 0x7F became U+FFFD.
+    const readBytes = fs.readBytes;
     return {
         read: (id) => fs.read(id),
+        readBytes: readBytes === undefined ? undefined : (id) => readBytes.call(fs, id),
         exists: (id) => {
             let v = exists.get(id);
             if (v === undefined) {
@@ -799,6 +824,12 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         externalSideEffects: new Map(),
     };
     const cache = options.cache;
+    // `moduleTypes` keys are extensions with the leading dot optional, matching rolldown's
+    // normalization (`prepare_build_context.rs:243` strips a `.` prefix).
+    const moduleTypes: Record<string, ModuleType> = {};
+    for (const [ext, type] of Object.entries(options.moduleTypes ?? {})) {
+        moduleTypes[(ext.startsWith('.') ? ext.slice(1) : ext).toLowerCase()] = type;
+    }
     const fs = memoBuildFs(options.fs);
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
@@ -951,10 +982,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         }
     };
 
-    const loadFn = async (id: string): Promise<string | null> => {
+    const loadFn = async (id: string, wantBytes: boolean): Promise<string | Uint8Array | null> => {
         if (id === EMPTY_MODULE_ID) return ''; // browser:false-disabled module → empty
         const r = await runLoad(pipe, ctx, id);
-        if (r === null || r === undefined) return fs.read(id);
+        // A byte-shaped module type reads through `Fs.readBytes` when the fs offers one. Only when
+        // NO plugin claimed the load: a `load` hook returns source text by contract, and a plugin
+        // that wants to own a binary file does so by handing back the text it wants compiled.
+        if (r === null || r === undefined) return wantBytes && fs.readBytes !== undefined ? fs.readBytes(id) : fs.read(id);
         if (typeof r === 'string') return r;
         // SourceDescription: take .code and merge its option overrides (load > resolveId).
         mergeOptions(pendingFor(id), r);
@@ -1006,19 +1040,30 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hit = signalHit;
             graph.parseStats.reused++;
         } else {
-            const source0 = await loadFn(id);
-            if (source0 === null) {
+            // The module type has to be settled BEFORE the load, because it decides whether the
+            // read is text or bytes. Only `resolveId`'s contribution is visible this early; a
+            // `load` hook that sets `moduleType` is re-read below and still wins, it just cannot
+            // retroactively turn a text read into a byte one — which is fine, since such a plugin
+            // supplied the source itself and no fs read happened.
+            const preType = pendingFor(id).moduleType ?? moduleTypeOf(id, moduleTypes);
+            const loaded = await loadFn(id, loaderWantsBytes(preType));
+            if (loaded === null) {
                 graph.errors.push(`cannot load module '${id}'`);
                 return -1;
             }
-            const transformed = await runTransform(pipe, ctx, source0, id);
+            // Bytes never reach `transform`: the hook's contract is source text, and a plugin that
+            // wants a say in a binary module gets it through `load`/`moduleType`. rolldown is the
+            // same shape — `StrOrBytes` survives only as far as `pre_process_source`.
+            const bytes = typeof loaded === 'string' ? null : loaded;
+            const source0 = bytes === null ? (loaded as string) : '';
+            const transformed = bytes === null ? await runTransform(pipe, ctx, source0, id) : { code: source0, meta: {} };
             source = transformed.code;
             // Merge transform overrides (transform > load > resolveId precedence).
             const pending = pendingFor(id);
             mergeOptions(pending, transformed);
             sideEffects = resolveModuleSideEffects(pending);
             metaVal = pending.meta;
-            moduleTypeVal = pending.moduleType ?? moduleTypeOf(id);
+            moduleTypeVal = pending.moduleType ?? moduleTypeOf(id, moduleTypes);
             // Declared module goal (cjs.md §7.1b): a per-build RESOLVE output. Needed BEFORE the
             // cache lookup because it is part of the key, and before `parse` because it selects the
             // parse goal.
@@ -1036,7 +1081,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // apply to source no plugin touched; an explicit `moduleType` from a plugin still wins,
             // so a plugin CAN hand work back to a built-in loader deliberately.
             const pluginOwns = pending?.moduleType === undefined && source !== source0;
-            const compiled = pluginOwns ? null : compileToModule(moduleTypeVal, source, id);
+            const compiled = pluginOwns ? null : compileToModule(moduleTypeVal, bytes ?? source, id);
             if (compiled !== null) {
                 if ('error' in compiled) {
                     graph.errors.push(compiled.error);
@@ -1401,7 +1446,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // same `pendingFor` channel a plugin's `resolveId` uses, so precedence is unchanged and
             // the loader stage picks it up without knowing attributes exist.
             if (rec.attributeType !== undefined && graph.byId.get(depId) === undefined) {
-                mergeOptions(pendingFor(depId), { moduleType: rec.attributeType as ModuleType });
+                mergeOptions(pendingFor(depId), { moduleType: ATTRIBUTE_TYPES[rec.attributeType] ?? rec.attributeType });
             }
             rec.resolved = await addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);

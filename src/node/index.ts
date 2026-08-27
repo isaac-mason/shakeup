@@ -15,6 +15,17 @@ export function createNodeFs(): Fs {
             }
         },
         exists: (id) => existsSync(id),
+        readBytes: (id) => {
+            try {
+                // `readFileSync` with no encoding hands back a Buffer, which IS a Uint8Array — but
+                // one that views a slice of a pooled ArrayBuffer, so it is copied rather than
+                // aliased before it leaves the seam.
+                const buf = readFileSync(id);
+                return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+            } catch {
+                return null;
+            }
+        },
         realpath: (id) => {
             try {
                 return realpathSync(id);

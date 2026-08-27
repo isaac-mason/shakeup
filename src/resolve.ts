@@ -1,8 +1,8 @@
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import type { ParseCache } from './graph-types';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve';
-import type { Plugin } from './plugin';
 import type { CompressMode } from './passes/compress';
+import type { ModuleType, Plugin } from './plugin';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
  * automatic runtime only. */
@@ -151,6 +151,12 @@ export type GraphOptions = CommonOptions & {
      *  lowering), so it lives in scan and the parse-cache key includes it. Set by `bundle()` from
      *  `output.minify`; default false. */
     compress?: CompressMode | false;
+    /** Extension → {@link ModuleType}, overriding the built-in map. The leading dot is optional:
+     *  `{ '.png': 'dataurl', wgsl: 'text' }`. rolldown's option of the same name, and the only way
+     *  to reach `base64`/`dataurl`/`binary` by extension — neither oracle maps any extension to
+     *  them by default, since which one a `.png` should use is a build decision. An import
+     *  attribute (`with { type: 'text' }`) or a plugin's `moduleType` still wins over this. */
+    moduleTypes?: Record<string, ModuleType>;
     /** Run the OPTIMIZE tier (directive-gated: `@optimize`/`@inline`/`@sroa`/`@unroll` → function
      *  inlining, loop unrolling, SROA, flow-sensitive inlining). These fire only where a source
      *  directive opts in, so `true` is safe as the default; set `false` to IGNORE all directives —
