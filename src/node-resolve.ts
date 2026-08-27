@@ -18,6 +18,14 @@ export type NodeResolverOptions = {
 export type NodeResolver = {
     resolve(specifier: string, importer: string | null): Promise<string | null>;
     load(id: string): string | null;
+    /** The nearest enclosing `package.json` for a RESOLVED id, off the resolver's own cache.
+     *
+     *  rolldown gets this for free: oxc-resolver returns `package_json` alongside the path from
+     *  every resolve, relative imports included (`ResolveReturn`, `rolldown_resolver/src/resolver.rs:78`).
+     *  shakeup splits resolution — this resolver handles bare specifiers, `defaultResolve` handles
+     *  relative ones — so the lookup is exposed instead and `makeBaseResolve` applies it to BOTH
+     *  branches. It shares `readPkg`'s cache, which resolution has usually already warmed. */
+    packageFor(id: string): Promise<PackageJson | null>;
 };
 
 const DEFAULT_CONDITIONS = ['import', 'browser', 'default'];
@@ -38,7 +46,64 @@ type PackageJson = {
     /** `workspaces` globs/paths (array form or `{ packages: [...] }`) — for install-free
      *  monorepo member resolution. */
     workspaces: string[] | undefined;
+    /** `sideEffects`: `false` = every module here is drop-if-unreferenced; a glob or glob array =
+     *  only the matching files have side effects. Absent = unknown, decide per statement. */
+    sideEffects: boolean | string[] | undefined;
 };
+
+/** Match one `sideEffects` glob against a package-relative path.
+ *
+ *  npm/webpack semantics, which are NOT full globbing: `*` matches within a segment, `**` crosses
+ *  separators, and a pattern with no `/` matches the BASENAME at any depth (`"*.css"` covers
+ *  `dist/a.css`). oxc-resolver implements this in `PackageJson::check_side_effects_for`, which is not
+ *  vendored under `llm/libs`, so this follows the spec rather than that source — hence the tests. */
+function sideEffectGlobMatches(pattern: string, relPath: string): boolean {
+    let pat = pattern.startsWith('./') ? pattern.slice(2) : pattern;
+    // A bare pattern (no separator) matches the basename at any depth.
+    const target = pat.includes('/') ? relPath : baseName(relPath);
+    let re = '';
+    for (let i = 0; i < pat.length; i++) {
+        const c = pat[i];
+        if (c === '*') {
+            if (pat[i + 1] === '*') {
+                // `**/` may also match ZERO segments, so the separator is part of the optional group.
+                if (pat[i + 2] === '/') {
+                    re += '(?:.*/)?';
+                    i += 2;
+                } else {
+                    re += '.*';
+                    i += 1;
+                }
+            } else {
+                re += '[^/]*';
+            }
+        } else if (c === '?') re += '[^/]';
+        else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+    return new RegExp(`^${re}$`).test(target);
+}
+
+/** The `sideEffects` verdict for `id` under `pkg`, or `undefined` when the manifest says nothing.
+ *  Mirrors oxc-resolver's per-module check: the path is taken RELATIVE TO THE PACKAGE DIRECTORY
+ *  (rolldown `ecma_module_view_factory.rs:237` computes it against the package.json's realpath
+ *  parent for exactly this reason). */
+export function packageSideEffectsFor(pkg: { dir: string; sideEffects: boolean | string[] | undefined }, id: string): boolean | undefined {
+    const se = pkg.sideEffects;
+    if (se === undefined) return undefined;
+    if (typeof se === 'boolean') return se;
+    if (!id.startsWith(`${pkg.dir}/`)) return undefined; // outside the package — say nothing
+    const rel = id.slice(pkg.dir.length + 1);
+    for (const pattern of se) if (sideEffectGlobMatches(pattern, rel)) return true;
+    return false;
+}
+
+/** `false` / `true` / one glob / an array of globs. Anything else is not a declaration. */
+function parseSideEffects(raw: unknown): boolean | string[] | undefined {
+    if (typeof raw === 'boolean') return raw;
+    if (typeof raw === 'string') return [raw];
+    if (Array.isArray(raw)) return raw.filter((x): x is string => typeof x === 'string');
+    return undefined;
+}
 
 function parsePackageName(spec: string): { name: string; subpath: string } | null {
     if (spec === '') return null;
@@ -386,6 +451,7 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
             module: typeof raw.module === 'string' ? raw.module : undefined,
             main: typeof raw.main === 'string' ? raw.main : undefined,
             workspaces,
+            sideEffects: parseSideEffects(raw.sideEffects),
         };
         pkgCache.set(dir, pkg);
         return pkg;
@@ -634,6 +700,7 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
     return {
         resolve: async (specifier, importer) => (await resolveId(warnCtx, specifier, importer)) ?? null,
         load: (id) => (id === EMPTY_MODULE_ID ? '' : null),
+        packageFor: (id) => findOwningPackage(readPkg, dirnameOf(id)),
     };
 }
 
@@ -697,6 +764,20 @@ async function findEnclosingPackage(
         if (pkg !== null) {
             return pkg.name === name ? pkg : null;
         }
+    }
+    return null;
+}
+
+/** Nearest enclosing `package.json`, walking up from a file's directory. Unlike
+ *  `findEnclosingPackage` this does not stop at a `node_modules` boundary or filter by name: the
+ *  owner of `…/node_modules/pkg/dist/a.js` IS `…/node_modules/pkg`. */
+async function findOwningPackage(
+    readPkg: (dir: string) => Promise<PackageJson | null>,
+    startDir: string,
+): Promise<PackageJson | null> {
+    for (let dir: string | null = startDir; dir !== null; dir = parentDir(dir)) {
+        const pkg = await readPkg(dir);
+        if (pkg !== null) return pkg;
     }
     return null;
 }

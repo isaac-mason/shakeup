@@ -164,7 +164,12 @@ function mergeOptions(
     if (src.moduleType !== undefined) dst.moduleType = src.moduleType;
 }
 
-/** Resolve the final module-level side-effect flag: first-set of the merged chain, else `true`. */
+/** Resolve the final module-level side-effect flag: first-set of the merged chain, else `true`.
+ *
+ *  The chain is plugin hook → `package.json#sideEffects` (filled by the base resolver in
+ *  `resolveThrough`) → this default. `true` here is NOT "assume side effects": treeshake still roots
+ *  only IMPURE statements (`treeshake.ts:289-291`, via `statementIsPure`), which is what rolldown's
+ *  final tier — `DeterminedSideEffects::Analyzed(..)` — computes from `stmt_infos`. */
 function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
     return pending.moduleSideEffects ?? true;
 }
@@ -861,7 +866,20 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mergeOptions(pendingFor(partial.id), partial);
             return partial.id;
         }
-        return baseResolve(specifier, importer);
+        const base = await baseResolve(specifier, importer);
+        if (base === null || typeof base === 'string') return base;
+        // The base resolver reports what `package.json` declared. It fills the pending options only
+        // where nothing has spoken yet, so a plugin (whose `resolveId`/`load`/`transform` may already
+        // have set this id's side effects) always wins — rolldown's precedence in
+        // `normalize_side_effects` (`ecma_module_view_factory.rs:171`): hook, then option, then
+        // manifest, then per-statement analysis.
+        const dst = pendingFor(base.id);
+        // `newPendingOptions` seeds this as null (= nothing has spoken), which is the state a
+        // manifest value may fill; a plugin having set it is what must not be overwritten.
+        if (base.moduleSideEffects !== undefined && dst.moduleSideEffects === null) {
+            dst.moduleSideEffects = base.moduleSideEffects;
+        }
+        return base.id;
     };
 
     const ctx: PluginCtx = {
