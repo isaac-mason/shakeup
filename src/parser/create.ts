@@ -295,12 +295,14 @@ export const ImportDeclaration = (
     specs: Node[] | null,
     source: Node,
     attributes: Node[] | null = null,
+    phase: 'source' | 'defer' | null = null,
 ): Node =>
     node(N.ImportDeclaration, s, e, '', {
         specifiers: specs ?? [],
         source,
         attributes: attributes ?? [],
         importKind: (flags & FL.TYPE_ONLY) !== 0 ? 'type' : 'value',
+        phase,
     });
 /** One `key: value` pair of an import attribute clause. */
 export const ImportAttribute = (s: number, e: number, _f: number, key: Node, value: Node): Node =>

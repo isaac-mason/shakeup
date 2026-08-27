@@ -2282,6 +2282,24 @@ function parseImport(state: ParserState): Node {
         if (!isK(state, K.FROM) && !isP(state, P.EQ)) flags |= FL.TYPE_ONLY;
         else restoreState(state, s);
     }
+    // Import PHASE: `import source w from './m.wasm'` / `import defer * as ns from './m.js'`.
+    //
+    // Both are CONTEXTUAL — `import source from './m'` is a default import of a binding NAMED
+    // `source`, which oxc accepts with `phase: null`. The disambiguator is the token AFTER: a phase
+    // keyword is never followed by `from`. Verified against `oxc-parser` for every form, including
+    // the ones it REJECTS: `import source * as w`, `import defer d`, `import defer { a }`, and a
+    // bare `import defer '…'` — `source` takes only a default binding, `defer` only a namespace.
+    let phase: 'source' | 'defer' | null = null;
+    if (state.tok === T_IDENT && !isK(state, K.FROM)) {
+        const isSource = state.src.startsWith('source', state.tokStart) && state.tokEnd - state.tokStart === 6;
+        const isDefer = state.src.startsWith('defer', state.tokStart) && state.tokEnd - state.tokStart === 5;
+        if (isSource || isDefer) {
+            const save = saveState(state);
+            nextToken(state);
+            if (isK(state, K.FROM) || isP(state, P.EQ)) restoreState(state, save);
+            else phase = isSource ? 'source' : 'defer';
+        }
+    }
     const from = state.sp;
     if ((state.tok as number) === T_STR) {
         const source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
@@ -2289,7 +2307,7 @@ function parseImport(state: ParserState): Node {
         const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmImport = true;
-        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source, attrs) as Node;
+        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source, attrs, phase) as Node;
     }
     if (isIdentLike(state)) {
         const local = parseIdent(state, R_BIND);
@@ -2344,6 +2362,7 @@ function parseImport(state: ParserState): Node {
         finishList(state, from),
         source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
         attrs,
+        phase,
     ) as Node;
 }
 

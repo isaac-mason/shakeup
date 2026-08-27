@@ -220,6 +220,9 @@ export const DEFS = [
         source: child,
         attributes: list(child),
         importKind: scalar<'value' | 'type'>(),
+        /** The import PHASE proposal: `import source w from …` / `import defer * as ns from …`.
+         *  A scalar, so no new node type and no id renumbering (`tst/ast.test.ts` freezes those). */
+        phase: scalar<'source' | 'defer' | null>(),
     }),
     def('ImportSpecifier', { local: child, imported: child, importKind: scalar<'value' | 'type'>() }),
     def('ImportDefaultSpecifier', { local: child }),
