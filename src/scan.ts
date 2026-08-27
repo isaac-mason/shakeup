@@ -411,6 +411,33 @@ function errorEsmSyntaxInCjs(mod: Module, errors: string[]): void {
     }
 }
 
+/**
+ * Refuse an import PHASE — `import source w from './m.wasm'` / `import defer * as ns from './m'`.
+ *
+ * Both oracles PARSE these; neither bundles them. esbuild refuses with an exact message
+ * ("Bundling with source phase imports is not supported unless they are external"), and rolldown
+ * accepts `defer` and then evaluates EAGERLY — measured: its output logs the module BEFORE the
+ * statement following the import, so it is not implementing defer, it is ignoring it. Refusing is
+ * the honest answer, and esbuild's wording is the model.
+ *
+ * `source` cannot be bundled at all: source phase yields a `WebAssembly.Module` rather than an
+ * evaluated module. `defer` is refused for now and tracked separately — shakeup owns the `__esm`
+ * lazy-init machinery to implement it properly, which would make it the only one of the three that
+ * is correct.
+ */
+function errorImportPhase(mod: Module, errors: string[]): void {
+    for (const stmt of mod.program.data.body) {
+        if (stmt.type !== N.ImportDeclaration) continue;
+        const phase = (stmt.data as { phase?: string | null }).phase;
+        if (phase !== 'source' && phase !== 'defer') continue;
+        errors.push(
+            `${mod.id}:${stmt.start}: bundling with ${phase === 'source' ? 'source phase imports' : 'deferred imports'} is not supported ` +
+                'unless they are external — the module has to be left unbundled.',
+        );
+        return; // one per module is enough
+    }
+}
+
 function extractRecords(mod: Module): void {
     const { semantic, source } = mod;
     for (const stmt of mod.program.data.body) {
@@ -1255,11 +1282,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             mod.jsxRuntime = c.jsxRuntime;
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorImportPhase(mod, graph.errors);
             errorDynamicRequire(mod, graph.errors);
         } else {
             extractRecords(mod); // scans the jsxLower-injected import as a normal record
             mod.exportsKind = classifyExportsKind(mod, graph.warnings);
             errorEsmSyntaxInCjs(mod, graph.errors);
+            errorImportPhase(mod, graph.errors);
             errorDynamicRequire(mod, graph.errors);
             mod.jsxRuntime = jsxRt; // captured runtime symbols (null when no JSX)
             const exportSig = exportSignature(mod);

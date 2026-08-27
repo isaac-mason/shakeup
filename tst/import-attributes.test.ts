@@ -196,3 +196,80 @@ describe('import attributes have an effect, not just a parse', () => {
         });
     });
 });
+
+// Import PHASE — `import source w from './m.wasm'` and `import defer * as ns from './m.js'`.
+// 24 webpack files use the `source` form for wasm; it was the largest remaining parse gap after the
+// attributes work.
+//
+// The grammar surface came from `oxc-parser`, and the disambiguation is the interesting part: both
+// keywords are CONTEXTUAL. `import source from './m'` is a default import of a binding NAMED
+// `source`, which oxc accepts with `phase: null` — the token AFTER decides, and a phase keyword is
+// never followed by `from`.
+//
+// Neither oracle bundles them. esbuild refuses with an exact message; rolldown accepts `defer` and
+// then evaluates EAGERLY — measured, so it is ignoring the phase rather than implementing it.
+// Refusing is the honest answer, and esbuild's wording is the model.
+describe('import phases', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false, kind: 'module' }).errors;
+    const phaseOf = (src: string) =>
+        (parse(src, { ts: false, jsx: false, kind: 'module' }).program.data.body[0].data as { phase: string | null }).phase;
+
+    it.each([
+        ['a source-phase default import', 'import source w from "./m.wasm";', 'source'],
+        ['a deferred namespace import', 'import defer * as ns from "./m.js";', 'defer'],
+        ['a source-phase import with attributes', 'import source w from "./m.wasm" with { type: "x" };', 'source'],
+    ])('parses %s', (_label, src, phase) => {
+        expect(errs(src)).toEqual([]);
+        expect(phaseOf(src)).toBe(phase);
+    });
+
+    it.each([
+        ['a default import of a binding named `source`', 'import source from "./m.js";'],
+        ['a default import of a binding named `defer`', 'import defer from "./m.js";'],
+    ])('does NOT treat %s as a phase', (_label, src) => {
+        expect(errs(src)).toEqual([]);
+        expect(phaseOf(src)).toBeNull();
+    });
+
+    it('leaves an ordinary import with a null phase', () => {
+        expect(phaseOf('import d from "./m.js";')).toBeNull();
+    });
+
+    it('`source` and `defer` are still ordinary identifiers elsewhere', () => {
+        expect(errs('const source = 1;\nconst defer = 2;\nexport const x = source + defer;')).toEqual([]);
+    });
+
+    describe('bundling refuses them, with esbuild’s message', () => {
+        const build = async (files: Record<string, string>) =>
+            bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files) });
+
+        it('refuses a source-phase import', async () => {
+            const r = await build({ '/m.wasm': '', '/main.js': 'import source w from "./m.wasm";\nexport const x = w;' });
+            expect(r.errors.join('\n')).toMatch(/source phase imports is not supported unless they are external/);
+        });
+
+        it('refuses a deferred import', async () => {
+            const r = await build({
+                '/m.js': 'export const v = 1;',
+                '/main.js': 'import defer * as ns from "./m.js";\nexport const x = ns.v;',
+            });
+            expect(r.errors.join('\n')).toMatch(/deferred imports is not supported unless they are external/);
+        });
+
+        it('does not refuse an ordinary import', async () => {
+            const r = await build({
+                '/m.js': 'export const v = 1;',
+                '/main.js': 'import { v } from "./m.js";\nexport const x = v;',
+            });
+            expect(r.errors).toEqual([]);
+        });
+
+        it('does not refuse a binding merely NAMED source', async () => {
+            const r = await build({
+                '/m.js': 'export default 1;',
+                '/main.js': 'import source from "./m.js";\nexport const x = source;',
+            });
+            expect(r.errors).toEqual([]);
+        });
+    });
+});
