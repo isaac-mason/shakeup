@@ -1932,6 +1932,15 @@ function parseStatement(state: ParserState): Node {
             }
             case K.FOR:
                 return parseFor(state, start);
+            // `with` is legal in sloppy CommonJS but CANNOT work in shakeup's output: an ES module is
+            // always strict, and a `with` body is a SyntaxError there. A documented non-goal
+            // (cjs.md §7.18) — and the RIGHT outcome, verified: esbuild refuses it with the same
+            // reasoning, while rolldown builds it and emits a bundle that dies at load with
+            // `Strict mode code may not include a with statement`. Only the message was wrong; it
+            // used to surface as a bare `unexpected token 'with' in expression`.
+            case K.WITH:
+                raise(state, ParseErrorCode.WithStatement);
+                return create.EmptyStatement(start, state.tokStart, 0) as Node;
             case K.WHILE: {
                 nextToken(state);
                 expectP(state, P.LPAREN, "'('");

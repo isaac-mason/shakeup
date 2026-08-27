@@ -37,6 +37,7 @@ export const ParseErrorCode = enumeration(
     'UnterminatedString',
     'UnterminatedTemplate',
     'UnterminatedComment',
+    'WithStatement',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -69,6 +70,10 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.UnterminatedString]: 'unterminated string literal',
     [ParseErrorCode.UnterminatedTemplate]: 'unterminated template literal',
     [ParseErrorCode.UnterminatedComment]: 'unterminated block comment',
+    // esbuild's diagnostic, adapted: "With statements cannot be used with the \"esm\" output format
+    // due to strict mode". shakeup emits ESM only, so the format is not a variable — the reason is.
+    [ParseErrorCode.WithStatement]:
+        '`with` statements cannot be bundled: the output is an ES module, which is always strict mode, and a `with` body cannot run in strict code',
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */
