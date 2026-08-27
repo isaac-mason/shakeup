@@ -133,6 +133,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         sawTopLevelAwait: false,
         sawEsmExport: false,
         sawEsmImport: false,
+        fatal: false,
         thisDepth: 0,
         topLevelThis: [],
         sawImportSyntax: false,
@@ -262,7 +263,7 @@ function consumeSemi(state: ParserState): void {
 
 // No line-table field to save/restore: the line table is built once, deferred, so nothing
 // mutates it during (speculative) parsing.
-type LexState = [number, number, number, number, number, number, number];
+type LexState = [number, number, number, number, number, number, number, boolean];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -271,6 +272,7 @@ const saveState = (state: ParserState): LexState => [
     state.tokFlags,
     state.errors.length,
     state.tokHash,
+    state.fatal,
 ];
 function restoreState(state: ParserState, s: LexState): void {
     state.pos = s[0];
@@ -280,6 +282,9 @@ function restoreState(state: ParserState, s: LexState): void {
     state.tokFlags = s[4];
     state.errors.length = s[5];
     state.tokHash = s[6];
+    // Rewound with everything else: speculation raises errors deliberately, so a failed probe must
+    // not leave the parse latched.
+    state.fatal = s[7];
 }
 
 function push(state: ParserState, v: Ref): void {

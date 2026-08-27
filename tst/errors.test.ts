@@ -189,3 +189,48 @@ describe('the parser always terminates on invalid input', () => {
         }
     });
 });
+
+// The parser reports ONE error per file and stops — oxc's `set_fatal_error` model
+// (`oxc_parser/src/error_handler.rs:84-89`), which records the diagnostic and calls
+// `lexer.advance_to_end()`.
+//
+// Measured against the references before adopting it: meriyah THROWS on the first error, esbuild
+// reports exactly 1, oxc reports exactly 1 — for two INDEPENDENT errors as well as for one. shakeup
+// reporting up to 9 cascading errors was the outlier.
+//
+// Nothing is lost by stopping: both consumers discard the AST when any error is present
+// (`bundle.ts` returns early on `graph.errors.length > 0`; `transform.ts` returns `emptyResult`).
+// And it makes termination STRUCTURAL — jumping to EOF exits every recovery loop in the parser at
+// its next test, rather than each loop having to be proved to make progress.
+describe('one error per file, then stop', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors;
+
+    it.each([
+        ['a stray token in an object pattern', 'function f({ a, ) ) {}'],
+        ['a stray token in an array literal', 'x = [1, ) ];'],
+        ['unbalanced closers', ') ) ) ) )'],
+        ['two independent errors', 'let 1x = 1;\nlet 2y = 2;'],
+        ['an error followed by valid code', 'function f({ a, ) ) {}\nconst ok = 1;'],
+    ])('reports exactly one for %s', (_label, src) => {
+        expect(errs(src)).toHaveLength(1);
+    });
+
+    it('reports the FIRST error, not a later one', () => {
+        const e = errs("var s = 'abc\nlet 1x = 2;");
+        expect(e).toHaveLength(1);
+        expect(e[0].msg).toMatch(/unterminated string/);
+    });
+
+    it('valid code is unaffected', () => {
+        expect(errs('const a = 1;\nfunction f() { return a }\nexport { f };')).toEqual([]);
+    });
+
+    it('a failed speculative probe does not latch the parse', () => {
+        // Speculation raises errors on purpose and rewinds them. If `fatal` were not rewound with
+        // the rest of the state, the first probe to fail would kill the whole file. `async (a) => a`
+        // and TS generics both take that path.
+        expect(errs('const g = async (a) => a;\nconst h = 1;')).toEqual([]);
+        expect(parse('let x: Array<number> = [];\nlet y = 2;', { ts: true, jsx: false }).errors).toEqual([]);
+        expect(errs('f(\n  async (d) => d,\n);')).toEqual([]);
+    });
+});
