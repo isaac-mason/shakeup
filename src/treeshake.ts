@@ -2,7 +2,7 @@ import { isPureStatement } from './analysis/effects';
 import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from './analysis/ns-usage';
 import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
-import { N, type Node } from './ast';
+import { N, type Node, walk } from './ast';
 import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 
 export type TreeshakeResult = {
@@ -72,6 +72,60 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
     });
     // (JSX runtime refs are collected normally now — jsxLower lowers JSX to `jsx(...)` calls before
     // treeshake, so their callee IdentifierReferences are ordinary refs. No JSX-specific walk.)
+}
+
+/** The bindings a statement AUGMENTS — every `X.a = …` whose target chain roots at a module-scope
+ *  binding, found ANYWHERE in the statement.
+ *
+ *  `Texture.DEFAULT_IMAGE = null`, `Object3D.DEFAULT_UP = new Vector3(…)`,
+ *  `KeyframeTrack.prototype.ValueTypeName = ''` are not free-standing effects: they belong to the
+ *  binding. Nothing references them, so under `sideEffects: false` (where impure statements are not
+ *  auto-rooted) they drop and the exported class silently loses its statics — which is how honouring
+ *  three's `sideEffects` broke `three.core.js` with
+ *  `TypeError: Cannot read properties of undefined (reading 'clone')`. rolldown keeps them, and oxc
+ *  models the position explicitly as `ReferenceFlags::MemberWriteTarget` ("`A` in `A.foo = 1` …
+ *  helps the minifier determine if a symbol's only reads are property-modification targets").
+ *
+ *  A WHOLE-STATEMENT WALK, deliberately, not a match on statement shape. `compress` runs BEFORE
+ *  treeshake, and by the time liveness is computed these writes have been folded well away from the
+ *  top level: `joinVars` merges adjacent statements into a `SequenceExpression`, nests those
+ *  sequences across rounds, and FUSES runs into a following `if`/`return`/`throw`, after which
+ *  `minimizeConditions` can rewrite the `if` into `test && (…)`. Chasing those shapes one at a time
+ *  missed a new one every round — sequence, nested sequence, fused if-test, then the left operand of
+ *  a `&&`. Rollup does not pattern-match either: it attributes an effect to the VARIABLE, and
+ *  including the variable includes its mutations. This walk is that model.
+ *
+ *  Over-retention is safe (a statement kept because a live binding is written somewhere inside it);
+ *  under-retention is a miscompile. So the walk is greedy and does not reason about whether a branch
+ *  actually executes. */
+function augmentedRefs(mod: Module, linked: Linked, statement: Node): number[] {
+    const out: number[] = [];
+    walk(statement, (n) => {
+        const ref = augmentedByAssignment(mod, linked, n);
+        if (ref !== 0 && !out.includes(ref)) out.push(ref);
+        return undefined;
+    });
+    return out;
+}
+
+/** The binding one `X.a.b = …` expression augments, or 0. */
+function augmentedByAssignment(mod: Module, linked: Linked, expr: Node): number {
+    if (expr.type !== N.AssignmentExpression || expr.data.operator !== '=') return 0;
+    let target: Node = expr.data.left;
+    let sawMember = false;
+    while (target.type === N.StaticMemberExpression || target.type === N.ComputedMemberExpression) {
+        if (target.type === N.ComputedMemberExpression) return 0; // key may have its own effects
+        sawMember = true;
+        target = target.data.object;
+    }
+    if (!sawMember || target.type !== N.IdentifierReference) return 0;
+    const sym = symbolOf(mod.semantic, target);
+    if (sym === 0) return 0;
+    if (mod.namedImports.has(sym)) {
+        const bind = linked.binds.get(packRef(mod.idx, sym));
+        return bind !== undefined && bind.kind === 'found' ? bind.ref : 0;
+    }
+    return mod.semantic.symbols[sym].scope === scopeOf(mod.semantic, mod.program) ? packRef(mod.idx, sym) : 0;
 }
 
 function statementIsPure(mod: Module, statement: Node): boolean {
@@ -204,6 +258,8 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     const declArrays: [number, [number, number]][][] = [];
 
     /** packed declared-symbol ref -> [moduleIdx, statement list index] */
+    /** binding → the statements that augment it (`X.foo = …`), pulled in when the binding goes live. */
+    const augmentsOf = new Map<number, [number, number][]>();
     const declToStatement = new Map<number, [number, number]>();
 
     // Incremental reuse: when topology is unchanged (module id list identical → stable indices),
@@ -241,6 +297,11 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             const declared: number[] = [];
             collectRefs(mod, linked, statement, refs, declared);
             list.push({ statement, refs, pure: statementIsPure(mod, statement) });
+            for (const aug of augmentedRefs(mod, linked, statement)) {
+                let sites = augmentsOf.get(aug);
+                if (sites === undefined) augmentsOf.set(aug, (sites = []));
+                sites.push([mod.idx, idx]);
+            }
             for (const ref of declared) {
                 declToStatement.set(ref, [mod.idx, idx]);
                 localDecls.push([ref, [mod.idx, idx]]);
@@ -338,6 +399,10 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         }
         const decl = declToStatement.get(ref);
         if (decl !== undefined) includeStatement(decl[0], decl[1]);
+        // A live binding drags in the statements that augment it. Their own refs are marked in turn
+        // by `includeStatement`, so `Object3D.DEFAULT_UP = new Vector3(0,1,0)` keeps `Vector3` alive.
+        const aug = augmentsOf.get(ref);
+        if (aug !== undefined) for (const [m, i] of aug) includeStatement(m, i);
     }
 
     const dropped: [number, Node][] = [];
