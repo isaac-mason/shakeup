@@ -105,8 +105,8 @@ describe('dev server — plugins are the surface', () => {
                 plugins: [
                     {
                         name: 'virtual',
-                        resolveId: (_ctx, spec) => (spec === 'virtual:config' ? spec : null),
-                        load: (_ctx, id) => (id === 'virtual:config' ? `export const v = 'from-plugin';` : null),
+                        resolveId: (spec) => (spec === 'virtual:config' ? spec : null),
+                        load: (id) => (id === 'virtual:config' ? `export const v = 'from-plugin';` : null),
                     },
                 ],
             },
@@ -118,7 +118,7 @@ describe('dev server — plugins are the surface', () => {
         const { runner } = setup(
             { '/entry.ts': `export const tag = __TAG__;` },
             {
-                plugins: [{ name: 'define', transform: (_ctx, code) => code.replace('__TAG__', `'patched'`) }],
+                plugins: [{ name: 'define', transform: (code) => code.replace('__TAG__', `'patched'`) }],
             },
         );
         expect((await runner.import('/entry.ts')).tag).toBe('patched');
@@ -131,9 +131,9 @@ describe('dev server — plugins are the surface', () => {
                 plugins: [
                     {
                         name: 'async',
-                        resolveId: async (_ctx, spec) => (spec === 'async:mod' ? spec : null),
-                        load: async (_ctx, id) => (id === 'async:mod' ? `export const v = 7;` : null),
-                        transform: async (_ctx, code) => code,
+                        resolveId: async (spec) => (spec === 'async:mod' ? spec : null),
+                        load: async (id) => (id === 'async:mod' ? `export const v = 7;` : null),
+                        transform: async (code) => code,
                     },
                 ],
             },
@@ -149,7 +149,7 @@ describe('dev server — plugins are the surface', () => {
                 plugins: [
                     {
                         name: 'inspect',
-                        moduleParsed: (_ctx, info) => {
+                        moduleParsed: (info) => {
                             seen.push(`${info.id}:${info.program.data.body.length}`);
                         },
                     },
@@ -180,9 +180,9 @@ describe('dev server — object plugin returns (R1)', () => {
         const files: Record<string, string> = { '/entry.ts': "import { d } from 'virtual:d';\nexport const v = d + 1;" };
         const desc: Plugin = {
             name: 'desc',
-            resolveId: (_ctx, spec) => (spec === 'virtual:d' ? { id: '\0d', external: false } : null),
+            resolveId: (spec) => (spec === 'virtual:d' ? { id: '\0d', external: false } : null),
             // SourceDescription with an accepted-but-ignored side-effect flag (dev doesn't shake).
-            load: (_ctx, id) => (id === '\0d' ? { code: 'export const d = 41;', moduleSideEffects: false } : null),
+            load: (id) => (id === '\0d' ? { code: 'export const d = 41;', moduleSideEffects: false } : null),
         };
         const { runner } = setup(files, { plugins: [desc] });
         expect((await runner.import('/entry.ts')).v).toBe(42);
@@ -191,7 +191,7 @@ describe('dev server — object plugin returns (R1)', () => {
     it('resolveId { external: true } routes to a native import (external)', async () => {
         const externalize: Plugin = {
             name: 'ext',
-            resolveId: (_ctx, spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
+            resolveId: (spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
         };
         const { server } = setup({ '/a.ts': '' }, { plugins: [externalize] });
         expect(await server.resolveId('lib-esque', '/a.ts')).toEqual({ external: 'lib-esque' });
@@ -201,7 +201,7 @@ describe('dev server — object plugin returns (R1)', () => {
         // A plugin can externalise a bare dep to a served URL (no import map needed).
         const toUrl: Plugin = {
             name: 'ext-url',
-            resolveId: (_ctx, spec) =>
+            resolveId: (spec) =>
                 spec === 'gpucat' ? { id: 'https://app.test/@project/node_modules/gpucat/dist/index.js', external: true } : null,
         };
         const { server } = setup({ '/a.ts': '' }, { plugins: [toUrl] });
@@ -215,11 +215,11 @@ describe('bundle mode — async plugins', () => {
     it('SUPPORTS async plugin hooks (first-class async Fs made the whole graph build async)', async () => {
         const asyncResolve: Plugin = {
             name: 'async-resolve',
-            resolveId: async (_ctx, spec) => (spec === 'virtual:x' ? '\0x' : null),
+            resolveId: async (spec) => (spec === 'virtual:x' ? '\0x' : null),
         };
         const asyncLoad: Plugin = {
             name: 'async-load',
-            load: async (_ctx, id) => (id === '\0x' ? 'export const vx = 1;' : null),
+            load: async (id) => (id === '\0x' ? 'export const vx = 1;' : null),
         };
         // Once Fs became first-class async, bundle() became async too — so async resolveId/load
         // hooks now resolve+load a virtual module in the bundle path (no more assertSync guard).

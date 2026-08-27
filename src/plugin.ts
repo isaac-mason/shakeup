@@ -68,6 +68,20 @@ export type TransformDescription = {
 export type ResolveIdResult = string | false | null | undefined | PartialResolvedId;
 /** load: string = source, null/undefined = pass, object = a {@link SourceDescription}. */
 export type LoadResult = string | null | undefined | SourceDescription;
+// PLUGIN HOOKS FOLLOW ROLLUP'S CALLING CONVENTION: the context is `this`, not a leading parameter.
+//
+// This used to be `(ctx, code, id)`. Every Rollup and Vite plugin in existence is written as
+// `transform(code, id)` with `this.resolve(...)`, so the divergence meant a real plugin received the
+// CONTEXT where it expected its first argument, and `this` was not the context at all. `pnpm
+// rollupsuite` reported it as a wall of `code.replace is not a function` / `this.resolve is not a
+// function` / `this.load is not a function` across 19 samples. Aligning took the suite from
+// 427/591 to 444/591.
+//
+// Note for anyone changing a hook signature again: TypeScript CANNOT catch this. Hook parameters are
+// positional and usually untyped in plugin literals, so `(_ctx, spec, importer)` silently re-bound to
+// `(specifier, importer, extra)` and type-checked clean while behaving wrongly at runtime — four test
+// files passed the compiler and failed at execution. Grep, do not trust `tsc`.
+
 /** transform: string = replace source, Edit[] = patch it, null/undefined = pass,
  *  object = a {@link TransformDescription}. */
 export type TransformResult = string | Edit[] | null | undefined | TransformDescription;
@@ -165,17 +179,17 @@ export function assertSync<T>(x: MaybePromise<T>): T {
  *  the dev server awaits, bundle mode requires sync. */
 export type Plugin = {
     name: string;
-    buildStart?: (ctx: PluginCtx) => MaybePromise<void>;
+    buildStart?: (this: PluginCtx) => MaybePromise<void>;
     resolveId?: WithFilter<
-        (ctx: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+        (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
     >;
-    load?: WithFilter<(ctx: PluginCtx, id: string) => MaybePromise<LoadResult>>;
-    transform?: WithFilter<(ctx: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
-    moduleParsed?: (ctx: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
+    load?: WithFilter<(this: PluginCtx, id: string) => MaybePromise<LoadResult>>;
+    transform?: WithFilter<(this: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
+    moduleParsed?: (this: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     /** Return the rewritten code, or rollup's `{ code, map }` object form. A returned `map` is NOT
      *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
-    renderChunk?: (ctx: PluginCtx, code: string) => string | { code: string; map?: unknown } | null | undefined;
-    buildEnd?: (ctx: PluginCtx) => MaybePromise<void>;
+    renderChunk?: (this: PluginCtx, code: string) => string | { code: string; map?: unknown } | null | undefined;
+    buildEnd?: (this: PluginCtx) => MaybePromise<void>;
 };
 
 type Compiled<F> = { plugin: string; matches: ((id: string) => boolean) | null; handler: F };
@@ -257,9 +271,7 @@ export function runResolveId(
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(specifier)) continue;
-            const r = (
-                hook.handler as (c: PluginCtx, s: string, im: string | null, e: ResolveIdExtra) => MaybePromise<ResolveIdResult>
-            )(ctx, specifier, importer, extra);
+            const r = hook.handler.call(ctx, specifier, importer, extra);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as ResolveIdResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
@@ -277,7 +289,7 @@ export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePr
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(id)) continue;
-            const r = (hook.handler as (c: PluginCtx, i: string) => MaybePromise<LoadResult>)(ctx, id);
+            const r = hook.handler.call(ctx, id);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as LoadResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
@@ -323,11 +335,7 @@ export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, i
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(id)) continue;
-            const r = (hook.handler as (c: PluginCtx, code: string, i: string) => MaybePromise<TransformResult>)(
-                ctx,
-                acc.code,
-                id,
-            );
+            const r = hook.handler.call(ctx, acc.code, id);
             if (isThenable(r)) {
                 return r.then((res) => {
                     apply(res as TransformResult);
@@ -347,7 +355,7 @@ export function runModuleParsed(pipeline: Pipeline, ctx: PluginCtx, info: Module
     let i = 0;
     const step = (): MaybePromise<void> => {
         while (i < hooks.length) {
-            const r = hooks[i++].handler(ctx, info);
+            const r = hooks[i++].handler.call(ctx, info);
             if (isThenable(r)) return r.then(() => step());
         }
     };

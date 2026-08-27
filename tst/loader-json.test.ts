@@ -136,7 +136,7 @@ describe('JSON modules', () => {
         // hook. Running the built-in loader afterwards fed that JavaScript to `JSON.parse`.
         const plugin: Plugin = {
             name: 'json',
-            transform: (_c, code, id) =>
+            transform: (code, id) =>
                 id.endsWith('.json') ? `export default ${code};\nexport const marker = 'PLUGIN';` : null,
         };
         expect((await run(D, "import { marker } from './d.json';\nexport const x = marker;", { plugins: [plugin] })).x).toBe(
