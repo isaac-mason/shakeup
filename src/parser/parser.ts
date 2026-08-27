@@ -520,7 +520,10 @@ function parseNew(state: ParserState): Node {
         nextToken(state);
         parseNameAsIdent(state, R_NAME);
         if (state.newTargetDepth === 0 && !state.allowTopNewTarget) raise(state, ParseErrorCode.TopLevelNewTarget);
-        return create.NewTarget(start, state.tokStart, 0) as Node;
+        // Chained, exactly like the NewExpression path below. `new.target` is an ordinary expression
+        // and `new.target.value` / `new.target?.name` are legal — returning it unchained stopped the
+        // parse at the `.` with `expected ';'`. 8 real webpack files, found by `pnpm parsercorpus`.
+        return parseMemberChain(state, create.NewTarget(start, state.tokStart, 0) as Node, true);
     }
     let callee: Node;
     if (isK(state, K.NEW)) {

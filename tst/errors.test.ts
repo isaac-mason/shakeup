@@ -234,3 +234,37 @@ describe('one error per file, then stop', () => {
         expect(errs('f(\n  async (d) => d,\n);')).toEqual([]);
     });
 });
+
+// Found by `pnpm parsercorpus` — 8 real webpack files. `new.target` parsed, but any member access on
+// it stopped the parse at the `.` with `expected ';'`.
+//
+// `parsePostfixChain` returns `parseNew(state)` directly, and `parseNew`'s NewExpression path ends
+// with `parseMemberChain(...)` while its `new.target` early-return did not. `new.target` is an
+// ordinary expression: `new.target.value`, `new.target?.name` and `new.target["x"]` are all legal.
+describe('new.target continues into a member chain', () => {
+    const ok = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each([
+        ['a property access', 'function f() { return new.target.value }'],
+        ['an optional chain', 'function f() { return new.target?.value }'],
+        ['a computed access', 'function f() { return new.target["x"] }'],
+        ['a call through it', 'class C { constructor() { new.target.foo() } }'],
+        ['inside a typeof comparison', 'function f() { if (typeof new.target.value !== "function") {} }'],
+    ])('accepts %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+
+    it.each([
+        ['bare new.target', 'function f() { return new.target }'],
+        ['an equality test', 'function f() { return new.target === f }'],
+        ['an ordinary new with a chain', 'function f() { return new Date().getTime() }'],
+        ['a parenthesised callee', 'function f() { return new (a.b)().c }'],
+    ])('does not regress %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+
+    it('still rejects new.target at the top level of a module', () => {
+        // The goal gate is unaffected by the chaining fix.
+        expect(parse('new.target;', { ts: false, jsx: false, kind: 'module' }).errors.length).toBeGreaterThan(0);
+    });
+});
