@@ -488,17 +488,21 @@ function emitExpr(p: Printer, n: Node): void {
             printExpr(p, d.alternate as Node, Prec.Assign);
             return;
         case N.CallExpression:
-            // Re-emit `/*@__PURE__*​/` in readable output so the marker survives for downstream tools
-            // and the print→parse round-trip stays exact. Under minify it is DROPPED, matching oxc,
-            // which emits none of three.core.js's 214 annotations: the marker has already been
-            // consumed by this build, and a minified bundle is the final artifact.
-            if (!p.opts.minify && (d.pure as boolean)) write(p, '/*@__PURE__*/');
+            // Re-emit the marker in readable output so it survives for downstream tools and the
+            // print→parse round-trip stays exact. SPACED, with a trailing space: that is what both
+            // oracles emit — oxc `comment.rs:62` (`"/* @__PURE__ */ "`) and esbuild `js_printer.go`
+            // — and this printer used to emit the compact form, which only went unnoticed because
+            // the one place it mattered (the CommonJS wrapper) was spliced as text with the spaced
+            // form hard-coded. Under minify it is DROPPED, matching oxc, which emits none of
+            // three.core.js's 214 annotations: the marker has already been consumed by this build,
+            // and a minified bundle is the final artifact.
+            if (!p.opts.minify && (d.pure as boolean)) write(p, '/* @__PURE__ */ ');
             printExpr(p, d.callee as Node, Prec.Call);
             if (d.optional as boolean) write(p, '?.');
             emitArgs(p, d.arguments as Node[]);
             return;
         case N.NewExpression: {
-            if (!p.opts.minify && (d.pure as boolean)) write(p, '/*@__PURE__*/');
+            if (!p.opts.minify && (d.pure as boolean)) write(p, '/* @__PURE__ */ ');
             write(p, 'new');
             space(p);
             // A call on the callee's member spine must be parenthesised, else `new (foo())()`

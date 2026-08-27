@@ -37,6 +37,7 @@ import {
 import { type CompressMode, runCompress } from './passes/compress';
 import { compressChunk } from './chunk-compress';
 import { lazySplit } from './passes/lazy-split';
+import { interopNamespace, materialiseLiveBody, wrapModuleBody } from './passes/wrap-module';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
@@ -1413,7 +1414,6 @@ function renderChunk(
                 headParts = renderBody([...splitRender.hoisted, ...splitRender.functions], null);
                 tailParts = renderBody(splitRender.body, null);
             }
-        }
         // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
         // MINIMAL — bound only when the body references them (§4.3 of cjs.md: rolldown emits
         // `(exports)` for a module that never mentions `module`). `/* @__PURE__ */` lets an unused
@@ -1422,12 +1422,35 @@ function renderChunk(
         if (wrapRef !== undefined) {
             const wrapName = finalNameOf(linked, wrapRef);
             const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
-            const params = uses.has('module') ? '(exports, module)' : '(exports)';
-            const indented = out === '' ? '' : `\n${out.replace(/^/gm, '    ')}\n`;
-            out = `var ${wrapName} = /* @__PURE__ */ __commonJS(${params} => {${indented}});`;
-            // The body moved down one line and right four columns; its mappings must follow, or the
-            // part's line count stops matching its text and the whole chunk's map desynchronizes.
-            if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, 1, 4) };
+            const params = uses.has('module') ? ['exports', 'module'] : ['exports'];
+            // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
+            // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
+            // in its pipeline. Building it here means the mappings fall out of printing instead of
+            // being patched up afterwards with `indentMappings`, which is what used to desynchronize
+            // the whole chunk's map when it was missed.
+            //
+            // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
+            // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
+            // body is not top level.
+            const wrapped: Node[] = [
+                wrapModuleBody({
+                    name: wrapName,
+                    helper: '__commonJS',
+                    params,
+                    body: materialiseLiveBody((mod.program.data as { body: Node[] }).body, live),
+                    pure: true,
+                }),
+            ];
+            for (const [map, nodeMode] of [
+                [linked.cjsNamespace, false],
+                [linked.cjsNamespaceNode, true],
+            ] as const) {
+                const nsRef = map.get(idx);
+                if (nsRef !== undefined) wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
+            }
+            const rendered = renderBody(wrapped, null);
+            out = rendered.code;
+            if (wantMap) mapPart = { code: out, map: rendered.map! };
             // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
             // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
             //
@@ -1435,17 +1458,7 @@ function renderChunk(
             // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
             // hands back the whole `module.exports` as `default` — what Node actually does. A module
             // imported both ways gets both objects; they are genuinely different values.
-            for (const [map, arg] of [
-                [linked.cjsNamespace, ''],
-                [linked.cjsNamespaceNode, ', 1'],
-            ] as const) {
-                const nsRef = map.get(idx);
-                if (nsRef === undefined) continue;
-                out += `\nvar ${finalNameOf(linked, nsRef)} = /* @__PURE__ */ __toESM(${wrapName}()${arg});`;
-            }
-            // Generated-only lines appended after the body: `joinParts` reads their count from the
-            // text, and a line with no entry is already unmapped, so only `code` needs updating.
-            if (mapPart !== null) mapPart = { code: out, map: mapPart.map! };
+        }
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
