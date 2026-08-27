@@ -23,12 +23,15 @@ import {
     CHAR,
     hashRange,
     intern,
+    internString,
+    keywordCodeOf,
     nextToken,
     reScanRegex,
     reScanTemplateContinue,
     sliceFlat,
 } from './lexer.ts';
 import {
+    F_ESCAPED,
     F_NL,
     K,
     P,
@@ -108,6 +111,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokFlags: 0,
         pureAt: -1,
         tokHash: 0,
+        tokCooked: '',
         tsMode: options.ts,
         jsxMode: options.jsx,
         fnDepth: 0,
@@ -218,8 +222,15 @@ function recordThis(state: ParserState, n: Node): Node {
 }
 
 function ident(state: ParserState, role: number, start: number, end: number): Identifier {
-    const h = start === state.tokStart && end === state.tokEnd ? state.tokHash : hashRange(state, start, end);
-    const name = intern(state, start, end, h);
+    // An escaped identifier's NAME is not its source slice, so it cannot be interned by range.
+    // Guarded on the flag, which `tokFlags` already carries — the ordinary path is unchanged.
+    let name: string;
+    if ((state.tokFlags & F_ESCAPED) !== 0 && start === state.tokStart && end === state.tokEnd) {
+        name = internString(state, state.tokCooked);
+    } else {
+        const h = start === state.tokStart && end === state.tokEnd ? state.tokHash : hashRange(state, start, end);
+        name = intern(state, start, end, h);
+    }
     // Cheap syntactic gate for the `require("lit")` edge walk — set here rather than by a dedicated
     // pass, exactly as `sawJSX` is. A false positive (a local named `require`) only costs one walk.
     if (name.length === 7 && name === 'require') state.sawRequire = true;
@@ -238,6 +249,15 @@ function parseIdent(state: ParserState, role: number): Identifier {
     // them operators, at which point BINDING one is an early error. oxc's `identifier_generator` /
     // `identifier_async` (`diagnostics.rs:573,578`). Only the binding role — a reference is already
     // handled by the operator branches in `parseAssign`/`parseUnary`, which consume the token.
+    // An escaped identifier is not the keyword it spells, but it may not APPEAR where the keyword
+    // it spells is reserved: `var \u0069f = 1` and `var \u0074his = 1` are both errors. This is
+    // `parseIdent` and not `parseNameAsIdent` precisely because that is the split — a property key
+    // or member name (`({ \u0069f: 1 })`, `x.\u0069f`) may be a reserved word and stays legal.
+    // Contextual keywords (`async`, `let`, `of`) are not reserved, so they pass.
+    if ((state.tokFlags & F_ESCAPED) !== 0) {
+        const kw = keywordCodeOf(state.tokCooked);
+        if (kw !== 0 && !isContextual(kw)) raise(state, ParseErrorCode.EscapedKeyword);
+    }
     if (role === R_BIND) {
         if (state.yieldOk && isK(state, K.YIELD)) raise(state, ParseErrorCode.IdentifierInGenerator);
         // `await` needs the extra guard because `awaitOk` is seeded TRUE at top level for the

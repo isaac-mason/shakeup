@@ -27,6 +27,11 @@ export const K = TOK;
 
 /** tokFlags bit: a newline preceded this token (for ASI / no-line-terminator rules). */
 export const F_NL = 1;
+/** The current token is an identifier written with at least one `\uXXXX` escape, so its NAME is
+ *  `tokCooked` rather than the source slice. A token flag rather than a separate reset, because
+ *  `tokFlags` is already assigned once per token — checking for an escaped identifier therefore
+ *  costs nothing on the hot path. */
+export const F_ESCAPED = 2;
 
 /** Parse errors and offsets. */
 export type ParseError = { pos: number; msg: string; code: ParseErrorCode };
@@ -68,6 +73,10 @@ export type ParserState = {
      *  When false, `await` parses as an identifier rather than erroring — matching oxc
      *  (`js/expression.rs:89`). That is what keeps `await(x)` a call to a function named `await` in
      *  a script, and it makes `await x` fail naturally as two adjacent identifiers. */
+    /** The decoded name of an escaped identifier — meaningful only while `tokFlags & F_ESCAPED`.
+     *  Never cleared: the flag is what makes it live, so the ordinary identifier path writes
+     *  nothing here. */
+    tokCooked: string;
     awaitOk: boolean;
     /** Is `yield` the OPERATOR here, rather than a plain identifier? The exact mirror of
      *  {@link awaitOk}, and oxc treats them as one pair — `Context::has_yield`, REPLACED on entering
