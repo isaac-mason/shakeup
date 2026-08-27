@@ -77,6 +77,15 @@ export type ParserState = {
      *  Never cleared: the flag is what makes it live, so the ordinary identifier path writes
      *  nothing here. */
     tokCooked: string;
+    /** Is the statement about to be parsed directly in the PROGRAM body? `import` and `export`
+     *  declarations are legal only there — not in a block, a function, or a single-statement `if`
+     *  body. esbuild threads the same fact as `parseStmtOpts.isModuleScope` and calls
+     *  `p.lexer.Unexpected()` when it is false (`js_parser.go:7211,7338,7380`).
+     *
+     *  Set by the Program loop before each statement and cleared by `parseStatement` on entry, so
+     *  every nested call sees `false` without a parameter having to be threaded through the dozen
+     *  places that parse a nested statement. */
+    moduleScope: boolean;
     awaitOk: boolean;
     /** Is `yield` the OPERATOR here, rather than a plain identifier? The exact mirror of
      *  {@link awaitOk}, and oxc treats them as one pair — `Context::has_yield`, REPLACED on entering

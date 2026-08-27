@@ -112,6 +112,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         pureAt: -1,
         tokHash: 0,
         tokCooked: '',
+        moduleScope: false,
         tsMode: options.ts,
         jsxMode: options.jsx,
         fnDepth: 0,
@@ -2028,6 +2029,10 @@ function parseBlock(state: ParserState): Node {
 }
 
 function parseStatement(state: ParserState): Node {
+    // Consume the module-scope flag: this statement may be an `import`/`export`, and every statement
+    // it goes on to nest may not.
+    const atModuleScope = state.moduleScope;
+    state.moduleScope = false;
     const start = state.tokStart;
     if (isPunct(state.tok)) {
         switch (state.tok as number) {
@@ -2278,9 +2283,14 @@ function parseStatement(state: ParserState): Node {
                     break;
                 }
                 restoreState(state, s);
+                // `import(…)` and `import.meta` are expressions and legal anywhere; an import
+                // DECLARATION is a module item and legal only at the top level. The two are
+                // separated above, so this check lands only on the declaration.
+                if (!atModuleScope) raise(state, ParseErrorCode.ImportExportNotTopLevel);
                 return parseImport(state);
             }
             case K.EXPORT:
+                if (!atModuleScope) raise(state, ParseErrorCode.ImportExportNotTopLevel);
                 return parseExport(state);
             case K.INTERFACE:
                 if (state.tsMode) return parseInterface(state, start, 0);
@@ -2332,6 +2342,10 @@ function parseStatement(state: ParserState): Node {
                             const from = state.sp;
                             while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
                                 const mark = state.tokStart;
+                                // A TypeScript namespace/module body is a module scope of its own:
+                                // `namespace N { export const y = 1 }` is the whole point of one.
+                                // esbuild threads this as `parseStmtOpts.isNamespaceScope`.
+                                state.moduleScope = true;
                                 push(state, parseStatement(state));
                                 if (noProgress(state, mark)) break;
                             }
@@ -2375,6 +2389,10 @@ function parseStatement(state: ParserState): Node {
                             const from = state.sp;
                             while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
                                 const mark = state.tokStart;
+                                // A TypeScript namespace/module body is a module scope of its own:
+                                // `namespace N { export const y = 1 }` is the whole point of one.
+                                // esbuild threads this as `parseStmtOpts.isNamespaceScope`.
+                                state.moduleScope = true;
                                 push(state, parseStatement(state));
                                 if (noProgress(state, mark)) break;
                             }
@@ -2845,6 +2863,9 @@ function parseExport(state: ParserState): Node {
         state.sawEsmExport = true;
         return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source, attrs) as Node;
     }
+    // The DECLARATION an `export` prefixes is still at module scope — `export import X = o.Y` is a
+    // TypeScript import-equals, and `parseStatement` cleared the flag on the way in here.
+    state.moduleScope = true;
     const decl = parseStatement(state);
     state.sawEsmExport = true;
     return create.ExportNamedDeclaration(start, state.tokStart, flags, decl, [], null) as Node;
@@ -3726,6 +3747,9 @@ export function parse(source: string, options: ParseOptions): ParseResult {
             nextToken(state);
         }
         lastPos = state.pos;
+        // THE module scope: only a statement parsed directly here may be an `import`/`export`
+        // declaration. `parseStatement` clears the flag on entry, so everything it nests is out.
+        state.moduleScope = true;
         push(state, parseStatement(state));
     }
     const body = finishList(state, from);

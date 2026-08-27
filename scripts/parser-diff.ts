@@ -35,7 +35,14 @@ const ALL: Goal[] = ['module', 'commonjs', 'script'];
  *  shakeup's `unambiguous` — the goal it uses when nothing has declared one. */
 const asKind = (g: Goal): ParseKind => (g === 'script' ? 'unambiguous' : g);
 
-const EXPECTED: Record<string, string> = {};
+const EXPECTED: Record<string, string> = {
+    // oxc's PARSER accepts a non-top-level `import`/`export` — it does not carry esbuild's
+    // `isModuleScope` gate. esbuild rejects (`js_parser.go:7211`), Rollup's acorn rejects
+    // ("'import', and 'export' cannot be used outside of module code"), and node rejects. shakeup
+    // follows the three, with node as the tiebreaker.
+    'invalid: export inside a function': 'oxc parser accepts; esbuild, acorn and node all reject',
+    'invalid: import inside a block': 'oxc parser accepts; esbuild, acorn and node all reject',
+};
 
 const CASES: Case[] = [
     // ── module-goal gating: the surface the CommonJS work touched ──
@@ -107,6 +114,10 @@ const CASES: Case[] = [
     { name: 'invalid: `\\x` escape in an identifier', src: 'var \\x61 = 1;' },
     { name: 'invalid: escaped reserved word as a binding', src: 'var \\u0069f = 1;' },
     { name: 'invalid: escaped `this` as a binding', src: 'var \\u0074his = 1;' },
+    // oxc's parser accepts these; esbuild, acorn and node all reject them. Recorded as EXPECTED so
+    // the divergence stays visible with its reason attached rather than counted as unexplained.
+    { name: 'invalid: export inside a function', src: 'function f() { export { f }; }', goals: ['module'] },
+    { name: 'invalid: import inside a block', src: '{ import "b"; }', goals: ['module'] },
     // ── things that must be REJECTED ──
     { name: 'invalid: let let', src: 'let let = 1;' },
     { name: 'invalid: duplicate lexical binding', src: 'let a = 1; let a = 2;' },

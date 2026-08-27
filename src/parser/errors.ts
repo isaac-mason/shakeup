@@ -56,6 +56,7 @@ export const ParseErrorCode = enumeration(
     'InvalidUnicodeEscape',
     'InvalidEscapedIdentChar',
     'EscapedKeyword',
+    'ImportExportNotTopLevel',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -107,6 +108,7 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.InvalidUnicodeEscape]: 'invalid unicode escape sequence',
     [ParseErrorCode.InvalidEscapedIdentChar]: "invalid character '%0' in an escaped identifier",
     [ParseErrorCode.EscapedKeyword]: 'keywords cannot contain escape characters',
+    [ParseErrorCode.ImportExportNotTopLevel]: "'import' and 'export' may only appear at the top level",
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */
