@@ -260,8 +260,22 @@ function traceSegment(m: Mappings, line: number, col: number): Segment | null {
  * segment is retraced through `inner`. Assumes a single inner source (index 0).
  */
 export function composeSourceMaps(outer: SourceMap, inner: SourceMap): SourceMap {
-    const om = decodeMappings(outer.mappings);
-    const im = decodeMappings(inner.mappings);
+    const result = composeMappings(decodeMappings(inner.mappings), decodeMappings(outer.mappings));
+    return {
+        version: 3,
+        sources: inner.sources,
+        sourcesContent: inner.sourcesContent,
+        names: inner.names,
+        mappings: encodeMappings(result),
+    };
+}
+
+/** Compose two mapping tables directly: `inner` maps origin→middle, `outer` maps middle→final, and
+ *  the result maps origin→final. The {@link composeSourceMaps} body, lifted so a caller holding
+ *  `Mappings` (the chunk compress stage) can compose without an encode/decode round trip. */
+export function composeMappings(inner: Mappings, outer: Mappings): Mappings {
+    const om = outer;
+    const im = inner;
     const result = newMappings();
     for (let gl = 0; gl < om.lines.length; gl++) {
         if (gl > 0) addLine(result);
@@ -275,13 +289,7 @@ export function composeSourceMaps(outer: SourceMap, inner: SourceMap): SourceMap
             else addUnmapped(result, seg[0]);
         }
     }
-    return {
-        version: 3,
-        sources: inner.sources,
-        sourcesContent: inner.sourcesContent,
-        names: inner.names,
-        mappings: encodeMappings(result),
-    };
+    return result;
 }
 
 /** A shakeup source map (SMv3). `sources[i] === null` marks a synthetic source with no origin. */

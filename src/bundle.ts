@@ -34,7 +34,8 @@ import {
     replaceSinglePlaceholder,
     resolveMinify,
 } from './output-options';
-import { runCompress } from './passes/compress';
+import { type CompressMode, runCompress } from './passes/compress';
+import { compressChunk } from './chunk-compress';
 import { lazySplit } from './passes/lazy-split';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import type { Edit } from './patches';
@@ -48,6 +49,7 @@ import {
     encodeMappings,
     indentMappings,
     inlineSourceMapComment,
+    composeMappings,
     joinParts,
     type Mappings,
     type Part,
@@ -965,7 +967,28 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     Timer.start(timer, 'graph');
     // Compress (minify P4) is a scan-stage transform — thread it in so the parse cache stays
     // compress-aware. `resolveMinify` also drives mangle (below) so the two never drift.
-    const compressForScan = resolveMinify(options.output?.minify).compress;
+    // PER MODULE: the `dce` tier only, never the cosmetic one. DCE feeds the purity analysis that
+    // tree-shaking depends on, so it has to precede the shaker — rolldown does exactly this at
+    // `pre_process_ecma_ast.rs` step 5, gated on `treeshake.is_some()`. The cosmetic tier runs later,
+    // over the assembled chunk (`chunk-compress.ts`), where it can see the whole picture.
+    // CHUNK-LEVEL COSMETIC COMPRESS — infrastructure landed, OFF by default.
+    //
+    // `CHUNK_COMPRESS=1` runs the cosmetic tier once over the assembled chunk instead of per module
+    // (`chunk-compress.ts` explains why that is the right position). It is not the default yet
+    // because MANGLING still runs before it: the chunk pass then deletes variables whose short names
+    // are already spent, which turns a real win into a loss. Measured on crashcat:
+    //
+    //     mangle OFF   per-module 906,530   chunk 904,171   (-2,359 — the tier move is right)
+    //     mangle ON    per-module 446,621   chunk 447,156   (+535  — mangling order eats it)
+    //
+    // Flipping the default needs the mangler relocated after the chunk compress, which is where every
+    // peer runs it (oxc's minifier owns its mangler and runs it last).
+    const LEGACY = process.env.CHUNK_COMPRESS === undefined;
+    const compressForScan = LEGACY
+        ? resolveMinify(options.output?.minify).compress
+        : resolveMinify(options.output?.minify).compress === false
+          ? false
+          : ('dce' as const);
     // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
     //
     // A module that received a cross-module substitution has its producers recorded on its cache entry
@@ -1041,7 +1064,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // purity and treeshake so both see the expanded code; each touched module is then re-analysed and
     // re-compressed, since scan's compress ran before the graph existed.
     {
-        const compressMode = resolveMinify(options.output?.minify).compress;
+        const compressMode = resolveMinify(options.output?.minify).compress === false ? false : ('dce' as const);
         const resolveImport = (idx: number, sym: number): { mod: number; sym: number } | null => {
             const bind = linked.binds.get(packRef(idx, sym));
             if (bind === undefined || bind.kind !== 'found') return null;
@@ -1160,7 +1183,10 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             shaken,
             warnings,
             want,
-            min.whitespace,
+            // Emit-glue spacing and module printing both stay readable when the chunk pass will
+            // minify: it re-parses this text, and minified printing loses `@__PURE__`.
+            min.compress === 'full' && !LEGACY ? false : min.whitespace,
+            min.compress === 'full' && !LEGACY,
             naming,
             pathToChunk,
             prelim,
@@ -1171,7 +1197,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, inc);
+        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, LEGACY ? false : min.compress, inc);
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
@@ -1254,6 +1280,12 @@ function renderChunk(
     warnings: string[],
     wantMap: boolean,
     tight: boolean,
+    /** The cosmetic tier runs later over the assembled chunk, so this render must stay READABLE.
+     *  Minified printing drops `/*@__PURE__*​/` annotations (1146 → 0 on crashcat), and the chunk
+     *  compress re-parses this text — so minifying here would destroy the purity information it
+     *  needs and it would keep calls it could otherwise drop. rolldown renders the chunk un-minified
+     *  for the same reason and lets `dce_or_minify` do the minifying once, at the end. */
+    deferMinify: boolean,
     naming: NormalizedOutputNaming,
     pathToChunk: (targetChunkIdx: number) => string,
     prelim: PreliminaryFileName,
@@ -1324,7 +1356,7 @@ function renderChunk(
             // its own printer. Everything else makes exactly one.
             const makePrinter = (liveOverride: typeof live = live) =>
                 createPrinter(
-                    { minify: naming.minify },
+                    { minify: deferMinify ? false : naming.minify },
                     {
                         // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
                         // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
@@ -2079,6 +2111,8 @@ export function renderChunks(
     naming: NormalizedOutputNaming,
     render: ChunkRenderer,
     moduleIdOf: (i: number) => string,
+    /** Resolved compress mode. `'full'` runs the cosmetic tier over each assembled chunk. */
+    compressMode: CompressMode | false,
     inc?: RenderIncremental,
 ): { chunks: OutputChunk[]; assets: { fileName: string; source: string }[] } {
     const chunks = chunkGraph.chunks;
@@ -2151,6 +2185,18 @@ export function renderChunks(
         }
         const rc = render(chunk, i, prelim[i], pathFrom(i), wantMap);
         if (rc === null) continue;
+        // COSMETIC COMPRESS, over the assembled chunk — see `chunk-compress.ts`. Placed before the
+        // chunk cache write (so a reused chunk skips it, rspack's content-addressed minimize cache
+        // reached through the cache we already keep) and before hashing (placeholders are derived
+        // from content, so compressing after would invalidate every hash).
+        if (compressMode === 'full') {
+            const joined = wantMap ? joinParts(rc.parts) : null;
+            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap);
+            rc.code = done.code;
+            // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
+            // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.
+            if (wantMap && joined !== null && done.map !== null) rc.parts = [{ code: done.code, map: composeMappings(joined.map, done.map) }];
+        }
         if (inc !== undefined) {
             inc.cache.set(keyOf[i], {
                 signature: sig,
