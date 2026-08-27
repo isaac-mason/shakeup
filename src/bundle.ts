@@ -1128,7 +1128,10 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
     const min = resolveMinify(options.output?.minify);
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, min.mangle);
+        // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
+    // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
+    // still runs — the chunk must be collision-free before it is one program.
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, min.mangle && LEGACY);
     Timer.end(timer, 'chunk');
 
     // Drop unused side-effect-free externals (the injected jsx runtime) via symbol liveness.
@@ -1197,7 +1200,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, LEGACY ? false : min.compress, inc);
+        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, LEGACY ? false : min.compress, !LEGACY && min.mangle, inc);
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
@@ -2113,6 +2116,8 @@ export function renderChunks(
     moduleIdOf: (i: number) => string,
     /** Resolved compress mode. `'full'` runs the cosmetic tier over each assembled chunk. */
     compressMode: CompressMode | false,
+    /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
+    chunkMangle: boolean,
     inc?: RenderIncremental,
 ): { chunks: OutputChunk[]; assets: { fileName: string; source: string }[] } {
     const chunks = chunkGraph.chunks;
@@ -2191,7 +2196,7 @@ export function renderChunks(
         // from content, so compressing after would invalidate every hash).
         if (compressMode === 'full') {
             const joined = wantMap ? joinParts(rc.parts) : null;
-            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap);
+            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle);
             rc.code = done.code;
             // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
             // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.

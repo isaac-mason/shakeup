@@ -6,7 +6,7 @@
 import { scopeOf } from './analysis/semantic';
 import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types';
 
-const RESERVED = new Set([
+export const RESERVED = new Set([
     'break',
     'case',
     'catch',
