@@ -69,6 +69,17 @@ export type ParserState = {
      *  (`js/expression.rs:89`). That is what keeps `await(x)` a call to a function named `await` in
      *  a script, and it makes `await x` fail naturally as two adjacent identifiers. */
     awaitOk: boolean;
+    /** Is `yield` the OPERATOR here, rather than a plain identifier? The exact mirror of
+     *  {@link awaitOk}, and oxc treats them as one pair — `Context::has_yield`, REPLACED on entering
+     *  a function body by that function's generator-ness and restored on exit.
+     *
+     *  Replacement rather than inheritance is what makes `function* g(){ function h(){ yield 1 } }`
+     *  an error: the inner non-generator resets it. An arrow replaces it too — an arrow body is
+     *  `[~Yield]`, so `function* g(){ (() => yield 1) }` is an error as well.
+     *
+     *  When false, `yield` parses as an ordinary identifier rather than erroring, which is what
+     *  keeps `var yield = 1`, `yield => 1` and `f(a = yield)` legal outside a generator. */
+    yieldOk: boolean;
     /** Module contained a `return` outside any function body. rolldown's
      *  `EcmaModuleAstUsage::TopLevelReturn` — tier 2 of the CommonJS kind rule, since only a CJS
      *  body (wrapped in a function) can legally contain one. Free to record here: the goal gate
@@ -151,9 +162,16 @@ export type ParserState = {
  * `bundle.ts` returns early on `graph.errors.length > 0`, `transform.ts` returns `emptyResult`.
  */
 export function raise(state: ParserState, code: ParseErrorCode, ...params: string[]): void {
+    raiseAt(state, state.tokStart, code, ...params);
+}
+
+/** {@link raise} at an explicit offset, for an EARLY error — one discovered after the offending
+ *  construct has already been parsed, where `tokStart` is a token past it. `f() = 1` is found at the
+ *  `=`, but the span oxc labels is the call's. */
+export function raiseAt(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
     if (state.fatal) return;
     state.fatal = true;
-    state.errors.push({ pos: state.tokStart, msg: formatError(code, params), code });
+    state.errors.push({ pos, msg: formatError(code, params), code });
     // Jump the lexer to end-of-input. `tokStart`/`tokEnd` follow so the next `raise` (there will not
     // be one) and any span built from them stay inside the source.
     state.pos = state.srcLen;

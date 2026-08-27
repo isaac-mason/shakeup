@@ -38,6 +38,21 @@ export const ParseErrorCode = enumeration(
     'UnterminatedTemplate',
     'UnterminatedComment',
     'WithStatement',
+    // Early errors — the grammar accepts the shape and a later rule rejects it. Every message here
+    // is oxc's, verbatim from `oxc_parser/src/diagnostics.rs`, so a divergence in `pnpm parserdiff`
+    // is visible as a divergence in TEXT and not only in accept/reject.
+    'InvalidAssignmentTarget',
+    'AssignmentNotSimple',
+    'DefaultValueOperator',
+    'InvalidRestTarget',
+    'SpreadLastElement',
+    'YieldOutsideGenerator',
+    'ConstructorGenerator',
+    'ConstructorAsync',
+    'ConstructorAccessor',
+    'IdentifierInGenerator',
+    'IdentifierInAsync',
+    'PrivateNameConstructor',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -74,6 +89,18 @@ const TEMPLATE: Record<number, string> = {
     // due to strict mode". shakeup emits ESM only, so the format is not a variable — the reason is.
     [ParseErrorCode.WithStatement]:
         '`with` statements cannot be bundled: the output is an ES module, which is always strict mode, and a `with` body cannot run in strict code',
+    [ParseErrorCode.InvalidAssignmentTarget]: 'cannot assign to this expression',
+    [ParseErrorCode.AssignmentNotSimple]: 'invalid left-hand side in assignment',
+    [ParseErrorCode.DefaultValueOperator]: "only '=' operator can be used for specifying default value",
+    [ParseErrorCode.InvalidRestTarget]: 'invalid rest element target in destructuring assignment',
+    [ParseErrorCode.SpreadLastElement]: 'spread must be last element',
+    [ParseErrorCode.YieldOutsideGenerator]: "a 'yield' expression is only allowed in a generator body",
+    [ParseErrorCode.ConstructorGenerator]: "constructor can't be a generator",
+    [ParseErrorCode.ConstructorAsync]: "constructor can't be an async method",
+    [ParseErrorCode.ConstructorAccessor]: "classes may not have a field named 'constructor'",
+    [ParseErrorCode.IdentifierInGenerator]: 'cannot use `yield` as an identifier in a generator context',
+    [ParseErrorCode.IdentifierInAsync]: 'cannot use `await` as an identifier in an async context',
+    [ParseErrorCode.PrivateNameConstructor]: "classes can't have an element named '#constructor'",
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */
