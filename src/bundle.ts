@@ -1207,7 +1207,13 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             }
         }
     }
-    for (const hook of pipeline.buildEnd) hook.handler(pluginCtx);
+    // AWAITED, and in parallel — Rollup documents `buildEnd` as `Kind: async, parallel` and says
+    // "you can also return a Promise" (`docs/plugin-development/index.md:304-313`). Calling it and
+    // walking away meant an async `buildEnd` neither blocked the build nor surfaced its error: the
+    // rejection escaped as an unhandled one and took the whole process down, well after `bundle()`
+    // had already returned a clean result. Found by `pnpm rollupsuite`, which crashed on
+    // `validate-resolved-by-logic` rather than reporting it.
+    await Promise.all(pipeline.buildEnd.map((hook) => hook.handler(pluginCtx)));
     warnings.push(...warningsOut.splice(0));
 
     // plugin ctx.emitFile assets (content-hashed fileName → source), collected across graph build +
