@@ -2200,7 +2200,9 @@ export function renderChunks(
             rc.code = done.code;
             // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
             // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.
-            if (wantMap && joined !== null && done.map !== null) rc.parts = [{ code: done.code, map: composeMappings(joined.map, done.map) }];
+            if (wantMap && joined !== null && done.map !== null) {
+                rc.parts = [{ code: done.code, map: composeMappings(joined.map, done.map) }];
+            }
         }
         if (inc !== undefined) {
             inc.cache.set(keyOf[i], {

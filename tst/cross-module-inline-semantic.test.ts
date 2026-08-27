@@ -32,7 +32,7 @@ describe('cross-module @inline keeps the semantic in step', () => {
         expect(code).not.toMatch(/addOne\s*\(/);
         // And the result is right: addOne(5)=6, addOne(6)=7, 6+7=13.
         const g: Record<string, unknown> = { input: 5 };
-        new Function('globalThis', code.replace(/^export\s*\{[^}]*\};?\s*$/m, ''))(g);
+        new Function('globalThis', code.replace(/export\s*\{[^}]*\};?/g, ''))(g);
         expect(g.sink).toBe(13);
     });
 });

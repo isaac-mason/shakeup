@@ -145,7 +145,10 @@ describe('import attributes have an effect, not just a parse', () => {
         it('survives minification', async () => {
             expect(
                 await ext('import u from "ext" with { type: "json" };\nexport const x = u;', { output: { minify: true } }),
-            ).toMatch(/with\{type: "json"\}/);
+            // Whitespace-tolerant: the clause must SURVIVE, not be formatted a particular way. The
+            // bundle emitter writes `type: "json"`; a fully minified chunk writes `type:"json"`, which
+            // is smaller and identical in meaning.
+            ).toMatch(/with\{type:\s*"json"\}/);
         });
     });
 

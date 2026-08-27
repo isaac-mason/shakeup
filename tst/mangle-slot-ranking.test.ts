@@ -59,8 +59,10 @@ describe('mangler ranks slots by reference frequency (oxc Phase 3)', () => {
     it('produces semantically identical output', { timeout: 120_000 }, async () => {
         const code = await build();
         const g = { x: 7 } as Record<string, unknown>;
-        // Re-entry: strip the ESM export so the body can run in a plain Function.
-        const body = code.replace(/^export\s*\{[^}]*\};?\s*$/m, '');
+        // Re-entry: strip the ESM export so the body can run in a plain Function. NOT line-anchored:
+        // a fully minified chunk is one line, so `…sink=zn(…);export{zn as big}` has no newline before
+        // the clause and an `^…$` match would silently leave the `export` in place.
+        const body = code.replace(/export\s*\{[^}]*\};?/g, '');
         new Function('globalThis', body)(g);
         // sum over i of (i+1) * (7+i)
         let want = 0;

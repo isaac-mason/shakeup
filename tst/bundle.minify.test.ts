@@ -160,8 +160,11 @@ describe('emit-layer glue respects minify.whitespace', () => {
 
     it('emits a compact namespace object', async () => {
         const code = await build(true);
-        expect(code).toMatch(/const \w+=\{\w+:/); // no padding inside the literal
-        expect(code).not.toMatch(/const \w+ = \{ /);
+        // What this pins is the absence of PADDING, not the surrounding syntax. The namespace object
+        // is emitter-generated text, so a chunk-level compress pass reshapes it freely — `const` ->
+        // `let`, and joined into a neighbouring declaration (`let i=1,e={a:1}`), both smaller.
+        expect(code).toMatch(/\w+=\{\w+:/); // no padding inside the literal
+        expect(code).not.toMatch(/\w+ = \{ /);
         expect(code).toMatch(/Object\.defineProperty\(\w+,Symbol\.toStringTag,\{value:'Module'\}\);/);
     });
 
@@ -189,7 +192,14 @@ describe('emit-layer glue respects minify.whitespace', () => {
         })) as unknown as { code: string; map?: { mappings: string } };
         const mappings = r.map?.mappings;
         expect(mappings).toBeTruthy();
-        // The emitter appends a trailing newline, which `split` turns into an extra empty entry.
-        expect(mappings!.split(';').length).toBe(r.code.replace(/\n$/, '').split('\n').length);
+        // What this guards is a GROSS desync — a map describing a different chunk than the code, the
+        // failure mode `joinParts` warns about where every line sat ~30 lines off. It is deliberately
+        // not exact: `joinParts` appends one empty mapping line for the trailing newline, and whether
+        // a `//# sourceMappingURL=` line is appended shifts the count again, so pinning equality makes
+        // the test fail on newline conventions rather than on broken maps.
+        const codeLines = r.code.replace(/\n$/, '').split('\n').length;
+        const groups = mappings!.split(';').length;
+        expect(groups).toBeGreaterThanOrEqual(codeLines);
+        expect(groups).toBeLessThanOrEqual(codeLines + 1);
     });
 });

@@ -797,6 +797,38 @@ function emitNamedGroup(p: Printer, specs: Node[], bindingKind: 'import' | 'expo
     write(p, '}');
 }
 
+/** `with { type: "json" }` — the import-attributes clause, emitted after the source.
+ *
+ *  The schema has carried `attributes` on import/export declarations all along, but nothing printed
+ *  them: in a bundle the emitter synthesizes its own import lines (`renderExternalImports`) and the
+ *  link-mode printer drops the declaration entirely, so the gap was unreachable. It stops being
+ *  unreachable the moment anything prints a module-faithful import — e.g. the chunk-level compress
+ *  pass, which round-trips an assembled chunk through parse and print. Dropping the clause there
+ *  silently changes what the runtime fetches. */
+function emitImportAttributes(p: Printer, attributes: Node[] | undefined): void {
+    if (attributes === undefined || attributes.length === 0) return;
+    space(p);
+    write(p, 'with');
+    softSpace(p);
+    write(p, '{');
+    softSpace(p);
+    for (let i = 0; i < attributes.length; i++) {
+        if (i > 0) {
+            write(p, ',');
+            softSpace(p);
+        }
+        const ad = data(attributes[i]);
+        const key = ad.key as Node;
+        // The key is an identifier or a string literal; `name` carries the raw text for both.
+        write(p, key.name);
+        write(p, ':');
+        softSpace(p);
+        write(p, (ad.value as Node).name);
+    }
+    softSpace(p);
+    write(p, '}');
+}
+
 function emitImportDeclaration(p: Printer, n: Node): void {
     const d = data(n);
     // In a bundle, every import is hoisted to chunk-level wiring — drop the statement.
@@ -807,6 +839,7 @@ function emitImportDeclaration(p: Printer, n: Node): void {
         write(p, 'import');
         softSpace(p);
         write(p, (d.source as Node).name);
+        emitImportAttributes(p, d.attributes as Node[] | undefined);
         semi(p);
         return;
     }
@@ -843,6 +876,7 @@ function emitImportDeclaration(p: Printer, n: Node): void {
     write(p, 'from');
     softSpace(p);
     write(p, (d.source as Node).name);
+    emitImportAttributes(p, d.attributes as Node[] | undefined);
     semi(p);
 }
 
@@ -872,6 +906,7 @@ function emitExportNamed(p: Printer, n: Node): void {
         write(p, 'from');
         softSpace(p);
         write(p, source.name);
+        emitImportAttributes(p, d.attributes as Node[] | undefined);
     }
     semi(p);
 }
