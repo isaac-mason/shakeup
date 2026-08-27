@@ -42,6 +42,37 @@ describe('using declarations', () => {
         expect(errs(src)).toEqual([]);
     });
 
+    describe('await using', () => {
+        it.each([
+            ['in an async function', 'async function f() { await using a = r(); }'],
+            ['in a plain function (oxc is lenient here too)', 'function f() { await using a = r(); }'],
+            ['at the top level of a module', 'await using a = r();'],
+        ])('parses %s', (_label, src) => {
+            expect(errs(src)).toEqual([]);
+        });
+
+        it('records the `await using` kind', () => {
+            const fn = parse('async function f() { await using a = r(); }', { ts: false, jsx: false, kind: 'module' }).program
+                .data.body[0];
+            const inner = (fn.data as { body: { data: { body: { data: { kind: string } }[] } } }).body.data.body[0];
+            expect(inner.data.kind).toBe('await using');
+        });
+
+        it.each([
+            ['awaiting a variable named `using`', 'async function f() { const using = 1; await using; }'],
+            ['awaiting a call to a `using`-prefixed name', 'async function f() { await usingFoo(); }'],
+            ['an ordinary await', 'async function f() { await x; }'],
+        ])('leaves %s alone', (_label, src) => {
+            expect(errs(src)).toEqual([]);
+        });
+
+        it('emits `await using` verbatim', async () => {
+            const r = await build('export async function f() {\n  await using a = g();\n  return 1;\n}\nexport const x = 1;');
+            expect(r.errors).toEqual([]);
+            expect(r.code).toMatch(/await using a = g\(\)/);
+        });
+    });
+
     describe('bundling', () => {
         it('emits `using` verbatim, as both oracles do', async () => {
             const r = await build('export function f() {\n  using a = g(), b = h();\n  return 1;\n}\nexport const x = 1;');
