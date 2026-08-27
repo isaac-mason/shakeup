@@ -4,9 +4,9 @@
 
 import type { Semantic } from './analysis/semantic';
 import type { Node, Program } from './ast';
+import type { CompressMode } from './passes/compress';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
 import type { Platform } from './resolve';
-import type { CompressMode } from './passes/compress';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';
@@ -72,6 +72,14 @@ export type ImportRecord = {
      *  specifier is also imported statically (so `kind` is `static`). Drives export-map seeding
      *  for the `import()` → `Promise.resolve(ns)` emit without re-walking the AST at link time. */
     hasDynamicLiteral: boolean;
+    /** The import-attributes clause as SOURCE TEXT (`with { type: "json" }`), or undefined. Kept for
+     *  EXTERNAL imports only, which are re-emitted from `linked.externalLocals` rather than printed
+     *  from the AST — a bundled module drops the clause, since by then it is inlined JavaScript. */
+    attributes?: string;
+    /** The `type` attribute's value (`with { type: "json" }` → `'json'`), when one was written. It
+     *  overrides the extension when choosing the target's {@link ModuleType} — `./x.txt with
+     *  { type: 'json' }` must load as JSON. */
+    attributeType?: string;
     /** For a `new-url` asset edge: the resolved real path of the asset, set by SCAN (resolution is
      *  scan's job). Undefined = unresolved (the `new URL(...)` is left verbatim). The generate-stage
      *  `emitAssets` pass reads + content-hashes this into {@link assetFileName}. */
@@ -324,6 +332,10 @@ export type Linked = {
      *  export fallback" (`linker.go:2704`). */
     dynamicExports: Set<number>;
     externalLocals: Map<string, string>;
+    /** External specifier → its import-attributes clause body, when one was written. External import
+     *  lines are rebuilt from {@link externalLocals} rather than printed from the AST, so the clause
+     *  has to travel separately or it is silently dropped — and the runtime still needs it. */
+    externalAttributes: Map<string, string>;
     defaultRefs: Map<number, number>;
     errors: string[];
 };

@@ -239,6 +239,27 @@ function collectPatternIdents(node: Node | null, out: Node[]): void {
     }
 }
 
+/** Capture an import-attributes clause verbatim from source, for an external's re-emit.
+ *
+ *  Verbatim rather than reconstructed: the clause is already valid syntax in the right place, and
+ *  re-printing it from the AST would have to re-decide identifier-vs-string keys and quote style for
+ *  no benefit. Only the span between the first and last attribute is needed — the surrounding
+ *  `with {` / `}` is regenerated, which normalises `assert` to `with` on the way out. */
+function recordAttributes(mod: Module, rec: number, stmt: Node, source: string): void {
+    if (rec < 0) return;
+    const attrs = (stmt.data as { attributes?: Node[] }).attributes;
+    if (attrs === undefined || attrs.length === 0) return;
+    // Trimmed: a node's `end` is the START of the next token, so the raw span carries the whitespace
+    // that preceded the closing brace.
+    const r = mod.importRecords[rec];
+    r.attributes = source.slice(attrs[0].start, attrs[attrs.length - 1].end).trim();
+    for (const a of attrs) {
+        const d = a.data as { key: Node; value: Node };
+        const key = d.key.type === N.StringLiteral ? strValue(source, d.key) : d.key.name;
+        if (key === 'type') r.attributeType = strValue(source, d.value);
+    }
+}
+
 function addRecord(mod: Module, specifier: string, kind: ImportRecordKind): number {
     const dynamic = kind === 'dynamic';
     const asset = kind === 'new-url';
@@ -398,6 +419,7 @@ function extractRecords(mod: Module): void {
             const src = stmt.data.source;
             if (src.type !== N.StringLiteral) continue;
             const rec = addRecord(mod, strValue(source, src), 'static');
+            recordAttributes(mod, rec, stmt, source);
             for (const spec of stmt.data.specifiers) {
                 let local: Node;
                 let name: string;
@@ -1323,6 +1345,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             }
             // symlinks:false disables the realpath deref (preserve the symlinked path).
             const depId = normalizedResolve.symlinks ? ((await fs.realpath?.(resolved)) ?? resolved) : resolved;
+            // A `type` attribute decides the target's module type, overriding its extension —
+            // `import d from './d.txt' with { type: 'json' }` must load as JSON. Routed through the
+            // same `pendingFor` channel a plugin's `resolveId` uses, so precedence is unchanged and
+            // the loader stage picks it up without knowing attributes exist.
+            if (rec.attributeType !== undefined && graph.byId.get(depId) === undefined) {
+                mergeOptions(pendingFor(depId), { moduleType: rec.attributeType as ModuleType });
+            }
             rec.resolved = await addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }
