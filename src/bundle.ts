@@ -1345,6 +1345,9 @@ function renderChunk(
         let headParts: { code: string; map: Mappings | null } | null = null;
         let tailParts: { code: string; map: Mappings | null } | null = null;
         let splitMapParts: Part[] | null = null;
+        // Hoisted out of the printer block below so the `__esm` wrappers further down can render AST
+        // rather than splice text. Assigned exactly once, immediately.
+        let renderStmts: ((body: Node[], liveOverride?: Set<number> | null) => { code: string; map: Mappings | null }) | null = null;
         // Printer backend (minify and non-minify): generate every token from the AST, in link mode
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
@@ -1399,6 +1402,7 @@ function renderChunk(
                 const code = trimMappings(finishPrinter(pr), pr.map!);
                 return { code, map: pr.map! };
             };
+            renderStmts = renderBody;
             const whole = renderBody((mod.program.data as { body: Node[] }).body);
             out = whole.code;
             if (wantMap) mapPart = { code: out, map: whole.map! };
@@ -1499,9 +1503,18 @@ function renderChunk(
                 // The namespace object stays OUTSIDE and is built from those hoisted bindings, so it
                 // must use accessors — a value snapshot taken here would capture `undefined`, since
                 // nothing has been assigned until `init` runs.
-                const body = tailParts.code.replace(/^/gm, '    ');
-                const head = headParts.code === '' ? '' : `${headParts.code}\n`;
-                const closure = `var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
+                // AST, not a text splice — same reason as the CommonJS wrapper above. `lazySplit`
+                // already hands back STATEMENT ARRAYS, so the hoisted bindings, the kept function
+                // declarations and the closure render as one body and the mappings fall out of
+                // printing instead of needing `indentMappings` to shove them down and right.
+                const headAndClosure = renderStmts!(
+                    [
+                        ...splitRender.hoisted,
+                        ...splitRender.functions,
+                        wrapModuleBody({ name: initName, helper: '__esm', params: [], body: splitRender.body, pure: true }),
+                    ],
+                    null,
+                );
                 // `nsCode` was appended to `out` before this block; replacing `out` wholesale dropped
                 // it and left `e_ns is not defined`. Re-append it AFTER the closure — the namespace
                 // reads hoisted bindings, so it may be built at top level, and it must be, because a
@@ -1511,18 +1524,19 @@ function renderChunk(
                 // time the importer's body runs — so deferring purely to the require site left a
                 // never-taken `require` with the module never evaluated and its bindings `undefined`.
                 // Idempotent: `__esm` returns immediately once it has run.
-                out = `${head}${closure}${nsCode === null ? '' : `\n${nsCode}`}\n${initName}();`;
+                const callText = `${initName}();`;
+                out = `${headAndClosure.code}${nsCode === null ? '' : `\n${nsCode}`}\n${callText}`;
                 if (mapPart !== null) {
-                    // Two parts, matching how the namespace object is already emitted as its own
-                    // part: `joinParts` derives each span from its own `code`, so they stay aligned.
+                    // One part per emitted region: `joinParts` derives each span from its own `code`,
+                    // so they stay aligned. The namespace object is still emitter TEXT and keeps its
+                    // own (unmapped) part, as it always did.
                     splitMapParts = [
-                        { code: headParts.code, map: headParts.map ?? undefined },
-                        { code: closure, map: tailParts.map === null ? undefined : indentMappings(tailParts.map, 1, 4) },
+                        { code: headAndClosure.code, map: headAndClosure.map ?? undefined },
                         ...(nsCode === null ? [] : [{ code: nsCode }]),
-                        { code: `${initName}();` },
+                        { code: callText },
                     ];
                     mapPart = null;
-                    nsCode = null; // already inside `out`, and its part is covered by the two above
+                    nsCode = null; // already inside `out`, and covered by the parts above
                 }
             } else {
                 const body = out.replace(/^/gm, '    ');
