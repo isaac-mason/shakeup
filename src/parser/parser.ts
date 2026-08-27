@@ -1859,12 +1859,31 @@ function parseStatement(state: ParserState): Node {
     // which parses `using [a] = r()` as a MEMBER assignment, `using = 1` as an assignment and
     // `using\n a = r()` as two statements — each of those has to stay an expression here. Both
     // oracles PARSE AND BUNDLE `using`, emitting it verbatim, so there is nothing to lower.
-    if (state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart)) {
+    const usingAt = (): boolean =>
+        state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart);
+    if (usingAt()) {
         const save = saveState(state);
         nextToken(state);
         const isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
         restoreState(state, save);
         if (isDecl) return parseVarDecl(state, VAR_KIND.USING, 0);
+    }
+    // `await using r = res()` — the async form, disposed with `[Symbol.asyncDispose]`. Same
+    // contextual rules one token further in, and `await` must still be able to start an ordinary
+    // expression (`await using` where `using` is a variable, `await usingFoo()`).
+    if (isK(state, K.AWAIT)) {
+        const save = saveState(state);
+        nextToken(state);
+        let isDecl = false;
+        if (usingAt() && (state.tokFlags & F_NL) === 0) {
+            nextToken(state);
+            isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
+        }
+        restoreState(state, save);
+        if (isDecl) {
+            nextToken(state); // consume `await`; `parseVarDecl` consumes `using`
+            return parseVarDecl(state, VAR_KIND.AWAIT_USING, 0);
+        }
     }
     if (isKeyword(state.tok)) {
         switch (state.tok as number) {
