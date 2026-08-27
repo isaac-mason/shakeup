@@ -38,15 +38,27 @@ describe('JSON modules', () => {
         expect((await run(D, "import { used, unused } from './d.json';\nexport const x = [used, unused];")).x).toEqual([1, 2]);
     });
 
-    it('a namespace import sees the identifier-safe keys plus default', async () => {
-        // `with-dash` is absent: naming it needs arbitrary-module-namespace-name syntax
-        // (`export { x as "with-dash" }`), which is P2. It is still reachable through `default`.
+    it('a namespace import sees EVERY key plus default', async () => {
+        // `with-dash` is here now: a non-identifier key is exported under its literal string name
+        // (`export { _with_dash as "with-dash" }`) — arbitrary module namespace names. rolldown does
+        // the same; its `__exportAll` carries `"with-dash": () => …`.
         expect((await run(D, "import * as ns from './d.json';\nexport const x = Object.keys(ns).sort();")).x).toEqual([
             'default',
             'nested',
             'unused',
             'used',
+            'with-dash',
         ]);
+    });
+
+    it('a non-identifier key can be imported by name', async () => {
+        expect((await run(D, 'import { "with-dash" as w } from "./d.json";\nexport const x = w;')).x).toBe(3);
+    });
+
+    it('a reserved-word key can be imported by name', async () => {
+        expect((await run({ '/r.json': '{"class":4}' }, 'import { "class" as c } from "./r.json";\nexport const x = c;')).x).toBe(
+            4,
+        );
     });
 
     it.each([
@@ -58,9 +70,10 @@ describe('JSON modules', () => {
         expect((await run({ '/a.json': json }, "import a from './a.json';\nexport const x = a;")).x).toEqual(expected);
     });
 
-    it('a key named `default` does not collide with the generated binding', async () => {
-        // `"default"` sanitises to `_default`, which is the name the default-export object uses.
-        // Without seeding that name it was silently redeclared and `d.default` read the wrong value.
+    it('a key named `default` is reachable, and does not double up the default export', async () => {
+        // Two hazards, both real: `"default"` sanitises to `_default`, the name the default-export
+        // object uses (silent redeclaration); and exporting it BY NAME would emit a second
+        // `export default`. It stays reachable through the default object, as it is in Node.
         expect(
             (
                 await run(

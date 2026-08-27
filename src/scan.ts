@@ -546,7 +546,11 @@ function extractRecords(mod: Module): void {
             const rec = addRecord(mod, strValue(source, src), 'static');
             const exported = stmt.data.exported;
             if (exported !== null) {
-                mod.namedExports.set(exported.name, { symbol: 0, rec, sourceName: NAME_NAMESPACE, exprNode: null });
+                // `export * as "ns name" from './m'` — the namespace name may be a STRING (arbitrary
+                // module namespace names). Reading `.name` off a StringLiteral gave `undefined`, so
+                // the export was registered under that key and every consumer missed it.
+                const name = exported.type === N.StringLiteral ? strValue(source, exported) : exported.name;
+                mod.namedExports.set(name, { symbol: 0, rec, sourceName: NAME_NAMESPACE, exprNode: null });
             } else {
                 mod.starExports.push(rec);
             }
