@@ -2,6 +2,7 @@ import { resetInferredPure } from './analysis/effects';
 import { stampPureCallsGraph } from './analysis/purity';
 import { SYM, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
+import { compressChunk } from './chunk-compress';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
 import {
@@ -35,10 +36,9 @@ import {
     resolveMinify,
 } from './output-options';
 import { type CompressMode, runCompress } from './passes/compress';
-import { compressChunk } from './chunk-compress';
 import { lazySplit } from './passes/lazy-split';
-import { interopNamespace, materialiseLiveBody, wrapModuleBody } from './passes/wrap-module';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
+import { interopNamespace, materialiseLiveBody, wrapModuleBody } from './passes/wrap-module';
 import type { Edit } from './patches';
 import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
@@ -47,10 +47,9 @@ import type { GraphOptions } from './resolve';
 import { buildGraph, hashSource, isAnyRequireCall, isRequireCall, resolveEmittedFileName, toModuleInfo } from './scan';
 import {
     buildLineTable,
-    encodeMappings,
-    indentMappings,
-    inlineSourceMapComment,
     composeMappings,
+    encodeMappings,
+    inlineSourceMapComment,
     joinParts,
     type Mappings,
     type Part,
@@ -1129,7 +1128,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     Timer.start(timer, 'chunk');
     const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
     const min = resolveMinify(options.output?.minify);
-        // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
+    // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, min.mangle && LEGACY);
@@ -1201,7 +1200,15 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, LEGACY ? false : min.compress, !LEGACY && min.mangle, inc);
+        const r = renderChunks(
+            chunkGraph,
+            naming,
+            renderer,
+            (i) => graph.modules[i].id,
+            LEGACY ? false : min.compress,
+            !LEGACY && min.mangle,
+            inc,
+        );
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
@@ -1342,12 +1349,11 @@ function renderChunk(
         let mapPart: Part | null = null;
         // Set only for a module needing the declaration/initializer split — see §7.25.
         let splitRender: ReturnType<typeof lazySplit> | null = null;
-        let headParts: { code: string; map: Mappings | null } | null = null;
-        let tailParts: { code: string; map: Mappings | null } | null = null;
         let splitMapParts: Part[] | null = null;
         // Hoisted out of the printer block below so the `__esm` wrappers further down can render AST
         // rather than splice text. Assigned exactly once, immediately.
-        let renderStmts: ((body: Node[], liveOverride?: Set<number> | null) => { code: string; map: Mappings | null }) | null = null;
+        let renderStmts: ((body: Node[], liveOverride?: Set<number> | null) => { code: string; map: Mappings | null }) | null =
+            null;
         // Printer backend (minify and non-minify): generate every token from the AST, in link mode
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
@@ -1415,65 +1421,63 @@ function renderChunk(
                 const all = (mod.program.data as { body: Node[] }).body;
                 const liveBody = live === null ? all : all.filter((st) => live.has(st.id));
                 splitRender = lazySplit(liveBody, dref === undefined ? undefined : (finalNameOf(linked, dref) ?? undefined));
-                headParts = renderBody([...splitRender.hoisted, ...splitRender.functions], null);
-                tailParts = renderBody(splitRender.body, null);
             }
-        // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
-        // MINIMAL — bound only when the body references them. `/* @__PURE__ */` lets an unused
-        // wrapper be dropped entirely.
-        const wrapRef = linked.cjsWrap.get(idx);
-        if (wrapRef !== undefined) {
-            const wrapName = finalNameOf(linked, wrapRef);
-            // rolldown's rule exactly (`ast_factory.rs:759-786`): push `exports` when the module
-            // references EITHER binding (`ModuleOrExports`), push `module` only when it references
-            // `module` (`ModuleRef`). A module touching neither gets NO parameter list. We used to
-            // emit `exports` unconditionally — the comment above claimed to be following rolldown and
-            // described behaviour it does not have.
-            const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
-            // Top-level `this` counts as referencing `exports`: in CommonJS `this === module.exports`,
-            // and `bundle.ts:323` rewrites every top-level `this` to `exports` — so a module that only
-            // ever says `this` still needs the parameter bound. rolldown folds the same case into
-            // `ModuleOrExports`. Missing it emitted a closure with no `exports` param whose body
-            // referenced `exports`, which the CJS `this` tests caught immediately.
-            const usesModule = uses.has('module');
-            const usesExports = uses.has('exports') || mod.topLevelThis.length > 0;
-            const params = usesModule ? ['exports', 'module'] : usesExports ? ['exports'] : [];
-            // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
-            // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
-            // in its pipeline. Building it here means the mappings fall out of printing instead of
-            // being patched up afterwards with `indentMappings`, which is what used to desynchronize
-            // the whole chunk's map when it was missed.
-            //
-            // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
-            // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
-            // body is not top level.
-            const wrapped: Node[] = [
-                wrapModuleBody({
-                    name: wrapName,
-                    helper: '__commonJS',
-                    params,
-                    body: materialiseLiveBody((mod.program.data as { body: Node[] }).body, live),
-                    pure: true,
-                }),
-            ];
-            for (const [map, nodeMode] of [
-                [linked.cjsNamespace, false],
-                [linked.cjsNamespaceNode, true],
-            ] as const) {
-                const nsRef = map.get(idx);
-                if (nsRef !== undefined) wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
+            // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
+            // MINIMAL — bound only when the body references them. `/* @__PURE__ */` lets an unused
+            // wrapper be dropped entirely.
+            const wrapRef = linked.cjsWrap.get(idx);
+            if (wrapRef !== undefined) {
+                const wrapName = finalNameOf(linked, wrapRef);
+                // rolldown's rule exactly (`ast_factory.rs:759-786`): push `exports` when the module
+                // references EITHER binding (`ModuleOrExports`), push `module` only when it references
+                // `module` (`ModuleRef`). A module touching neither gets NO parameter list. We used to
+                // emit `exports` unconditionally — the comment above claimed to be following rolldown and
+                // described behaviour it does not have.
+                const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
+                // Top-level `this` counts as referencing `exports`: in CommonJS `this === module.exports`,
+                // and `bundle.ts:323` rewrites every top-level `this` to `exports` — so a module that only
+                // ever says `this` still needs the parameter bound. rolldown folds the same case into
+                // `ModuleOrExports`. Missing it emitted a closure with no `exports` param whose body
+                // referenced `exports`, which the CJS `this` tests caught immediately.
+                const usesModule = uses.has('module');
+                const usesExports = uses.has('exports') || mod.topLevelThis.length > 0;
+                const params = usesModule ? ['exports', 'module'] : usesExports ? ['exports'] : [];
+                // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
+                // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
+                // in its pipeline. Building it here means the mappings fall out of printing instead of
+                // being patched up afterwards with `indentMappings`, which is what used to desynchronize
+                // the whole chunk's map when it was missed.
+                //
+                // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
+                // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
+                // body is not top level.
+                const wrapped: Node[] = [
+                    wrapModuleBody({
+                        name: wrapName,
+                        helper: '__commonJS',
+                        params,
+                        body: materialiseLiveBody((mod.program.data as { body: Node[] }).body, live),
+                        pure: true,
+                    }),
+                ];
+                for (const [map, nodeMode] of [
+                    [linked.cjsNamespace, false],
+                    [linked.cjsNamespaceNode, true],
+                ] as const) {
+                    const nsRef = map.get(idx);
+                    if (nsRef !== undefined) wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
+                }
+                const rendered = renderBody(wrapped, null);
+                out = rendered.code;
+                if (wantMap) mapPart = { code: out, map: rendered.map! };
+                // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
+                // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
+                //
+                // The second argument is rolldown's `isNodeMode` (D4): an importer that is ESM BY FILE
+                // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
+                // hands back the whole `module.exports` as `default` — what Node actually does. A module
+                // imported both ways gets both objects; they are genuinely different values.
             }
-            const rendered = renderBody(wrapped, null);
-            out = rendered.code;
-            if (wantMap) mapPart = { code: out, map: rendered.map! };
-            // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
-            // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
-            //
-            // The second argument is rolldown's `isNodeMode` (D4): an importer that is ESM BY FILE
-            // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
-            // hands back the whole `module.exports` as `default` — what Node actually does. A module
-            // imported both ways gets both objects; they are genuinely different values.
-        }
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
@@ -1493,27 +1497,17 @@ function renderChunk(
             out += `\n${nsCode}`;
         }
         // LAZY INIT — an ESM module reached only through `require()` (§7.20/D1). Its whole body,
-        // namespace included, moves inside an `__esm` closure so it evaluates at the require CALL.
+        // initializers move inside an `__esm` closure so they evaluate at the require CALL, while the
+        // declarations stay at top level — rolldown's single wrapped-ESM shape
+        // (`module_finalizers/impl_visit_mut.rs:283-331`), which it builds unconditionally.
         //
-        // The namespace has to be built INSIDE too: its members are closure locals now, so a literal
-        // left outside would close over nothing. Only its BINDING is hoisted, which is also what
-        // makes the object reachable from the require site.
-        //
-        // rolldown instead splits declarations from initializers and keeps the bindings at top level
-        // (`misc/wrapped_esm`) — it has to, because it applies this to modules a static `import`
-        // also reads. `link.ts` restricts this path to require-only targets precisely so that split
-        // is not needed; the mixed case still takes the eager path and still warns.
+        // The namespace object stays OUTSIDE and is built from those hoisted bindings, so it must
+        // use accessors — a value snapshot taken here would capture `undefined`, since nothing has
+        // been assigned until `init` runs.
         if (lazyRef !== undefined && out !== '') {
             const initName = finalNameOf(linked, lazyRef);
-            const nsName = linked.namespaceOf.get(idx);
-            if (splitRender !== null && headParts !== null && tailParts !== null) {
-                // MIXED: required AND statically imported. Bindings hoisted to bare `var`s and
-                // function declarations kept at top level, so the static importer can name them;
-                // only the initializers go inside the closure. rolldown's `misc/wrapped_esm` shape.
+            if (splitRender !== null) {
                 //
-                // The namespace object stays OUTSIDE and is built from those hoisted bindings, so it
-                // must use accessors — a value snapshot taken here would capture `undefined`, since
-                // nothing has been assigned until `init` runs.
                 // AST, not a text splice — same reason as the CommonJS wrapper above. `lazySplit`
                 // already hands back STATEMENT ARRAYS, so the hoisted bindings, the kept function
                 // declarations and the closure render as one body and the mappings fall out of
@@ -1530,13 +1524,13 @@ function renderChunk(
                 // it and left `e_ns is not defined`. Re-append it AFTER the closure — the namespace
                 // reads hoisted bindings, so it may be built at top level, and it must be, because a
                 // consumer names it outside.
-                // `init` is CALLED here too, at the module's own slot. A split module is statically
-                // imported by definition, and ESM guarantees a static import has evaluated by the
-                // time the importer's body runs — so deferring purely to the require site left a
-                // never-taken `require` with the module never evaluated and its bindings `undefined`.
-                // Idempotent: `__esm` returns immediately once it has run.
-                const callText = `${initName}();`;
-                out = `${headAndClosure.code}${nsCode === null ? '' : `\n${nsCode}`}\n${callText}`;
+                // NO eager `init()` call at the module's own slot. `link.ts` sets `esmInitSplit`
+                // only for require-ONLY targets, and the whole point of the lazy form is that such
+                // a module runs at the require CALL and not before — an eager call here re-broke
+                // all six laziness tests (never-reached require, ordering, sticky throw). The
+                // mixed case, which DOES need a call because a static importer reads the bindings,
+                // still takes the eager path in `link.ts` and never reaches here.
+                out = `${headAndClosure.code}${nsCode === null ? '' : `\n${nsCode}`}`;
                 if (mapPart !== null) {
                     // One part per emitted region: `joinParts` derives each span from its own `code`,
                     // so they stay aligned. The namespace object is still emitter TEXT and keeps its
@@ -1544,18 +1538,10 @@ function renderChunk(
                     splitMapParts = [
                         { code: headAndClosure.code, map: headAndClosure.map ?? undefined },
                         ...(nsCode === null ? [] : [{ code: nsCode }]),
-                        { code: callText },
                     ];
                     mapPart = null;
                     nsCode = null; // already inside `out`, and covered by the parts above
                 }
-            } else {
-                const body = out.replace(/^/gm, '    ');
-                out = `${nsName === undefined ? '' : `var ${nsName};\n`}var ${initName} = /* @__PURE__ */ __esm(() => {\n${body}\n});`;
-                // Same splice, same correction — one or two header lines depending on whether the
-                // namespace binding is hoisted, plus the four-column indent.
-                if (mapPart !== null) mapPart = { code: out, map: indentMappings(mapPart.map!, nsName === undefined ? 1 : 2, 4) };
-                nsCode = null;
             }
         }
         if (out !== '') moduleTexts.push(out);

@@ -342,32 +342,34 @@ export function linkGraph(graph: Graph): Linked {
             // `__toCommonJS` (which stamps the `__esModule` marker the requiring code checks for).
             //
             if (!linked.namespaceOf.has(rec.resolved)) linked.namespaceOf.set(rec.resolved, `${reprName(target)}_ns`);
-            // LAZY INIT when nothing else needs the module's bindings hoisted. `require()` must
-            // evaluate its target AT THE CALL — eagerly running it changes when side effects happen
-            // and runs a module whose require is never reached (§7.20).
+            // LAZY INIT, ALWAYS SPLIT. `require()` must evaluate its target AT THE CALL — eagerly
+            // running it changes when side effects happen, and runs a module whose require is never
+            // reached (§7.20). The ORDERING is what makes this necessary even when the module is
+            // also statically imported: Node's ESM evaluation is a post-order walk in SOURCE order,
+            // and a CommonJS module is a leaf whose `require` calls happen during its own
+            // evaluation, while shakeup's `sortModules` treats a `require` edge as a static
+            // dependency edge and hoists the target above its requirer — measured divergent from
+            // Node in three of four shapes (§7.25).
             //
-            // rolldown always builds the lazy form, splitting declarations from initializers so the
-            // namespace getters can close over bare `var`s (`misc/wrapped_esm`). That split is only
-            // NEEDED when something else — a static `import` — also wants those bindings at top
-            // level. When the target is reached ONLY through `require`, the whole body can go inside
-            // the closure untouched and the namespace can be assigned from within it, which is the
-            // same semantics with no rewriting. The split remains outstanding for the mixed case,
-            // which is why the warning below still fires there.
-            // LAZY INIT, always. `require()` must evaluate its target AT THE CALL, and it is the
-            // ORDERING that makes this necessary even when the module is also statically imported:
-            // Node's ESM evaluation is a post-order walk in SOURCE order, and a CommonJS module is a
-            // leaf whose `require` calls happen during its own evaluation. shakeup's `sortModules`
-            // treats a `require` edge as a static dependency edge, so it hoists the target above its
-            // requirer — measured divergent from Node in three of four shapes (§7.25).
+            // rolldown has exactly ONE wrapped-ESM shape and builds it unconditionally
+            // (`module_finalizers/impl_visit_mut.rs:283-331`): function declarations hoist out, the
+            // namespace declaration hoists out, every top-level `var` binding hoists out as a bare
+            // `var a, b;`, and only the initializers go inside the closure. There is no unsplit
+            // variant to fall back to.
             //
-            // A target that is ALSO statically imported additionally needs the declaration/
-            // initializer split, because that importer still has to be able to name its bindings.
-            // Require-ONLY targets are lazy today. The MIXED case (also statically imported) needs
-            // the declaration/initializer split — `src/passes/lazy-split.ts` is written and tested,
-            // and the emit plumbing is in place behind `esmInitSplit` — but it also needs the
-            // ordering fix above, so it stays eager and warns until both land together.
-            if (!isStaticallyImported(graph, rec.resolved)) linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
-            else if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
+            // shakeup used to keep a second, unsplit shape for the require-ONLY case — the whole
+            // body inside the closure with the namespace assigned from within — reasoning that
+            // nothing outside wants the bindings, so the rewriting is unnecessary. It IS
+            // unnecessary, and that was the problem: it bought nothing and cost a divergent emit
+            // shape that could only be produced by re-indenting already-rendered TEXT, which is what
+            // desynchronized its source mappings. One shape, built from the AST, matching rolldown.
+            //
+            // A target that is ALSO statically imported additionally needs the ordering fix above,
+            // so it stays eager and warns; the split it would also need is now unconditional.
+            if (!isStaticallyImported(graph, rec.resolved)) {
+                linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
+                linked.esmInitSplit.add(rec.resolved);
+            } else if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
                 warnedEagerEsm.add(rec.resolved);
                 graph.warnings.push(
                     `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module that is ALSO statically ` +

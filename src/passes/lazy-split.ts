@@ -9,9 +9,10 @@ const binding = (name: string, at = 0): Node => node(N.BindingIdentifier, at, at
  * Split a module's top-level DECLARATIONS from their INITIALIZERS, so the whole body can move inside
  * an `__esm` lazy-init closure while its bindings stay visible at top level.
  *
- * Needed for a module that is BOTH `require`d and statically `import`ed (cjs.md §7.25 / C1). The
- * require-only case does not need it — nothing outside wants the bindings, so the body goes into the
- * closure untouched. Here a static importer still reads them, so they must be hoisted:
+ * Applied to EVERY lazily-initialised module (cjs.md §7.25 / C1), which is what rolldown does
+ * (`module_finalizers/impl_visit_mut.rs:283-331`) — it has no unsplit variant. The bindings have to
+ * be hoisted because the module's namespace object is built at top level from getters that close
+ * over them, and because a static importer would read them directly:
  *
  *     const a = 1;              →   var a;
  *     class C {}                    function f() {}        // hoisted, left alone
@@ -23,9 +24,7 @@ const binding = (name: string, at = 0): Node => node(N.BindingIdentifier, at, at
  *                                   });
  *
  * This is rolldown's `misc/wrapped_esm` shape. It trades `const`/`let` for `var` — losing TDZ — which
- * is the cost rolldown pays unconditionally and shakeup pays only for the mixed case.
- *
- * Returns null when nothing needs splitting, so the caller can keep the cheaper path.
+ * is the cost rolldown pays unconditionally, and now so do we.
  */
 export type LazySplit = {
     /** Bare `var a, b, c;` declarations to emit at top level, before the closure. */
@@ -37,11 +36,12 @@ export type LazySplit = {
     body: Node[];
 };
 
-/** Every binding name a declarator introduces, including through destructuring patterns. */
-function patternNames(target: Node, out: string[]): void {
+/** Every binding a declarator introduces, including through destructuring patterns. Collected as
+ *  NODES rather than names so the hoisted `var` keeps each binding's SYMBOL — see `toTarget`. */
+function patternNames(target: Node, out: Node[]): void {
     switch (target.type) {
         case N.BindingIdentifier:
-            out.push(target.name);
+            out.push(target);
             return;
         case N.ObjectPattern:
             for (const p of (target.data as { properties: Node[] }).properties) {
@@ -83,9 +83,17 @@ function patternNames(target: Node, out: string[]): void {
  */
 function toTarget(n: Node): Node {
     switch (n.type) {
-        case N.BindingIdentifier:
+        case N.BindingIdentifier: {
+            // `set` zeroes `sym` — a retyped node is normally a fresh node. Here it is NOT: the
+            // cover grammar means this is the SAME binding read back as a reference, and the symbol
+            // is what every later stage renames through. Dropping it printed the raw source name
+            // while the namespace getters printed the mangled one, so `{ get a() { return e; } }`
+            // read a variable that did not exist.
+            const sym = n.sym;
             set(n, N.IdentifierReference, null);
+            n.sym = sym;
             return n;
+        }
         case N.ObjectPattern: {
             const props = (n.data as { properties: Node[] }).properties;
             for (const p of props) {
@@ -145,7 +153,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
     const hoisted: Node[] = [];
     const functions: Node[] = [];
     const out: Node[] = [];
-    const names: string[] = [];
+    const names: Node[] = [];
 
     // `export const v = 1` is an ExportNamedDeclaration WRAPPING the declaration. Link mode drops the
     // `export` keyword and prints the inner declaration, so the split has to see through the wrapper
@@ -161,7 +169,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
             // becomes an assignment to the synthesized default binding.
             if (decl.type === N.FunctionDeclaration) unwrapped.push(decl);
             else {
-                names.push(defaultName);
+                names.push(binding(defaultName, stmt.start));
                 out.push(
                     create.ExpressionStatement(
                         stmt.start,
@@ -188,7 +196,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
         if (stmt.type === N.ClassDeclaration) {
             const id = (stmt.data as { id: Node | null }).id;
             if (id !== null) {
-                names.push(id.name);
+                names.push(id);
                 // A class declaration is not hoisted like a function — its binding exists but is in
                 // TDZ until evaluated, so the initializer genuinely belongs inside the closure.
                 // `class C {}` becomes `C = class {}` — the SAME node retyped, so its body and any
@@ -214,7 +222,14 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                 0,
                 0,
                 0,
-                names.map((n) => create.VariableDeclarator(0, 0, 0, binding(n), null, null) as Node),
+                names.map((n) => {
+                    // A FRESH binding node per hoisted declarator — the original is retyped in place
+                    // into the assignment target — carrying the same symbol, so renaming and mangling
+                    // resolve the declaration and its uses to one name.
+                    const b = binding(n.name, n.start);
+                    b.sym = n.sym;
+                    return create.VariableDeclarator(0, 0, 0, b, null, null) as Node;
+                }),
             ) as Node,
         );
     }

@@ -63,7 +63,9 @@ export function interopNamespace(name: string, wrapperName: string, nodeMode: bo
     const call = create.CallExpression(S, S, 0, ident(wrapperName), [], null);
     const args: Node[] = nodeMode ? [call, node(N.NumericLiteral, S, S, '1', null)] : [call];
     const toEsm = create.CallExpression(S, S, create.FL.PURE, ident('__toESM'), args, null);
-    return create.VariableDeclaration(S, S, create.VAR_KIND.VAR, [create.VariableDeclarator(S, S, 0, binding(name), null, toEsm)]);
+    return create.VariableDeclaration(S, S, create.VAR_KIND.VAR, [
+        create.VariableDeclarator(S, S, 0, binding(name), null, toEsm),
+    ]);
 }
 
 /** The live statements of a module body, with dead declarators pruned.
