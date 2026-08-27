@@ -32,6 +32,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { cpus, loadavg, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { brotliCompressSync, gzipSync } from 'node:zlib';
@@ -113,6 +114,11 @@ const TOOLS: Tool[] = [
         // TypeScript. Those cost time that the others also pay internally, so it stays a fair
         // wall-clock comparison, but it is NOT a comparison of equivalent feature sets — rollup
         // cannot consume CommonJS at all without `@rollup/plugin-commonjs`.
+        //
+        // AND IT DOES NOT MINIFY, which the size column says but the WALL column silently does not.
+        // Reading "shakeup is 1.05x faster than rollup" as a like-for-like win was wrong: shakeup was
+        // minifying and rollup was not. The `rollup+terser` arm below is the honest pairing; keep
+        // this one for the shape of the split (bundling cost vs minifying cost).
         name: 'rollup',
         countsCpu: true,
         run: () =>
@@ -147,6 +153,58 @@ const TOOLS: Tool[] = [
                 const out = await b.generate({ format: 'es' });
                 await b.close();
                 return out.output.map((o: { code?: string }) => o.code ?? '').join('\n');
+            }, true),
+    },
+    {
+        // THE LIKE-FOR-LIKE ARM: rollup doing the same job shakeup does, minification included.
+        // terser is what the rollup ecosystem actually reaches for (`@rollup/plugin-terser` wraps
+        // it), so this is the real pure-JS pipeline shakeup competes with.
+        //
+        // Resolved through webpack's dependency tree rather than added as a direct devDependency —
+        // `terser-webpack-plugin` already pulls it in. If that ever stops being true the arm SKIPS,
+        // exactly like a missing corpus, rather than failing the run.
+        name: 'rollup+terser',
+        countsCpu: true,
+        run: () =>
+            timed(async () => {
+                const req = createRequire(import.meta.url);
+                let minify: (code: string, opts?: unknown) => Promise<{ code?: string }>;
+                try {
+                    ({ minify } = await import(req.resolve('terser')));
+                } catch {
+                    throw new Error('terser not resolvable — arm skipped');
+                }
+                const { rollup } = await import('rollup');
+                const b = await rollup({
+                    input: corpus.entry,
+                    external: corpus.external,
+                    onwarn: () => {},
+                    plugins: [
+                        {
+                            name: 'ts-and-resolve',
+                            resolveId(source: string, importer: string | undefined) {
+                                if (importer === undefined || corpus.external.includes(source)) return null;
+                                if (!source.startsWith('.')) return null;
+                                const base = resolve(dirname(importer), source);
+                                for (const ext of ['', '.ts', '.tsx', '.js', '.mjs', '/index.ts', '/index.js']) {
+                                    if (existsSync(base + ext) && !existsSync(join(base + ext, 'x'))) return base + ext;
+                                }
+                                return null;
+                            },
+                            transform(code: string, id: string) {
+                                if (!/\.tsx?$/.test(id)) return null;
+                                return {
+                                    code: transformSync(code, { loader: id.endsWith('.tsx') ? 'tsx' : 'ts' }).code,
+                                    map: null,
+                                };
+                            },
+                        },
+                    ],
+                });
+                const out = await b.generate({ format: 'es' });
+                await b.close();
+                const joined = out.output.map((o: { code?: string }) => o.code ?? '').join('\n');
+                return (await minify(joined, { module: true })).code ?? '';
             }, true),
     },
     {
@@ -369,8 +427,15 @@ async function main(): Promise<void> {
         const f = rollupWall / base;
         console.log('\nPURE-JS arms — the like-for-like comparison, since rolldown and esbuild are native:');
         console.log(
-            `  rollup  ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'}  (rollup is NOT minifying; no built-in minifier, so read its size column as unminified)`,
+            `  rollup        ${rollupWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${f.toFixed(2)}x ${f >= 1 ? 'faster' : 'slower'}  (rollup is NOT minifying — unequal work, read the next line instead)`,
         );
+        const rtWall = wall['rollup+terser'] !== undefined ? med(wall['rollup+terser']) : null;
+        if (rtWall !== null) {
+            const rt = rtWall / base;
+            console.log(
+                `  rollup+terser ${rtWall.toFixed(1)}ms vs shakeup ${base.toFixed(1)}ms — shakeup ${rt.toFixed(2)}x ${rt >= 1 ? 'faster' : 'slower'}  <- THE LIKE-FOR-LIKE NUMBER (both minifying)`,
+            );
+        }
         const wpWall = wall['webpack'] !== undefined ? med(wall['webpack']) : null;
         if (wpWall !== null) {
             const g = wpWall / base;
