@@ -826,7 +826,12 @@ function parsePrivate(state: ParserState): Node {
         type: N.PrivateIdentifier,
         start: state.tokStart,
         end: state.tokEnd,
-        name: intern(state, state.tokStart + 1, state.tokEnd, state.tokHash),
+        // An escaped private name (`#\u0061`) carries its decoded name on the token, like any other
+        // escaped identifier — the source slice would be the escape text.
+        name:
+            (state.tokFlags & F_ESCAPED) !== 0
+                ? internString(state, state.tokCooked)
+                : intern(state, state.tokStart + 1, state.tokEnd, state.tokHash),
         sym: 0,
         data: null,
     };

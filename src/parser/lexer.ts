@@ -176,11 +176,13 @@ const KW_TOK = new Int32Array(KW_MASK + 1);
  * `\u{1F600}` while accepting the same emoji written literally. ASCII is checked against the same
  * `CHAR` table the raw path uses, which keeps `\u0031` (a leading digit) an error, as it is in oxc.
  */
-function scanEscapedIdent(state: ParserState): void {
+function scanEscapedIdent(state: ParserState, nameStart: number, tok: number): void {
     const src = state.src,
         srcLen = state.srcLen;
-    const start = state.tokStart;
-    let pos = start;
+    // Where the NAME begins, which is not where the TOKEN begins for a private name: `#\u0061`
+    // spans from the `#` but is called `a`. `parsePrivate` interns from `tokStart + 1` for the same
+    // reason.
+    let pos = nameStart;
     let name = '';
     let first = true;
     while (pos < srcLen) {
@@ -256,14 +258,13 @@ function scanEscapedIdent(state: ParserState): void {
         return;
     }
     state.pos = pos;
-    state.tokStart = start;
     state.tokEnd = pos;
     state.tokCooked = name;
     state.tokFlags |= F_ESCAPED;
     // An escaped identifier is NEVER the keyword it spells: `\u0069f` is an identifier named `if`,
     // and the parser rejects it wherever a reserved word would be illegal. Leaving it `T_IDENT` is
     // what makes `({ \u0069f: 1 })` — a property key, where reserved words are fine — still parse.
-    state.tok = T_IDENT;
+    state.tok = tok;
     state.tokHash = 0;
 }
 
@@ -411,7 +412,7 @@ export function nextToken(state: ParserState): void {
                     // `a\u0062c` — a `\` in CONTINUE position. One compare, and only on the branch
                     // that was already ending the loop, so the ordinary identifier costs nothing.
                     if (cc === 92) {
-                        scanEscapedIdent(state);
+                        scanEscapedIdent(state, state.tokStart, T_IDENT);
                         return;
                     }
                     break;
@@ -479,10 +480,19 @@ export function nextToken(state: ParserState): void {
             return;
         }
         pos++;
+        const nameStart = pos;
         let h = 0;
         while (pos < srcLen) {
             const cc = src.charCodeAt(pos);
-            if (cc < 128 && CHAR[cc] !== C_ID && CHAR[cc] !== C_DIG) break;
+            if (cc < 128 && CHAR[cc] !== C_ID && CHAR[cc] !== C_DIG) {
+                // `#\u0061` — a private name may be escaped exactly as an ordinary identifier may.
+                // 750 of test262's rejections were this one case.
+                if (cc === 92) {
+                    scanEscapedIdent(state, nameStart, T_PRIVATE);
+                    return;
+                }
+                break;
+            }
             if (cc >= 128 && (cc === 0x2028 || cc === 0x2029)) break;
             h = (Math.imul(h, 31) + cc) | 0;
             pos++;
@@ -808,7 +818,7 @@ function scanPunct(state: ParserState, c: number): void {
             // identifier test so the hot path never tests for it: reaching this default already
             // means the character matched nothing else.
             if (c === 92) {
-                scanEscapedIdent(state);
+                scanEscapedIdent(state, state.tokStart, T_IDENT);
                 return;
             }
             raise(state, ParseErrorCode.UnexpectedChar, String.fromCharCode(c));
