@@ -1750,7 +1750,25 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
         nextToken(state);
     }
     let id: Ref = null;
-    if (isIdentLike(state)) id = parseIdent(state, R_BIND);
+    if (isIdentLike(state)) {
+        // The two forms bind their name in DIFFERENT contexts, and the grammar spells it out:
+        //   FunctionDeclaration : function BindingIdentifier[?Yield, ?Await] …
+        //   FunctionExpression  : function BindingIdentifier[~Yield, ~Await] …
+        // An expression's name lives in its own scope, outside the enclosing function, so
+        // `function* g() { (function yield() {}) }` is legal while `function* g() { function
+        // yield() {} }` is not. Suppressing the flags only across the NAME is what separates them;
+        // reading the same context for both rejected 3 valid test262 programs.
+        const isFnExpr = !isDecl || isExpr;
+        const outerYield = state.yieldOk;
+        const outerAwait = state.awaitOk;
+        if (isFnExpr) {
+            state.yieldOk = false;
+            state.awaitOk = false;
+        }
+        id = parseIdent(state, R_BIND);
+        state.yieldOk = outerYield;
+        state.awaitOk = outerAwait;
+    }
     let typeParams: Ref = null;
     if (state.tsMode && isP(state, P.LT)) {
         const t = tryParseTypeParams(state);

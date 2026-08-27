@@ -135,6 +135,19 @@ describe('`yield` outside a generator', () => {
         }
     });
 
+    it("binds a function EXPRESSION's name outside the generator", () => {
+        // The grammar spells the split out:
+        //   FunctionDeclaration : function BindingIdentifier[?Yield, ?Await] …
+        //   FunctionExpression  : function BindingIdentifier[~Yield, ~Await] …
+        // An expression's name lives in its own scope, so it escapes the enclosing generator's
+        // restriction while a declaration's name does not. `pnpm test262` caught this: reading one
+        // context for both rejected three valid programs.
+        expect(ok('function* g() { (function yield() {}); }')).toEqual([]);
+        expect(ok('async function f() { (function await() {}); }')).toEqual([]);
+        expect(ok('var g = function*() { (function yield() {}); };')).toEqual([]);
+        expect(errOf('function* g() { function yield() {} }')?.code).toBe(ParseErrorCode.IdentifierInGenerator);
+    });
+
     it('rejects BINDING `yield` inside a generator', () => {
         expect(errOf('function* g() { var yield = 1 }')?.code).toBe(ParseErrorCode.IdentifierInGenerator);
         expect(ok('function* g() { yield 1 }')).toEqual([]);
