@@ -195,8 +195,10 @@ describe('tree shaking — module-level side-effect gate (unit seam)', () => {
     it("sideEffects 'no-treeshake': every statement is rooted", async () => {
         const { graph, shaken, effectIdx } = await shakeWith('no-treeshake');
         const effectLive = shaken.live[effectIdx];
-        const total = graph.modules[effectIdx].program.data.body.length;
-        expect(effectLive.size).toBe(total);
+        // `live` is keyed by NODE id and holds more than one entry per statement: the statement
+        // itself, plus one per declarator of a variable declaration (that is what gives declarator
+        // granularity — see `shakeUnits`). So assert every STATEMENT is present rather than counting.
+        for (const stmt of graph.modules[effectIdx].program.data.body) expect(effectLive.has(stmt.id)).toBe(true);
     });
 
     it('sideEffects true (default): an impure statement is auto-rooted (kept)', async () => {

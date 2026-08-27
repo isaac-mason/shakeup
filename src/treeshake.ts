@@ -24,7 +24,12 @@ export type TreeshakeResult = {
 };
 
 export type StatementInfo = {
+    /** The shaking UNIT — a top-level statement, or ONE declarator of a split declaration. */
     statement: Node;
+    /** The top-level statement the unit belongs to; `=== statement` unless it is a declarator.
+     *  Including a unit marks BOTH ids live, so a consumer can gate on the statement without
+     *  knowing whether it was split. */
+    owner: Node;
     refs: number[];
     pure: boolean;
 };
@@ -337,7 +342,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
                 const refs: number[] = [];
                 const declared: number[] = [];
                 collectRefs(mod, linked, unit, refs, declared);
-                list.push({ statement: unit, refs, pure: unitIsPure(mod, unit, statement) });
+                list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, unit, statement) });
                 for (const ref of declared) {
                     declToStatement.set(ref, [mod.idx, list.length - 1]);
                     localDecls.push([ref, [mod.idx, list.length - 1]]);
@@ -375,6 +380,18 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         const info = infos[modIdx][idx];
         if (live[modIdx].has(info.statement.id)) return;
         live[modIdx].add(info.statement.id);
+        // ONE SOURCE OF TRUTH. `live` records every id an emitter needs to test, so nothing
+        // downstream has to re-derive which declarations were split:
+        //   • the OWNER statement, so the statement-level gate works for a split unit too;
+        //   • every declarator of an UNSPLIT declaration, so "keep declarators present in `live`"
+        //     is a uniform rule rather than one conditional on how this statement was treated.
+        if (info.owner !== info.statement) live[modIdx].add(info.owner.id);
+        else if (info.statement.type === N.VariableDeclaration || info.statement.type === N.ExportNamedDeclaration) {
+            const decl = info.statement.type === N.VariableDeclaration ? info.statement : (info.statement.data.declaration as Node | null);
+            if (decl !== null && decl.type === N.VariableDeclaration) {
+                for (const d of decl.data.declarations as Node[]) live[modIdx].add(d.id);
+            }
+        }
         for (const r of info.refs) markRef(r);
     };
 
