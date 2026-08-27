@@ -11,7 +11,7 @@
 //     by `node.type`; each node fires every visitor's hook in order (fused), and hooks mutate via
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
 import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
-import { refFor, retireSymbol as retireSymbolIn, SCOPE, type Semantic } from '../analysis/semantic.ts';
+import { refFor, retireSymbol as retireSymbolIn, type Semantic } from '../analysis/semantic.ts';
 import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast.ts';
 
 type Hook = (node: Node, ctx: TransformCtx) => void;
@@ -156,64 +156,8 @@ class Ctx {
         this.enterByType = t.enter;
         this.exitByType = t.exit;
     }
-    /**
-     * CHANGE SCOPES — which functions changed, and when (Closure's `ChangeTracker`).
-     *
-     * `stamp[scopeId]` holds the round number of the last change in that function OR ANYWHERE INSIDE
-     * IT, so a driver can skip a function whose stamp is older than the last round it visited. Null
-     * when the driver is not tracking (every traversal outside the compress fixed point).
-     *
-     * An INTEGER stamp, not a `Set`: benched at `benches/micro/change-report.bench.ts`, a `Set.add`
-     * on every mutation costs 6-7x where an indexed store costs nothing, and the value being the
-     * round number means last round's marks self-invalidate with no clearing pass.
-     */
-    stamp: number[] | null = null;
-    /** The round the stamps are being written for. */
-    round = 0;
-    /** The innermost enclosing FUNCTION scope — Closure's `isChangeScopeRoot` unit. Measured coarser
-     *  than `currentScope` and cheaper for it: on the crashcat chunk, round 2 has 456 dirty scopes
-     *  but only 320 dirty functions, because block scopes collapse and mutations cluster. */
-    currentFn = 0;
-    /**
-     * Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point.
-     *
-     * An ACCESSOR so the stamp is written on EVERY path. The obvious alternative — hooking the
-     * mutation methods (`replaceWith`, `remove`, ...) — was measured WRONG: a dozen-plus passes
-     * assign `ctx.changed = true` directly after mutating a list in place (`inline.ts`,
-     * `boolean-context.ts`, `drop-unused.ts`, ...), and instrumenting only the methods reported zero
-     * dirty scopes in rounds where the loop was demonstrably still working. One hook, no way to
-     * forget. Benched as free (`change-report.bench.ts`).
-     */
-    _changed = false;
-    get changed(): boolean {
-        return this._changed;
-    }
-    set changed(v: boolean) {
-        if (v && this.stamp !== null) this.markChanged();
-        this._changed = v;
-    }
-    /**
-     * Stamp the enclosing function AND its ancestors.
-     *
-     * Ancestors matter because the stamp means "changed at or below here": to reach a dirty NESTED
-     * function the walk must not skip the functions containing it. Early-exits as soon as an ancestor
-     * already carries this round, so the common case is one or two writes.
-     */
-    private markChanged(): void {
-        const stamp = this.stamp as number[];
-        const round = this.round;
-        const scopes = this.semantic.scopes;
-        let s = this.currentFn;
-        for (;;) {
-            if (stamp[s] === round) return; // this function and everything above it is already marked
-            stamp[s] = round;
-            if (s === 0) return;
-            // Walk to the next enclosing FUNCTION, not merely the next scope.
-            let p = scopes[s].parent;
-            while (p !== 0 && scopes[p].flags !== SCOPE.FUNCTION) p = scopes[p].parent;
-            s = p;
-        }
-    }
+    /** Set by any mutation (replace/remove/multi) — lets a driver run to a fixed point. */
+    changed = false;
     /**
      * Per-round reference deltas, or null when the driver is not maintaining counts incrementally.
      *
@@ -499,14 +443,8 @@ function descend(node: Node, ctx: Ctx): void {
     }
     const prev = ctx.currentScope;
     ctx.currentScope = s;
-    // A FUNCTION scope becomes the enclosing change scope; block/catch/for scopes leave it alone, so
-    // a mutation inside a block marks the whole function. Read off the scope table rather than
-    // matching node types — `descend` is already in the branch that owns a scope.
-    const prevFn = ctx.currentFn;
-    if (ctx.stamp !== null && ctx.semantic.scopes[s].flags === SCOPE.FUNCTION) ctx.currentFn = s;
     WALKERS[node.type](node, ctx, visitSingle, visitList);
     ctx.currentScope = prev;
-    ctx.currentFn = prevFn;
 }
 
 /** Visit a single-child slot; returns the (possibly replaced) node to write back. */
@@ -644,16 +582,9 @@ export function traverse(
     semantic: Semantic,
     visitors: Visitor[],
     refDelta: Map<number, RefDelta> | null = null,
-    /** Change-scope stamps to write, and the round to write. Only the compress fixed point passes
-     *  these; every other traversal leaves them null and pays nothing. */
-    stamps: { stamp: number[]; round: number } | null = null,
 ): boolean {
     const ctx = new Ctx(semantic, visitors);
     ctx.refDelta = refDelta;
-    if (stamps !== null) {
-        ctx.stamp = stamps.stamp;
-        ctx.round = stamps.round;
-    }
     ctx.op = OP_NONE;
     fireEnter(program, ctx);
     ctx.op = OP_NONE;
