@@ -2246,8 +2246,40 @@ function parseFor(state: ParserState, start: number): Node {
     let init: Ref = null;
     if (isP(state, P.SEMI)) nextToken(state);
     else {
-        if (isKeyword(state.tok) && (state.tok === K.VAR || state.tok === K.LET || state.tok === K.CONST)) {
-            const kind = state.tok === K.VAR ? VAR_KIND.VAR : state.tok === K.LET ? VAR_KIND.LET : VAR_KIND.CONST;
+        // `for (using x of xs)` / `for (await using x of xs)` — the for-of head takes a `using`
+        // declaration too. `using` is a plain identifier here, so it cannot join the keyword test
+        // below; and `await using` is distinct from the `for await` on line above, which has already
+        // been consumed into `flags`.
+        let usingKind = 0;
+        const atUsing = (): boolean =>
+            state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart);
+        // The binding may not be `of`: the spec keeps `for (using of xs)` meaning "iterate into the
+        // variable `using`", so `using` followed by `of` is never a declaration. oxc agrees.
+        const bindingFollows = (): boolean => isIdentLike(state) && !isK(state, K.OF) && (state.tokFlags & F_NL) === 0;
+        const save = saveState(state);
+        if (atUsing()) {
+            nextToken(state);
+            if (bindingFollows()) usingKind = VAR_KIND.USING;
+        } else if (isK(state, K.AWAIT)) {
+            nextToken(state);
+            if (atUsing()) {
+                nextToken(state);
+                if (bindingFollows()) usingKind = VAR_KIND.AWAIT_USING;
+            }
+        }
+        restoreState(state, save);
+        // The shared path below consumes ONE token as the keyword, so `await using` needs its
+        // `await` dropped here first.
+        if (usingKind === VAR_KIND.AWAIT_USING) nextToken(state);
+        if (usingKind !== 0 || (isKeyword(state.tok) && (state.tok === K.VAR || state.tok === K.LET || state.tok === K.CONST))) {
+            const kind =
+                usingKind !== 0
+                    ? usingKind
+                    : state.tok === K.VAR
+                      ? VAR_KIND.VAR
+                      : state.tok === K.LET
+                        ? VAR_KIND.LET
+                        : VAR_KIND.CONST;
             const ds = state.tokStart;
             nextToken(state);
             const target = parseBindingTarget(state);

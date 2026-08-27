@@ -73,6 +73,37 @@ describe('using declarations', () => {
         });
     });
 
+    describe('in a for-of head', () => {
+        it.each([
+            ['`for (using x of xs)`', 'function f() { for (using x of xs) {} }'],
+            ['`for (await using x of xs)`', 'async function f() { for (await using x of xs) {} }'],
+        ])('parses %s', (_label, src) => {
+            expect(errs(src)).toEqual([]);
+        });
+
+        it('`for (using of xs)` still iterates INTO a variable named `using`', () => {
+            // The spec preserves this meaning, so `using` followed by `of` is never a declaration.
+            // Treating it as one made the head expect a second `of` and fail.
+            expect(errs('function f() { for (using of xs) {} }')).toEqual([]);
+        });
+
+        it.each([
+            ['an ordinary const head', 'function f() { for (const x of xs) {} }'],
+            ['a classic three-part head', 'function f() { for (let i = 0; i < 1; i++) {} }'],
+            ['`for await`', 'async function f() { for await (const x of xs) {} }'],
+            ['a bare target', 'function f() { for (x of xs) {} }'],
+            ['a for-in head', 'function f() { for (var x in o) {} }'],
+        ])('does not disturb %s', (_label, src) => {
+            expect(errs(src)).toEqual([]);
+        });
+
+        it('emits the for-of `using` head verbatim', async () => {
+            const r = await build('export function f() {\n  for (using x of globalThis.xs) { x.t() }\n}\nexport const x = 1;');
+            expect(r.errors).toEqual([]);
+            expect(r.code).toMatch(/for \(using x of/);
+        });
+    });
+
     describe('bundling', () => {
         it('emits `using` verbatim, as both oracles do', async () => {
             const r = await build('export function f() {\n  using a = g(), b = h();\n  return 1;\n}\nexport const x = 1;');
