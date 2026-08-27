@@ -407,6 +407,18 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                         const nsExport = chunkGraph.chunks[targetChunk].nsExportName?.get(rec.resolved);
                         if (nsExport !== undefined && ctx.linked.dynamicExports.has(rec.resolved)) {
                             map.set(n, `import('${path}').then((m) => m.${nsExport})`);
+                        } else if (n.data.options !== null) {
+                            // DROP the import-attributes argument. The specifier now points at a
+                            // JavaScript chunk, so `{ with: { type: 'json' } }` has become a lie and
+                            // Node rejects the load outright:
+                            //   `import('./d.json', { with: { type: 'json' } })`
+                            //     → `import('./d-BoSLbCma.js', { with: { type: 'json' } })`
+                            //     → TypeError: Module "…/d-BoSLbCma.js" is not of type "json"
+                            // A build that reported no errors produced a bundle that threw. Both
+                            // oracles drop the attribute for a BUNDLED module for the same reason and
+                            // keep it only for an external — and an external never reaches here,
+                            // because `rec.external` short-circuits above.
+                            map.set(n, `import('${path}')`);
                         } else map.set(source, `'${path}'`);
                     }
                 }
@@ -535,18 +547,23 @@ function renderExternalImports(linked: Linked, sideEffectSpecs: Set<string>, tig
     const lines: string[] = [];
     for (const [spec, entries] of bySpec) {
         sideEffectSpecs.delete(spec);
+        const attrs = linked.externalAttributes.get(spec);
         const star = entries.find((e) => e.name === '*');
-        if (star !== undefined) lines.push(importStmt(`* as ${star.local}`, spec, tight));
+        if (star !== undefined) lines.push(importStmt(`* as ${star.local}`, spec, tight, attrs));
         const def = entries.find((e) => e.name === 'default');
         const named = entries.filter((e) => e.name !== '*' && e.name !== 'default');
         if (def !== undefined || named.length > 0) {
             const inner = named.map((e) => (e.name === e.local ? e.name : `${e.name} as ${e.local}`)).join(clauseSep(tight));
             const namedPart = named.length > 0 ? (tight ? `{${inner}}` : `{ ${inner} }`) : '';
             const clauses = [def !== undefined ? def.local : '', namedPart].filter((s) => s !== '').join(clauseSep(tight));
-            lines.push(importStmt(clauses, spec, tight));
+            lines.push(importStmt(clauses, spec, tight, attrs));
         }
     }
-    for (const spec of sideEffectSpecs) lines.push(tight ? `import'${spec}';` : `import '${spec}';`);
+    for (const spec of sideEffectSpecs) {
+        const a = linked.externalAttributes.get(spec);
+        const w = a === undefined ? '' : tight ? `with{${a}}` : ` with { ${a} }`;
+        lines.push(tight ? `import'${spec}'${w};` : `import '${spec}'${w};`);
+    }
     return lines;
 }
 
@@ -561,11 +578,15 @@ const clauseSep = (tight: boolean): string => (tight ? ',' : ', ');
 /** `import <clauses> from '<spec>';`, dropping the separators that only exist for readability.
  *  A clause list starting with `{`/`*` needs no space after `import`, and one ending in `}` needs
  *  none before `from`; a bare default local (`import d from …`) needs both. */
-function importStmt(clauses: string, spec: string, tight: boolean): string {
-    if (!tight) return `import ${clauses} from '${spec}';`;
+function importStmt(clauses: string, spec: string, tight: boolean, attrs?: string): string {
+    // An external keeps its import attributes: the module is still fetched by the runtime, which
+    // needs `with { type: … }` to load it. (A BUNDLED module drops the clause — it is inlined
+    // JavaScript by then. Both oracles split it exactly this way.)
+    const w = attrs === undefined ? '' : tight ? `with{${attrs}}` : ` with { ${attrs} }`;
+    if (!tight) return `import ${clauses} from '${spec}'${w};`;
     const lead = clauses.startsWith('{') || clauses.startsWith('*') ? '' : ' ';
     const tail = clauses.endsWith('}') ? '' : ' ';
-    return `import${lead}${clauses}${tail}from'${spec}';`;
+    return `import${lead}${clauses}${tail}from'${spec}'${w};`;
 }
 
 /** Whether a namespace member's local binding can never be reassigned, so the namespace may hold it

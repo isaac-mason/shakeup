@@ -275,6 +275,7 @@ export function linkGraph(graph: Graph): Linked {
         esmInit: new Map(),
         dynamicExports: new Set(),
         externalLocals: new Map(),
+        externalAttributes: new Map(),
         defaultRefs: new Map(),
         errors: [],
     };
@@ -354,6 +355,12 @@ export function linkGraph(graph: Graph): Linked {
                         'effects may run earlier than Node would run them, or run even if the require is never reached.',
                 );
             }
+        }
+    }
+
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.external && rec.attributes !== undefined) linked.externalAttributes.set(rec.specifier, rec.attributes);
         }
     }
 
