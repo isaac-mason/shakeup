@@ -15,7 +15,12 @@ import type { Plugin } from '../src/plugin.ts';
 // granularity is the aligned target, and it closes the merge regression and the pre-existing
 // multi-declarator limitation together.
 //
-// `it.fails` marks what is currently broken so the suite stays green; fixing it turns them red.
+// FIXED by two changes, which are coupled and neither works alone:
+//   A `splitDeclarators` (scan) splits top-level multi-declarator statements, so statement-level
+//     shaking reaches declarator granularity. Mirrors rolldown `split_multi_declarator` / esbuild's
+//     one-part-per-declarator. Fixes the shape that exists in SOURCE.
+//   B `weldStatements` moved `joinVars` out of the scan-time fixed point to RENDER, over the
+//     live-filtered list — nothing that merges statements may run before liveness is computed.
 const sideEffectFree: Plugin = {
     name: 'sef',
     resolveId: (_c, spec, importer) => (spec === './pure.js' && importer ? { id: '/pure.js', moduleSideEffects: false } : null),
@@ -45,23 +50,24 @@ describe('dead declarators are dropped', () => {
         expect(code).not.toContain('BBB');
     });
 
-    it.fails('separate declarations, MINIFIED — joinVars welds the dead one to the live one', async () => {
+    it('separate declarations, MINIFIED — joinVars welds the dead one to the live one', async () => {
         const code = await build(SEPARATE, true);
         expect(code).not.toContain('BBB');
     });
 
-    it.fails('one statement with two declarators, unminified', async () => {
-        // Pre-existing, not a regression: the shaker cannot split a statement. rolldown can.
+    it('one statement with two declarators, unminified', async () => {
+        // Fixed by `splitDeclarators`: one statement per declarator, so the shaker's statement
+        // granularity reaches the declarator. rolldown and esbuild both split for this reason.
         const code = await build(MERGED, false);
         expect(code).not.toContain('BBB');
     });
 
-    it.fails('one statement with two declarators, minified', async () => {
+    it('one statement with two declarators, minified', async () => {
         const code = await build(MERGED, true);
         expect(code).not.toContain('BBB');
     });
 
-    it.fails.each([
+    it.each([
         ['var', "import { mk } from 'ext';\nvar a = mk('AAA');\nvar b = mk('BBB');\nexport { a, b };"],
         ['let', "import { mk } from 'ext';\nlet a = mk('AAA');\nlet b = mk('BBB');\nexport { a, b };"],
         ['const', "import { mk } from 'ext';\nconst a = mk('AAA');\nconst b = mk('BBB');\nexport { a, b };"],
