@@ -5,13 +5,11 @@ import { lazySplit } from '../src/passes/lazy-split.ts';
 import { printStmt } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 
-// cjs.md §7.25 / C1. A module that is BOTH `require`d and statically `import`ed has to move inside an
-// `__esm` closure so the require evaluates it at the call — but its bindings must stay visible at top
-// level for the static importer. That is rolldown's declaration/initializer split
-// (`misc/wrapped_esm`), and this is the pass that performs it.
-//
-// The require-ONLY case does not need any of this: nothing outside wants the bindings, so the body
-// goes into the closure untouched.
+// cjs.md §7.25 / C1. A `require`d ES module moves inside an `__esm` closure so the require evaluates
+// it at the call — but its bindings must stay visible at top level, both for the namespace object's
+// getters and for any static importer. That is rolldown's declaration/initializer split, which
+// rolldown builds for EVERY wrapped ESM module (`module_finalizers/impl_visit_mut.rs:283-331`) and
+// which shakeup now also applies unconditionally. This is the pass that performs it.
 const split = (src: string) => {
     const p = parse(src, { ts: false, jsx: false, kind: 'module' });
     expect(p.errors).toEqual([]);
@@ -96,5 +94,39 @@ describe('declaration/initializer split', () => {
             `${r.hoisted}\nconst before = a;\nfunction init(){${r.body}}\ninit();\nreturn [before, a];`,
         )() as unknown[];
         expect(out).toEqual([undefined, 1]);
+    });
+});
+
+describe('the split keeps every binding on ONE name', () => {
+    // The hoisted `var` and the initializer assignments are SYNTHESIZED nodes. If they carry no
+    // symbol they print the raw source name, while the namespace getters — built from the real
+    // symbol — print the renamed one. Under `minify` that produced
+    // `var e,t; ... {get a(){return a}}`: getters reading variables that do not exist. Only
+    // `pnpm cjsdiff` caught it, so it is pinned here too.
+    const files = {
+        '/e.js': 'export const a = 1;\nexport let m = 2;',
+        '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a, e.m];",
+        '/main.js': "import d from './d.cjs';\nexport const x = d;",
+    };
+    const run = async (minify: boolean) => {
+        const { bundle } = await import('../src/bundle.ts');
+        const { createMemoryFs } = await import('../src/fs.ts');
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), output: minify ? { minify: true } : {} });
+        expect(r.errors).toEqual([]);
+        return r.code;
+    };
+
+    it.each([false, true])('evaluates to the same values (minify: %s)', async (minify) => {
+        const code = await run(minify);
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as { x: unknown };
+        expect(mod.x).toEqual([1, 2]);
+    });
+
+    it('the hoisted names and the namespace getter bodies agree after mangling', async () => {
+        const code = await run(true);
+        const hoisted = /var ([A-Za-z$_][\w$]*),([A-Za-z$_][\w$]*);var \w+=__esm/.exec(code);
+        expect(hoisted).not.toBeNull();
+        const getters = [...code.matchAll(/get \w+\(\)\{return ([A-Za-z$_][\w$]*);?\}/g)].map((m) => m[1]);
+        expect(getters.sort()).toEqual([hoisted![1], hoisted![2]].sort());
     });
 });
