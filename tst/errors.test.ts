@@ -343,3 +343,32 @@ describe('string export and import names', () => {
         expect(ok(src)).toEqual([]);
     });
 });
+
+// Found by `pnpm parsercorpus` — the last non-`with` entry. `export default async` assumed a
+// `function` followed, so `export default async (v) => v * 2` failed with `expected '('`.
+//
+// An ordinary default export of an async arrow. It survived because the same shape one level in
+// (`const f = async (v) => v`) always worked — only the default-export path had the assumption.
+describe('export default of an async arrow', () => {
+    const ok = (src: string) => parse(src, { ts: false, jsx: false, kind: 'module' }).errors;
+
+    it.each([
+        ['a parenthesised parameter', 'export default async (value) => value * 2;'],
+        ['a bare parameter', 'export default async v => v;'],
+        ['no parameters', 'export default async () => {};'],
+        ['a leading comment in the parameter list', 'export default async (/** @type {number} */ v) => v;'],
+    ])('accepts %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+
+    it.each([
+        ['an anonymous async function', 'export default async function () {}'],
+        ['a named async function', 'export default async function f() {}'],
+        ['a plain function', 'export default function () {}'],
+        ['a class', 'export default class {}'],
+        ['an expression', 'export default 1;'],
+        ['a binding merely NAMED async', 'export default async;'],
+    ])('does not regress %s', (_label, src) => {
+        expect(ok(src)).toEqual([]);
+    });
+});
