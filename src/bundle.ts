@@ -1156,7 +1156,13 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // escaping as a throw — a caller reads `result.errors`, and a config mistake is not an exception.
     let chunkOptions: ReturnType<typeof resolveChunkOptions>;
     try {
-        chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
+        chunkOptions = resolveChunkOptions(
+            options.output,
+            graph.entries.length,
+            warnings,
+            pluginCtx.getModuleInfo,
+            graph.externalIds,
+        );
     } catch (e) {
         return {
             code: '',
@@ -1961,6 +1967,8 @@ function resolveChunkOptions(
     entryCount: number,
     warnings: string[],
     getModuleInfo: (id: string) => ModuleInfo | null,
+    /** Ids a plugin resolved as external — see `Graph.externalIds`. */
+    externalIds: ReadonlySet<string> = new Set(),
 ): ChunkOptions {
     const cs = output?.codeSplitting;
     const inline = output?.inlineDynamicImports === true;
@@ -2023,6 +2031,13 @@ function resolveChunkOptions(
             const claimedBy = new Map<string, string>();
             for (const [chunkName, ids] of Object.entries(mc)) {
                 for (const id of ids) {
+                    // An EXTERNAL module is never emitted, so it cannot be put in a chunk. rollup
+                    // errors; we silently produced a group that could never match anything.
+                    if (externalIds.has(id)) {
+                        throw new Error(
+                            `"${id}" cannot be included in manualChunks because it is resolved as an external module by the "external" option or plugins.`,
+                        );
+                    }
                     const prior = claimedBy.get(id);
                     if (prior !== undefined && prior !== chunkName) {
                         throw new Error(

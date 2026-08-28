@@ -823,6 +823,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         affected: new Set(),
         changed: new Set(),
         externalSideEffects: new Map(),
+        externalIds: new Set(),
     };
     const cache = options.cache;
     // `moduleTypes` keys are extensions with the leading dot optional, matching rolldown's
@@ -890,6 +891,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (partial.external !== undefined && partial.external !== false) {
                 // true | 'absolute' | 'relative' → external. Treated alike (keep verbatim).
                 pluginExternals.add(specifier);
+                // Keep the RESOLVED id too — `manualChunks` lists ids, and this is the only place an
+                // external's absolute path is known (everything else keys externals by specifier).
+                if (typeof partial.id === 'string') graph.externalIds.add(partial.id);
                 // A plugin may declare the external side-effect-free (rolldown `moduleSideEffects`),
                 // letting an unreferenced import of it drop entirely.
                 if (partial.moduleSideEffects === false) graph.externalSideEffects.set(specifier, false);
