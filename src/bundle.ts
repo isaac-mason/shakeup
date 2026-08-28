@@ -708,7 +708,17 @@ function renderNamespaceObject(
         }
         return lines.join('\n');
     }
-    return tight ? `${decl}${nsName}={${inner}};${tag}` : `${decl}${nsName} = { ${inner} };${tag}`;
+    // `__proto__: null` — a real ES module namespace is an exotic object with a NULL prototype, and
+    // that is observable: `Object.getPrototypeOf(ns)`, and `deepStrictEqual` against
+    // `{ __proto__: null, ... }`, both see it. ALL THREE oracles emit it — rollup
+    // (`Object.freeze({ __proto__: null, ... })`), rolldown, and esbuild — so this was a shakeup-only
+    // divergence, not a choice between them.
+    //
+    // Freezing is a SEPARATE question and stays as it was: rollup freezes, rolldown and esbuild do
+    // not, and the comment above records why we follow the latter two.
+    const proto = tight ? '__proto__:null' : '__proto__: null';
+    const members = inner === '' ? proto : `${proto}${clauseSep(tight)}${inner}`;
+    return tight ? `${decl}${nsName}={${members}};${tag}` : `${decl}${nsName} = { ${members} };${tag}`;
 }
 
 /** Runtime helpers for CommonJS interop, transcribed from rolldown's `runtime-base.js`.
