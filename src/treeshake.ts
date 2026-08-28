@@ -178,6 +178,21 @@ function statementIsPure(mod: Module, statement: Node): boolean {
         const rec = mod.importRecords.find((r) => r.specifier === spec);
         return !(rec?.external ?? false);
     }
+    if (statement.type === N.ExportAllDeclaration) {
+        // An ENTRY's `export * from '<external>'` is part of its public export surface, but the names
+        // it contributes are not statically known, so it never appears in an export map and nothing
+        // roots it — it was shaken away and `basename` from `export * from 'path'` simply vanished.
+        // Treated as impure so it survives, the same way a bare `import '<external>'` is kept for its
+        // side effect just above.
+        //
+        // ENTRY only: a non-entry external star is already reported as dropped
+        // (`trackChunkSpecs`), because there is nowhere in a concatenated bundle to put it.
+        const source = statement.data.source;
+        if (source.type !== N.StringLiteral) return true;
+        const spec = mod.source.slice(source.start + 1, source.end - 1);
+        const rec = mod.importRecords.find((r) => r.specifier === spec);
+        return !(mod.isEntry && (rec?.external ?? false));
+    }
     return isPureStatement(statement);
 }
 
