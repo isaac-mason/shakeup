@@ -1009,7 +1009,27 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         return r.code;
     };
 
-    const addModule = async (id: string, isEntry: boolean): Promise<number> => {
+    /**
+     * In-flight ADD promises, so a second request for a module already being loaded awaits the first
+     * instead of starting over.
+     *
+     * `this.load({ id })` from inside that module's own `load` hook is the case that forced this:
+     * the module is not in `graph.byId` yet, so `addModule` began loading it AGAIN, whose load hook
+     * called `this.load` again — unbounded recursion, and a stack overflow
+     * (`preload-loading-module`). Deduping by promise also removes redundant work for any concurrent
+     * request for the same id.
+     */
+    const adding = new Map<string, Promise<number>>();
+    const addModule = (id: string, isEntry: boolean): Promise<number> => {
+        const existing = graph.byId.get(id);
+        if (existing !== undefined) return Promise.resolve(existing);
+        const pending = adding.get(id);
+        if (pending !== undefined) return pending;
+        const p = addModuleUncached(id, isEntry).finally(() => adding.delete(id));
+        adding.set(id, p);
+        return p;
+    };
+    const addModuleUncached = async (id: string, isEntry: boolean): Promise<number> => {
         const existing = graph.byId.get(id);
         if (existing !== undefined) return existing;
         // Visible to this module's OWN hooks from here until it lands in the graph — see

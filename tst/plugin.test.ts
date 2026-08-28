@@ -302,3 +302,58 @@ describe('this.load', () => {
         expect(info!.hasDefaultExport).toBe(false);
     });
 });
+
+describe('this.load is re-entrancy safe', () => {
+    // `preload-loading-module` calls `this.load({ id })` from inside THAT module's own `load` hook.
+    // The module is not in the graph yet, so `addModule` began loading it AGAIN, whose load hook
+    // called `this.load` again — unbounded recursion. Concurrent requests for one id now share a
+    // single in-flight promise.
+    it('calling this.load for the module currently being loaded does not recurse', async () => {
+        let resolvedId: string | null = null;
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './dep.js';\nexport const a = 1;", '/dep.js': 'export const d = 1;' }),
+            plugins: [
+                {
+                    name: 'preload',
+                    load(id) {
+                        if (id === '/dep.js') {
+                            // `MaybePromise`, so normalise before chaining — the point is that the
+                            // re-entrant call resolves at all rather than recursing.
+                            void Promise.resolve(this.load({ id })).then((info) => {
+                                resolvedId = info === null ? null : info.id;
+                            });
+                        }
+                        return null;
+                    },
+                },
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        expect(resolvedId).toBe('/dep.js');
+    });
+
+    it('concurrent loads of one id share a single module', async () => {
+        let count = 0;
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': 'export const a = 1;', '/dep.js': 'export const d = 1;' }),
+            plugins: [
+                {
+                    name: 'twice',
+                    async buildStart() {
+                        const [x, y] = await Promise.all([this.load({ id: '/dep.js' }), this.load({ id: '/dep.js' })]);
+                        expect(x?.id).toBe(y?.id);
+                    },
+                    load(id) {
+                        if (id === '/dep.js') count++;
+                        return null;
+                    },
+                },
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        // Loaded ONCE despite two concurrent requests.
+        expect(count).toBe(1);
+    });
+});
