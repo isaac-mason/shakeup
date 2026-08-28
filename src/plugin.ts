@@ -82,6 +82,11 @@ export type LoadResult = string | null | undefined | SourceDescription;
 // `(specifier, importer, extra)` and type-checked clean while behaving wrongly at runtime — four test
 // files passed the compiler and failed at execution. Grep, do not trust `tsc`.
 
+/** One entry in the `generateBundle` bundle object — a rendered chunk or an emitted asset. Kept
+ *  loose (`Record<string, unknown>` tail) because plugins both read rollup-specific fields we do not
+ *  model and write arbitrary ones back. */
+export type GenerateBundleEntry = { type: 'chunk' | 'asset'; fileName: string } & Record<string, unknown>;
+
 /** transform: string = replace source, Edit[] = patch it, null/undefined = pass,
  *  object = a {@link TransformDescription}. */
 export type TransformResult = string | Edit[] | null | undefined | TransformDescription;
@@ -190,6 +195,20 @@ export type Plugin = {
      *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
     renderChunk?: (this: PluginCtx, code: string) => string | { code: string; map?: unknown } | null | undefined;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
+    /**
+     * `generateBundle(options, bundle, isWrite)` — the last chance to inspect or MUTATE the output.
+     *
+     * `bundle` is keyed by fileName, values tagged `type: 'chunk' | 'asset'`, exactly as rollup shapes
+     * it. Plugins add entries (emitting a file), delete them (suppressing one) and rewrite `code` in
+     * place, so the caller must read the object BACK after every hook rather than trusting the arrays
+     * it passed in. 19 of rollup's own function samples use this hook.
+     */
+    generateBundle?: (
+        this: PluginCtx,
+        options: Record<string, unknown>,
+        bundle: Record<string, GenerateBundleEntry>,
+        isWrite: boolean,
+    ) => MaybePromise<void>;
 };
 
 type Compiled<F> = { plugin: string; matches: ((id: string) => boolean) | null; handler: F };
@@ -203,6 +222,7 @@ export type Pipeline = {
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
     renderChunk: Compiled<NonNullable<Plugin['renderChunk']>>[];
     buildEnd: Compiled<NonNullable<Plugin['buildEnd']>>[];
+    generateBundle: Compiled<NonNullable<Plugin['generateBundle']>>[];
 };
 
 function compileMatcher(filter: HookFilter | undefined): ((id: string) => boolean) | null {
@@ -228,6 +248,7 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         resolveId: [],
         load: [],
         transform: [],
+        generateBundle: [],
         moduleParsed: [],
         renderChunk: [],
         buildEnd: [],
@@ -247,6 +268,8 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         if (rc !== null) pipeline.renderChunk.push(rc);
         const be = normalize(p.name, p.buildEnd);
         if (be !== null) pipeline.buildEnd.push(be);
+        const gb = normalize(p.name, p.generateBundle);
+        if (gb !== null) pipeline.generateBundle.push(gb);
     }
     return pipeline;
 }

@@ -4,7 +4,7 @@ import { SYM, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { compressChunk } from './chunk-compress';
 import { buildChunkGraph, type Chunk, type ChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { basenameOf, dirnameOf, type Fs, relativePath } from './fs';
+import { basenameOf, dirnameOf, type Fs, normalizePath, relativePath } from './fs';
 import {
     externalKey,
     type Graph,
@@ -40,7 +40,7 @@ import { lazySplit } from './passes/lazy-split';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { interopNamespace, materialiseLiveBody, wrapModuleBody } from './passes/wrap-module';
 import type { Edit } from './patches';
-import { compilePipeline, type ModuleInfo, type PluginCtx } from './plugin';
+import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
 import type { GraphOptions } from './resolve';
@@ -1252,6 +1252,49 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // renderChunk/buildEnd. Appended after buildEnd so a late emit still lands in the output.
     for (const [fileName, source] of graph.emitted) assets.push({ fileName, source });
 
+    // `generateBundle` — the last hook, and the only one that can MUTATE the finished output. rollup
+    // hands over a fileName-keyed object; plugins add entries (emitting a file), delete them and
+    // rewrite `code` in place, so the arrays are rebuilt FROM the object afterwards rather than
+    // assumed unchanged. Runs before the file-name check below on purpose: an entry a plugin injects
+    // is exactly what that check exists to catch (`error-file-name-absolute-path` injects
+    // `/etc/passwd` here).
+    if (pipeline.generateBundle.length > 0) {
+        const bundleObj: Record<string, GenerateBundleEntry> = {};
+        for (const c of outputChunks) bundleObj[c.fileName] = { ...c, type: 'chunk' } as GenerateBundleEntry;
+        for (const a of assets) bundleObj[a.fileName] = { ...a, type: 'asset' } as GenerateBundleEntry;
+        for (const hook of pipeline.generateBundle) await hook.handler.call(pluginCtx, naming as never, bundleObj, false);
+        outputChunks = [];
+        assets = [];
+        for (const [key, entry] of Object.entries(bundleObj)) {
+            // The KEY is the authority on where the file lands, but a plugin may also set a divergent
+            // `fileName` — rollup validates both, so both are carried through.
+            if (entry.type === 'asset') assets.push({ ...(entry as unknown as OutputAsset), fileName: entry.fileName ?? key });
+            else outputChunks.push({ ...(entry as unknown as OutputChunk), fileName: entry.fileName ?? key });
+        }
+    }
+
+    // FILE NAMES MUST STAY INSIDE THE OUTPUT DIRECTORY. A `entryFileNames` pattern like
+    // `a/../../pwned.js`, or a plugin-emitted `/etc/passwd`, writes outside `output.dir` — rollup
+    // treats that as an error rather than a warning, and so do we (`Bundle.ts:368`,
+    // `logFileNameOutsideOutputDirectory`). Checked HERE, after every name is final, so a pattern, a
+    // hash placeholder and a plugin emit are all covered by one gate.
+    for (const name of [...outputChunks.map((c) => c.fileName), ...assets.map((a) => a.fileName)]) {
+        if (isFileNameOutsideOutputDirectory(name)) {
+            return {
+                code: '',
+                chunks: [],
+                errors: [
+                    `The output file name "${name}" is not contained in the output directory. Make sure all file names are relative paths without ".." segments.`,
+                ],
+                warnings,
+                graph,
+                linked,
+                shaken,
+                parseStats: graph.parseStats,
+            };
+        }
+    }
+
     // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
     // `code`/`map` aliases point at the FIRST entry chunk (back-compat).
     const entryFirst = outputChunks[0];
@@ -1269,6 +1312,28 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         timings: Timer.report(timer),
         map: entryFirst?.map,
     };
+}
+
+/**
+ * Does this emitted file name escape the output directory?
+ *
+ * Transcribed from rollup's `isFileNameOutsideOutputDirectory` (`src/Bundle.ts:368`), including its
+ * OWN `isAbsolute` rather than node's: rollup uses `/^(?:\/|(?:[A-Za-z]:)?[/\\|])/`
+ * (`src/utils/path.ts:1`), which catches a Windows drive path (`C:\etc\passwd`) on POSIX too —
+ * `node:path.isAbsolute` would not, and one of rollup's own fixtures asserts exactly that case.
+ *
+ * `join` normalises the `..` segments first, so `a/../../pwned.js` becomes `../pwned.js`.
+ */
+function isFileNameOutsideOutputDirectory(fileName: string): boolean {
+    // `normalizePath` is our `join(fileName)`: same `..`/`.` resolution, except it yields '' where
+    // node yields '.', so the empty result folds back to '.' before the checks.
+    const normalized = (normalizePath(fileName) || '.').replaceAll('\\', '/');
+    return (
+        normalized === '..' ||
+        normalized.startsWith('../') ||
+        normalized === '.' ||
+        /^(?:\/|(?:[A-Za-z]:)?[/\\|])/.test(normalized)
+    );
 }
 
 /** Render one chunk to a {@link RenderedChunk} (placeholders unresolved), or null if it is an

@@ -177,6 +177,13 @@ for (const { d, c } of selected) {
             external: (o.external ?? []) as string[],
             plugins: o.plugins as never,
             treeshake: o.treeshake === false ? false : undefined,
+            // FORWARD `options.output`. It used to be dropped, which silently made every sample that
+            // asserts on an output OPTION unfailable-and-unpassable: `entryFileNames`,
+            // `chunkFileNames`, interop and validation cases never reached the bundler at all, so 38
+            // `generateError` samples were being reported as shakeup gaps when the harness had thrown
+            // the input away. `skipReason` still filters the formats and `preserveModules` we do not
+            // implement, so nothing unsupported gets through here.
+            output: (o.output ?? {}) as never,
         });
         if (r.errors.length > 0) {
             if (wantsError) {
