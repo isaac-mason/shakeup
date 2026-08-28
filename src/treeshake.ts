@@ -185,14 +185,27 @@ function unitIsPure(mod: Module, linked: Linked, unit: Node, statement: Node): b
 }
 
 function statementIsPure(mod: Module, linked: Linked, statement: Node): boolean {
+    // AN INIT OBLIGATION IS A SIDE EFFECT — see `staticImportRunsTarget` for which targets have one
+    // and why dropping the statement would lose the module's evaluation entirely. A re-export is the
+    // same dependency edge as an import, so it is asked the same question: `export { v } from './e'`
+    // in a barrel is what runs `e`, and shaking it away left `e` never evaluated.
+    if (
+        statement.type === N.ImportDeclaration ||
+        statement.type === N.ExportNamedDeclaration ||
+        statement.type === N.ExportAllDeclaration
+    ) {
+        const src = statement.data.source as Node | null;
+        if (src !== null && src.type === N.StringLiteral) {
+            const spec = mod.source.slice(src.start + 1, src.end - 1);
+            const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
+            if (rec !== undefined && staticImportRunsTarget(linked, rec)) return false;
+        }
+    }
     if (statement.type === N.ImportDeclaration) {
         const source = statement.data.source;
         if (source.type !== N.StringLiteral) return true;
         const spec = mod.source.slice(source.start + 1, source.end - 1);
         const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
-        // AN INIT OBLIGATION IS A SIDE EFFECT — see `staticImportRunsTarget` for which targets have
-        // one and why dropping the statement would lose the module's evaluation entirely.
-        if (rec !== undefined && staticImportRunsTarget(linked, rec)) return false;
         if (statement.data.specifiers.length > 0) return true;
         return !(rec?.external ?? false);
     }

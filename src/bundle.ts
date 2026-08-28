@@ -398,9 +398,14 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
     if (!mod.importRecords.some(wants)) return map;
     const src = mod.source;
     for (const stmt of (mod.program.data as { body: Node[] }).body) {
-        if (stmt.type !== N.ImportDeclaration) continue;
-        const source = (stmt.data as { source: Node }).source;
-        if (source.type !== N.StringLiteral) continue;
+        // `import './e.js'`, `export { v } from './e.js'` and `export * from './e.js'` are the same
+        // dependency edge as far as evaluation goes: each names a module that has to have run by the
+        // time this statement is reached. A re-export carries the obligation exactly like an import,
+        // which is what the `re-export chain to target` shape in `pnpm evalorder` measures.
+        if (stmt.type !== N.ImportDeclaration && stmt.type !== N.ExportNamedDeclaration && stmt.type !== N.ExportAllDeclaration)
+            continue;
+        const source = (stmt.data as { source: Node | null }).source;
+        if (source === null || source.type !== N.StringLiteral) continue;
         const spec = src.slice(source.start + 1, source.end - 1);
         const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
         if (rec === undefined) continue;

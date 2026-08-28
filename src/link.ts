@@ -360,6 +360,42 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
+    // TRANSITIVE. Wrapping the required module is not enough: everything IT statically imports has to
+    // be wrapped too, or those dependencies evaluate at their own slots — ahead of the requirer that
+    // is supposed to pull them in.
+    //
+    //     b.cjs   requires mid.js     -> mid is wrapped (required AND imported)
+    //     mid.js  imports  e.js       -> e is only imported, so it runs at its slot
+    //
+    // Node runs `[b, e, main]` because `e` is reached through b's `require`; leaving `e` eager runs it
+    // first, `[e, b, main]`. rolldown closes this with `wrap_module_recursively`
+    // (`link_stage/wrapping.rs:19`): a module that needs wrapping wraps, and then EVERY module
+    // reachable through its import records wraps as well — every kind of record, not just `require`.
+    // So the whole subgraph beneath a CommonJS module is wrapped.
+    //
+    // Cheap in practice: the closure is empty unless the build actually consumes CommonJS. Both byte
+    // corpora are pure ESM and have no wrapped module at all, so this reaches nothing there.
+    const wrapStack = [...linked.cjsWrap.keys(), ...linked.esmInit.keys()];
+    const wrapSeen = new Set<number>(wrapStack);
+    while (wrapStack.length > 0) {
+        const from = wrapStack.pop()!;
+        for (const rec of graph.modules[from].importRecords) {
+            if (rec.external || rec.resolved < 0 || wrapSeen.has(rec.resolved)) continue;
+            wrapSeen.add(rec.resolved);
+            wrapStack.push(rec.resolved);
+            const target = graph.modules[rec.resolved];
+            // A CommonJS dependency already has its own wrapper shape; only ES modules need the
+            // declaration/initializer split minting here.
+            if (target.exportsKind === 'commonjs') {
+                cjsWrapRef(ctx, target);
+                continue;
+            }
+            if (!linked.namespaceOf.has(rec.resolved)) linked.namespaceOf.set(rec.resolved, `${reprName(target)}_ns`);
+            linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
+            linked.esmInitSplit.add(rec.resolved);
+        }
+    }
+
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
             if (rec.external && rec.attributes !== undefined) linked.externalAttributes.set(rec.specifier, rec.attributes);
