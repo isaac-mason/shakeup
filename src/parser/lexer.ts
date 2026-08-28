@@ -334,6 +334,7 @@ export function nextToken(state: ParserState): void {
     let pos = state.pos;
     let nl = 0;
     let sawPure = false;
+    let sawNse = false;
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
         if (c < 128) {
@@ -372,7 +373,14 @@ export function nextToken(state: ParserState): void {
                     let a = pos + 2;
                     if (src.charCodeAt(a) === 32) a++;
                     const ac = src.charCodeAt(a);
-                    if ((ac === 64 || ac === 35) && src.startsWith('__PURE__', a + 1)) sawPure = true;
+                    if (ac === 64 || ac === 35) {
+                        if (src.startsWith('__PURE__', a + 1)) sawPure = true;
+                        // `@__NO_SIDE_EFFECTS__` asserts that CALLING the annotated function has no
+                        // effects, whatever its body does (rollup `annotationNoSideEffects`, rolldown
+                        // `SideEffectsFreeFunction`). Same cold branch as `__PURE__`: the `@`/`#`
+                        // test above already rejects virtually every comment.
+                        else if (src.startsWith('__NO_SIDE_EFFECTS__', a + 1)) sawNse = true;
+                    }
                     pos = close;
                     continue;
                 }
@@ -391,6 +399,9 @@ export function nextToken(state: ParserState): void {
         break;
     }
     if (sawPure) state.pureAt = pos;
+    // A LIST, not a single slot: unlike `pureAt` (consumed by the node that starts exactly there),
+    // these are resolved to functions after the parse, and several may be pending at once.
+    if (sawNse) state.nseAt.push(pos);
     state.tokFlags = nl;
     state.tokStart = pos;
     if (pos >= srcLen) {

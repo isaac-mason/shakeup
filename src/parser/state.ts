@@ -50,6 +50,9 @@ export type ParserState = {
     /** Source position of the token immediately after a `/*@__PURE__*​/` (or `#__PURE__`) annotation,
      *  or -1. A call/new whose span STARTS here is the annotated one. Set by the whitespace skipper. */
     pureAt: number;
+    /** Source positions of the token following each `/*@__NO_SIDE_EFFECTS__*​/` annotation. Resolved
+     *  to the annotated function AFTER the parse — see `resolveNoSideEffects`. */
+    nseAt: number[];
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;

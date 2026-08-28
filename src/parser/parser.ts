@@ -118,6 +118,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokEnd: 0,
         tokFlags: 0,
         pureAt: -1,
+        nseAt: [],
         tokHash: 0,
         tokCooked: '',
         moduleScope: false,
@@ -3746,6 +3747,9 @@ export type ParseResult = {
     hasEsmImport: boolean;
     /** `this` expressions at the module top level (CommonJS: `module.exports`). */
     topLevelThis: Node[];
+    /** Source positions of the token after each `/*@__NO_SIDE_EFFECTS__*​/`. Empty for the vast
+     *  majority of files; resolved to function symbols by `resolveNoSideEffects`. */
+    noSideEffectsAt: number[];
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -3797,6 +3801,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasEsmExport: state.sawEsmExport,
         hasEsmImport: state.sawEsmImport,
         topLevelThis: state.topLevelThis,
+        noSideEffectsAt: state.nseAt,
     };
 }
 

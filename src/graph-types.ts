@@ -127,6 +127,9 @@ export type Module = {
     importRecords: ImportRecord[];
     namedImports: Map<number, NamedImport>;
     namedExports: Map<string, NamedExport>;
+    /** Symbols the author annotated `/*@__NO_SIDE_EFFECTS__*​/` — calling them is asserted
+     *  side-effect-free whatever the body does (rolldown `SymbolRefFlags::SideEffectsFreeFunction`). */
+    noSideEffects: ReadonlySet<number>;
     starExports: number[];
     execOrder: number;
     /** Module uses JSX (set by the parser; gates JSX-runtime injection without a detection walk). */
@@ -230,6 +233,9 @@ export type CachedParse = {
     importRecords: { specifier: string; kind: ImportRecordKind; hasDynamicLiteral: boolean }[];
     namedImports: Map<number, NamedImport>;
     namedExports: Map<string, NamedExport>;
+    /** Symbols the author annotated `/*@__NO_SIDE_EFFECTS__*​/` — calling them is asserted
+     *  side-effect-free whatever the body does (rolldown `SymbolRefFlags::SideEffectsFreeFunction`). */
+    noSideEffects: ReadonlySet<number>;
     starExports: number[];
     hasJSX: boolean;
     hasImportSyntax: boolean;
