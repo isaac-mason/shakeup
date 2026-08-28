@@ -83,3 +83,39 @@ describe('manualChunks rejects a module claimed by two chunks', () => {
         expect(r.errors).toEqual([]);
     });
 });
+
+describe('option VALUES are validated even for options we do not act on', () => {
+    // Worth doing precisely BECAUSE `interop`/`generatedCode` are unimplemented: silently ignoring an
+    // option a user set is a worse failure than rejecting a bad value for it — the build looks
+    // configured and is not. These reject invalid VALUES only; everything rollup accepts is still
+    // accepted (and then ignored), so nothing that works today breaks.
+    const build = async (output: Record<string, unknown>) =>
+        bundle({ entry: '/main.js', fs: createMemoryFs({ '/main.js': 'export const a = 1;' }), output: output as never });
+
+    it.each([
+        ['generatedCode string', { generatedCode: 'some-string' }, 'for option "output.generatedCode"'],
+        ['generatedCode preset', { generatedCode: { preset: 'some-string' } }, 'for option "output.generatedCode.preset"'],
+        ['interop', { interop: 'true' }, 'for option "output.interop"'],
+    ])('rejects an invalid %s', async (_name, output, fragment) => {
+        const r = await build(output);
+        expect(r.errors[0]).toContain(fragment);
+        expect(r.errors[0]).toContain('Invalid value');
+    });
+
+    it.each([
+        ['generatedCode es5', { generatedCode: 'es5' }],
+        ['generatedCode es2015', { generatedCode: 'es2015' }],
+        ['generatedCode object preset', { generatedCode: { preset: 'es2015' } }],
+        ['generatedCode object without preset', { generatedCode: { symbols: true } }],
+        ['interop auto', { interop: 'auto' }],
+        ['interop defaultOnly', { interop: 'defaultOnly' }],
+    ])('still accepts a valid %s', async (_name, output) => {
+        const r = await build(output);
+        expect(r.errors).toEqual([]);
+    });
+
+    it('reports through errors rather than throwing', async () => {
+        // A config mistake is not an exception — callers read `result.errors`.
+        await expect(build({ interop: 'nonsense' })).resolves.toBeDefined();
+    });
+});
