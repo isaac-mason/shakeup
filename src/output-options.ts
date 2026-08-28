@@ -340,5 +340,13 @@ function normalizeIgnoreList(v: SourcemapIgnoreList | undefined): (source: strin
     if (v === true) return () => true;
     if (typeof v === 'string') return (source) => source.includes(v);
     if (v instanceof RegExp) return (source) => v.test(source);
-    return v;
+    // A user FUNCTION must actually answer the question. rollup validates the return
+    // (`sourcemapIgnoreList function must return a boolean.`) rather than letting `undefined` fall
+    // through as a silent "not ignored" — which is exactly the sort of misconfiguration that looks
+    // like it worked. Wrapped rather than checked once, because the answer is per-source.
+    return (source, mapPath) => {
+        const r = v(source, mapPath);
+        if (typeof r !== 'boolean') throw new Error('sourcemapIgnoreList function must return a boolean.');
+        return r;
+    };
 }
