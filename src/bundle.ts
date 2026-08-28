@@ -9,6 +9,8 @@ import {
     externalKey,
     type Graph,
     type ImportBind,
+    type ImportRecord,
+    isEsmFormat,
     type Linked,
     type Module,
     NAME_DEFAULT,
@@ -19,7 +21,7 @@ import {
     refMod,
     refSym,
 } from './graph-types';
-import { initRefForRecord } from './init-obligations';
+import { computeInteropOwners, type InteropOwner, initRefForRecord, recordIsInitObligation } from './init-obligations';
 import { finalNameOf, linkGraph } from './link';
 import {
     DEFAULT_HASH_SIZE,
@@ -193,6 +195,8 @@ type EmitCtx = {
     /** Resolve a target chunk idx to the import specifier this chunk uses for it (relative
      *  path over preliminary/placeholder-bearing filenames). Null in link-only. */
     pathToChunk: ((targetChunkIdx: number) => string) | null;
+    /** Which statement owns each wrapped-CommonJS interop namespace — see `computeInteropOwners`. */
+    interopOwners: Map<number, InteropOwner>;
 };
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
@@ -383,11 +387,15 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
  * (`cjs.md` §7.25d). The gate is the shared predicate, never `linked.esmInit` read inline.
  */
 function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
-    const { mod, linked, chunk } = ctx;
+    const { mod, linked, chunk, interopOwners } = ctx;
     const map = new Map<Node, string>();
-    // O(records) pre-check: a module with no lazily-initialised static target contributes nothing,
-    // and the walk below is skipped for the overwhelming majority of modules.
-    if (!mod.importRecords.some((r) => initRefForRecord(linked, r, 'static-import') !== undefined)) return map;
+    // O(records) pre-check: a module with no static target that is either lazily initialised or a
+    // wrapped CommonJS module contributes nothing, and the walk below is skipped for the
+    // overwhelming majority of modules.
+    const nsMap = isEsmFormat(mod.defFormat) ? linked.cjsNamespaceNode : linked.cjsNamespace;
+    const wants = (r: ImportRecord): boolean =>
+        recordIsInitObligation(r, 'static-import') && (linked.esmInit.has(r.resolved) || nsMap.has(r.resolved));
+    if (!mod.importRecords.some(wants)) return map;
     const src = mod.source;
     for (const stmt of (mod.program.data as { body: Node[] }).body) {
         if (stmt.type !== N.ImportDeclaration) continue;
@@ -397,9 +405,25 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
         const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
         if (rec === undefined) continue;
         const initRef = initRefForRecord(linked, rec, 'static-import');
-        if (initRef === undefined) continue;
-        const name = chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
-        map.set(stmt, `${name}();`);
+        if (initRef !== undefined) {
+            const name = chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
+            map.set(stmt, `${name}();`);
+            continue;
+        }
+        // A WRAPPED CommonJS target instead: this statement runs the module by building its interop
+        // namespace, but only if it is the statement that OWNS it. Everyone else just reads the
+        // binding the owner declared — see `computeInteropOwners` for why one and not all.
+        if (!recordIsInitObligation(rec, 'static-import')) continue;
+        const nsRef = nsMap.get(rec.resolved);
+        if (nsRef === undefined) continue;
+        const owner = interopOwners.get(nsRef);
+        if (owner === undefined || owner.module !== mod.idx || owner.stmtId !== stmt.id) continue;
+        const wrapRef = linked.cjsWrap.get(rec.resolved);
+        if (wrapRef === undefined) continue;
+        const nsName = chunk?.importLocalOf.get(nsRef) ?? finalNameOf(linked, nsRef);
+        const wrapName = chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
+        const nodeArg = isEsmFormat(mod.defFormat) ? ', 1' : '';
+        map.set(stmt, `var ${nsName} = /* @__PURE__ */ __toESM(${wrapName}()${nodeArg});`);
     }
     return map;
 }
@@ -1211,6 +1235,16 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, false);
+    // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
+    // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
+    // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the
+    // wrapper it calls.
+    const interopOwners = computeInteropOwners(
+        graph,
+        linked,
+        (i) => (shaken === null ? null : shaken.live[i]),
+        chunkGraph.chunkByModule,
+    );
     Timer.end(timer, 'chunk');
 
     // Drop unused side-effect-free externals (the injected jsx runtime) via symbol liveness.
@@ -1263,6 +1297,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             chunk,
             ci,
             shaken,
+            interopOwners,
             warnings,
             want,
             // Emit-glue spacing and module printing both stay readable when the chunk pass will
@@ -1424,6 +1459,8 @@ function renderChunk(
     chunk: Chunk,
     chunkIdx: number,
     shaken: TreeshakeResult | null,
+    /** Decided once for the whole bundle, beside `shaken` — see `computeInteropOwners`. */
+    interopOwners: Map<number, InteropOwner>,
     warnings: string[],
     wantMap: boolean,
     tight: boolean,
@@ -1494,7 +1531,7 @@ function renderChunk(
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
         {
-            const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
+            const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
             const initCalls = collectInitCalls(ctx);
@@ -1603,7 +1640,15 @@ function renderChunk(
                     [linked.cjsNamespaceNode, true],
                 ] as const) {
                     const nsRef = map.get(idx);
-                    if (nsRef !== undefined) wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
+                    if (nsRef === undefined) continue;
+                    // UNLESS AN IMPORT STATEMENT OWNS IT. `import b from './b.cjs'` evaluates the
+                    // module at that statement, so when one exists the decl is emitted there instead
+                    // (`collectInitCalls`) and putting a second one here would both redeclare the
+                    // binding and run the wrapper early. Only a module reached solely through
+                    // `require()` — which sequences its own init — still declares it beside the
+                    // wrapper, which is where it has always been.
+                    if (interopOwners.has(nsRef)) continue;
+                    wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
                 }
                 const rendered = renderBody(wrapped, null);
                 out = rendered.code;

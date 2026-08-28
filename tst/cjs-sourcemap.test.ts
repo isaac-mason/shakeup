@@ -52,8 +52,15 @@ describe('sourcemaps survive CommonJS wrapping', () => {
     it('an ES module in the SAME chunk is not collateral damage', async () => {
         // The helper-block offset hit every module in the chunk, not just the wrapped one — this is
         // the assertion that would have caught it first.
+        //
+        // `const x` is main.js LINE 2, and this expected line 1 until the interop namespace moved to
+        // the import statement it belongs to. It read 1 because main's import emitted nothing at all,
+        // so `const x` was the first generated line of main's region and took the region's opening
+        // segment. Now the statement emits `var import_d = …` and carries line 1 itself, and the line
+        // after it maps to the line after it. Both are asserted, since the pair is the real claim.
         const { code, map } = await build({ '/d.cjs': D_CJS, '/main.js': "import d from './d.cjs';\nexport const x = d;" });
-        expect(resolve(code, map, 'const x =')).toEqual({ source: '/main.js', line: 1, column: 0 });
+        expect(resolve(code, map, 'var import_d')).toEqual({ source: '/main.js', line: 1, column: 0 });
+        expect(resolve(code, map, 'const x =')).toEqual({ source: '/main.js', line: 2, column: 0 });
     });
 
     it('a bundle with no CommonJS still maps correctly', async () => {
