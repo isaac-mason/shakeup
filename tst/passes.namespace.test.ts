@@ -111,3 +111,27 @@ describe('transform stage — namespace lowering', () => {
         expect(t.data.declare).toBe(true);
     });
 });
+
+describe('namespace keys are sorted', () => {
+    // A namespace object's key order is OBSERVABLE (`Object.keys` / `getOwnPropertyNames`), so it is
+    // not a free choice. rollup sorts by name with a plain code-unit comparison
+    // (`Module.ts:1505` — `a < b ? -1 : a > b ? 1 : 0`, NOT `localeCompare`) and asserts the exact
+    // sequence in `namespace-keys-are-sorted`. We emitted source order.
+    it('orders members by code unit, not source position', async () => {
+        const { bundle, createMemoryFs } = await import('../src/index.ts');
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/main.js': "import * as ns from './foo.js';\nexport const keys = Object.getOwnPropertyNames(ns);",
+                '/foo.js':
+                    'export const z = 1;\nexport const A = 2;\nexport const aa = 3;\nexport const $ = 4;\n' +
+                    'export default 5;\nexport const foo = 6;\nexport const Z = 7;\nexport const ö = 8;',
+            }),
+        });
+        expect(r.errors).toEqual([]);
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { keys: string[] };
+        // Code-unit order puts uppercase before lowercase and non-ASCII last — `localeCompare` would
+        // interleave them, which is the specific thing this pins.
+        expect(mod.keys).toEqual(['$', 'A', 'Z', 'aa', 'default', 'foo', 'z', 'ö']);
+    });
+});
