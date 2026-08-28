@@ -2000,6 +2000,14 @@ function resolveChunkOptions(
             warnings.push('both advancedChunks and manualChunks are set — manualChunks is ignored');
         }
     } else if (output?.manualChunks !== undefined) {
+        // `inlineDynamicImports` collapses everything into ONE chunk, so there is nothing for
+        // `manualChunks` to assign — rollup rejects the combination rather than silently dropping
+        // one of them, which is what we did.
+        if (inline) {
+            throw new Error(
+                'Invalid value for option "output.manualChunks" - this option is not supported for "output.inlineDynamicImports".',
+            );
+        }
         const mc = output.manualChunks;
         if (typeof mc === 'function') {
             // fn form → one group whose `name` is the fn; deps NOT pulled in (Rollup semantics:

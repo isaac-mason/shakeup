@@ -155,3 +155,27 @@ describe('sourcemapIgnoreList must answer with a boolean', () => {
         }
     });
 });
+
+describe('manualChunks and inlineDynamicImports are mutually exclusive', () => {
+    // `inlineDynamicImports` collapses everything into ONE chunk, so there is nothing for
+    // `manualChunks` to assign. We silently dropped one of them; rollup rejects the combination.
+    const FILES = { '/main.js': "import('./lib.js');\nexport const a = 1;", '/lib.js': 'export const l = 1;' };
+
+    it('rejects both together', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs(FILES),
+            output: { inlineDynamicImports: true, manualChunks: { lib: ['/lib.js'] } } as never,
+        });
+        expect(r.errors[0]).toContain('Invalid value for option "output.manualChunks"');
+        expect(r.errors[0]).toContain('not supported for "output.inlineDynamicImports"');
+    });
+
+    it.each([
+        ['inlineDynamicImports alone', { inlineDynamicImports: true }],
+        ['manualChunks alone', { manualChunks: { lib: ['/lib.js'] } }],
+    ])('accepts %s', async (_name, output) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(FILES), output: output as never });
+        expect(r.errors).toEqual([]);
+    });
+});
