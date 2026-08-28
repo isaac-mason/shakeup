@@ -153,7 +153,8 @@ function shakeUnits(statement: Node): Node[] {
     const decl =
         statement.type === N.VariableDeclaration
             ? statement
-            : statement.type === N.ExportNamedDeclaration && (statement.data.declaration as Node | null)?.type === N.VariableDeclaration
+            : statement.type === N.ExportNamedDeclaration &&
+                (statement.data.declaration as Node | null)?.type === N.VariableDeclaration
               ? (statement.data.declaration as Node)
               : null;
     if (decl === null) return [statement];
@@ -301,6 +302,32 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     /** binding → the statements that augment it (`X.foo = …`), pulled in when the binding goes live. */
     const augmentsOf = new Map<number, [number, number][]>();
     const declToStatement = new Map<number, [number, number]>();
+    /**
+     * The OTHER units that declare a symbol, when there is more than one.
+     *
+     * `var b = 3; var b = b - 1;` declares `b` twice, and a `Map` keyed by symbol keeps only the last
+     * write — so marking `b` live included the second declarator and shook the first, emitting
+     * `var b = b - 1` with `b` undefined. That is a miscompile, not a missed optimisation: the second
+     * declarator READS what the first wrote. Rollup's own suite catches it four ways
+     * (`unused-{while,do-while,for-in,for-of}-loop-declaration`), where the duplicate `var` is the
+     * loop body.
+     *
+     * A separate map rather than making every value an array: duplicate declarations are rare, so the
+     * common path keeps its single tuple and allocates nothing.
+     */
+    const extraDecls = new Map<number, [number, number][]>();
+    /** Record that `ref` is declared by unit `val`, keeping any declaration already recorded. */
+    const noteDecl = (ref: number, val: [number, number]): void => {
+        const prev = declToStatement.get(ref);
+        if (prev === undefined) {
+            declToStatement.set(ref, val);
+            return;
+        }
+        if (prev[0] === val[0] && prev[1] === val[1]) return;
+        const list = extraDecls.get(ref);
+        if (list === undefined) extraDecls.set(ref, [val]);
+        else if (!list.some((e) => e[0] === val[0] && e[1] === val[1])) list.push(val);
+    };
 
     // Incremental reuse: when topology is unchanged (module id list identical → stable indices),
     // reuse a module's infos unless it was re-parsed or imports a re-parsed module (whose new
@@ -325,7 +352,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         if (topoStable && cache !== undefined && !reshake.has(mod.idx)) {
             infos.push(cache.infos[mod.idx]);
             declArrays.push(cache.decls[mod.idx]);
-            for (const [ref, val] of cache.decls[mod.idx]) declToStatement.set(ref, val);
+            for (const [ref, val] of cache.decls[mod.idx]) noteDecl(ref, val);
             continue;
         }
         const list: StatementInfo[] = [];
@@ -344,7 +371,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
                 collectRefs(mod, linked, unit, refs, declared);
                 list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, unit, statement) });
                 for (const ref of declared) {
-                    declToStatement.set(ref, [mod.idx, list.length - 1]);
+                    noteDecl(ref, [mod.idx, list.length - 1]);
                     localDecls.push([ref, [mod.idx, list.length - 1]]);
                 }
             }
@@ -353,13 +380,12 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
                 if (sites === undefined) augmentsOf.set(aug, (sites = []));
                 sites.push([mod.idx, unitStart]);
             }
-
         }
         const defRef = linked.defaultRefs.get(mod.idx);
         if (defRef !== undefined) {
             for (let i = 0; i < list.length; i++) {
                 if (list[i].statement.type === N.ExportDefaultDeclaration) {
-                    declToStatement.set(defRef, [mod.idx, i]);
+                    noteDecl(defRef, [mod.idx, i]);
                     localDecls.push([defRef, [mod.idx, i]]);
                     break;
                 }
@@ -387,7 +413,8 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         //     is a uniform rule rather than one conditional on how this statement was treated.
         if (info.owner !== info.statement) live[modIdx].add(info.owner.id);
         else if (info.statement.type === N.VariableDeclaration || info.statement.type === N.ExportNamedDeclaration) {
-            const decl = info.statement.type === N.VariableDeclaration ? info.statement : (info.statement.data.declaration as Node | null);
+            const decl =
+                info.statement.type === N.VariableDeclaration ? info.statement : (info.statement.data.declaration as Node | null);
             if (decl !== null && decl.type === N.VariableDeclaration) {
                 for (const d of decl.data.declarations as Node[]) live[modIdx].add(d.id);
             }
@@ -459,6 +486,9 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         }
         const decl = declToStatement.get(ref);
         if (decl !== undefined) includeStatement(decl[0], decl[1]);
+        // Every OTHER declaration of the same symbol too — see `extraDecls`.
+        const extra = extraDecls.get(ref);
+        if (extra !== undefined) for (const [m, i] of extra) includeStatement(m, i);
         // A live binding drags in the statements that augment it. Their own refs are marked in turn
         // by `includeStatement`, so `Object3D.DEFAULT_UP = new Vector3(0,1,0)` keeps `Vector3` alive.
         const aug = augmentsOf.get(ref);

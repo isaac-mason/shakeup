@@ -85,13 +85,53 @@ describe('dead declarators are dropped', () => {
     // ── already correct: guards the surrounding behaviour ──
 
     it('a statement between the declarations blocks the merge', async () => {
-        const code = await build("import { mk } from 'ext';\nvar a = mk('AAA');\nglobalThis.f = 1;\nvar b = mk('BBB');\nexport { a, b };", true, ['ext']);
+        const code = await build(
+            "import { mk } from 'ext';\nvar a = mk('AAA');\nglobalThis.f = 1;\nvar b = mk('BBB');\nexport { a, b };",
+            true,
+            ['ext'],
+        );
         expect(code).not.toContain('BBB');
     });
 
     it('inline `export const` is unaffected', async () => {
         // These are ExportNamedDeclaration nodes, not merge candidates for joinVars.
-        const code = await build("import { mk } from 'ext';\nexport const a = mk('AAA');\nexport const b = mk('BBB');", true, ['ext']);
+        const code = await build("import { mk } from 'ext';\nexport const a = mk('AAA');\nexport const b = mk('BBB');", true, [
+            'ext',
+        ]);
         expect(code).not.toContain('BBB');
+    });
+});
+
+describe('a symbol declared more than once keeps EVERY declaration', () => {
+    // `var b = 3; var b = b - 1;` declares `b` twice. The liveness map is keyed by symbol, so the
+    // second declaration used to overwrite the first and only the second was marked live — emitting
+    // `var b = b - 1` with `b` undefined. That is a MISCOMPILE, not a missed optimisation: the
+    // second declarator reads what the first wrote.
+    //
+    // Rollup's own suite catches it four ways, with the duplicate `var` as a loop body:
+    // `unused-{while,do-while,for-in,for-of}-loop-declaration`.
+    const evalOut = async (src: string): Promise<unknown> => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/main.js': src }) });
+        expect(r.errors).toEqual([]);
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { out: unknown };
+        return mod.out;
+    };
+
+    it.each([
+        ['plain redeclaration', 'var b = 3;\nvar b = b - 1;\nexport const out = b;', 2],
+        ['inside a block', 'var b = 3;\n{ var b = b - 1; }\nexport const out = b;', 2],
+        ['inside an if', 'var b = 3;\nif (b) var b = b - 1;\nexport const out = b;', 2],
+        ['as a while body', 'var b = 3;\nwhile (b > 0) var b = b - 1;\nexport const out = b;', 0],
+    ])('%s', async (_name, src, expected) => {
+        expect(await evalOut(src)).toBe(expected);
+    });
+
+    it('keeps a side-effecting initializer on an unread binding in a loop body', async () => {
+        // rollup's `unused-while-loop-declaration` verbatim: `unused` is never read, but `result--`
+        // must still run once per iteration.
+        const out = await evalOut(
+            'let result = 3;\nvar b = 3;\nwhile (b > 0)\nvar b = b - 1, unused = result--, unused2 = 0;\nexport const out = [b, result];',
+        );
+        expect(out).toEqual([0, 0]);
     });
 });
