@@ -16,6 +16,7 @@
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
 import { emitRefFacts, REF, semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
+import { structureVerifyOn, verifyStructure } from '../verify-structure.ts';
 import { refFor, type Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
@@ -102,7 +103,6 @@ const LOOP_PASSES: TaggedPass[] = [
  *  the loop. `substituteAlternateSyntax` (`true`→`!0`) is the canonical example: inside the loop it
  *  would ping-pong forever against fold-constants (`!0`→`true`), so it runs last, once. Entirely
  *  cosmetic, so `'dce'` skips this traversal altogether. */
-
 
 // A SECOND final traversal, run after `FINAL_PASSES` completes. `substituteAlternateSyntax` rewrites
 // `const` → `let`, which turns declaration runs that were previously unmergeable (a `let` run split by
@@ -208,7 +208,7 @@ export { setSemanticVerify } from '../../analysis/ref-facts.ts';
  *  swaps it in so all downstream sym-id lookups stay consistent), or `null` when nothing changed. */
 export function runCompress(program: Node, semantic: Semantic, mode: CompressMode = 'full'): Semantic | null {
     let any = false;
-    let cur = semantic;
+    const cur = semantic;
     const loop = loopPassesFor(mode);
     // Interprocedural purity runs ONCE up front, before the loop: it only ever ADDS information
     // (`CallExpression.pure`) that the removal passes then act on, so it belongs to the semantic tier
@@ -296,6 +296,15 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         const delta = DELTA_MODE === 'off' ? null : new Map<number, RefDelta>();
         const changed = traverse(program, cur, loop, delta);
         if (!changed) break;
+        // Structural check BEFORE the semantic one: a tree with a statement in an expression slot
+        // will confuse anything that walks it, and the round number names the pass set that built it.
+        if (structureVerifyOn()) {
+            const bad = verifyStructure(program);
+            if (bad.length > 0)
+                throw new Error(
+                    `compress round ${i + 1} produced a structurally invalid tree:\n  ${bad.slice(0, 20).join('\n  ')}`,
+                );
+        }
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
         // reference counts after this round's removals — the loop usually settles in 1–2 rounds.
@@ -305,7 +314,9 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
             if (DELTA_MODE === 'verify') {
                 const problems = verifyRefFacts(cur, program);
                 if (problems.length > 0)
-                    throw new Error(`incremental reference facts diverged after round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                    throw new Error(
+                        `incremental reference facts diverged after round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                    );
             }
         }
         // AFTER the round's `RefDelta` is folded in — checking before it reports every reference the
@@ -316,7 +327,9 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
-                throw new Error(`maintained semantic diverged after compress round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                throw new Error(
+                    `maintained semantic diverged after compress round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                );
         }
     }
     // Both final traversals are purely cosmetic — `'dce'` stops after the fixed point. They share a
@@ -333,13 +346,17 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
-                throw new Error(`maintained semantic diverged after the final traversal:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                throw new Error(
+                    `maintained semantic diverged after the final traversal:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                );
         }
         if (COALESCE_ENABLED && traverse(program, cur, COALESCE_PASSES)) finalChanged = true;
         if (semanticVerifyOn()) {
             const problems = verifySemantic(cur, program);
             if (problems.length > 0)
-                throw new Error(`maintained semantic diverged after coalesceVariableNames:\n  ${problems.slice(0, 20).join('\n  ')}`);
+                throw new Error(
+                    `maintained semantic diverged after coalesceVariableNames:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                );
         }
         if (finalChanged) any = true;
     }
