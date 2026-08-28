@@ -135,3 +135,37 @@ describe('namespace keys are sorted', () => {
         expect(mod.keys).toEqual(['$', 'A', 'Z', 'aa', 'default', 'foo', 'z', 'ö']);
     });
 });
+
+describe('a namespace object has a null prototype', () => {
+    // A real ES module namespace is an exotic object whose [[Prototype]] is null, and that is
+    // OBSERVABLE — `Object.getPrototypeOf(ns)`, and `deepStrictEqual` against `{ __proto__: null }`,
+    // both see it. All three oracles emit it: rollup as `Object.freeze({ __proto__: null, ... })`,
+    // rolldown and esbuild as a bare `__proto__: null` member. We emitted a plain object.
+    //
+    // Freezing is a separate question and is deliberately NOT done — rollup freezes, rolldown and
+    // esbuild do not, and we follow the latter two.
+    it('exposes no Object.prototype methods', async () => {
+        const { bundle, createMemoryFs } = await import('../src/index.ts');
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/main.js':
+                    "import * as ns from './lib.js';\n" +
+                    'export const proto = Object.getPrototypeOf(ns);\n' +
+                    "export const hasToString = 'toString' in ns;\n" +
+                    'export const value = ns.a;',
+                '/lib.js': 'export const a = 1;',
+            }),
+        });
+        expect(r.errors).toEqual([]);
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as {
+            proto: unknown;
+            hasToString: boolean;
+            value: number;
+        };
+        expect(mod.proto).toBeNull();
+        expect(mod.hasToString).toBe(false);
+        // The members still work — this is a prototype change, not a restructuring.
+        expect(mod.value).toBe(1);
+    });
+});
