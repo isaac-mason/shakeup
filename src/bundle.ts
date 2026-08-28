@@ -1680,6 +1680,29 @@ function renderChunk(
     const exportedNames: string[] = [];
     let cjsEntryDefault: string | null = null;
     const seenExport = new Set<string>();
+    // `output.exports` must be CONSISTENT with what the entry actually exports — rollup's
+    // `getExportMode` (`utils/getExportMode.ts:13-20`). `'default'` demands the entry export exactly
+    // `default`; `'none'` demands it export nothing. We accepted either silently and then just
+    // suppressed the export line, so a misconfigured build produced a chunk missing its exports
+    // instead of telling the user.
+    if (
+        chunk.entryModule >= 0 &&
+        (chunk.isEntry || chunk.isDynamicEntry) &&
+        (naming.exports === 'default' || naming.exports === 'none')
+    ) {
+        const keys = [...(linked.exportMaps.get(chunk.entryModule)?.keys() ?? [])];
+        const bad = naming.exports === 'default' ? !(keys.length === 1 && keys[0] === NAME_DEFAULT) : keys.length > 0;
+        if (bad) {
+            // rollup's `printQuotedStringList`: one item bare, otherwise `"a", "b" and "c"`.
+            const quoted = keys.map((k) => `"${k}"`);
+            const list =
+                quoted.length <= 1 ? (quoted[0] ?? '') : `${quoted.slice(0, -1).join(', ')} and ${quoted[quoted.length - 1]}`;
+            const id = graph.modules[chunk.entryModule].id;
+            throw new Error(
+                `"${naming.exports}" was specified for "output.exports", but entry module "${relativePath(naming.dir, id)}" has the following exports: ${list}`,
+            );
+        }
+    }
     const suppressEntryExports = naming.exports === 'none';
     // Entry (and dynamic-entry) chunks export their entry module's surface.
     if (!suppressEntryExports && chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
