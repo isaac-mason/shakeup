@@ -111,6 +111,10 @@ export type ModuleInfo = {
     importers: string[]; // computed by reverse-scan of the graph
     dynamicImporters: string[];
     exports: string[]; // own named-export keys
+    /** Whether the module has a default export. `null` while the module is still LOADING — rollup
+     *  reports null there because nothing has been parsed yet, and its fixtures assert exactly that
+     *  from inside a `load`/`transform` hook. */
+    hasDefaultExport: boolean | null;
 };
 
 /** A file a plugin asks the bundler to emit alongside the output chunks. `source` is the contents;
@@ -144,7 +148,16 @@ export type PluginCtx = {
      *  in {@link BundleResult.assets}; the dev server has no output sink, so its assets resolve via a
      *  host `url()` strategy and calling emitFile there throws. */
     emitFile(file: EmittedFile): string;
-    /** Backed by the live graph. */
+    /**
+     * `this.load({ id })` — bring a module into the graph (resolve -> load -> transform -> parse) and
+     * return its info. rollup's mechanism for a plugin that needs to INSPECT a module it does not
+     * own: reading its exports to decide a rewrite, or forcing a dependency in.
+     *
+     * Idempotent: `addModule` returns the existing index rather than re-loading.
+     */
+    load(options: { id: string } & Record<string, unknown>): MaybePromise<ModuleInfo | null>;
+    /** Backed by the live graph. A module that is still LOADING reports partial info (rollup does the
+     *  same) rather than null — its own `load`/`transform` hooks can ask about it. */
     getModuleInfo(id: string): ModuleInfo | null;
     /** All module ids currently in the graph. */
     getModuleIds(): IterableIterator<string>;

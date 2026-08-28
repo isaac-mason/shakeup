@@ -42,6 +42,17 @@ import { join, resolve } from 'node:path';
 import { bundle } from '../src/bundle.ts';
 
 const ROOT = 'llm/libs/rollup/test/function/samples';
+// A FIXTURE'S floating promise must not kill the run. Several samples do
+//
+//     const p = this.load({ id });                  // stored, deliberately not awaited yet
+//     assert.strictEqual(this.getModuleInfo(id).x, null);   // may throw first
+//
+// and when the assert throws, `p` — already rejected — is never awaited. Node's default is to
+// terminate the process on an unhandled rejection, which took the WHOLE SUITE down on one sample and
+// made everything after it unmeasurable. The sample still fails through its own assertion path; this
+// only stops one fixture's bookkeeping from ending the run.
+process.on('unhandledRejection', () => {});
+
 const args = process.argv.slice(2);
 const listIdx = args.indexOf('--list');
 const LIST = listIdx >= 0 ? args[listIdx + 1] : null;

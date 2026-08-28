@@ -16,6 +16,7 @@ export function stubPluginCtx(fs: Fs, warn: (m: string) => void = () => {}): Plu
         emitFile: () => {
             throw new Error('emitFile not supported in stubPluginCtx');
         },
+        load: () => null,
         getModuleInfo: () => null,
         getModuleIds: () => [][Symbol.iterator](),
     };

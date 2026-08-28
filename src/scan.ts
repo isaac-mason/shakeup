@@ -690,6 +690,7 @@ export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
         importers: [...mod.importers],
         dynamicImporters: [],
         exports: [...mod.namedExports.keys()],
+        hasDefaultExport: mod.namedExports.has(NAME_DEFAULT),
     };
 }
 
@@ -913,6 +914,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         return base.id;
     };
 
+    /** Modules whose load/transform/parse is in progress, keyed by id — see `getModuleInfo`. */
+    const inFlight = new Map<string, ModuleInfo>();
+
     const ctx: PluginCtx = {
         warn: (m) => graph.warnings.push(m),
         error: (m) => {
@@ -958,10 +962,20 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
             return fileName;
         },
+        load: async ({ id }) => {
+            await addModule(id, false);
+            const idx = graph.byId.get(id);
+            return idx === undefined ? null : toModuleInfo(graph, graph.modules[idx]);
+        },
         getModuleInfo: (id) => {
             const idx = graph.byId.get(id);
-            if (idx === undefined) return null;
-            return toModuleInfo(graph, graph.modules[idx]);
+            if (idx !== undefined) return toModuleInfo(graph, graph.modules[idx]);
+            // Still LOADING. rollup registers a module before running its `load`/`transform` hooks,
+            // so those hooks can ask about it and get an object with the not-yet-known fields null —
+            // `has-default-export` asserts `getModuleInfo(id).hasDefaultExport === null` from inside
+            // `load(id)`. Our `Module` cannot exist before parsing (it needs `program`/`semantic`),
+            // so the in-flight entry is a partial `ModuleInfo` rather than a placeholder module.
+            return inFlight.get(id) ?? null;
         },
         getModuleIds: () => graph.byId.keys(),
     };
@@ -998,6 +1012,23 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     const addModule = async (id: string, isEntry: boolean): Promise<number> => {
         const existing = graph.byId.get(id);
         if (existing !== undefined) return existing;
+        // Visible to this module's OWN hooks from here until it lands in the graph — see
+        // `getModuleInfo`. Fields that need a parse stay null, which is what rollup reports too.
+        inFlight.set(id, {
+            id,
+            code: null,
+            isEntry,
+            isExternal: false,
+            moduleSideEffects: true,
+            meta: {},
+            moduleType: 'js',
+            importedIds: [],
+            dynamicallyImportedIds: [],
+            importers: [],
+            dynamicImporters: [],
+            exports: [],
+            hasDefaultExport: null,
+        });
         const jsx = id.endsWith('.tsx') || id.endsWith('.jsx');
 
         // Signal-mode fast path: an unchanged module (not in the change signal) with a full cache
@@ -1341,6 +1372,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         };
         graph.modules.push(mod);
         graph.byId.set(id, mod.idx);
+        inFlight.delete(id);
         if (reuse) {
             const c = hit as CachedParse;
             // Clone import records (resolved/external are per-build); namedImports/Exports index
