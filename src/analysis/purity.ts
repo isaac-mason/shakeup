@@ -24,8 +24,8 @@
 // common case — helpers declared and called in the same file — and, for a scope-hoisted bundle, the
 // bundle IS one module.
 import { N, type Node, walk } from '../ast.ts';
-import { markInferredPure } from './effects.ts';
 import { type Graph, type Linked, packRef } from '../graph-types.ts';
+import { markInferredPure } from './effects.ts';
 
 /** A call to `Math.<anything>()` on the GLOBAL `Math` (unresolved binding). The Math methods are
  *  specified as pure numeric functions; like every other minifier we assume the global is not
@@ -45,6 +45,8 @@ const isFunctionNode = (n: Node): boolean =>
     n.type === N.FunctionDeclaration || n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression;
 
 type Summary = { impure: boolean; callees: Set<number> };
+
+const EMPTY_SYMS: ReadonlySet<number> = new Set<number>();
 
 /** Every symbol BOUND inside `fn` — parameters and local declarations. Writing to one of these is
  *  unobservable from outside the call, so it must not poison the summary; without this, any function
@@ -188,9 +190,79 @@ function boundSymbol(n: Node): number {
     return 0;
 }
 
+/**
+ * Resolve `/*@__NO_SIDE_EFFECTS__*​/` annotation POSITIONS to the symbols they annotate.
+ *
+ * The lexer records the position of the token AFTER each annotation; which node that is depends on
+ * where the author put the comment. Measured against both oracles (they agree on every placement
+ * below; they differ only on `export /*A*​/ function`, which rollup honours and rolldown does not):
+ *
+ *     /*A*​/ export function api() {}     -> the ExportNamedDeclaration
+ *     /*A*​/ function api() {}            -> the FunctionDeclaration
+ *     /*A*​/ export const api = () => {}  -> the ExportNamedDeclaration
+ *     export const api = /*A*​/ () => {}  -> the arrow itself
+ *
+ * Returns the SYMBOLS, because that is the unit purity is keyed by here — and it is also rolldown's
+ * shape (`SymbolRefFlags::SideEffectsFreeFunction`) rather than rollup's node-level flag.
+ */
+export function resolveNoSideEffects(program: Node, positions: readonly number[]): Set<number> {
+    const flagged = new Set<number>();
+    if (positions.length === 0) return flagged;
+    const at = new Set(positions);
+    const symOf = (id: Node | null): number => (id === null ? 0 : ((id as { sym: number }).sym ?? 0));
+    /** Flag what a declaration declares: a function's own name, or each function-valued binding. */
+    const markDecl = (decl: Node | null): void => {
+        if (decl === null) return;
+        if (decl.type === N.FunctionDeclaration) {
+            const sym = symOf((decl.data as { id: Node | null }).id);
+            if (sym > 0) flagged.add(sym);
+            return;
+        }
+        if (decl.type === N.VariableDeclaration) {
+            for (const d of (decl.data as { declarations: Node[] }).declarations) {
+                const dd = d.data as { id: Node; init: Node | null };
+                // Only a FUNCTION-valued binding: the annotation is about calling it.
+                if (dd.init !== null && isFunctionNode(dd.init)) {
+                    const sym = symOf(dd.id);
+                    if (sym > 0) flagged.add(sym);
+                }
+            }
+        }
+    };
+    walk(program, (n) => {
+        if (at.has(n.start)) {
+            if (n.type === N.ExportNamedDeclaration) markDecl((n.data as { declaration: Node | null }).declaration);
+            else if (n.type === N.FunctionDeclaration || n.type === N.VariableDeclaration) markDecl(n);
+        }
+        // `export const api = /*A*​/ () => {}` — the annotation sits on the INITIALISER, so the
+        // binding it names is the enclosing declarator's.
+        if (n.type === N.VariableDeclarator) {
+            const dd = n.data as { id: Node; init: Node | null };
+            if (dd.init !== null && isFunctionNode(dd.init) && at.has(dd.init.start)) {
+                const sym = symOf(dd.id);
+                if (sym > 0) flagged.add(sym);
+            }
+        }
+        return true;
+    });
+    return flagged;
+}
+
 /** Record one function under `sym`, degrading to impure if the symbol is bound more than once. */
-function record(summaries: Map<number, Summary>, k: number, fn: Node, resolve: (sym: number) => number | null): void {
+function record(
+    summaries: Map<number, Summary>,
+    k: number,
+    fn: Node,
+    resolve: (sym: number) => number | null,
+    asserted: boolean,
+): void {
     if (summaries.has(k)) summaries.set(k, { impure: true, callees: new Set() });
+    // `@__NO_SIDE_EFFECTS__` is a USER ASSERTION about calling the function, not a claim about its
+    // body — rollup returns false from `hasEffects` outright. Summarising the body would defeat it,
+    // since the whole point is that the body DOES have effects the author is vouching are irrelevant.
+    // Expressed as an empty summary so it flows through `solve`/`stamp` (and across modules, which
+    // key by `packRef`) with no other machinery.
+    else if (asserted) summaries.set(k, { impure: false, callees: new Set() });
     else summaries.set(k, summarize(fn, resolve));
 }
 
@@ -200,6 +272,8 @@ function collect(
     summaries: Map<number, Summary>,
     key: (sym: number) => number,
     resolve: (sym: number) => number | null,
+    /** Symbols the author annotated `@__NO_SIDE_EFFECTS__` — see `resolveNoSideEffects`. */
+    asserted: ReadonlySet<number> = EMPTY_SYMS,
 ): Node[] {
     // Candidate call sites, harvested in THIS walk. `stamp` used to walk the whole program a second
     // time to find them: 190 walks over 343,870 nodes to mark 155 calls on a crashcat bundle, and 61
@@ -215,7 +289,7 @@ function collect(
         // `function f() {}` — the name is bound by the declaration itself.
         if (isFunctionNode(n)) {
             const sym = boundSymbol(n);
-            if (sym !== 0) record(summaries, key(sym), n, resolve);
+            if (sym !== 0) record(summaries, key(sym), n, resolve, asserted.has(sym));
             return;
         }
         // `const f = () => {}` / `const f = function () {}` — by far the more common shape in modern
@@ -230,7 +304,7 @@ function collect(
             if (d.init === null || !isFunctionNode(d.init)) continue;
             if (d.id.type !== N.BindingIdentifier) continue;
             const sym = (d.id as { sym: number }).sym ?? 0;
-            if (sym > 0) record(summaries, key(sym), d.init, resolve);
+            if (sym > 0) record(summaries, key(sym), d.init, resolve, asserted.has(sym));
         }
     });
     return calls;
@@ -282,10 +356,10 @@ function stamp(calls: readonly Node[], summaries: Map<number, Summary>, key: (sy
  * Stamp `pure` on every call to a provably side-effect-free, locally-declared function.
  * Returns whether anything was stamped.
  */
-export function stampPureCalls(program: Node): boolean {
+export function stampPureCalls(program: Node, asserted: ReadonlySet<number> = EMPTY_SYMS): boolean {
     const summaries = new Map<number, Summary>();
     const id = (sym: number): number => sym;
-    const calls = collect(program, summaries, id, id);
+    const calls = collect(program, summaries, id, id, asserted);
     if (summaries.size === 0) return false;
 
     solve(summaries);
@@ -320,7 +394,10 @@ export function stampPureCallsGraph(graph: Graph, linked: Linked): boolean {
     for (let idx = 0; idx < graph.modules.length; idx++) {
         const mod = graph.modules[idx];
         if (mod.program === null) continue;
-        callsByModule.set(idx, collect(mod.program, summaries, (sym) => packRef(idx, sym), resolveIn(idx)));
+        callsByModule.set(
+            idx,
+            collect(mod.program, summaries, (sym) => packRef(idx, sym), resolveIn(idx), mod.noSideEffects),
+        );
     }
     if (summaries.size === 0) return false;
     solve(summaries);

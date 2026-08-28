@@ -1,3 +1,4 @@
+import { resolveNoSideEffects } from './analysis/purity';
 import { semanticVerifyOn, verifySemantic } from './analysis/ref-facts';
 import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from './analysis/semantic';
 import { isJSXNode, N, type Node, type Program, walk } from './ast';
@@ -180,6 +181,8 @@ function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
  *  the import-bytes proposal's spelling for what the loader calls `binary`. `json` and `text` need
  *  no entry because the two vocabularies already agree there. Anything else passes through as
  *  written and reaches the loader as an unknown type. */
+const EMPTY_NSE: ReadonlySet<number> = new Set<number>();
+
 const ATTRIBUTE_TYPES: Record<string, ModuleType> = { bytes: 'binary' };
 
 /** Default module type from the id's extension, plus the caller's `moduleTypes` overrides.
@@ -1072,6 +1075,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasEsmExport = false;
         let hasEsmImport = false;
         let topLevelThis: Node[] = [];
+        let noSideEffects: ReadonlySet<number> = EMPTY_NSE;
         let sideEffects: ModuleSideEffects;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
@@ -1091,6 +1095,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             sideEffects = signalHit.sideEffects;
             metaVal = signalHit.meta;
             moduleTypeVal = signalHit.moduleType;
+            // The annotated-symbol set is derived from the AST, so it must be restored with it —
+            // an unchanged module reconstructed from cache would otherwise silently lose its
+            // `@__NO_SIDE_EFFECTS__` annotations on the second build.
+            noSideEffects = signalHit.noSideEffects;
             reuse = true;
             hit = signalHit;
             graph.parseStats.reused++;
@@ -1175,6 +1183,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasEsmExport = hit.hasEsmExport;
                 hasEsmImport = hit.hasEsmImport;
                 topLevelThis = hit.topLevelThis;
+                noSideEffects = hit.noSideEffects;
                 graph.parseStats.reused++;
                 // EXPERIMENT (`RECOMPRESS_CACHED=1`): re-run compress on a module restored from the
                 // parse cache, simulating "we cache parse + semantic but NOT compress" — i.e. what an
@@ -1207,6 +1216,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 topLevelThis = parsed.topLevelThis;
                 semantic = createSemantic();
                 analyze(semantic, program);
+                // AFTER `analyze` — the resolver reads `sym` off the binding identifiers, which is
+                // only assigned once the semantic has run. Done once here so the set rides the parse
+                // cache with everything else derived from the AST.
+                noSideEffects = resolveNoSideEffects(program, parsed.noSideEffectsAt);
                 // TS + JSX lowering, all before extractRecords (rolldown Scan order): jsxLower injects a
                 // real `import {…} from "…/jsx-runtime"` scanned as a normal record. Its minted runtime
                 // symbols are captured into `jsxRt` → mod.jsxRuntime (for the runtime-import prune).
@@ -1373,6 +1386,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             importRecords: [],
             namedImports: new Map(),
             namedExports: new Map(),
+            noSideEffects,
             starExports: [],
             execOrder: -1,
             hasJSX,
@@ -1441,6 +1455,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 })),
                 namedImports: mod.namedImports,
                 namedExports: mod.namedExports,
+                noSideEffects: mod.noSideEffects,
                 starExports: mod.starExports,
                 hasJSX: mod.hasJSX,
                 hasImportSyntax: mod.hasImportSyntax,
