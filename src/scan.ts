@@ -1035,15 +1035,31 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         // REGISTERED BEFORE THE BODY RUNS. `addModuleUncached` is `async`, so calling it executes its
         // synchronous prefix immediately — through `loadFn` and into the plugin's `load` hook, which
         // is exactly where the re-entrant `this.load` comes from. Registering the promise after that
-        // call means the re-entrant lookup finds an empty map and recurses anyway; the gate defers
-        // the body by one microtask so `adding` is populated before anything can ask.
-        let start: (() => void) | undefined;
-        const gate = new Promise<void>((res) => {
-            start = res;
+        // call means the re-entrant lookup finds an empty map and recurses anyway.
+        //
+        // So the ENTRY is published first and the call made second, rather than deferring the call by
+        // a microtask. Deferring also fixes the recursion, and it breaks the other half of the
+        // contract: rollup registers a module synchronously within `this.load`, and
+        // `has-default-export` leans on exactly that — it calls `this.load(...)` without awaiting and
+        // reads `this.getModuleInfo(id)` on the next line, which must already see the in-flight
+        // record that `addModuleUncached` publishes in its synchronous prefix.
+        let settle: (n: number) => void;
+        let fail: (e: unknown) => void;
+        const p = new Promise<number>((res, rej) => {
+            settle = res;
+            fail = rej;
         });
-        const p = gate.then(() => addModuleUncached(id, isEntry)).finally(() => adding.delete(id));
         adding.set(id, p);
-        start?.();
+        addModuleUncached(id, isEntry).then(
+            (n) => {
+                adding.delete(id);
+                settle(n);
+            },
+            (e) => {
+                adding.delete(id);
+                fail(e);
+            },
+        );
         return p;
     };
     const addModuleUncached = async (id: string, isEntry: boolean): Promise<number> => {

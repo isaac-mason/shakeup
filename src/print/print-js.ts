@@ -958,7 +958,29 @@ export function printStmt(p: Printer, n: Node): void {
         case N.Program: {
             const body = d.body as Node[];
             let emitted = false;
+            // IMPORTS ARE HOISTED, so what they emit is hoisted too. A static import evaluates its
+            // target before ANY of the importer's body runs, whatever line the statement sits on:
+            //
+            //     globalThis.o = [];          // main.js line 1 — runs SECOND
+            //     import a from './a.cjs';    // line 2 — a.cjs runs FIRST, and pushes to `o`
+            //
+            // Node throws there (`o` is undefined when a.cjs pushes) and so does rolldown; emitting
+            // `var import_a = __toESM(require_a())` down at line 2 does not, which is the
+            // `CommonJS evaluates in dependency order` case in `pnpm cjsdiff`. Textual position is
+            // right relative to the OTHER imports and wrong relative to everything else, so the
+            // imports emit as a block, in their own order, ahead of the body.
+            if (p.linkModule) {
+                for (const s of body) {
+                    if (s.type !== N.ImportDeclaration) continue;
+                    if (p.live !== null && !p.live.has(s.id)) continue;
+                    if (emitsNothing(p, s)) continue;
+                    if (emitted) softNewline(p);
+                    printStmt(p, s);
+                    emitted = true;
+                }
+            }
             for (const s of body) {
+                if (p.linkModule && s.type === N.ImportDeclaration) continue; // hoisted above
                 if (p.live !== null && !p.live.has(s.id)) continue; // tree-shaken (top-level only)
                 // Declarator granularity falls out of the same set: `treeshake` put an id in `live`
                 // for each declarator it kept, so this is membership, not policy.
