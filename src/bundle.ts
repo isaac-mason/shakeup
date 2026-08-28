@@ -970,6 +970,14 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
             return fileName;
         },
+        // POST-BUILD context (renderChunk / buildEnd / generateBundle): the graph is closed, so
+        // `this.load` can only report what is already in it. The graph-backed load lives on the scan
+        // context, which is where a plugin can still pull a module in.
+        load: ({ id }): ModuleInfo | null => {
+            if (graph === undefined) return null;
+            const idx = graph.byId.get(id);
+            return idx === undefined ? null : toModuleInfo(graph, graph.modules[idx]);
+        },
         getModuleInfo: (id): ModuleInfo | null => {
             if (graph === undefined) return null;
             const idx = graph.byId.get(id);

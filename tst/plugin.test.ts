@@ -226,3 +226,79 @@ describe('generateBundle', () => {
         expect((r.assets ?? []).some((a) => a.fileName === 'assets/deep/ok.txt')).toBe(true);
     });
 });
+
+describe('this.load', () => {
+    // rollup's mechanism for a plugin that needs to INSPECT a module it does not own — reading its
+    // exports to decide a rewrite, or forcing a dependency into the graph.
+    it('pulls a module into the graph and returns its info', async () => {
+        let seen: { id: string; exports: string[]; hasDefaultExport: boolean | null } | null = null;
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/main.js': 'export const a = 1;',
+                '/other.js': 'export const b = 2;\nexport default 3;',
+            }),
+            plugins: [
+                {
+                    name: 'loader',
+                    async buildStart() {
+                        const info = await this.load({ id: '/other.js' });
+                        seen =
+                            info === null
+                                ? null
+                                : { id: info.id, exports: info.exports, hasDefaultExport: info.hasDefaultExport };
+                    },
+                },
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        expect(seen).not.toBeNull();
+        expect(seen!.id).toBe('/other.js');
+        expect(seen!.exports.sort()).toEqual(['b', 'default']);
+        expect(seen!.hasDefaultExport).toBe(true);
+    });
+
+    it('reports a module that is still loading, with the unparsed fields null', async () => {
+        // rollup registers a module BEFORE running its load/transform hooks, so those hooks can ask
+        // about it. `has-default-export` asserts exactly this: `hasDefaultExport === null` from
+        // inside `load(id)`. Returning null there made fixtures deref null and die.
+        const duringLoad: (boolean | null | 'MISSING')[] = [];
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './dep.js';\nexport const a = 1;", '/dep.js': 'export default 1;' }),
+            plugins: [
+                {
+                    name: 'observe',
+                    load(id) {
+                        const info = this.getModuleInfo(id);
+                        duringLoad.push(info === null ? 'MISSING' : info.hasDefaultExport);
+                        return null;
+                    },
+                },
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        expect(duringLoad.length).toBeGreaterThan(0);
+        expect(duringLoad).not.toContain('MISSING');
+        for (const v of duringLoad) expect(v).toBeNull();
+    });
+
+    it('hasDefaultExport is false for a module without one, once parsed', async () => {
+        let info: { hasDefaultExport: boolean | null } | null = null;
+        await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': 'export const a = 1;' }),
+            plugins: [
+                {
+                    name: 'peek',
+                    buildEnd() {
+                        const i = this.getModuleInfo('/main.js');
+                        info = i === null ? null : { hasDefaultExport: i.hasDefaultExport };
+                    },
+                },
+            ],
+        });
+        expect(info).not.toBeNull();
+        expect(info!.hasDefaultExport).toBe(false);
+    });
+});
