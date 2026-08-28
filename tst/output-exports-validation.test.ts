@@ -119,3 +119,39 @@ describe('option VALUES are validated even for options we do not act on', () => 
         await expect(build({ interop: 'nonsense' })).resolves.toBeDefined();
     });
 });
+
+describe('sourcemapIgnoreList must answer with a boolean', () => {
+    // A user function that returns nothing let `undefined` fall through as a silent "not ignored" —
+    // the misconfiguration that looks like it worked. rollup validates the return instead.
+    const build = async (fn: unknown) =>
+        bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': 'export const a = 1;' }),
+            output: { sourcemap: true, sourcemapIgnoreList: fn } as never,
+        });
+
+    it('rejects a function returning undefined', async () => {
+        const r = await build(() => undefined);
+        expect(r.errors[0]).toContain('sourcemapIgnoreList function must return a boolean.');
+    });
+
+    it('rejects a function returning a truthy non-boolean', async () => {
+        const r = await build(() => 'yes');
+        expect(r.errors[0]).toContain('sourcemapIgnoreList function must return a boolean.');
+    });
+
+    it.each([
+        ['returning true', () => true],
+        ['returning false', () => false],
+    ])('accepts a function %s', async (_name, fn) => {
+        const r = await build(fn);
+        expect(r.errors).toEqual([]);
+    });
+
+    it('leaves the non-function forms alone', async () => {
+        for (const v of [true, false, 'node_modules', /node_modules/]) {
+            const r = await build(v);
+            expect(r.errors, String(v)).toEqual([]);
+        }
+    });
+});
