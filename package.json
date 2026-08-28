@@ -22,7 +22,8 @@
         "rollupsuite": "tsx scripts/rollup-suite.ts",
         "test262": "tsx scripts/test262.ts",
         "unchanged": "tsx scripts/output-unchanged.ts",
-        "cachevalue": "tsx scripts/cache-value.ts"
+        "cachevalue": "tsx scripts/cache-value.ts",
+        "evalorder": "tsx scripts/eval-order.ts"
     },
     "devDependencies": {
         "@biomejs/biome": "^2.5.6",
