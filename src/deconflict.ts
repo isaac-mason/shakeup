@@ -3,8 +3,10 @@
 // side-maps (`linked.finalNames`/`namespaceOf`/`externalLocals`) — NO AST mutation; the printer
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
-import { scopeOf } from './analysis/semantic';
+import { SCOPE, scopeOf } from './analysis/semantic';
+import { N, type Node, walkChildren } from './ast';
 import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types';
+import { finalNameOf } from './link';
 
 export const RESERVED = new Set([
     'break',
@@ -239,7 +241,102 @@ export function deconflictChunk(
         linked.namespaceOf.set(modIdx, claim(base));
     }
     if (weights === null) for (const [key, base] of extBase) claimExternal(key, base);
+    // AFTER every top-level name is final: only then is it known which names a nested binding would
+    // capture.
+    deshadowLocals(graph, linked, memberSet, claim);
     return claim;
+}
+
+/**
+ * DESHADOWING — rename a nested binding that would capture an outer name referenced through it.
+ *
+ * Deconfliction gives top-level symbols their final names, but says nothing about the scopes those
+ * names are READ from. If an import lands on `foo` and some function takes a parameter `foo`, every
+ * reference to the import inside that function silently binds to the parameter instead:
+ *
+ *     import { foo as _foo } from './lib.js';
+ *     function g(foo) { return _foo(); }     ->     function g(foo) { return foo(); }
+ *
+ * Four shapes were broken this way — a named function expression's own id (infinite recursion, and
+ * three of rollup's samples), a function parameter, a catch parameter, and a class expression's id.
+ * Only a plain `let` inside a function appeared to work, and that was luck: the unused local had
+ * been tree-shaken away, so nothing was left to shadow.
+ *
+ * DIRECTION, from rollup (`ChildScope.deconflict` / `addUsedOutsideNames`): rename the INNER
+ * binding, not the outer one. Reserving every local name globally would also be correct but would
+ * push a `$1` onto vast numbers of top-level symbols; rollup renames only the bindings that actually
+ * capture something, and so does this.
+ */
+function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | null, claim: (base: string) => string): void {
+    for (const mod of graph.modules) {
+        if (memberSet !== null && !memberSet.has(mod.idx)) continue;
+        if (mod.external) continue;
+        const sem = mod.semantic;
+        /**
+         * The name the PRINTER will emit for a symbol — which for an import is NOT `finalNameOf` on
+         * the local. `import { foo as _foo }` keeps the local symbol `_foo`, and the printer resolves
+         * it through `linked.binds` to the producer's final name (`foo`). Comparing against `_foo`
+         * found no collision, which is why the first attempt at this pass changed nothing.
+         *
+         * Resolved from `linked` alone, i.e. the whole-bundle perspective. A cross-chunk import
+         * renders as a chunk-local alias instead; missing that under-detects, which is the previous
+         * behaviour rather than a regression.
+         */
+        const outerName = (modIdx: number, sym: number): string | null => {
+            if (mod.namedImports.get(sym) === undefined) return finalNameOf(linked, packRef(modIdx, sym));
+            const bind = linked.binds.get(packRef(modIdx, sym));
+            if (bind === undefined) return null;
+            switch (bind.kind) {
+                case 'found':
+                    return finalNameOf(linked, bind.ref);
+                case 'cjs-member':
+                    return finalNameOf(linked, bind.ref);
+                case 'namespace':
+                    return linked.namespaceOf.get(bind.module) ?? null;
+                case 'external':
+                    return linked.externalLocals.get(externalKey(bind.specifier, bind.name)) ?? null;
+                default:
+                    return null;
+            }
+        };
+        /** Per scope: names read inside it that resolve OUTSIDE it, so a local of that name captures. */
+        const captured = new Map<number, Set<string>>();
+        const visit = (n: Node, scope: number): void => {
+            const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
+            const cur = own === 0 ? scope : own;
+            if (n.type === N.IdentifierReference && n.sym !== 0) {
+                const rec = sem.symbols[n.sym];
+                if (rec !== undefined && rec.scope !== cur) {
+                    const name = outerName(mod.idx, n.sym);
+                    if (name === null) {
+                        walkChildren(n, (c) => visit(c, cur));
+                        return;
+                    }
+                    // Mark every scope between the READ and the DECLARATION: a binding anywhere on
+                    // that chain would capture the reference.
+                    for (let s = cur; s !== 0 && s !== rec.scope; s = sem.scopes[s].parent) {
+                        let set = captured.get(s);
+                        if (set === undefined) captured.set(s, (set = new Set()));
+                        set.add(name);
+                    }
+                }
+            }
+            walkChildren(n, (c) => visit(c, cur));
+        };
+        visit(mod.program, 0);
+        if (captured.size === 0) continue;
+        for (let sym = 1; sym < sem.symbols.length; sym++) {
+            const rec = sem.symbols[sym];
+            const decl = rec?.decl;
+            if (decl === null || decl === undefined) continue;
+            // Top-level symbols are the ones deconfliction already named; only NESTED bindings here.
+            const flags = sem.scopes[rec.scope]?.flags;
+            if (flags === undefined || flags === SCOPE.MODULE) continue;
+            const ref = packRef(mod.idx, sym);
+            if (linked.finalNames.has(ref)) continue;
+            if (captured.get(rec.scope)?.has(decl.name) === true) linked.finalNames.set(ref, claim(decl.name));
+        }
+    }
 }
 
 export function deconflictWholeBundle(graph: Graph, linked: Linked): void {
