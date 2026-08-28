@@ -168,7 +168,22 @@ export function isPureStatement(stmt: Node): boolean {
             return stmt.data.superClass === null && !classHasStaticEffects(stmt);
         case N.VariableDeclaration: {
             for (const d of stmt.data.declarations) {
-                if (d.type === N.VariableDeclarator && !isPureExpr(d.data.init)) return false;
+                if (d.type !== N.VariableDeclarator) continue;
+                // DESTRUCTURING READS PROPERTIES, and a property read can run a getter:
+                //
+                //     Object.defineProperty(obj, 'x', { get() { ++effects } });
+                //     const { x } = obj;        // x unused — the getter must STILL fire
+                //
+                // Judging the declarator by its INIT alone (`obj`, a bare identifier, is pure) dropped
+                // the whole statement and lost the side effect. All three oracles keep it, measured on
+                // this exact input: rollup's `propertyReadSideEffects` defaults to true, and rolldown
+                // and esbuild agree.
+                //
+                // Conservative on purpose. An object literal of plain data properties could safely be
+                // dropped, but array destructuring also invokes `Symbol.iterator`, and neither is
+                // worth proving for the few bytes it saves. A pattern is a read.
+                if (d.data.id.type !== N.BindingIdentifier) return false;
+                if (!isPureExpr(d.data.init)) return false;
             }
             return true;
         }

@@ -166,7 +166,21 @@ function shakeUnits(statement: Node): Node[] {
 /** A declarator is pure exactly when its initializer is — the declaration itself binds and nothing more. */
 function unitIsPure(mod: Module, unit: Node, statement: Node): boolean {
     if (unit === statement) return statementIsPure(mod, statement);
-    return isPureExpr((unit.data as { init: Node | null }).init);
+    const d = unit.data as { id: Node; init: Node | null };
+    // DESTRUCTURING READS PROPERTIES, and a property read can run a getter:
+    //
+    //     Object.defineProperty(obj, 'x', { get() { ++effects } });
+    //     const { x } = obj;        // x unused — but the getter must still fire
+    //
+    // We judged the declarator by its INIT alone (`obj`, a bare identifier, is pure) and dropped it,
+    // losing the side effect. All three oracles keep it: rollup's `propertyReadSideEffects` defaults
+    // to true, and rolldown and esbuild agree — measured on this exact input.
+    //
+    // Conservative on purpose: an object literal with only data properties could safely be dropped,
+    // but array destructuring also invokes `Symbol.iterator`, and neither is worth proving for the
+    // handful of bytes it would save. A pattern is a read.
+    if (d.id.type !== N.BindingIdentifier) return false;
+    return isPureExpr(d.init);
 }
 
 function statementIsPure(mod: Module, statement: Node): boolean {
