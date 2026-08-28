@@ -794,10 +794,10 @@ describe('require() of an ES module', () => {
 // closure so its body runs at the CALL, which is what Node does. See `tst/cjs-chunks.test.ts` for the
 // value assertions on ordering and never-reached requires.
 //
-// The lazy form needs the whole body inside the closure, which is only possible when nothing else
-// wants the module's bindings at top level. A target that is ALSO statically imported still takes the
-// eager path — closing that needs rolldown's declaration/initializer split — and that remainder is
-// what the warning now reports.
+// A target that is ALSO statically imported is lazy too. It takes rolldown's declaration/initializer
+// split: the bindings are hoisted to bare `var`s so importers can still reference them at top level,
+// and the BODY goes in the closure. This block used to assert a warning about eager evaluation in
+// that case; the case is now fixed rather than reported.
 describe('require() of an ES module that is also statically imported', () => {
     const mixed = async (esm: string) =>
         bundle({
@@ -811,19 +811,23 @@ describe('require() of an ES module that is also statically imported', () => {
         });
 
     it('stays quiet for a pure ES module', async () => {
-        // Eager evaluation of a pure body is unobservable, so there is nothing to report.
         expect((await mixed('export const a = 1;')).warnings).toEqual([]);
     });
 
-    it('warns when the target has a side-effectful statement', async () => {
-        const w = (await mixed('console.log("hi");\nexport const a = 1;')).warnings;
-        expect(w).toHaveLength(1);
-        expect(w[0]).toMatch(/ALSO statically imported/);
-        expect(w[0]).toMatch(/may run in a different order than Node would run them/);
+    it('is lazy — and so silent — when the target has a side-effectful statement', async () => {
+        const r = await mixed('console.log("hi");\nexport const a = 1;');
+        expect(r.warnings).toEqual([]);
+        // The split: binding hoisted out so `main` can name it, body inside the closure.
+        expect(r.code).toMatch(/var a;\nvar init_esm = \/\* @__PURE__ \*\/ __esm\(\(\) => \{/);
+        expect(r.code).toMatch(/console\.log\("hi"\);/);
+        // ...and it runs at the require, not at the producer's slot.
+        expect(r.code).toMatch(/module\.exports = \(init_esm\(\), __toCommonJS\(esm_ns\)\)\.a;/);
     });
 
-    it('warns when an initializer is impure', async () => {
-        expect((await mixed('export const a = globalThis.f();')).warnings).toHaveLength(1);
+    it('is lazy when an initializer is impure', async () => {
+        const r = await mixed('export const a = globalThis.f();');
+        expect(r.warnings).toEqual([]);
+        expect(r.code).toMatch(/a = globalThis\.f\(\);/);
     });
 
     it('a require-ONLY target is lazy and never warns', async () => {

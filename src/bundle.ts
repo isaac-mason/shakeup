@@ -375,6 +375,35 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
     });
 }
 
+/**
+ * `init_X();` text for each included static import statement whose target is lazily initialised.
+ *
+ * Keyed by the IMPORT STATEMENT, because that is where the call must land: the statement already
+ * sits in the importer's source order, so replacing it in place makes evaluation order fall out
+ * (`cjs.md` §7.25d). The gate is the shared predicate, never `linked.esmInit` read inline.
+ */
+function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
+    const { mod, linked, chunk } = ctx;
+    const map = new Map<Node, string>();
+    // O(records) pre-check: a module with no lazily-initialised static target contributes nothing,
+    // and the walk below is skipped for the overwhelming majority of modules.
+    if (!mod.importRecords.some((r) => initRefForRecord(linked, r, 'static-import') !== undefined)) return map;
+    const src = mod.source;
+    for (const stmt of (mod.program.data as { body: Node[] }).body) {
+        if (stmt.type !== N.ImportDeclaration) continue;
+        const source = (stmt.data as { source: Node }).source;
+        if (source.type !== N.StringLiteral) continue;
+        const spec = src.slice(source.start + 1, source.end - 1);
+        const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
+        if (rec === undefined) continue;
+        const initRef = initRefForRecord(linked, rec, 'static-import');
+        if (initRef === undefined) continue;
+        const name = chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
+        map.set(stmt, `${name}();`);
+    }
+    return map;
+}
+
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunk, chunkGraph } = ctx;
     const map = new Map<Node, string>();
@@ -1468,6 +1497,7 @@ function renderChunk(
             const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
+            const initCalls = collectInitCalls(ctx);
             collectRequireOverrides(ctx, overrides);
             const renameCache: (string | null | undefined)[] = [];
             // A FACTORY, not a single printer: a module that needs the declaration/initializer split
@@ -1500,6 +1530,7 @@ function renderChunk(
                         },
                         live: liveOverride,
                         overrides,
+                        initCalls,
                         srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
                         sourceIdx: srcIdx,
                     },

@@ -606,6 +606,17 @@ function wireAndDeconflict(
                         wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
                 }
             }
+            // The STATIC-IMPORT half of the same obligation. A static import of a lazily-initialised
+            // module is printed as `init_X()` in the import statement's place (`bundle.ts`'s
+            // `collectInitCalls`), and that call is no more a named import than the require-side one
+            // is — so across a chunk boundary it needs wiring here too. Registration and emission
+            // have to move together: `treeshake.ts` keeps the statement alive, this gives the name
+            // it calls somewhere to come from, and skipping either one leaves a dangling `init_e`.
+            for (const rec of mod.importRecords) {
+                const initRef = initRefForRecord(linked, rec, 'static-import');
+                if (initRef !== undefined)
+                    wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
+            }
         }
     }
 

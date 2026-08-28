@@ -836,7 +836,19 @@ function emitImportAttributes(p: Printer, attributes: Node[] | undefined): void 
 function emitImportDeclaration(p: Printer, n: Node): void {
     const d = data(n);
     // In a bundle, every import is hoisted to chunk-level wiring — drop the statement.
-    if (p.linkModule) return;
+    //
+    // UNLESS it carries an init obligation. A statically imported module that is ALSO `require`d is
+    // lazy, and the language says it must have been evaluated by the time this import statement is
+    // reached — so the statement is REPLACED IN PLACE by `init_X();`. Because the statement already
+    // sits in source order inside the importer's body, correct evaluation order is inherited rather
+    // than reconstructed. rolldown's mechanism verbatim (`esm_init_obligations.rs`: "the finalizer
+    // replaces each included static-import statement with the `init_*()` calls of the targets that
+    // record must initialize"); see `cjs.md` §7.25d.
+    if (p.linkModule) {
+        const init = p.initCalls?.get(n);
+        if (init !== undefined) write(p, init);
+        return;
+    }
     const specs = d.specifiers as Node[]; // tsStrip already removed type-only imports + specifiers
     if (specs.length === 0) {
         // Side-effect import: `import 'x';`
@@ -919,7 +931,9 @@ function emitExportNamed(p: Printer, n: Node): void {
  *  that up front lets the top-level loop skip its separator so no blank line is left behind. */
 function emitsNothing(p: Printer, n: Node): boolean {
     if (!p.linkModule) return false;
-    if (n.type === N.ImportDeclaration || n.type === N.ExportAllDeclaration) return true;
+    // An import that was replaced by an `init_X()` call emits something after all.
+    if (n.type === N.ImportDeclaration) return p.initCalls?.get(n) === undefined;
+    if (n.type === N.ExportAllDeclaration) return true;
     if (n.type === N.ExportNamedDeclaration) return (data(n).declaration as Node | null) === null;
     return false;
 }

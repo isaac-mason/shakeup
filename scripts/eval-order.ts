@@ -109,8 +109,11 @@ function orderOf(dir: string, entry: string): string {
     try {
         return execFileSync(process.execPath, [runner], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
     } catch (e) {
-        const err = String((e as { stderr?: Buffer }).stderr ?? '').split('\n')[0];
-        return `THREW ${err.slice(0, 46)}`;
+        const err = String((e as { stderr?: Buffer }).stderr ?? '')
+            .split('\n')
+            .slice(0, 6)
+            .join(' | ');
+        return `THREW ${err.slice(0, 300)}`;
     }
 }
 
