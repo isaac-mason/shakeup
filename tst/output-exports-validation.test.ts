@@ -179,3 +179,37 @@ describe('manualChunks and inlineDynamicImports are mutually exclusive', () => {
         expect(r.errors).toEqual([]);
     });
 });
+
+describe('manualChunks cannot include an external module', () => {
+    // An external is never emitted, so it cannot be put in a chunk. We silently produced a group that
+    // could never match anything. Externals are otherwise tracked by SPECIFIER, so a resolved
+    // absolute path is only knowable when a PLUGIN returns `{ id, external: true }` — which is the
+    // case covered here. The `external` OPTION matches on the specifier and never yields the
+    // resolved id, so `manual-chunks-include-external-modules3` stays unreachable.
+    it('rejects an id a plugin resolved as external', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './ext.js';\nexport const a = 1;" }),
+            plugins: [
+                {
+                    name: 'ext',
+                    resolveId(source) {
+                        return source.endsWith('ext.js') ? { id: '/resolved-ext.js', external: true } : null;
+                    },
+                },
+            ],
+            output: { manualChunks: { ext: ['/resolved-ext.js'] } } as never,
+        });
+        expect(r.errors[0]).toContain('cannot be included in manualChunks');
+        expect(r.errors[0]).toContain('resolved as an external module');
+    });
+
+    it('leaves a normal manual chunk alone', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './dep.js';\nexport const a = 1;", '/dep.js': 'export const d = 1;' }),
+            output: { manualChunks: { dep: ['/dep.js'] } } as never,
+        });
+        expect(r.errors).toEqual([]);
+    });
+});

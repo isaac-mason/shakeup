@@ -203,6 +203,10 @@ export type Graph = {
      *  the default (side-effectful → always emitted). Set by a plugin `resolveId` returning
      *  `moduleSideEffects: false`, and for the injected `<src>/jsx-runtime`. */
     externalSideEffects: Map<string, boolean>;
+    /** RESOLVED ids a plugin declared external (`resolveId` returning `{ id, external: true }`).
+     *  Externals are otherwise tracked by SPECIFIER, so a caller holding an absolute path — such as
+     *  `manualChunks`, which lists ids — has no other way to learn that the path is external. */
+    externalIds: Set<string>;
 };
 
 /** A module's parse/analyze/extract result — everything derived purely from its
