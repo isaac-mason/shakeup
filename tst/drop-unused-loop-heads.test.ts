@@ -71,6 +71,25 @@ describe('dropUnused: a declaration in a loop head', () => {
         expect(m.f()).toBe(3);
     });
 
+    it('prunes a dead PURE declarator even when an impure sibling stays', async () => {
+        // oxc's predicate is PER-DECLARATOR (`minimize_statements.rs:1048` — `retain_mut`, keep when
+        // live OR the init has side effects), not per-clause. Bailing the whole head on any impure
+        // sibling is the obvious conservative reading and is NOT what oxc does: for
+        // `for (let _ = g(), q = 0; …)` with both dead it emits `for (let _ = g(); …)`.
+        for (const src of [
+            'export function f(g){let n=0;for(let _=g(),q=0;n<3;n++){n+=1;}return n;}',
+            'export function f(g){let n=0;for(let q=0,_=g();n<3;n++){n+=1;}return n;}',
+        ]) {
+            const r = await build(src, true);
+            expect(r.errors).toEqual([]);
+            expect(/for\s*\(\s*let\s+[^;]*,/.test(r.code), src).toBe(false); // one declarator left…
+            expect(r.code, src).toMatch(/for\s*\(\s*let\s+\w+\s*=\s*\w+\(\)/); // …and it is the impure one
+        }
+        // Two impure dead declarators: both survive, in oxc too.
+        const both = await build('export function f(g,h){let n=0;for(let _=g(),z=h();n<3;n++){n+=1;}return n;}', true);
+        expect(/for\s*\(\s*let\s+[^;]*,/.test(both.code)).toBe(true);
+    });
+
     it('never drops an IMPURE init, and runs it exactly once', async () => {
         // The corrupt-AST half. oxc keeps `for (let _ = g(); …)` whole rather than demoting the init
         // to a bare `g()`, and matching that is what keeps a statement out of an expression slot.

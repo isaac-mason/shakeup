@@ -135,28 +135,32 @@ function onForStatement(n: Node, ctx: TransformCtx): void {
     if (sem === null || uses === null) return;
     const v = verdicts(init, sem, uses);
     if (v === null || v.length === 0) return;
-    // An impure init anywhere in the head bails the whole clause, matching oxc.
-    let dropped = 0;
-    for (const verdict of v) {
-        if (verdict === DROP_IMPURE) return;
-        if (verdict === DROP_PURE) dropped++;
+    // PER-DECLARATOR, which is oxc's `retain_mut` predicate verbatim: keep a declarator when its
+    // binding is live OR its init has side effects, and drop the rest. Bailing the whole clause on
+    // any impure sibling — the obvious conservative reading — is NOT what oxc does: for
+    // `for (let _ = g(), q = 0; …)` with both dead it emits `for (let _ = g(); …)`, pruning the pure
+    // one and keeping the effect. Two of four mixed cases diverged before this was per-declarator.
+    const decls = init.data.declarations;
+    const kept: Node[] = [];
+    for (let i = 0; i < decls.length; i++) {
+        // DROP_IMPURE means "binding dead, init has effects". In a statement list that becomes a
+        // bare ExpressionStatement; in a `for` head oxc keeps the declarator whole instead, and so
+        // do we — writing a statement into the `init` EXPRESSION slot is what corrupted the tree.
+        if (v[i] === DROP_PURE) ctx.retire(decls[i]);
+        else kept.push(decls[i]);
     }
-    if (dropped === 0) return;
-    if (dropped === v.length) {
+    if (kept.length === decls.length) return; // nothing dropped
+    if (kept.length === 0) {
+        // The init clause of a `for` is OPTIONAL, so an all-dead head becomes `for (; …; …)`.
+        // `for_stmt.init = None` in oxc — set on the PARENT, never by unlinking the declaration,
+        // which is the whole bug this guard exists for.
         ctx.retire(init);
         n.data.init = null;
         ctx.changed = true;
         return;
     }
-    // Some declarators live: prune the dead ones IN PLACE. Rewriting the declaration's own list is
-    // fine in a single-child slot — it is `ctx.remove()`, which unlinks the node itself, that is not.
-    // `for (let _ = 0, q = 0; q < 3; q++)` → `for (let q = 0; …)`, which is what oxc emits.
-    const decls = init.data.declarations;
-    const kept: Node[] = [];
-    for (let i = 0; i < decls.length; i++) {
-        if (v[i] === DROP_PURE) ctx.retire(decls[i]);
-        else kept.push(decls[i]);
-    }
+    // Rewriting the declaration's own list is fine in a single-child slot — it is `ctx.remove()`,
+    // which unlinks the node itself, that is not.
     init.data.declarations = kept;
     ctx.changed = true;
 }
