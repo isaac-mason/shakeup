@@ -159,6 +159,7 @@ for (const { d, c } of selected) {
     // rather than silently reduced to its first entry.
     const rawInput = o.input;
     let input: string | undefined;
+    let inputName: string | undefined;
     if (typeof rawInput === 'string') input = rawInput;
     else if (Array.isArray(rawInput)) {
         if (rawInput.length > 1) {
@@ -167,12 +168,16 @@ for (const { d, c } of selected) {
         }
         input = rawInput[0] as string;
     } else if (typeof rawInput === 'object' && rawInput !== null) {
-        const vals = Object.values(rawInput as Record<string, string>);
-        if (vals.length > 1) {
+        const entries = Object.entries(rawInput as Record<string, string>);
+        if (entries.length > 1) {
             skip('multiple entry points', d);
             continue;
         }
-        input = vals[0];
+        // KEEP THE KEY. It is the entry NAME, and `[name]` in `output.entryFileNames` substitutes it
+        // — which is the whole point of `input-name-validation*`, where the name is `/test` or
+        // `../test` and rollup rejects it. Collapsing to `Object.values(...)[0]` threw the name away,
+        // so those samples could never fail the way they are meant to.
+        [inputName, input] = entries[0];
     }
     const entry = input === undefined ? join(dir, 'main.js') : resolve(dir, input);
     if (!existsSync(entry)) {
@@ -183,7 +188,7 @@ for (const { d, c } of selected) {
     let chunks: { fileName: string; code: string; isEntry: boolean }[];
     try {
         const r = await bundle({
-            entry,
+            ...(inputName === undefined ? { entry } : { input: { [inputName]: entry } }),
             fs: diskFs,
             external: (o.external ?? []) as string[],
             plugins: o.plugins as never,
