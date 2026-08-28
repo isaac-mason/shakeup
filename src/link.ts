@@ -1,4 +1,3 @@
-import { isPureStatement } from './analysis/effects';
 import type { Graph, ImportBind, Linked, Module } from './graph-types';
 import { isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 
@@ -136,18 +135,6 @@ function cjsNamespaceRef(ctx: LinkCtx, target: Module, nodeMode: boolean): numbe
     const ref = syntheticRef(ctx, target.idx, nodeMode ? `import_${reprName(target)}_node` : `import_${reprName(target)}`);
     map.set(target.idx, ref);
     return ref;
-}
-
-/** Is this module reached by any STATIC import (as opposed to only `require`/`import()`)? A static
- *  importer needs the module's bindings hoisted at top level, which rules out putting the whole body
- *  inside a lazy-init closure. */
-function isStaticallyImported(graph: Graph, idx: number): boolean {
-    for (const mod of graph.modules) {
-        for (const rec of mod.importRecords) {
-            if (rec.resolved === idx && rec.kind === 'static' && !rec.external) return true;
-        }
-    }
-    return false;
 }
 
 /** The synthetic symbol holding a lazily-initialised ESM module's init function
@@ -326,7 +313,6 @@ export function linkGraph(graph: Graph): Linked {
         }
     }
 
-    const warnedEagerEsm = new Set<number>();
     for (const idx of linked.order) {
         for (const rec of graph.modules[idx].importRecords) {
             if (rec.kind !== 'require' || rec.external || rec.resolved < 0) continue;
@@ -364,19 +350,13 @@ export function linkGraph(graph: Graph): Linked {
             // shape that could only be produced by re-indenting already-rendered TEXT, which is what
             // desynchronized its source mappings. One shape, built from the AST, matching rolldown.
             //
-            // A target that is ALSO statically imported additionally needs the ordering fix above,
-            // so it stays eager and warns; the split it would also need is now unconditional.
-            if (!isStaticallyImported(graph, rec.resolved)) {
-                linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
-                linked.esmInitSplit.add(rec.resolved);
-            } else if (!warnedEagerEsm.has(rec.resolved) && target.program.data.body.some((st) => !isPureStatement(st))) {
-                warnedEagerEsm.add(rec.resolved);
-                graph.warnings.push(
-                    `${graph.modules[idx].id}: require('${rec.specifier}') targets an ES module that is ALSO statically ` +
-                        'imported, so it is evaluated eagerly with the rest of the bundle rather than at the require() ' +
-                        'call — its side effects may run in a different order than Node would run them (cjs.md §7.25).',
-                );
-            }
+            // ALSO STATICALLY IMPORTED — lazy too, now. The evaluation-order fix is the emit half:
+            // each included static import statement is REPLACED by `init_X()` at its own source
+            // position, so the module evaluates exactly where the language says (`cjs.md` §7.25d,
+            // rolldown's `esm_init_obligations.rs`). Making it lazy without that emit would simply
+            // never evaluate it.
+            linked.esmInit.set(rec.resolved, cjsInitRef(ctx, target));
+            linked.esmInitSplit.add(rec.resolved);
         }
     }
 

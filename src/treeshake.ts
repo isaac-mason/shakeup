@@ -4,6 +4,7 @@ import { walkRefIdents } from './analysis/refs';
 import { scopeOf, symbolOf } from './analysis/semantic';
 import { N, type Node, walk } from './ast';
 import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
+import { initRefForRecord } from './init-obligations';
 
 export type TreeshakeResult = {
     live: Set<number>[];
@@ -164,8 +165,8 @@ function shakeUnits(statement: Node): Node[] {
 }
 
 /** A declarator is pure exactly when its initializer is — the declaration itself binds and nothing more. */
-function unitIsPure(mod: Module, unit: Node, statement: Node): boolean {
-    if (unit === statement) return statementIsPure(mod, statement);
+function unitIsPure(mod: Module, linked: Linked, unit: Node, statement: Node): boolean {
+    if (unit === statement) return statementIsPure(mod, linked, statement);
     const d = unit.data as { id: Node; init: Node | null };
     // DESTRUCTURING READS PROPERTIES, and a property read can run a getter:
     //
@@ -183,13 +184,19 @@ function unitIsPure(mod: Module, unit: Node, statement: Node): boolean {
     return isPureExpr(d.init);
 }
 
-function statementIsPure(mod: Module, statement: Node): boolean {
+function statementIsPure(mod: Module, linked: Linked, statement: Node): boolean {
     if (statement.type === N.ImportDeclaration) {
-        if (statement.data.specifiers.length > 0) return true;
         const source = statement.data.source;
         if (source.type !== N.StringLiteral) return true;
         const spec = mod.source.slice(source.start + 1, source.end - 1);
-        const rec = mod.importRecords.find((r) => r.specifier === spec);
+        const rec = mod.importRecords.find((r) => r.specifier === spec && r.kind === 'static');
+        // AN INIT OBLIGATION IS A SIDE EFFECT. A lazily-initialised target evaluates at the point
+        // its importer names it (`init_X()` printed in this statement's place — `bundle.ts`'s
+        // `collectInitCalls`), so dropping the statement as "pure" drops the only thing that ever
+        // runs the module. rolldown ties the two together in `record_is_init_obligation`; here the
+        // registration in `link.ts` and the emission must stay in lockstep, and this is the lock.
+        if (rec !== undefined && initRefForRecord(linked, rec, 'static-import') !== undefined) return false;
+        if (statement.data.specifiers.length > 0) return true;
         return !(rec?.external ?? false);
     }
     if (statement.type === N.ExportAllDeclaration) {
@@ -398,7 +405,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
                 const refs: number[] = [];
                 const declared: number[] = [];
                 collectRefs(mod, linked, unit, refs, declared);
-                list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, unit, statement) });
+                list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, linked, unit, statement) });
                 for (const ref of declared) {
                     noteDecl(ref, [mod.idx, list.length - 1]);
                     localDecls.push([ref, [mod.idx, list.length - 1]]);

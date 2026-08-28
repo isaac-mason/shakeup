@@ -24,6 +24,9 @@ export type PrinterConfig = {
     /** Bundle "link mode": drop import statements, unwrap `export <decl>` to `<decl>`, and
      *  rewrite anonymous `export default` to `const <defaultName()> =`. Off ⇒ module-faithful. */
     linkModule?: boolean;
+    /** Text to emit AT an included static import statement's position, keyed by that statement.
+     *  Used for `init_X();` — see `init-obligations.ts` and `cjs.md` §7.25d. */
+    initCalls?: Map<Node, string>;
     /** Name for an anonymous `export default` in link mode. */
     defaultName?: () => string;
     /** Top-level statement liveness (tree-shaking). A statement whose id is absent is dropped.
@@ -58,6 +61,8 @@ export type Printer = {
     nameOf: NameResolver;
     /** Bundle link mode (see {@link PrinterConfig.linkModule}). */
     linkModule: boolean;
+    /** See {@link PrinterConfig.initCalls}. */
+    initCalls: Map<Node, string> | null;
     defaultName: (() => string) | null;
     live: Set<number> | null;
     /** Which declarators to emit for ONE specific declaration node. Set by the `Program` loop and
@@ -98,6 +103,7 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
         linkModule: cfg.linkModule ?? false,
+        initCalls: cfg.initCalls ?? null,
         defaultName: cfg.defaultName ?? null,
         live: cfg.live ?? null,
         declFilter: null,
