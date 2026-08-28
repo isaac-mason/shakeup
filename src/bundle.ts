@@ -1152,7 +1152,23 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
-    const chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
+    // Option validation reports through `errors` like every other build failure, rather than
+    // escaping as a throw — a caller reads `result.errors`, and a config mistake is not an exception.
+    let chunkOptions: ReturnType<typeof resolveChunkOptions>;
+    try {
+        chunkOptions = resolveChunkOptions(options.output, graph.entries.length, warnings, pluginCtx.getModuleInfo);
+    } catch (e) {
+        return {
+            code: '',
+            chunks: [],
+            errors: [(e as Error).message],
+            warnings,
+            graph,
+            linked: null,
+            shaken: null,
+            parseStats: graph.parseStats,
+        };
+    }
     const min = resolveMinify(options.output?.minify);
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
@@ -1992,6 +2008,24 @@ function resolveChunkOptions(
         } else {
             // object map { chunkName: [ids] } → one group per entry; listed modules + their deps
             // land in the chunk (Rollup semantics → includeDependenciesRecursively: true).
+            // A module may belong to ONE manual chunk. rollup errors rather than picking a winner
+            // (`logInvalidChunk`, `Chunk.ts`), because the "winner" would be silent and arbitrary —
+            // our group machinery would have resolved it by priority, which is the advancedChunks
+            // model, not this one.
+            const claimedBy = new Map<string, string>();
+            for (const [chunkName, ids] of Object.entries(mc)) {
+                for (const id of ids) {
+                    const prior = claimedBy.get(id);
+                    if (prior !== undefined && prior !== chunkName) {
+                        throw new Error(
+                            // rollup prints a cwd-relative id (`relativeId`); ours is relative to
+                            // `output.dir`, with the `./` prefix dropped to match its shape.
+                            `Cannot assign "${relativePath(output?.dir ?? '', id).replace(/^\.\//, '')}" to the "${chunkName}" chunk as it is already in the "${prior}" chunk.`,
+                        );
+                    }
+                    claimedBy.set(id, chunkName);
+                }
+            }
             for (const [chunkName, ids] of Object.entries(mc)) {
                 const idSet = new Set(ids);
                 add(

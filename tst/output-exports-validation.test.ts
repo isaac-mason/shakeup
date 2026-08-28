@@ -47,3 +47,39 @@ describe('output.exports is validated against the entry surface', () => {
         }
     });
 });
+
+describe('manualChunks rejects a module claimed by two chunks', () => {
+    // A module belongs to ONE manual chunk. rollup errors (`logInvalidChunk`) rather than picking a
+    // winner — and our group machinery WOULD have picked one, by priority, because that is the
+    // `advancedChunks` model rather than this one. A silent arbitrary winner is the bad outcome.
+    it('throws naming both chunks', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './dep.js';\nexport const a = 1;", '/dep.js': 'export const d = 1;' }),
+            output: { manualChunks: { dep1: ['/dep.js'], dep2: ['/dep.js'] } } as never,
+        });
+        expect(r.errors[0]).toContain('to the "dep2" chunk as it is already in the "dep1" chunk');
+    });
+
+    it('allows the same module listed twice under ONE chunk name', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': "import './dep.js';\nexport const a = 1;", '/dep.js': 'export const d = 1;' }),
+            output: { manualChunks: { dep1: ['/dep.js', '/dep.js'] } } as never,
+        });
+        expect(r.errors).toEqual([]);
+    });
+
+    it('leaves distinct assignments alone', async () => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({
+                '/main.js': "import './a.js';\nimport './b.js';\nexport const x = 1;",
+                '/a.js': 'export const a = 1;',
+                '/b.js': 'export const b = 2;',
+            }),
+            output: { manualChunks: { ca: ['/a.js'], cb: ['/b.js'] } } as never,
+        });
+        expect(r.errors).toEqual([]);
+    });
+});
