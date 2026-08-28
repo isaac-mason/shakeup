@@ -898,6 +898,15 @@ function emitImportDeclaration(p: Printer, n: Node): void {
 
 function emitExportNamed(p: Printer, n: Node): void {
     const d = data(n);
+    // `export { v } from './e.js'` where `e` is wrapped: this statement is the dependency edge, so
+    // it is what runs the module — same obligation an `import` carries, same treatment.
+    if (p.linkModule) {
+        const init = p.initCalls?.get(n);
+        if (init !== undefined) {
+            write(p, init);
+            return;
+        }
+    }
     const decl = d.declaration as Node | null; // tsStrip already erased type-only exports + specifiers
     if (decl) {
         // Link mode: keep the declaration, drop the `export` keyword (the binding is
@@ -931,8 +940,11 @@ function emitExportNamed(p: Printer, n: Node): void {
  *  that up front lets the top-level loop skip its separator so no blank line is left behind. */
 function emitsNothing(p: Printer, n: Node): boolean {
     if (!p.linkModule) return false;
-    // An import that was replaced by an `init_X()` call emits something after all.
-    if (n.type === N.ImportDeclaration) return p.initCalls?.get(n) === undefined;
+    // A module declaration that was replaced by what evaluates its target emits something after all.
+    // `export { v } from './e.js'` is as much a dependency edge as `import './e.js'` is, and when the
+    // target is wrapped the re-export is the statement that has to run it.
+    if (p.initCalls?.get(n) !== undefined) return false;
+    if (n.type === N.ImportDeclaration) return true;
     if (n.type === N.ExportAllDeclaration) return true;
     if (n.type === N.ExportNamedDeclaration) return (data(n).declaration as Node | null) === null;
     return false;
@@ -969,18 +981,18 @@ export function printStmt(p: Printer, n: Node): void {
             // `CommonJS evaluates in dependency order` case in `pnpm cjsdiff`. Textual position is
             // right relative to the OTHER imports and wrong relative to everything else, so the
             // imports emit as a block, in their own order, ahead of the body.
+            const hoisted = (s: Node): boolean => p.linkModule && p.initCalls?.get(s) !== undefined;
             if (p.linkModule) {
                 for (const s of body) {
-                    if (s.type !== N.ImportDeclaration) continue;
+                    if (!hoisted(s)) continue;
                     if (p.live !== null && !p.live.has(s.id)) continue;
-                    if (emitsNothing(p, s)) continue;
                     if (emitted) softNewline(p);
                     printStmt(p, s);
                     emitted = true;
                 }
             }
             for (const s of body) {
-                if (p.linkModule && s.type === N.ImportDeclaration) continue; // hoisted above
+                if (hoisted(s)) continue; // emitted as a block above
                 if (p.live !== null && !p.live.has(s.id)) continue; // tree-shaken (top-level only)
                 // Declarator granularity falls out of the same set: `treeshake` put an id in `live`
                 // for each declarator it kept, so this is membership, not policy.
@@ -1175,8 +1187,13 @@ export function printStmt(p: Printer, n: Node): void {
             return;
         }
         case N.ExportAllDeclaration: {
-            // Bundled star re-exports are resolved at chunk level.
-            if (p.linkModule) return;
+            // Bundled star re-exports are resolved at chunk level — but the edge still evaluates the
+            // target, so a wrapped one is initialized here (see `emitExportNamed`).
+            if (p.linkModule) {
+                const init = p.initCalls?.get(n);
+                if (init !== undefined) write(p, init);
+                return;
+            }
             write(p, 'export');
             softSpace(p);
             write(p, '*');

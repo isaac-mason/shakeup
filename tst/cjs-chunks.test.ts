@@ -294,6 +294,39 @@ describe('a statically imported module evaluates at its import, not at its slot'
         expect((x as [number, string[]])[1]).toEqual(['b', 'main']);
     });
 
+    it("wraps TRANSITIVELY, so a wrapped module's own imports stay lazy too", async () => {
+        // Wrapping only the required module is not enough: `mid` is wrapped because b requires it,
+        // but `e` — which only `mid` imports — then evaluated at its own slot, ahead of b. rolldown's
+        // `wrap_module_recursively` (`link_stage/wrapping.rs:19`) wraps the whole subgraph beneath a
+        // wrapped module, which is what this asserts.
+        const K = 'ORDER_E';
+        const x = await buildAndRun({
+            '/e.js': `${decl(K)}${push(K, 'e')}export const v = 1;`,
+            '/mid.js': "import { v } from './e.js';\nexport const w = v;",
+            '/b.cjs': `${decl(K)}${push(K, 'b')}module.exports = require('./mid.js').w;`,
+            '/main.js':
+                `${decl(K)}import b from './b.cjs';\nimport './mid.js';\n${push(K, 'main')}` +
+                `export const x = [b, globalThis.${K}.slice()];`,
+        });
+        expect(x as [number, string[]]).toEqual([1, ['b', 'e', 'main']]);
+    });
+
+    it('runs a wrapped target through a RE-EXPORT edge', async () => {
+        // `export { v } from './e.js'` is the same dependency edge as an import: in a barrel it is the
+        // only statement that runs `e`. Treating it as pure shook it away and `e` never evaluated at
+        // all — the bundle produced [b, main].
+        const K = 'ORDER_F';
+        const x = await buildAndRun({
+            '/e.js': `${decl(K)}${push(K, 'e')}export const v = 1;`,
+            '/barrel.js': "export { v } from './e.js';",
+            '/b.cjs': `${decl(K)}${push(K, 'b')}module.exports = require('./barrel.js').v;`,
+            '/main.js':
+                `${decl(K)}import b from './b.cjs';\nimport './barrel.js';\n${push(K, 'main')}` +
+                `export const x = [b, globalThis.${K}.slice()];`,
+        });
+        expect(x as [number, string[]]).toEqual([1, ['b', 'e', 'main']]);
+    });
+
     it('declares the interop namespace ONCE for two importers', async () => {
         // `init_X()` is idempotent so every importer can call it; a `var` decl is not, so exactly one
         // statement owns it and the rest emit nothing. Two decls would redeclare the binding and
