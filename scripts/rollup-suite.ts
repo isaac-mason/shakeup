@@ -252,10 +252,29 @@ for (const { d, c } of selected) {
             // have produced or the assertions test the wrong object: a Module namespace is frozen,
             // null-prototype and never callable, which is why `exports()`, `exports.hasOwnProperty`
             // and `String(exports)` all failed on samples that are not actually broken.
+            // LIVE, not a snapshot. `Object.assign({}, ns)` COPIES each binding once, so any fixture
+            // that mutates state and then re-reads an export saw the stale value — `toggled` still
+            // false after `await exports.test()`, `foo` still undefined after `exports.defineFooBar()`.
+            // Rollup's own harness hands over a CommonJS `module.exports`, where those reads ARE live.
+            // Getters reproduce that while keeping the object plain: own + enumerable so
+            // `hasOwnProperty` and `Object.keys` behave, configurable and writable-through so a
+            // fixture may overwrite an export.
             'let exp;',
             'if (ns !== undefined) {',
             '  const keys = Object.keys(ns);',
-            "  exp = keys.length === 1 && keys[0] === 'default' ? ns.default : Object.assign({}, ns);",
+            "  if (keys.length === 1 && keys[0] === 'default') exp = ns.default;",
+            '  else {',
+            '    exp = {};',
+            '    const own = new Map();',
+            '    for (const k of keys) {',
+            '      Object.defineProperty(exp, k, {',
+            '        get: () => (own.has(k) ? own.get(k) : ns[k]),',
+            '        set: (v) => { own.set(k, v); },',
+            '        enumerable: true,',
+            '        configurable: true,',
+            '      });',
+            '    }',
+            '  }',
             '}',
             'if (cfg.exports) await cfg.exports(exp);',
         ].join('\n'),
