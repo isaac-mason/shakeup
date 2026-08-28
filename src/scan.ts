@@ -1032,8 +1032,18 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         if (existing !== undefined) return Promise.resolve(existing);
         const pending = adding.get(id);
         if (pending !== undefined) return pending;
-        const p = addModuleUncached(id, isEntry).finally(() => adding.delete(id));
+        // REGISTERED BEFORE THE BODY RUNS. `addModuleUncached` is `async`, so calling it executes its
+        // synchronous prefix immediately — through `loadFn` and into the plugin's `load` hook, which
+        // is exactly where the re-entrant `this.load` comes from. Registering the promise after that
+        // call means the re-entrant lookup finds an empty map and recurses anyway; the gate defers
+        // the body by one microtask so `adding` is populated before anything can ask.
+        let start: (() => void) | undefined;
+        const gate = new Promise<void>((res) => {
+            start = res;
+        });
+        const p = gate.then(() => addModuleUncached(id, isEntry)).finally(() => adding.delete(id));
         adding.set(id, p);
+        start?.();
         return p;
     };
     const addModuleUncached = async (id: string, isEntry: boolean): Promise<number> => {
