@@ -625,7 +625,12 @@ function renderNamespaceObject(
     const map = linked.exportMaps.get(modIdx);
     const entries: string[] = [];
     if (map !== undefined) {
-        for (const [name, bind] of map) {
+        // SORTED BY NAME, matching rollup's `sortExportedVariables` (`Module.ts:1505`,
+        // `a < b ? -1 : a > b ? 1 : 0` — plain code-unit order, not `localeCompare`). A namespace
+        // object's key order is OBSERVABLE through `Object.keys`/`getOwnPropertyNames`, and rollup's
+        // `namespace-keys-are-sorted` asserts the exact sequence, so source order is a divergence
+        // rather than a free choice.
+        for (const [name, bind] of [...map].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
             // Narrowed target: emit only the members its consumers read (tree-shake seeded exactly
             // these live). Absent set → whole surface (target escaped / entry / dynamic).
             if (nsMembers !== undefined && !nsMembers.has(name)) continue;
