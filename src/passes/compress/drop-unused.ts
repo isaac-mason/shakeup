@@ -80,10 +80,99 @@ function classify(decl: Node, sem: Semantic, uses: number[]): number {
     return isPureExpr(decl.data.init) ? DROP_PURE : DROP_IMPURE;
 }
 
+/**
+ * Declarations sitting in a LOOP HEAD, recorded by the loop's own hook immediately before the head
+ * is descended into. A `let`/`const` declaration reaches a SINGLE-CHILD slot in exactly three
+ * places — `ForStatement.init`, `ForInStatement.left`, `ForOfStatement.left` — and `ctx.remove()`
+ * is not legal in any of them (`for (in b)` is not a statement). It threw
+ * "remove()/replaceWithMultiple() not allowed in a single-child slot" on a 28-line real dependency:
+ *
+ *     for (const _ in b) { bLength += 1; }
+ *
+ * `var` never reached it only because `var` is hard-bailed two lines below.
+ *
+ * A parent hook rather than a parent POINTER because the traversal does not carry one, and this is
+ * the shape the sibling passes already use (`normalize`'s `clauseHook`, `deadCode`'s direct
+ * `stmt.data.left` reads). It is exact: an enter hook fires immediately before its own children are
+ * visited, so the node recorded here is the very node the head slot is about to hand to
+ * `onVariableDeclaration`.
+ */
+let LOOP_HEADS: Set<Node> = new Set();
+
+/** Per-declarator verdicts for a whole declaration, or `null` if the declaration is a hard bail.
+ *  Shared by the statement hook and the `for(;;)` head hook so both refuse the same things. */
+function verdicts(n: Node, sem: Semantic, uses: number[]): number[] | null {
+    if (n.type !== N.VariableDeclaration) return null;
+    if (n.data.kind === 'var') return null; // HARD BAIL: `var` hoists / can redeclare
+    // HARD BAIL on `using` / `await using`: the BINDING is the observable thing (see below).
+    if (n.data.kind === 'using' || n.data.kind === 'await using') return null;
+    const decls = n.data.declarations;
+    const out = new Array<number>(decls.length);
+    for (let i = 0; i < decls.length; i++) out[i] = classify(decls[i], sem, uses);
+    return out;
+}
+
+/**
+ * `for (let i = 0; …)` whose binding is dead: drop the WHOLE init clause, which is optional in a
+ * `for` head — `for (; n < 3; n++)`. This is the one loop head where a removal is expressible, and
+ * it has to happen from here because the slot is single-child; `ctx.remove()` on the declaration
+ * throws.
+ *
+ * Only when EVERY declarator is dead and pure. oxc keeps `for (let _ = g(); …)` intact rather than
+ * demoting the init to a bare `g()`, and matching that is also what avoids the second half of this
+ * bug: the `DROP_IMPURE` path below builds an `ExpressionStatement`, and writing a STATEMENT into
+ * the `init` EXPRESSION slot produced a tree the printer rejected with "unsupported expression node
+ * ExpressionStatement" — a corrupt AST rather than a throw at the mutation site.
+ */
+function onForStatement(n: Node, ctx: TransformCtx): void {
+    if (n.type !== N.ForStatement) return;
+    const init = n.data.init;
+    if (init === null || init.type !== N.VariableDeclaration) return;
+    // Off-limits to the statement hook whatever we decide here.
+    LOOP_HEADS.add(init);
+    const sem = SEM;
+    const uses = USES;
+    if (sem === null || uses === null) return;
+    const v = verdicts(init, sem, uses);
+    if (v === null || v.length === 0) return;
+    // An impure init anywhere in the head bails the whole clause, matching oxc.
+    let dropped = 0;
+    for (const verdict of v) {
+        if (verdict === DROP_IMPURE) return;
+        if (verdict === DROP_PURE) dropped++;
+    }
+    if (dropped === 0) return;
+    if (dropped === v.length) {
+        ctx.retire(init);
+        n.data.init = null;
+        ctx.changed = true;
+        return;
+    }
+    // Some declarators live: prune the dead ones IN PLACE. Rewriting the declaration's own list is
+    // fine in a single-child slot — it is `ctx.remove()`, which unlinks the node itself, that is not.
+    // `for (let _ = 0, q = 0; q < 3; q++)` → `for (let q = 0; …)`, which is what oxc emits.
+    const decls = init.data.declarations;
+    const kept: Node[] = [];
+    for (let i = 0; i < decls.length; i++) {
+        if (v[i] === DROP_PURE) ctx.retire(decls[i]);
+        else kept.push(decls[i]);
+    }
+    init.data.declarations = kept;
+    ctx.changed = true;
+}
+
+/** A for-in/of head binding is REQUIRED syntax — `for (in b)` does not parse — so the declaration is
+ *  simply off-limits. oxc agrees: it emits `for (let _ in b)` for an unused `_`. */
+function onForInOf(n: Node, _ctx: TransformCtx): void {
+    const left = (n.data as { left: Node }).left;
+    if (left.type === N.VariableDeclaration) LOOP_HEADS.add(left);
+}
+
 /** VariableDeclaration hook: only `let`/`const`; compute per-declarator verdicts and rewrite the
  *  statement conservatively. */
 function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
     if (n.type !== N.VariableDeclaration) return;
+    if (LOOP_HEADS.has(n)) return; // a loop head — see LOOP_HEADS
     if (n.data.kind === 'var') return; // HARD BAIL: `var` hoists / can redeclare
     // HARD BAIL on `using` / `await using`: the BINDING is the observable thing. Dropping an unused
     // one and keeping its initializer for side effects — correct for `let`/`const` — deletes the
@@ -147,7 +236,15 @@ export const dropUnused: Visitor = {
         [N.Program]: (_n, ctx) => {
             SEM = ctx.semantic;
             USES = ctx.semantic.uses;
+            // Fresh per traversal: the compress fixed point runs this many times over the same
+            // module, and a stale entry would silently protect a declaration that is no longer a
+            // loop head.
+            LOOP_HEADS = new Set();
         },
+        // These fire before their own head is descended into, which is what makes the record exact.
+        [N.ForStatement]: onForStatement,
+        [N.ForInStatement]: onForInOf,
+        [N.ForOfStatement]: onForInOf,
         [N.VariableDeclaration]: onVariableDeclaration,
     }),
     exit: null,
