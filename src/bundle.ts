@@ -19,6 +19,7 @@ import {
     refMod,
     refSym,
 } from './graph-types';
+import { initRefForRecord } from './init-obligations';
 import { finalNameOf, linkGraph } from './link';
 import {
     DEFAULT_HASH_SIZE,
@@ -363,7 +364,8 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         // that is the whole point of the lazy form. Sequencing the init in front of the read is
         // rolldown's shape too: `const foo = (init_foo(), __toCommonJS(foo_exports))`
         // (`tests/rolldown/misc/wrapped_esm/artifacts.snap`).
-        const initRef = linked.esmInit.get(rec.resolved);
+        // Shared predicate — `init-obligations.ts`.
+        const initRef = initRefForRecord(linked, rec, 'require');
         if (initRef === undefined) {
             map.set(n, `__toCommonJS(${ns})`);
             return;

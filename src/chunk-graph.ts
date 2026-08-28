@@ -1,6 +1,7 @@
 import { helpersNeededBy } from './bundle';
 import { deconflictChunk } from './deconflict';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
+import { initRefForRecord } from './init-obligations';
 import { finalNameOf, reprName } from './link';
 import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
 
@@ -598,7 +599,9 @@ function wireAndDeconflict(
                 // with nothing joining the two.
                 if (wrapRef === undefined && linked.namespaceOf.has(rec.resolved)) {
                     wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'namespace', module: rec.resolved });
-                    const initRef = linked.esmInit.get(rec.resolved);
+                    // Through the shared predicate, not `linked.esmInit` inline — see
+                    // `init-obligations.ts` for why the gating lives in one place.
+                    const initRef = initRefForRecord(linked, rec, 'require');
                     if (initRef !== undefined)
                         wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, { kind: 'found', ref: initRef });
                 }
