@@ -1,5 +1,5 @@
-import { type GetHash, type HashCharacters, hasherByType } from './util/hash';
 import type { CompressMode } from './passes/compress';
+import { type GetHash, type HashCharacters, hasherByType } from './util/hash';
 
 /** Slim `PreRenderedChunk` passed to filename functions. */
 export type PreRenderedChunk = {
@@ -83,12 +83,7 @@ export function resolveMinify(minify: boolean | MinifyOptions | undefined): Reso
             whitespace: minify.whitespace === true,
             mangle: minify.mangle === true,
             // Omitted → `'dce'`: the semantic tier is ALWAYS on. Only an explicit `false` opts out.
-            compress:
-                minify.compress === true
-                    ? 'full'
-                    : minify.compress === false
-                      ? false
-                      : 'dce',
+            compress: minify.compress === true ? 'full' : minify.compress === false ? false : 'dce',
         };
     }
     // No `minify` at all still runs the SEMANTIC tier. Optimisation (what code exists, which branch
@@ -283,6 +278,35 @@ export function normalizeOutputOptions(
     const exportsMode = o.exports ?? 'auto';
     if (!['auto', 'named', 'default', 'none'].includes(exportsMode)) {
         throw new Error(`"output.exports" must be "auto", "named", "default" or "none", received "${exportsMode}".`);
+    }
+
+    // VALUE VALIDATION for options we accept but do not act on (`interop`, `generatedCode`).
+    //
+    // Worth doing precisely BECAUSE they are unimplemented: silently ignoring an option a user set is
+    // a worse failure than rejecting a bad value for it — the build looks configured and is not.
+    // These reject invalid VALUES only; every value rollup accepts is still accepted here (and then
+    // ignored), so nothing that works today breaks. Messages transcribed from rollup's `logs.ts`.
+    const GENERATED_CODE_PRESETS = ['es5', 'es2015'];
+    const gc = (o as { generatedCode?: unknown }).generatedCode;
+    if (typeof gc === 'string' && !GENERATED_CODE_PRESETS.includes(gc)) {
+        throw new Error(
+            `Invalid value ${JSON.stringify(gc)} for option "output.generatedCode" - valid values are "es2015" and "es5". You can also supply an object for more fine-grained control.`,
+        );
+    }
+    if (gc !== null && typeof gc === 'object') {
+        const preset = (gc as { preset?: unknown }).preset;
+        if (preset !== undefined && (typeof preset !== 'string' || !GENERATED_CODE_PRESETS.includes(preset))) {
+            throw new Error(
+                `Invalid value ${JSON.stringify(preset)} for option "output.generatedCode.preset" - valid values are "es2015" and "es5".`,
+            );
+        }
+    }
+    const INTEROP_VALUES = ['compat', 'auto', 'esModule', 'default', 'defaultOnly'];
+    const interop = (o as { interop?: unknown }).interop;
+    if (typeof interop === 'string' && !INTEROP_VALUES.includes(interop)) {
+        throw new Error(
+            `Invalid value ${JSON.stringify(interop)} for option "output.interop" - use one of "compat", "auto", "esModule", "default", "defaultOnly".`,
+        );
     }
 
     const sm = o.sourcemap ?? legacySourcemap ?? false;
