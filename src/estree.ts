@@ -184,8 +184,9 @@ export type ESTreeNode = { type: string; start: number; end: number; [k: string]
  *  is shakeup's `/*@__PURE__*​/` marker. (`id`/`sym` live on the node, not in `data`.) */
 const DROPPED = new Set(['scopeId', 'pure']);
 
-/** field name -> isList, per numeric node type. */
-const CHILD_OF: (Map<string, boolean> | undefined)[] = new Array(TYPE_COUNT);
+/** field name -> isList, per numeric node type. Dense over every real type — only slot 0, the
+ *  reserved `<null>` id that no node carries, is absent, so lookups here need no guard. */
+const CHILD_OF: Map<string, boolean>[] = new Array(TYPE_COUNT);
 for (const t of NODE_TYPE_NAMES) CHILD_OF[N[t]] = new Map(CHILD_FIELDS[t].map((f) => [f.name, f.list]));
 
 const ident = (name: string, start: number, end: number): ESTreeNode => ({ type: 'Identifier', start, end, name });
@@ -254,7 +255,11 @@ function literalFields(n: Node): Record<string, unknown> {
 export function astToEstree(n: Node, sourceType: 'module' | 'script' = 'module'): ESTreeNode {
     const to = (c: Node): ESTreeNode => astToEstree(c, sourceType);
     const { start, end } = n;
-    const d = n.data as Record<string, unknown> | null;
+    // Non-null by construction: every case below that reads `d` is a node type whose schema declares
+    // fields, and the null-data types (identifiers, literals, the JSX fragment markers) all return
+    // before reaching one. The generic path re-checks `n.data` for real. Deliberately NOT `d?.x` —
+    // that would turn a mistyped field name into a silent `undefined` instead of a visible failure.
+    const d = n.data as Record<string, unknown>;
 
     switch (n.type) {
         // Four shakeup identifier types collapse to one ESTree `Identifier`. The distinction
@@ -294,18 +299,27 @@ export function astToEstree(n: Node, sourceType: 'module' | 'script' = 'module')
         // shakeup splits member access three ways by KIND; ESTree has one node with a `computed`
         // flag, and names the property slot `property` in every case.
         case N.StaticMemberExpression:
-            return { type: 'MemberExpression', start, end, object: to(d?.object as Node), property: to(d?.property as Node), computed: false, optional: d?.optional as boolean };
         case N.ComputedMemberExpression:
-            return { type: 'MemberExpression', start, end, object: to(d?.object as Node), property: to(d?.expression as Node), computed: true, optional: d?.optional as boolean };
-        case N.PrivateFieldExpression:
-            return { type: 'MemberExpression', start, end, object: to(d?.object as Node), property: to(d?.field as Node), computed: false, optional: d?.optional as boolean };
+        case N.PrivateFieldExpression: {
+            // The property slot is named differently in each: `property`, `expression`, `field`.
+            const slot = n.type === N.StaticMemberExpression ? 'property' : n.type === N.ComputedMemberExpression ? 'expression' : 'field';
+            return {
+                type: 'MemberExpression',
+                start,
+                end,
+                object: to(d.object as Node),
+                property: to(d[slot] as Node),
+                computed: n.type === N.ComputedMemberExpression,
+                optional: d.optional as boolean,
+            };
+        }
 
         // No ESTree counterpart: a parameter is its pattern, or an AssignmentPattern when defaulted.
         // The TS-only fields (`typeAnnotation`, `optional`, `readonly`, `accessibility`) ride on the
         // pattern in @typescript-eslint's AST; carrying them here would need a shape ESTree lacks.
         case N.FormalParameter: {
-            const pattern = to(d?.pattern as Node);
-            const init = d?.init as Node | null;
+            const pattern = to(d.pattern as Node);
+            const init = d.init as Node | null;
             return init === null ? pattern : { type: 'AssignmentPattern', start, end, left: pattern, right: to(init) };
         }
 
@@ -313,15 +327,17 @@ export function astToEstree(n: Node, sourceType: 'module' | 'script' = 'module')
         // directly off the class. Synthesized with the members' span.
         case N.ClassDeclaration:
         case N.ClassExpression: {
-            const members = (d?.body as Node[]).map(to);
+            const members = (d.body as Node[]).map(to);
             const bodyStart = members.length > 0 ? (members[0].start as number) : end;
             const bodyEnd = members.length > 0 ? (members[members.length - 1].end as number) : end;
+            const id = d.id as Node | null;
+            const superClass = d.superClass as Node | null;
             return {
                 type: ESTREE_TYPE[n.type],
                 start,
                 end,
-                id: d?.id === null ? null : to(d?.id as Node),
-                superClass: d?.superClass === null ? null : to(d?.superClass as Node),
+                id: id === null ? null : to(id),
+                superClass: superClass === null ? null : to(superClass),
                 body: { type: 'ClassBody', start: bodyStart, end: bodyEnd, body: members },
                 decorators: [],
             };
@@ -330,60 +346,62 @@ export function astToEstree(n: Node, sourceType: 'module' | 'script' = 'module')
         // ESTree splits each quasi into raw/cooked and marks the last one `tail`. Neither is stored:
         // shakeup keeps the raw slice and the position in the list, so both are derived here.
         case N.TemplateLiteral: {
-            const quasis = d?.quasis as Node[];
+            const quasis = d.quasis as Node[];
             return {
                 type: 'TemplateLiteral',
                 start,
                 end,
                 quasis: quasis.map((q, i) => templateElement(q, i === quasis.length - 1)),
-                expressions: (d?.expressions as Node[]).map(to),
+                expressions: (d.expressions as Node[]).map(to),
             };
         }
 
         case N.Program:
-            return { type: 'Program', start, end, sourceType, body: (d?.body as Node[]).map(to) };
+            return { type: 'Program', start, end, sourceType, body: (d.body as Node[]).map(to) };
 
         // ESTree stores `selfClosing` on the opening element; shakeup does not store it at all,
         // because it is implied — an element with no closing element closed itself. Derived here
         // rather than added to the AST, which is the right split: the fact is already in the tree.
         case N.JSXElement: {
-            const opening = to(d?.openingElement as Node);
-            opening.selfClosing = d?.closingElement === null;
+            const opening = to(d.openingElement as Node);
+            const closing = d.closingElement as Node | null;
+            opening.selfClosing = closing === null;
             return {
                 type: 'JSXElement',
                 start,
                 end,
                 openingElement: opening,
-                children: (d?.children as Node[]).map(to),
-                closingElement: d?.closingElement === null ? null : to(d?.closingElement as Node),
+                children: (d.children as Node[]).map(to),
+                closingElement: closing === null ? null : to(closing),
             };
         }
 
         // Target positions, where the cover grammar has to be resolved ESTree's way — see asPattern.
         // Only `=` can carry a pattern; `+=` and friends require a simple target.
         case N.AssignmentExpression: {
-            const left = to(d?.left as Node);
+            const left = to(d.left as Node);
+            const operator = d.operator as string;
             return {
                 type: 'AssignmentExpression',
                 start,
                 end,
-                operator: d?.operator as string,
-                left: d?.operator === '=' ? asPattern(left) : left,
-                right: to(d?.right as Node),
+                operator,
+                left: operator === '=' ? asPattern(left) : left,
+                right: to(d.right as Node),
             };
         }
         case N.ForInStatement:
         case N.ForOfStatement: {
-            const left = to(d?.left as Node);
+            const left = to(d.left as Node);
             const out: ESTreeNode = {
                 type: ESTREE_TYPE[n.type],
                 start,
                 end,
                 left: left.type === 'VariableDeclaration' ? left : asPattern(left),
-                right: to(d?.right as Node),
-                body: to(d?.body as Node),
+                right: to(d.right as Node),
+                body: to(d.body as Node),
             };
-            if (n.type === N.ForOfStatement) out.await = d?.await as boolean;
+            if (n.type === N.ForOfStatement) out.await = d.await as boolean;
             return out;
         }
 
@@ -393,12 +411,12 @@ export function astToEstree(n: Node, sourceType: 'module' | 'script' = 'module')
 
     // Generic path: rename the type, recurse into child fields, copy the rest.
     const out: ESTreeNode = { type: ESTREE_TYPE[n.type], start, end, ...CONSTANT_FIELDS[n.type] };
-    if (d === null) return out;
+    if (n.data === null) return out; // the null-data markers: `this`, `super`, `debugger`, fragments
     const children = CHILD_OF[n.type];
     for (const key of Object.keys(d)) {
         if (DROPPED.has(key)) continue;
         const v = d[key];
-        const list = children?.get(key);
+        const list = children.get(key);
         if (list === undefined) {
             out[key] = v; // a scalar the schema declares (operator, kind, computed, …)
         } else if (list) {
