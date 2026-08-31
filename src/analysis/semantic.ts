@@ -96,6 +96,28 @@ export type Semantic = {
      * `symbols[sym].flags` (`SYM.VAR`/`LET`/`CONST`), so a consumer that cares still has it.
      */
     symbolInit: Map<number, Node>;
+
+    /**
+     * Per-symbol `(nodeId, scope)` pairs — where each symbol is REFERENCED and where it is DECLARED.
+     * oxc's `Scoping::resolved_references`, which is `ArenaVec<ArenaVec<ReferenceId>>`
+     * (`oxc_semantic/src/scoping.rs:284`): a flat array per symbol, no hashing. Measured against the
+     * alternatives on three's chunk — building this costs 0.77ms where a `Set`+`Map` shape costs
+     * 2.87ms and a dedicated re-walk costs 7.73ms.
+     *
+     * `declPairs` records the scope the binding IDENTIFIER APPEARS in, which is NOT
+     * `symbols[sym].scope` — that is the hoisted OWNER (`oxc_mangler/src/lib.rs:664`).
+     *
+     * NULL UNLESS ASKED FOR, via `createSemantic(true)`. Only the chunk-level semantic that feeds the
+     * mangler wants these; the ~97 per-module analyses would pay to build something nothing reads,
+     * which is exactly what the four flat arrays this replaces used to do. oxc opts in the same way —
+     * `SemanticBuilder::new().with_build_nodes(true).with_class_table(true)` for the mangler's build
+     * and a bare `SemanticBuilder::new()` for the compressor's (`oxc_minifier/src/lib.rs:131,153`).
+     *
+     * Pairs are appended, never inserted, and removal is a linear scan of ONE symbol's array followed
+     * by a swap-remove of the pair — oxc's `delete_resolved_reference` (`scoping.rs:642`) exactly.
+     */
+    refPairs: number[][] | null;
+    declPairs: number[][] | null;
 };
 
 /** Read/write tally for one symbol. */
@@ -221,8 +243,15 @@ export function refFor(sem: Semantic, sym: number): RefCounts {
 }
 
 /** Allocate an empty {@link Semantic}; reuse it across analyze() calls to keep warm capacity. */
-export function createSemantic(): Semantic {
+/** Append one declaration site. No-op unless the semantic was built with reference scopes. */
+function recordDecl(sem: Semantic, sym: number, nodeId: number, scope: number): void {
+    if (sem.declPairs !== null) (sem.declPairs[sym] ??= []).push(nodeId, scope);
+}
+
+export function createSemantic(withReferenceScopes = false): Semantic {
     return {
+        refPairs: withReferenceScopes ? [] : null,
+        declPairs: withReferenceScopes ? [] : null,
         scopes: [{ parent: 0, flags: 0, node: null }],
         symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
         refs: [],
@@ -303,12 +332,17 @@ function declare(state: AnalyseState, identNode: Node, flags: number, ns: number
     if (existing !== undefined) {
         state.sem.symbols[existing].flags |= flags;
         identNode.sym = existing;
+        // A REDECLARATION still contributes a declaring scope — oxc folds these in via
+        // `symbol_redeclarations` (`oxc_mangler/src/lib.rs:667`).
+        recordDecl(state.sem, existing, identNode.id, state.scope);
         return existing;
     }
     const id = state.sem.symbols.length;
     state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId });
     state.sem.bindings.set(key, id);
     identNode.sym = id;
+    // `state.scope`, not `targetScope`: the APPEARANCE scope, per `declPairs`.
+    recordDecl(state.sem, id, identNode.id, state.scope);
     return id;
 }
 
@@ -384,6 +418,8 @@ function resetSem(out: Semantic): void {
     out.shorthand.clear();
     out.exported.clear();
     out.symbolInit.clear();
+    if (out.refPairs !== null) out.refPairs.length = 0;
+    if (out.declPairs !== null) out.declPairs.length = 0;
 }
 
 /**
@@ -408,6 +444,7 @@ export function analyze(out: Semantic, program: Node): void {
         // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
         const sym = node.sym;
         if (sym === 0) continue;
+        if (out.refPairs !== null) (out.refPairs[sym] ??= []).push(node.id, state.scope);
         const f = state.pendFlags[i];
         if ((f & (REF_READ | REF_WRITE)) !== 0) {
             const c = refFor(out, sym);
