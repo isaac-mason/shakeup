@@ -84,6 +84,29 @@ export const num = (value: number, at = SPAN): Node => node(N.NumericLiteral, at
 export const bool = (value: boolean, at = SPAN): Node => node(N.BooleanLiteral, at, at, value ? 'true' : 'false', null);
 export const nullLit = (at = SPAN): Node => node(N.NullLiteral, at, at, 'null', null);
 
+/** `123n`. Takes the VALUE and appends the suffix, matching {@link num}. */
+export const bigInt = (value: bigint, at = SPAN): Node => node(N.BigIntLiteral, at, at, `${value}n`, null);
+
+/** `/pattern/flags`. Takes the two parts rather than raw source, so the delimiters cannot be
+ *  forgotten — the literal's `name` is emitted verbatim by the printer. */
+export const regExp = (pattern: string, flags = '', at = SPAN): Node =>
+    node(N.RegExpLiteral, at, at, `/${pattern}/${flags}`, null);
+
+/** `#name`. Stored WITHOUT the `#` — the parser strips it (and decodes escapes) into `name`, and
+ *  the printer adds it back. Passing a leading `#` is tolerated by the printer but not the norm. */
+export const privateName = (name: string, at = SPAN): Node => node(N.PrivateIdentifier, at, at, name, null);
+
+/** One cooked chunk of a template literal — the text BETWEEN the delimiters, which is what the
+ *  parser stores (it slices inside the backticks / `${`…`}`). */
+export const templateElement = (text: string, at = SPAN): Node => node(N.TemplateElement, at, at, text, null);
+
+/** A JSX tag or attribute name. Distinct from {@link idName}: JSX names allow `-`. */
+export const jsxIdent = (name: string, at = SPAN): Node => node(N.JSXIdentifier, at, at, name, null);
+
+/** Literal text between JSX tags, raw (entity decoding and whitespace collapsing happen in
+ *  `jsx-text.ts`, not here). */
+export const jsxText = (text: string, at = SPAN): Node => node(N.JSXText, at, at, text, null);
+
 // --- shorthands ----------------------------------------------------------------------------
 
 /** `object.property` */

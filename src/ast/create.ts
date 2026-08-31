@@ -91,7 +91,13 @@ export type KeywordType =
     | typeof N.TSNullKeyword
     | typeof N.TSNeverKeyword
     | typeof N.TSUnknownKeyword
-    | typeof N.TSThisType;
+    | typeof N.TSThisType
+    // `intrinsic` (TS 4.1, used by the `Uppercase`/`Lowercase` lib types). The parser does not
+    // recognise it yet — `tsKeywordType` returns 0, so it parses as a `TSTypeReference`, which is
+    // harmless because types are erased either way. Listed here so the node type is CONSTRUCTIBLE
+    // and the builder-coverage test has no hole to special-case; teaching the parser to emit it is
+    // a separate alignment question.
+    | typeof N.TSIntrinsicKeyword;
 
 export const BooleanLiteral = (s: number, e: number, flags: number): Node =>
     node(N.BooleanLiteral, s, e, flags !== 0 ? 'true' : 'false', null);
@@ -485,8 +491,8 @@ export const NewExpression = (s: number, e: number, f: number, callee: Node, arg
     node(N.NewExpression, s, e, '', {
         callee,
         arguments: args ?? [],
-        typeArguments: typeArgs ?? null,
         pure: (f & FL.PURE) !== 0,
+        typeArguments: typeArgs ?? null,
     });
 export const SequenceExpression = (s: number, e: number, _f: number, expressions: Node[]): Node =>
     node(N.SequenceExpression, s, e, '', { expressions });
