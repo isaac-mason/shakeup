@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -23,6 +23,14 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 /** The language toolchain: everything oxc would own. */
 const TOOLCHAIN = ['ast', 'parser', 'analysis', 'passes', 'print', 'mangle', 'util'];
 
+/** Toolchain code that is not in one of those directories. `sourcemap.ts` is shared by `print/` and
+ *  five bundler files, so it can live in neither half — oxc has the same shape, where `oxc_sourcemap`
+ *  is a peer crate consumed by `oxc_codegen` and `oxc_minifier` rather than a module inside codegen. */
+const TOOLCHAIN_FILES = ['sourcemap.ts'];
+
+/** Above both halves: the two `exports` entries, which re-export across the boundary by design. */
+const ENTRIES = ['index.ts', 'node'];
+
 /** The bundler: everything rolldown would own. Since the split it is one directory, so the check is
  *  a single name — plus the package entry, which re-exports both halves, so reaching the bundler
  *  THROUGH it is the same violation wearing a different specifier. */
@@ -43,17 +51,23 @@ function tsFiles(dir: string, out: string[] = []): string[] {
 /** Bundler modules referenced from a toolchain file, as `file -> specifier` strings. */
 function crossHalfImports(): string[] {
     const found: string[] = [];
-    for (const dir of TOOLCHAIN) {
-        for (const file of tsFiles(join(SRC, dir))) {
+    const corpus = [...TOOLCHAIN.flatMap((d) => tsFiles(join(SRC, d))), ...TOOLCHAIN_FILES.map((f) => join(SRC, f))];
+    {
+        for (const file of corpus) {
             const text = readFileSync(file, 'utf8');
             for (const re of SPECIFIERS) {
                 for (const m of text.matchAll(re)) {
                     const spec = m[1];
                     if (!spec.startsWith('.')) continue; // a package, not our tree
-                    if (!spec.includes('../')) continue; // stays inside its own directory
-                    const head = spec.split('/').filter((p) => p !== '.' && p !== '..')[0];
-                    if (head !== undefined && BUNDLER.has(head.replace(/\.ts$/, '')))
-                        found.push(`${file.slice(SRC.length + 1)} -> ${spec}`);
+                    // RESOLVE rather than pattern-match the specifier. A `spec.includes('../')` test
+                    // reads as "stays inside its own directory", but that is only true for a file in
+                    // a subdirectory: from top-level `src/sourcemap.ts`, `'./bundler/graph-types.ts'`
+                    // escapes into the other half with no `../` in it at all. That heuristic silently
+                    // exempted every top-level file, and a sabotage run is what exposed it.
+                    const abs = resolve(dirname(file), spec);
+                    if (!abs.startsWith(SRC)) continue; // outside src/ entirely
+                    const head = abs.slice(SRC.length + 1).split(sep)[0].replace(/\.ts$/, '');
+                    if (BUNDLER.has(head)) found.push(`${file.slice(SRC.length + 1)} -> ${spec}`);
                 }
             }
         }
@@ -76,5 +90,16 @@ describe('the language toolchain does not depend on the bundler', () => {
         // A boundary test that scans nothing passes forever. Pin the corpus it actually reads.
         const scanned = TOOLCHAIN.flatMap((d) => tsFiles(join(SRC, d)));
         expect(scanned.length).toBeGreaterThan(60);
+    });
+
+    it('leaves no file under src/ unclassified', () => {
+        // The hole this closes: the scan used to cover seven DIRECTORIES, so `sourcemap.ts`,
+        // `estree.ts` and `jsx-text.ts` — 873 lines sitting at the top level — were invisible to it.
+        // Two of those have since moved into scanned directories and `sourcemap.ts` is now named
+        // explicitly, but naming it is not enough: the NEXT top-level file would be invisible too.
+        // So require every entry under `src/` to be accounted for, and fail on anything new.
+        const known = new Set([...TOOLCHAIN, ...TOOLCHAIN_FILES, ...ENTRIES, 'bundler']);
+        const stray = readdirSync(SRC).filter((e) => !known.has(e));
+        expect(stray).toEqual([]);
     });
 });

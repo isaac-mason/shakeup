@@ -23,7 +23,8 @@ import {
     SPAN,
     str,
 } from '../ast/index.ts';
-import { attrKeyText, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../jsx-text.ts';
+import { decodeJSXEntities } from '../util/jsx-entities.ts';
+import { attrKeyText, childrenAreStatic, normalizeJSXText } from './jsx-text.ts';
 import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
 // Loose payload view — JSX node types aren't narrowable through `n.data`.

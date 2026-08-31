@@ -20,6 +20,10 @@
 // construction call sites short — `exprStmt(assign(computed(p, str(k)), v))` — and prefixing every
 // one of them would undo exactly what they are for. `create.*` keeps its namespace because call
 // sites already read that way and its 127 builder names would swamp the flat surface.
+// `estree.ts` is deliberately NOT re-exported. It is a test-facing projection whose only import of
+// `@typescript-eslint/types` is a devDependency, and this package ships ZERO runtime dependencies —
+// putting it in the barrel would put it in `src/index.ts`, and a consumer install (devDeps absent)
+// would fail to resolve it. Local test runs cannot catch that, since devDeps are present here.
 export * from './ast.ts';
 export * from './build.ts';
 export * as create from './create.ts';

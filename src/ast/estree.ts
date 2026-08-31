@@ -1,6 +1,6 @@
 import type { AST_NODE_TYPES } from '@typescript-eslint/types';
-import { CHILD_FIELDS, N, type Node, NODE_TYPE_NAMES, TYPE_COUNT, type TypeName } from './ast/index.ts';
-import { decodeJSXEntities } from './jsx-text.ts';
+import { decodeJSXEntities } from '../util/jsx-entities.ts';
+import { CHILD_FIELDS, N, NODE_TYPE_NAMES, type Node, TYPE_COUNT, type TypeName } from './index.ts';
 
 type ESTreeTypeName = `${AST_NODE_TYPES}`;
 

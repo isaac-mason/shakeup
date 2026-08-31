@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
 import { describe, expect, it } from 'vitest';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { astToEstree, ESTREE_TYPE } from '../src/estree.ts';
+import { astToEstree, ESTREE_TYPE } from '../src/ast/estree.ts';
 import { estreeDiff, isKnownGap } from './estree-diff.ts';
 import { parse } from '../src/parser/index.ts';
 
