@@ -111,7 +111,12 @@ function hookTablesFor(visitors: Visitor[]): HookTables {
 
 /** Hooks of one phase for one node type, computed on first sight and cached. Pass ORDER is
  *  load-bearing (the compress passes are deliberately ordered), so hooks append in visitor order. */
-function hooksOf(visitors: Visitor[], table: (Hook[] | null | undefined)[], type: number, phase: 'enter' | 'exit'): Hook[] | null {
+function hooksOf(
+    visitors: Visitor[],
+    table: (Hook[] | null | undefined)[],
+    type: number,
+    phase: 'enter' | 'exit',
+): Hook[] | null {
     let hooks: Hook[] | null = null;
     for (let i = 0; i < visitors.length; i++) {
         const tbl = visitors[i][phase];
@@ -375,8 +380,13 @@ function accumulate(into: Map<number, RefDelta>, root: Node, sign: number): void
  *  of the structure, so it is asserted rather than assumed — and the same hazard exists, unchecked,
  *  across the 19 fused compress passes.
  *
- *  `LOWER_SEMANTIC_MODE=verify pnpm test` turns it on. */
-const HOOK_CONFLICT_CHECK = process.env.LOWER_SEMANTIC_MODE === 'verify' || process.env.TRAVERSE_VERIFY === '1';
+ *  Driven by `setLowerSemanticMode('verify')`, which `tst/lower-semantic-verify.test.ts` calls — so it
+ *  runs in `pnpm test`. It used to read `process.env.LOWER_SEMANTIC_MODE` at module load while that
+ *  test set the mode through the SETTER, which meant the check was never once enabled by anything. */
+let HOOK_CONFLICT_CHECK = false;
+export const setHookConflictCheck = (on: boolean): void => {
+    HOOK_CONFLICT_CHECK = on;
+};
 
 function conflict(node: Node, phase: string, ctx: Ctx, first: number, second: number): never {
     const name = Object.keys(N).find((k) => N[k as keyof typeof N] === node.type) ?? String(node.type);

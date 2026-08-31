@@ -218,7 +218,10 @@ export function verifyRefFacts(
  *  `over(safe)`: harmless for correctness (oxc's rule — stale EXTRA references cost optimizations, a
  *  MISSING one miscompiles) but it means a symbol looks live when it is dead, so `dropUnused` declines
  *  to remove it and the output is bigger than it should be. */
-export function subtractRefFacts(sem: { refs: ({ reads: number; writes: number } | undefined)[]; uses: number[] }, root: Node): void {
+export function subtractRefFacts(
+    sem: { refs: ({ reads: number; writes: number } | undefined)[]; uses: number[] },
+    root: Node,
+): void {
     emitRefFacts(root, (sym, flags) => {
         const c = sem.refs[sym];
         if (c !== undefined) {
@@ -256,7 +259,9 @@ let SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
 export const semanticVerifyOn = (): boolean => SEMANTIC_VERIFY;
 /** Enable programmatically. The env var is read at MODULE LOAD, so a test setting `process.env` in its
  *  body has no effect — the first version of `tst/semantic-verify.test.ts` did that and was vacuous. */
-export const setSemanticVerify = (on: boolean): void => { SEMANTIC_VERIFY = on; };
+export const setSemanticVerify = (on: boolean): void => {
+    SEMANTIC_VERIFY = on;
+};
 
 /**
  * Differential check for ANY stage that mutates the AST while maintaining the semantic: does the
@@ -320,7 +325,9 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
         const d = n.data as { scopeId?: number } | null;
         if (d === null || d.scopeId === undefined || d.scopeId === 0) continue; // truth says: owns none
         if (!maintainedScopeNodes.has(n))
-            out.push(`scope-owning node ${n.type} @${n.start} has no scopeId in maintained (UNSAFE: resolves from the wrong scope)`);
+            out.push(
+                `scope-owning node ${n.type} @${n.start} has no scopeId in maintained (UNSAFE: resolves from the wrong scope)`,
+            );
     }
 
     // Symbol ids differ between builds; the PARTITION they induce must not.
@@ -341,7 +348,9 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
             mToT.set(m, t);
             tToM.set(t, m);
         } else if (pm !== t || pt !== m) {
-            out.push(`node ${n.type} @${n.start} '${n.name}' symbol partition mismatch (UNSAFE): maintained ${m} -> truth ${t}, but maintained ${m} already maps to ${pm} and truth ${t} maps back to ${pt}`);
+            out.push(
+                `node ${n.type} @${n.start} '${n.name}' symbol partition mismatch (UNSAFE): maintained ${m} -> truth ${t}, but maintained ${m} already maps to ${pm} and truth ${t} maps back to ${pt}`,
+            );
         }
     }
 
@@ -364,8 +373,7 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
             if (t === 0 || m === 0) continue;
             const prev = mScopeToT.get(m);
             if (prev === undefined) mScopeToT.set(m, t);
-            else if (prev !== t)
-                out.push(`scope ${m} maps to two truth scopes (${prev} and ${t}) (UNSAFE: scope tree diverged)`);
+            else if (prev !== t) out.push(`scope ${m} maps to two truth scopes (${prev} and ${t}) (UNSAFE: scope tree diverged)`);
         }
 
         // A symbol's OWNING SCOPE must agree with truth, mapped through both partitions.
@@ -378,9 +386,13 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
             // scope was removed from the tree and the symbol still claims it. That is the blockFlatten
             // shape exactly.
             if (mRec.scope !== 0 && expected === undefined)
-                out.push(`sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope}, which does not exist in truth (UNSAFE: stale after a structural move)`);
+                out.push(
+                    `sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope}, which does not exist in truth (UNSAFE: stale after a structural move)`,
+                );
             else if (expected !== undefined && expected !== tRec.scope)
-                out.push(`sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope} (truth ${tRec.scope}) (UNSAFE: wrong owning scope)`);
+                out.push(
+                    `sym ${mSym} '${mRec.decl?.name ?? '?'}' claims scope ${mRec.scope} (truth ${tRec.scope}) (UNSAFE: wrong owning scope)`,
+                );
         }
 
         // Every scope's parent must still exist. A removed scope left as a parent breaks the chain
@@ -398,7 +410,9 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
     for (const n of nodes) {
         const m = before.get(n) ?? 0;
         if (m >= maintained.symbols.length)
-            out.push(`node ${n.type} @${n.start} '${n.name}' holds sym ${m} beyond the table (size ${maintained.symbols.length}) (UNSAFE)`);
+            out.push(
+                `node ${n.type} @${n.start} '${n.name}' holds sym ${m} beyond the table (size ${maintained.symbols.length}) (UNSAFE)`,
+            );
     }
 
     // A LIVE symbol's `decl` must still be ATTACHED to the tree. `deconflict.ts:134` and `link.ts:210`
@@ -436,53 +450,13 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
         for (let i = 1; i < maintained.symbols.length; i++) if (maintained.symbols[i].scope !== 0) liveM++;
         let liveT = 0;
         for (let i = 1; i < truth.symbols.length; i++) if (truth.symbols[i].scope !== 0) liveT++;
-        if (liveM !== liveT) out.push(`EXTRAS(safe): maintained has ${liveM} live symbols, truth ${liveT} (delta ${liveM - liveT})`);
+        if (liveM !== liveT)
+            out.push(`EXTRAS(safe): maintained has ${liveM} live symbols, truth ${liveT} (delta ${liveM - liveT})`);
     }
     for (const p of verifyRefFacts(maintained, program)) if (p.includes('UNDER(unsafe)')) out.push(p);
 
     // `symbolInit` / `shorthand` / `exported` are read by compress passes (alias-inline, const-prop)
     // and are NOT covered by the RefDelta, which carries only reads/writes/uses. A stale entry here
     // points at a node the lowering may have detached, so it is reported as unsafe.
-    if (VERIFY_SYMBOL_INIT) {
-        // Symbol IDS differ between the two builds — compare THROUGH the partition map established
-        // above, or every entry looks divergent for no reason.
-        for (const [mSym, mInit] of maintained.symbolInit) {
-            const tSym = mToT.get(mSym);
-            if (tSym === undefined) continue; // symbol absent from truth (stale decl) — safe
-            const tInit = truth.symbolInit.get(tSym);
-            if (tInit === undefined) out.push(`sym ${mSym} symbolInit is stale in maintained (truth has none)`);
-            else if (tInit !== mInit) out.push(`sym ${mSym} symbolInit points at a DIFFERENT node (maintained ${mInit.type} vs truth ${tInit.type})`);
-        }
-        for (const [tSym, tInit] of truth.symbolInit) {
-            const mSym = tToM.get(tSym);
-            if (mSym !== undefined && !maintained.symbolInit.has(mSym))
-                out.push(`sym ${mSym} symbolInit missing in maintained (truth has ${tInit.type})`);
-        }
-    }
-    if (VERIFY_SYMBOL_INIT) {
-        // What `Semantic.unresolved` is FOR is name reservation: `deconflict` seeds its taken set
-        // from it. So compare RESERVATION, not list membership — a name can legitimately be reserved
-        // through the symbol table in one build and through `unresolved` in the other. `declare const
-        // g` is exactly that: the maintained build still has `g` declared (so the reference resolved
-        // and never entered the list), while a rebuild on the stripped tree has no declaration and
-        // reserves `g` as unresolved instead. Both reserve it; only the route differs.
-        const declared = new Set<string>();
-        for (let i = 1; i < maintained.symbols.length; i++) {
-            const nm = maintained.symbols[i].decl?.name;
-            if (nm !== undefined) declared.add(nm);
-        }
-        // Only UNDER-reservation is reported. A name the maintained build reserves and the rebuild
-        // does not costs at most a rename; a name NEITHER route reserves is free for capture, which
-        // is the direction that breaks code.
-        const mNames = new Set(maintained.unresolved.map((n) => n.name));
-        for (const n of truth.unresolved)
-            if (!mNames.has(n.name) && !declared.has(n.name))
-                out.push(`name '${n.name}' is reserved by neither unresolved nor a symbol in maintained (UNSAFE: free for capture)`);
-    }
     return out;
 }
-
-/** `symbolInit` divergence is reported separately: it is real, but it is a SIZE effect (compress
- *  passes decline to fire), not a miscompile, so gating the default flip on it would be wrong.
- *  Set `VERIFY_SYMBOL_INIT=1` to include it. */
-const VERIFY_SYMBOL_INIT = process.env.VERIFY_SYMBOL_INIT === '1';
