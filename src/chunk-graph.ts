@@ -1,4 +1,4 @@
-import { helpersNeededBy } from './bundle';
+import { helpersNeededBy } from './generate/esm.ts';
 import { deconflictChunk } from './deconflict';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 import { initRefForRecord } from './init-obligations';

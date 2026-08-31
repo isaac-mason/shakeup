@@ -12,7 +12,6 @@ import type { NormalizedOutputNaming } from '../output-options.ts';
 import type { Part } from '../sourcemap.ts';
 import type { TreeshakeResult } from '../treeshake.ts';
 
-
 /** Per-module render context. Built once per module inside `renderChunk`'s loop, and by nothing
  *  else — there is no chunk-less caller, which is why every field below is non-null.
  *
@@ -125,4 +124,37 @@ export type RenderedModules = {
     entryStarSpecs: string[];
     /** External specifiers imported for side effects only. */
     sideEffectSpecs: Set<string>;
+};
+
+export const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
+
+/** Emit-layer spacing. The AST printer is whitespace-aware, but this hand-built glue (import and
+ *  export clauses, the namespace object) carried readable padding regardless of `minify.whitespace`
+ *  — 1.4KB on crashcat measured against oxc-minify. Only COLUMNS move: every one of these is a
+ *  single line before and after, so the line-counting the source-map parts rely on is untouched. */
+export const clauseSep = (tight: boolean): string => (tight ? ',' : ', ');
+
+/** A chunk's preliminary filename: the pattern with `[hash]` left as a placeholder token (or
+ *  `null` when the pattern has no `[hash]`, in which case the name is reserved immediately). */
+export type PreliminaryFileName = { fileName: string; hashPlaceholder: string | null };
+
+/** The intermediate a chunk render produces before hashing (placeholders unresolved). */
+export type RenderedChunk = {
+    chunk: Chunk;
+    chunkIdx: number;
+    prelim: PreliminaryFileName;
+    /** Code with cross-chunk/dynamic paths as placeholders (own name still logical). */
+    code: string;
+    /** Assembled parts (banner/intro leading synthetics included) for the per-chunk map. */
+    parts: Part[];
+    mapSources: string[];
+    mapSourcesContent: string[];
+    // metadata for OutputChunk
+    name: string;
+    isEntry: boolean;
+    isDynamicEntry: boolean;
+    moduleIds: string[];
+    imports: string[];
+    dynamicImports: string[];
+    exports: string[];
 };
