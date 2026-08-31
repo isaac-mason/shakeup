@@ -59,7 +59,7 @@ export const binding = (name: string, at = SPAN): Node => node(N.BindingIdentifi
 /** A `BindingIdentifier` carrying its symbol. */
 export const boundBinding = (name: string, sym: number, at = SPAN): Node => {
     const n = node(N.BindingIdentifier, at, at, name, null);
-    (n as { sym: number }).sym = sym;
+    n.sym = sym;
     return n;
 };
 
