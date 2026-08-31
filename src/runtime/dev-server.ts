@@ -311,7 +311,13 @@ export function createDevServer(options: DevServerOptions): DevServer {
         if (pending !== undefined) return pending;
         const p = fetchModuleTracked(id);
         inFlight.set(id, p);
-        void p.finally(() => inFlight.delete(id));
+        // `then(cleanup, cleanup)`, not `finally`: `finally` returns a NEW promise that adopts p's
+        // rejection, and discarding it unhandled turns any throwing plugin hook into a spurious
+        // unhandled rejection on top of the error the caller already sees.
+        const cleanup = () => {
+            inFlight.delete(id);
+        };
+        void p.then(cleanup, cleanup);
         return p;
     }
 
