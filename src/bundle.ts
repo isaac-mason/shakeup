@@ -1265,7 +1265,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         const mrc = options.moduleRenderCache ?? { modules: new Map(), namesHash: -1 };
         const namesHash = nameSignature(linked);
         const liveHash = graph.modules.map((_, i) => (shaken === null ? 0 : hashLiveSet(shaken.live[i])));
-        const mod: ModuleRenderCtx = {
+        const mod: ModuleReuse = {
             cache: mrc.modules,
             namesStable: mrc.namesHash === namesHash,
             changed: graph.changed,
@@ -1458,8 +1458,30 @@ type RenderCtx = {
     pathToChunk: (targetChunkIdx: number) => string;
 };
 
-function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, modInc: ModuleRenderCtx | null): RenderedChunk | null {
-    const { graph, linked, chunkGraph, chunk, chunkIdx, shaken, interopOwners, warnings } = ctx;
+/** What rendering a chunk's modules produced — everything the format renderer needs from that pass.
+ *
+ *  A returned value, not shared mutable state: the two phases used to be one function and the
+ *  accumulators were locals, so "what crosses the seam" was invisible. It is these five. */
+type RenderedModules = {
+    /** The module region, as sourcemap parts. Their `code` concatenates to the region's text. */
+    parts: Part[];
+    mapSources: string[];
+    mapSourcesContent: string[];
+    /** `export * from '<external>'` specifiers hoisted out of an entry module. */
+    entryStarSpecs: string[];
+    /** External specifiers imported for side effects only. */
+    sideEffectSpecs: Set<string>;
+};
+
+/** Render every module of one chunk to text, in that chunk's perspective.
+ *
+ *  This is where the collect-then-print pairing lives, and it CANNOT be lifted out the way rolldown
+ *  lifts `finalize_modules` into a bundle-wide pass before rendering. rolldown can because it MUTATES
+ *  the AST; shakeup builds `Map<Node, string>` overrides that `printModule` consumes and discards, so
+ *  collection and printing are one unit. That is deliberate — the module AST is reused across builds
+ *  through `options.cache`, and mutating it during render would poison the next build. */
+function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): RenderedModules {
+    const { graph, linked, chunk, chunkGraph, shaken, interopOwners, warnings } = ctx;
     const { naming, wantMap, tight, deferMinify, pathToChunk } = ctx;
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
@@ -1476,22 +1498,22 @@ function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, modInc: Module
         // Per-module reuse: a clean module (not re-parsed, unchanged liveness, same chunk
         // perspective) renders identical bytes when no final name shifted (`namesStable`). This
         // is what makes a single-chunk edit cheap — only the touched module re-renders.
-        if (modInc !== null) {
-            const entry = modInc.cache.get(mod.id);
+        if (reuse !== null) {
+            const entry = reuse.cache.get(mod.id);
             const mapOk =
                 !wantMap ||
                 entry === undefined ||
                 entry.text === '' ||
                 (entry.mapPart !== null && entry.srcIdx === mapSources.length);
             if (
-                modInc.namesStable &&
+                reuse.namesStable &&
                 entry !== undefined &&
-                !modInc.changed.has(mod.id) &&
-                entry.liveHash === modInc.liveHash[idx] &&
+                !reuse.changed.has(mod.id) &&
+                entry.liveHash === reuse.liveHash[idx] &&
                 entry.chunkKey === chunkKey &&
                 mapOk
             ) {
-                modInc.stats.moduleReused++;
+                reuse.stats.moduleReused++;
                 if (entry.text !== '') {
                     if (wantMap) {
                         mapSources.push(mod.id);
@@ -1731,20 +1753,34 @@ function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, modInc: Module
         }
         // Cache the render for reuse — unless it carries a per-build hash placeholder (its bytes
         // are not counter-stable, so it must re-render every build).
-        if (modInc !== null) {
-            if (out.includes('!~{')) modInc.cache.delete(mod.id);
+        if (reuse !== null) {
+            if (out.includes('!~{')) reuse.cache.delete(mod.id);
             else
-                modInc.cache.set(mod.id, {
-                    liveHash: modInc.liveHash[idx],
+                reuse.cache.set(mod.id, {
+                    liveHash: reuse.liveHash[idx],
                     chunkKey,
                     text: out,
                     mapPart,
                     srcIdx,
                     nsCode,
                 });
-            modInc.stats.moduleRendered++;
+            reuse.stats.moduleRendered++;
         }
     }
+
+    return { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs };
+}
+
+/** Render one chunk in the `es` output format: its import/export surface, then the assembled text.
+ *
+ *  Named for the FORMAT, not the phase. Both references split here and split the same way — rolldown
+ *  has `ecmascript/format/{esm,cjs,iife,umd}.rs`, rollup has `finalisers/{es,cjs,amd,iife,umd,
+ *  system}.ts` — because emitting a format's import/export statements and framing its body is one
+ *  decision, not two. shakeup emits only `es` today (`format: () => 'es'`), so the seam is latent;
+ *  naming it now means a second format arrives as a sibling rather than as a re-cut. */
+function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: PreliminaryFileName): RenderedChunk | null {
+    const { graph, linked, chunkGraph, chunk, chunkIdx, shaken, naming, tight, pathToChunk } = ctx;
+    const { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs } = mods;
 
     // Cross-chunk static imports: `import { imported as local, … } from '<path>';`
     const crossImportLines: string[] = [];
@@ -1965,6 +2001,12 @@ function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, modInc: Module
         dynamicImports: dynamicImportNames,
         exports: exportedNames,
     };
+}
+
+/** Render one chunk: its modules, then its output format. Kept as a named composition so the two
+ *  passes and their one hand-off stay visible at a single place. */
+function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, reuse: ModuleReuse | null): RenderedChunk | null {
+    return renderEsm(ctx, renderModules(ctx, reuse), prelim);
 }
 
 /** Per-group fallbacks (top-level advancedChunks values, else engine defaults). */
@@ -2271,7 +2313,9 @@ export type CachedModuleRender = {
 export type ModuleRenderCache = { modules: Map<string, CachedModuleRender>; namesHash: number };
 
 /** Per-module reuse inputs threaded into {@link renderChunk}. */
-export type ModuleRenderCtx = {
+/** Per-module render REUSE: what lets an unchanged module skip re-rendering. Named for the job, not
+ *  for the incremental machinery it arrives from (`RenderIncremental.mod`). */
+export type ModuleReuse = {
     cache: Map<string, CachedModuleRender>;
     /** Every final name is unchanged from the cached build → referenced names are stable. */
     namesStable: boolean;
@@ -2284,7 +2328,7 @@ export type ModuleRenderCtx = {
 
 /** Incremental render inputs: the persistent cache + the render-dirty module ids
  *  (`graph.changed ∪ graph.affected`) + a stats sink + per-module reuse context. */
-export type RenderIncremental = { cache: RenderCache; dirty: Set<string>; stats: RenderStats; mod: ModuleRenderCtx };
+export type RenderIncremental = { cache: RenderCache; dirty: Set<string>; stats: RenderStats; mod: ModuleReuse };
 
 /** A chunk's stable cross-build identity: its member ids in exec order. Distinct chunks never
  *  share members, so this is unique; exec-order changes (which alter output) change it. */
