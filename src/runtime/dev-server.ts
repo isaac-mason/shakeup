@@ -24,9 +24,15 @@ import type { HmrUpdate } from './environment.ts';
 export type ResolveResult = string | { external: string };
 
 export type DevServerOptions = CommonOptions & {
-    /** emit source maps (mapping runner code → original) so the runner attaches them
-     *  and dev stack traces map to source. Default true. */
-    sourcemap?: boolean;
+    /** Emit source maps (mapping runner code → the module's own source) so the runner attaches
+     *  them and dev stack traces map back. A predicate decides per module.
+     *
+     *  Default: every module EXCEPT `node_modules` — the same rule `sourcemapIgnoreList` already
+     *  defaults to on the output side. A built dependency has no original source in reach, so its
+     *  map points at the built file: worth little, and paid for with a full SMv3 map plus a base64
+     *  `sourceMappingURL` bolted onto every module body, on every boot, in every environment.
+     *  `true` restores the old behaviour and maps everything. */
+    sourcemap?: boolean | ((id: string) => boolean);
     /** eagerly warm a module's static-import closure in the background on first transform, so the
      *  runner's later fetches are cache hits (transform overlaps the runner's eval). Default true. */
     preTransform?: boolean;
@@ -181,8 +187,27 @@ function hashOf(s: string): number {
 const NULL_FS: Fs = { read: () => null, exists: () => false };
 const EMPTY_HMR: HmrInfo = { selfAccepts: false, acceptedDeps: [] };
 
+/** Resolve `sourcemap` into a per-module predicate. Default: everything but `node_modules` — the
+ *  same test `normalizeIgnoreList` applies on the output side, inverted, since this option's `true`
+ *  means "emit" where an ignore-list's means "skip".
+ *
+ *  The `string`/`RegExp` forms `sourcemapIgnoreList` accepts are deliberately NOT accepted here: its
+ *  booleans mean the opposite of these, and a shared union would make the two look interchangeable. */
+function normalizeSourcemap(v: boolean | ((id: string) => boolean) | undefined): (id: string) => boolean {
+    if (v === undefined) return (id) => !id.includes('node_modules');
+    if (typeof v === 'boolean') return () => v;
+    // A user FUNCTION must actually answer the question — the same contract `sourcemapIgnoreList`
+    // enforces, rather than letting `undefined` fall through as a silent "no map".
+    return (id) => {
+        const r = v(id);
+        if (typeof r !== 'boolean') throw new Error('sourcemap function must return a boolean.');
+        return r;
+    };
+}
+
 export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
+    const wantSourcemap = normalizeSourcemap(options.sourcemap);
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => options.warn?.(m));
     const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
     // Cumulative bundling metrics (exposed via `stats()`). firstAt/lastAt bound the wall span;
@@ -406,7 +431,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
             });
         }
 
-        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: options.sourcemap ?? true });
+        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: wantSourcemap(id) });
         perf.devTransformMs += performance.now() - tDev;
         if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
         const tResolve = performance.now();
