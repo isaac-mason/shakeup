@@ -42,7 +42,6 @@ import { type CompressMode, runCompress } from './passes/compress';
 import { lazySplit } from './passes/lazy-split';
 import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { interopNamespace, materialiseLiveBody, wrapModuleBody } from './passes/wrap-module';
-import type { Edit } from './patches';
 import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin';
 import { printModule } from './print/print-js';
 import { createPrinter, finishPrinter } from './print/printer';
@@ -182,19 +181,27 @@ export type BundleResult = {
     map?: SourceMap;
 };
 
+/** Per-module render context. Built once per module inside `renderChunk`'s loop, and by nothing
+ *  else — there is no chunk-less caller, which is why every field below is non-null.
+ *
+ *  It used to carry `chunk`/`chunkGraph`/`pathToChunk` as `| null`, documented "null in link-only
+ *  helpers". Those helpers no longer exist: link stopped naming things when `linkGraph` was purified
+ *  (see the note at the `linkGraph` call — per-chunk deconflict inside `buildChunkGraph` assigns
+ *  names in fresh per-chunk scopes), and the whole-bundle naming perspective went with it. The
+ *  nullability outlived it by twelve unreachable branches, several of which read as real alternative
+ *  naming paths. */
 type EmitCtx = {
-    graph: Graph;
     linked: Linked;
     mod: Module;
-    edits: Edit[];
     warnings: string[];
+    /** Null when `treeshake: false` — the one genuine nullable here. */
     live: Set<number> | null;
-    /** The chunk this module is being rendered into (null in link-only helpers). */
-    chunk: Chunk | null;
-    chunkGraph: ChunkGraph | null;
+    /** The chunk this module is being rendered into. */
+    chunk: Chunk;
+    chunkGraph: ChunkGraph;
     /** Resolve a target chunk idx to the import specifier this chunk uses for it (relative
-     *  path over preliminary/placeholder-bearing filenames). Null in link-only. */
-    pathToChunk: ((targetChunkIdx: number) => string) | null;
+     *  path over preliminary/placeholder-bearing filenames). */
+    pathToChunk: (targetChunkIdx: number) => string;
     /** Which statement owns each wrapped-CommonJS interop namespace — see `computeInteropOwners`. */
     interopOwners: Map<number, InteropOwner>;
 };
@@ -216,14 +223,12 @@ function renameOf(ctx: EmitCtx, identNode: Node): string | null {
 /** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
  *  consuming chunk). A `found`/`namespace` bind whose producer lives in ANOTHER chunk renders
  *  as this chunk's cross-chunk import LOCAL (recorded during wiring); a same-chunk bind
- *  renders as the producer's final name. `chunk === null` = single-scope (whole-bundle). */
-function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): string | null {
+ *  renders as the producer's final name. */
+function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk): string | null {
     switch (bind.kind) {
         case 'found': {
-            if (chunk !== null) {
-                const local = chunk.importLocalOf.get(bind.ref);
-                if (local !== undefined) return local;
-            }
+            const local = chunk.importLocalOf.get(bind.ref);
+            if (local !== undefined) return local;
             return finalNameOf(linked, bind.ref);
         }
         case 'cjs-member': {
@@ -234,15 +239,13 @@ function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk | null): stri
             // The namespace is resolved exactly like a `found` bind — CHUNK-LOCAL alias first — so a
             // consumer in another chunk names the symbol it imported rather than the producer's own
             // local, which is what used to dangle.
-            const local = chunk?.importLocalOf.get(bind.ref) ?? finalNameOf(linked, bind.ref);
+            const local = chunk.importLocalOf.get(bind.ref) ?? finalNameOf(linked, bind.ref);
             if (local === null) return null;
             return bind.name === NAME_NAMESPACE ? local : `${local}.${bind.name}`;
         }
         case 'namespace': {
-            if (chunk !== null) {
-                const local = chunk.nsImportLocalOf.get(bind.module);
-                if (local !== undefined) return local;
-            }
+            const local = chunk.nsImportLocalOf.get(bind.module);
+            if (local !== undefined) return local;
             return linked.namespaceOf.get(bind.module) ?? null;
         }
         case 'external':
@@ -351,7 +354,7 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
         if (wrapRef !== undefined) {
             // Chunk-local alias first: a `require` that crosses a chunk boundary must call the name
             // this chunk imported the wrapper under, not the producer's own local.
-            const wrapper = ctx.chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
+            const wrapper = ctx.chunk.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
             map.set(n, `${wrapper}()`);
             return;
         }
@@ -374,7 +377,7 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
             map.set(n, `__toCommonJS(${ns})`);
             return;
         }
-        const initName = ctx.chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
+        const initName = ctx.chunk.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
         map.set(n, `(${initName}(), __toCommonJS(${ns}))`);
     });
 }
@@ -411,7 +414,7 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
         if (rec === undefined) continue;
         const initRef = initRefForRecord(linked, rec, 'static-import');
         if (initRef !== undefined) {
-            const name = chunk?.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
+            const name = chunk.importLocalOf.get(initRef) ?? finalNameOf(linked, initRef);
             map.set(stmt, `${name}();`);
             continue;
         }
@@ -425,8 +428,8 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
         if (owner === undefined || owner.module !== mod.idx || owner.stmtId !== stmt.id) continue;
         const wrapRef = linked.cjsWrap.get(rec.resolved);
         if (wrapRef === undefined) continue;
-        const nsName = chunk?.importLocalOf.get(nsRef) ?? finalNameOf(linked, nsRef);
-        const wrapName = chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
+        const nsName = chunk.importLocalOf.get(nsRef) ?? finalNameOf(linked, nsRef);
+        const wrapName = chunk.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
         const nodeArg = isEsmFormat(mod.defFormat) ? ', 1' : '';
         map.set(stmt, `var ${nsName} = /* @__PURE__ */ __toESM(${wrapName}()${nodeArg});`);
     }
@@ -434,14 +437,14 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
 }
 
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
-    const { mod, chunk, chunkGraph } = ctx;
+    const { mod, chunkGraph } = ctx;
     const map = new Map<Node, string>();
     // Only `import()` and `new URL(...)` produce an override, and the scan already recorded both as
     // import records — so a module with neither cannot contribute one, and the whole-program walk
     // below is skipped. Checking is O(records).
     if (!mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)) return map;
     walk(mod.program, (n) => {
-        if (n.type === N.ImportExpression && chunk !== null && chunkGraph !== null) {
+        if (n.type === N.ImportExpression) {
             const source = n.data.source;
             if (source.type === N.StringLiteral) {
                 const spec = mod.source.slice(source.start + 1, source.end - 1);
@@ -457,14 +460,11 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                         const cjsNs = ctx.linked.cjsNamespace.get(rec.resolved);
                         const nsName =
                             cjsNs !== undefined
-                                ? (ctx.chunk?.importLocalOf.get(cjsNs) ?? finalNameOf(ctx.linked, cjsNs))
+                                ? (ctx.chunk.importLocalOf.get(cjsNs) ?? finalNameOf(ctx.linked, cjsNs))
                                 : ctx.linked.namespaceOf.get(rec.resolved);
                         map.set(n, `Promise.resolve().then(() => ${nsName ?? '{}'})`);
                     } else {
-                        const path =
-                            ctx.pathToChunk !== null
-                                ? ctx.pathToChunk(targetChunk)
-                                : `./${chunkGraph.chunks[targetChunk].name}.js`;
+                        const path = ctx.pathToChunk(targetChunk);
                         // A mode-2 target's chunk exports the runtime namespace OBJECT under a
                         // single name — its members are not knowable as chunk exports — so the
                         // import site unwraps it and the caller's `m.a` reads the object.
@@ -670,7 +670,7 @@ function renderNamespaceObject(
     graph: Graph,
     linked: Linked,
     modIdx: number,
-    chunk: Chunk | null,
+    chunk: Chunk,
     nsMembers: Set<string> | undefined,
     tight: boolean,
     /** The `var` is already declared outside (lazy-init form) — assign, do not redeclare. */
@@ -758,7 +758,7 @@ function renderNamespaceObject(
             if (rec.external || rec.resolved < 0) continue;
             const wrapRef = linked.cjsWrap.get(rec.resolved);
             if (wrapRef !== undefined) {
-                const wrapper = chunk?.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
+                const wrapper = chunk.importLocalOf.get(wrapRef) ?? finalNameOf(linked, wrapRef);
                 lines.push(`__reExport(${nsName},${tight ? '' : ' '}/* @__PURE__ */ __toESM(${wrapper}()));`);
             } else if (linked.dynamicExports.has(rec.resolved)) {
                 // Chained: the star source is itself a mode-2 re-exporter, so copy from ITS object.
@@ -1538,7 +1538,7 @@ function renderChunk(
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
         {
-            const ctx: EmitCtx = { graph, linked, mod, edits: [], warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
+            const ctx: EmitCtx = { linked, mod, warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
             trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(ctx);
             const initCalls = collectInitCalls(ctx);
