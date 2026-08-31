@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { parse } from '../src/index.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter, printerPart } from '../src/print/printer.ts';
-import { buildLineTable, decodeMappings, encodeMappings } from '../src/sourcemap.ts';
+import { buildLineTable, decodeMappings, encodeMappings } from '../src/util/sourcemap.ts';
 
 /** Print `src` with sourcemap building on; return generated code + decoded segments. */
 function printWithMap(src: string, minify: boolean) {

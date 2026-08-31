@@ -15,7 +15,7 @@ import {
     runTransform,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
-import type { SourceMap } from '../../sourcemap.ts';
+import type { SourceMap } from '../../util/sourcemap.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
 import type { HmrUpdate } from './environment.ts';
 

@@ -2,7 +2,7 @@ export * from './ast/index.ts';
 export * from './parser/index.ts';
 export * from './analysis/index.ts';
 export * from './bundler/patches.ts';
-export * from './sourcemap.ts';
+export * from './util/sourcemap.ts';
 export * from './bundler/fs.ts';
 export * from './bundler/watch.ts';
 export * from './bundler/graph-types.ts';

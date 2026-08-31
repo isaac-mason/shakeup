@@ -23,10 +23,10 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 /** The language toolchain: everything oxc would own. */
 const TOOLCHAIN = ['ast', 'parser', 'analysis', 'passes', 'print', 'mangle', 'util'];
 
-/** Toolchain code that is not in one of those directories. `sourcemap.ts` is shared by `print/` and
- *  five bundler files, so it can live in neither half — oxc has the same shape, where `oxc_sourcemap`
- *  is a peer crate consumed by `oxc_codegen` and `oxc_minifier` rather than a module inside codegen. */
-const TOOLCHAIN_FILES = ['sourcemap.ts'];
+/** Toolchain code sitting at the top level rather than in one of those directories. Empty by design:
+ *  `src/` is `index.ts` plus directories, and the third test below keeps it that way. Kept as a real
+ *  hook rather than deleted, so a future top-level module has an obvious place to be declared. */
+const TOOLCHAIN_FILES: string[] = [];
 
 /** Above both halves: the two `exports` entries, which re-export across the boundary by design. */
 const ENTRIES = ['index.ts', 'node'];

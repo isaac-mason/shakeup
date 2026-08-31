@@ -10,7 +10,7 @@ import {
     encodeMappings,
     inlineSourceMapComment,
     newMappings,
-} from '../src/sourcemap.ts';
+} from '../src/util/sourcemap.ts';
 import { devTransform } from '../src/bundler/transform.ts';
 
 // UTF-16 positions via plain JS string indexing (JS strings are UTF-16, matching SMv3 columns).

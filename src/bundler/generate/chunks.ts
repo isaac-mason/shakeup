@@ -5,7 +5,7 @@
 // than beside either, because this is the only caller and the pipeline reads top-down from it.
 
 import type { CompressMode } from '../../passes/compress/index.ts';
-import { composeMappings, encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from '../../sourcemap.ts';
+import { composeMappings, encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from '../../util/sourcemap.ts';
 import type { OutputChunk } from '../bundle.ts';
 import { compressChunk } from '../chunk-compress.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';

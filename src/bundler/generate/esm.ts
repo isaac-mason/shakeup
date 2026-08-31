@@ -5,7 +5,7 @@
 // umd,system}.ts`. Emitting a format's import/export statements and framing its body is one
 // decision. shakeup emits only `es` today, so a second format arrives as a sibling file.
 import { N, type Node, walk } from '../../ast/index.ts';
-import type { Part } from '../../sourcemap.ts';
+import type { Part } from '../../util/sourcemap.ts';
 import type { Chunk } from '../chunk-graph.ts';
 import { relativePath } from '../fs.ts';
 import { type Graph, type Linked, type Module, NAME_DEFAULT, NAME_NAMESPACE } from '../graph-types.ts';

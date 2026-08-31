@@ -26,8 +26,8 @@ import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../pas
 import { printModule } from '../../print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../print/printer.ts';
 import { isRequireCall } from '../scan.ts';
-import type { Mappings } from '../../sourcemap.ts';
-import { buildLineTable, type Part, trimMappings } from '../../sourcemap.ts';
+import type { Mappings } from '../../util/sourcemap.ts';
+import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
 import {
     clauseSep,
     type EmitCtx,

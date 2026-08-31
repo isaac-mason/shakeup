@@ -50,8 +50,8 @@ import { runCompress } from '../passes/compress/index.ts';
 import { printModule } from '../print/print-js.ts';
 import type { PrinterConfig, PrintOptions } from '../print/printer.ts';
 import { createPrinter, finishPrinter } from '../print/printer.ts';
-import type { Mappings } from '../sourcemap.ts';
-import { buildLineTable, trimMappings } from '../sourcemap.ts';
+import type { Mappings } from '../util/sourcemap.ts';
+import { buildLineTable, trimMappings } from '../util/sourcemap.ts';
 import { RESERVED } from './deconflict.ts';
 
 export type ChunkCompressResult = { code: string; map: Mappings | null };

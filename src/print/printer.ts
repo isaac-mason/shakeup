@@ -1,5 +1,5 @@
 import { lineColOf, type Node } from '../ast/index.ts';
-import { addLine, addSegment, type Mappings, newMappings } from '../sourcemap.ts';
+import { addLine, addSegment, type Mappings, newMappings } from '../util/sourcemap.ts';
 
 /** Options controlling how the printer renders. Whitespace and syntactic-form
  *  selection are toggled by `minify` — the single flag oxc's codegen keys off

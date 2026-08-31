@@ -1,3 +1,16 @@
+// SOURCE MAPS — segment building, VLQ encode/decode, composition, and the emitted artifact.
+//
+// In `util/` because that is the layer's rule, not because it is a small helper: this file imports
+// NOTHING, and it is shared across layers (`print/printer.ts` builds the segments, eleven files under
+// `bundler/` consume and compose them). Zero imports plus more than one consuming layer is exactly
+// what `util/` means here — the same reason `jsx-entities.ts` sits beside it.
+//
+// oxc looks like a counter-example and is not. `oxc_sourcemap` is a separate CRATE, which reads as
+// "not part of codegen" — but it is `oxc_sourcemap = "8.0.2"` from crates.io, published and versioned
+// on its own and consumed outside oxc. That is a packaging decision; shakeup is one package, so it
+// carries no layering argument. The layering fact that does carry is the dependency direction, and
+// it points here.
+
 const BASE64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 // char CODES for each base64 digit — write these into a byte buffer instead of pushing 1-char
 // strings, which for a large module means a giant string[] + join (the old hot path + GC).

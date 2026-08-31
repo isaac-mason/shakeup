@@ -8,7 +8,7 @@ import { tsStrip } from '../passes/strip-ts.ts';
 import { traverse } from '../passes/traverse.ts';
 import { printModule } from '../print/print-js.ts';
 import { createPrinter, finishPrinter, printerPart } from '../print/printer.ts';
-import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../sourcemap.ts';
+import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../util/sourcemap.ts';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
  *  filename extension when omitted. */

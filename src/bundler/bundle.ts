@@ -1,7 +1,7 @@
 import { resetInferredPure } from '../analysis/effects.ts';
 import { runCompress } from '../passes/compress/index.ts';
 import { inlineCrossModule } from '../passes/optimize/inline-functions.ts';
-import type { SourceMap } from '../sourcemap.ts';
+import type { SourceMap } from '../util/sourcemap.ts';
 import * as Timer from '../util/timer.ts';
 import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph.ts';
 import { type Fs, normalizePath, relativePath } from './fs.ts';

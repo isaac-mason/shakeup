@@ -2,7 +2,7 @@ import type { Semantic } from '../analysis/semantic.ts';
 import type { Program } from '../ast/index.ts';
 import type { Fs, MaybePromise } from './fs.ts';
 import { applyEdits, type Edit } from './patches.ts';
-import type { SourceMap } from '../sourcemap.ts';
+import type { SourceMap } from '../util/sourcemap.ts';
 
 /** false = no side effects (droppable if unused); true = default liveness;
  *  'no-treeshake' = keep every statement + always include the module. */
