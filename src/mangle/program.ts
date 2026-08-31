@@ -27,7 +27,7 @@ import { assignSlots, SLOT_UNASSIGNED } from './slots.ts';
  * `reserved` is every name the result must avoid — globals the chunk references, plus anything the
  * caller wants left alone.
  */
-export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string>, debug = false): Map<number, string> {
+export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string>): Map<number, string> {
     const out = new Map<number, string>();
     // Direct `eval` can see every binding by its source name (oxc reserves per-scope, lib.rs:604-608).
     // shakeup's semantic does not track it, so bail for the whole program — correctness over precision,
@@ -50,19 +50,23 @@ export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string
         bindingsByScope[rec.scope]?.push(sym);
     }
 
-    const refScopes: number[][] = Array.from({ length: symbolCount }, () => []);
-    const declScopes: number[][] = Array.from({ length: symbolCount }, () => []);
-    const { refSyms, refScopeIds, declSyms, declScopeIds } = sem;
-    for (let i = 0; i < refSyms.length; i++) {
-        const sym = refSyms[i];
-        if (sym > 0) refScopes[sym].push(refScopeIds[i]);
-    }
-    for (let i = 0; i < declSyms.length; i++) {
-        const sym = declSyms[i];
-        if (sym > 0) declScopes[sym].push(declScopeIds[i]);
-    }
-
-    if (debug) verifyScopesAgainstWalk(program, sem, symbolCount, refScopes, declScopes);
+    // DERIVED FROM THE TREE, not read off the semantic. `Semantic` used to carry these as four flat
+    // arrays filled by `analyze` — oxc's data model (`get_resolved_references(sym).scope_id` plus the
+    // declaring and redeclaring scopes) — but nothing maintained them, and compress runs between that
+    // `analyze` and this call. Measured on the chunk the mangler actually sees, 2,339 of crashcat's
+    // symbols and 881 of three's had scopes that no longer described the tree.
+    //
+    // The direction was the safe one — oxc's own words (`compressor.rs:38`): "Stale *extra* references
+    // cause missed optimizations (output stays correct); an *added* reference that was never recorded
+    // can cause incorrect output." Ours were extras, so output stayed valid and was simply BIGGER:
+    // references compress had deleted still forced symbols apart, so fewer shared a slot and names ran
+    // longer. Deriving them here is worth 262 bytes on crashcat, 59 on three, 50 on three-consumer.
+    //
+    // oxc fixes the same staleness by rebuilding the WHOLE semantic for the mangler
+    // (`oxc_minifier/src/lib.rs:157`) — which it needs regardless, for tables the compressor's build
+    // lacks (`with_build_nodes`, `with_class_table`). Ours needs only these two, and building just
+    // them measured 6.8ms against 19.0ms for a full re-`analyze`, with byte-identical output.
+    const { refScopes, declScopes } = collectScopes(program, sem, symbolCount);
 
     const { slots, totalSlots } = assignSlots({ scopeCount, root, parent, bindingsByScope, refScopes, declScopes, symbolCount });
 
@@ -90,55 +94,35 @@ export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string
 }
 
 /**
- * DIFFERENTIAL CHECK on the scopes above — the one `mangle/chunk.ts` ran as `MANGLE_SCOPES=verify`,
- * salvaged here when that file (a second mangler, unreachable since link-time mangling was removed)
- * was deleted. Without it the comparison would have gone with the file, and it is the only thing that
- * tests the assumption this function rests on.
+ * The scopes each symbol is REFERENCED in and DECLARED in, from the current tree.
  *
- * THE ASSUMPTION. The scopes come off the semantic (`refScopeIds`/`declScopeIds` — oxc's
- * `get_resolved_references(sym).scope_id`, no traversal), which is only sound while those lists
- * describe the CURRENT tree. `chunk-compress.ts` runs `analyze()` -> `runCompress()` -> here, and
- * compress mutates, so measured on both corpora the semantic reaching this function is marked stale
- * every single time (crashcat 1/1, three 1/1). The deleted mangler guarded that case by walking
- * instead; this one does not, so the assumption is that compress never MOVES a reference between
- * scopes — only adds and removes, which the counts already track.
+ * `declScopes` is the scope the binding IDENTIFIER APPEARS in, which is NOT `symbols[sym].scope` —
+ * that is the hoisted OWNER. oxc keeps the distinction for the same reason (`oxc_mangler/src/lib.rs`
+ * :664, "`var` is hoisted, so include the scope where it is declared"). Redeclarations are included
+ * because every `BindingIdentifier` is visited, matching oxc's `symbol_redeclarations`.
  *
- * That is what this asserts, by rebuilding the same two tables from a walk of the tree as it actually
- * is and comparing. Compared as MULTISETS: `assignSlots` only ever tests set membership, so order and
- * duplicates are not observable, but a MISSING or EXTRA scope is.
+ * Equivalence to the semantic-derived tables this replaced was checked BEFORE they were deleted: on a
+ * freshly analyzed tree the two agree exactly, on both corpora. That control is what proved the
+ * divergence after compress was real staleness and not a numbering difference between `traverse`'s
+ * `currentScope` and `analyze`'s `state.scope`.
  */
-function verifyScopesAgainstWalk(
-    program: Node,
-    sem: Semantic,
-    symbolCount: number,
-    refScopes: number[][],
-    declScopes: number[][],
-): void {
-    const rw: number[][] = Array.from({ length: symbolCount }, () => []);
-    const dw: number[][] = Array.from({ length: symbolCount }, () => []);
+function collectScopes(program: Node, sem: Semantic, symbolCount: number): { refScopes: number[][]; declScopes: number[][] } {
+    const refScopes: number[][] = Array.from({ length: symbolCount }, () => []);
+    const declScopes: number[][] = Array.from({ length: symbolCount }, () => []);
     const visitor: Visitor = {
-        name: 'mangle-verify-collect',
+        name: 'mangle-collect-scopes',
         enter: hookTable({
             [N.IdentifierReference]: (n: Node, ctx: TransformCtx) => {
-                const s = (n as { sym: number }).sym;
-                if (s > 0) rw[s].push(ctx.currentScope);
+                const sym = (n as { sym: number }).sym;
+                if (sym > 0) refScopes[sym].push(ctx.currentScope);
             },
             [N.BindingIdentifier]: (n: Node, ctx: TransformCtx) => {
-                const s = (n as { sym: number }).sym;
-                if (s > 0) dw[s].push(ctx.currentScope);
+                const sym = (n as { sym: number }).sym;
+                if (sym > 0) declScopes[sym].push(ctx.currentScope);
             },
         }),
         exit: null,
     };
     traverse(program, sem, [visitor]);
-
-    const key = (a: number[]): string => [...a].sort((x, y) => x - y).join(',');
-    for (let sym = 1; sym < symbolCount; sym++) {
-        if (key(rw[sym]) !== key(refScopes[sym]))
-            throw new Error(`mangle refScopes diverged, sym ${sym}: walk [${key(rw[sym])}] vs semantic [${key(refScopes[sym])}]`);
-        if (key(dw[sym]) !== key(declScopes[sym]))
-            throw new Error(
-                `mangle declScopes diverged, sym ${sym}: walk [${key(dw[sym])}] vs semantic [${key(declScopes[sym])}]`,
-            );
-    }
+    return { refScopes, declScopes };
 }
