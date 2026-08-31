@@ -1112,36 +1112,35 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // their paths). Before the error gate so an asset load failure surfaces like a scan error.
     await emitAssets(graph, options.fs);
     Timer.end(timer, 'graph');
-    if (graph.errors.length > 0 || graph.entries.length === 0) {
-        return {
-            code: '',
-            chunks: [],
-            errors: graph.errors,
-            warnings: [],
-            graph,
-            linked: null,
-            shaken: null,
-            parseStats: graph.parseStats,
-        };
-    }
+
+    /** A failed build: no output, plus whatever pipeline state exists by the point of failure.
+     *
+     *  Six sites used to spell this out. They disagreed in two ways, both of which read as
+     *  oversights rather than intent, and both are fixed here: the two earliest returned
+     *  `warnings: []`, silently discarding plugin `this.warn()` output and every scan warning; and
+     *  the chunk-options failure returned `linked: null, shaken: null` despite holding both. A
+     *  caller inspecting `result.graph` after a failure now gets the same picture wherever it
+     *  stopped. */
+    const failed = (errors: string[], warnings: string[], atLink: Linked | null, atShake: TreeshakeResult | null): BundleResult => ({
+        code: '',
+        chunks: [],
+        errors,
+        warnings,
+        graph,
+        linked: atLink,
+        shaken: atShake,
+        parseStats: graph.parseStats,
+    });
+    const earlyWarnings = (): string[] => [...warningsOut, ...graph.warnings];
+
+    if (graph.errors.length > 0 || graph.entries.length === 0) return failed(graph.errors, earlyWarnings(), null, null);
     // Link WITHOUT whole-bundle deconflict — the per-chunk deconflict inside buildChunkGraph
     // assigns names in fresh per-chunk scopes. For a single chunk this reproduces the
     // whole-bundle names byte-for-byte (same order, same taken seeding).
     Timer.start(timer, 'link');
     const linked = linkGraph(graph); // Link binds+sorts only; per-chunk deconflict runs in buildChunkGraph
     Timer.end(timer, 'link');
-    if (linked.errors.length > 0) {
-        return {
-            code: '',
-            chunks: [],
-            errors: linked.errors,
-            warnings: [],
-            graph,
-            linked,
-            shaken: null,
-            parseStats: graph.parseStats,
-        };
-    }
+    if (linked.errors.length > 0) return failed(linked.errors, earlyWarnings(), linked, null);
 
     const warnings: string[] = [...warningsOut, ...graph.warnings];
     // Tree-shake per module before chunk assembly. Uses binds/exportMaps, not names.
@@ -1224,16 +1223,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             graph.externalIds,
         );
     } catch (e) {
-        return {
-            code: '',
-            chunks: [],
-            errors: [(e as Error).message],
-            warnings,
-            graph,
-            linked: null,
-            shaken: null,
-            parseStats: graph.parseStats,
-        };
+        return failed([(e as Error).message], warnings, linked, shaken);
     }
     const min = resolveMinify(options.output?.minify);
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
@@ -1262,16 +1252,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     try {
         naming = normalizeOutputOptions(options.output, options.sourcemap, multiChunk, warnings);
     } catch (e) {
-        return {
-            code: '',
-            chunks: [],
-            errors: [(e as Error).message],
-            warnings,
-            graph,
-            linked,
-            shaken,
-            parseStats: graph.parseStats,
-        };
+        return failed([(e as Error).message], warnings, linked, shaken);
     }
 
     // Two-pass render → content-hash → final-hash → substitute (see renderChunks below). The per-chunk
@@ -1323,16 +1304,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
-        return {
-            code: '',
-            chunks: [],
-            errors: [(e as Error).message],
-            warnings,
-            graph,
-            linked,
-            shaken,
-            parseStats: graph.parseStats,
-        };
+        return failed([(e as Error).message], warnings, linked, shaken);
     }
     Timer.end(timer, 'render');
 
@@ -1395,20 +1367,15 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // `logFileNameOutsideOutputDirectory`). Checked HERE, after every name is final, so a pattern, a
     // hash placeholder and a plugin emit are all covered by one gate.
     for (const name of [...outputChunks.map((c) => c.fileName), ...assets.map((a) => a.fileName)]) {
-        if (isFileNameOutsideOutputDirectory(name)) {
-            return {
-                code: '',
-                chunks: [],
-                errors: [
+        if (isFileNameOutsideOutputDirectory(name))
+            return failed(
+                [
                     `The output file name "${name}" is not contained in the output directory. Make sure all file names are relative paths without ".." segments.`,
                 ],
                 warnings,
-                graph,
                 linked,
                 shaken,
-                parseStats: graph.parseStats,
-            };
-        }
+            );
     }
 
     // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
