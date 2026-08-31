@@ -88,3 +88,41 @@ describe('sourcemaps survive CommonJS wrapping', () => {
         expect(resolve(code, map, 'globalThis.z')).toEqual({ source: '/e.js', line: 2, column: 4 });
     });
 });
+
+describe('the emitted text and the sourcemap parts are one list', () => {
+    // `renderChunk` used to build a `string[]` for the code beside a `Part[]` for the map. They had
+    // to agree exactly — `joinParts` derives each part's line span from its own `code` — and they
+    // drifted twice. `helperLines` (see the header above) was the first. `cjsEntryDefault` was the
+    // second: a CommonJS ENTRY chunk emitted `export default require_main();` into the code list
+    // with no matching map part, so the map came out one line short.
+    //
+    // Latent both times, and silent both times, which is exactly why this asserts the INVARIANT
+    // rather than any particular shape: every emitted line must be accounted for in the mappings.
+    // `joinParts` appends one trailing line for the final newline, so the map is always n+1.
+    const lineAccounting = async (files: Record<string, string>, output: Record<string, unknown> = {}) => {
+        const r = await bundle({
+            entry: '/main.js',
+            external: [],
+            fs: createMemoryFs(files),
+            output: { sourcemap: true, ...output },
+        });
+        expect(r.errors).toEqual([]);
+        const code = r.code.replace(/\n?\/\/# sourceMappingURL=[^\n]*\n?$/, '');
+        return { emitted: code.split('\n').length, mapped: r.map!.mappings.split(';').length };
+    };
+
+    it.each([
+        ['an ESM entry', { '/main.js': 'export const A = 1;\nglobalThis.z = A;' }, {}],
+        ['a CommonJS entry', { '/main.js': 'const A = 1;\nmodule.exports = A + globalThis.z;' }, {}],
+        [
+            'a CommonJS dependency',
+            { '/main.js': "import d from './d.cjs';\nglobalThis.z = d;", '/d.cjs': 'module.exports = 1;' },
+            {},
+        ],
+        ['a CommonJS entry with an outro', { '/main.js': 'module.exports = globalThis.z;' }, { outro: 'globalThis.__d = 1;' }],
+        ['a banner and footer', { '/main.js': 'export const A = 1;' }, { banner: '/* b */', footer: '/* f */' }],
+    ])('accounts for every emitted line: %s', async (_label, files, output) => {
+        const { emitted, mapped } = await lineAccounting(files as Record<string, string>, output);
+        expect(mapped).toBe(emitted + 1);
+    });
+});

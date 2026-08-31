@@ -1482,7 +1482,8 @@ function renderChunk(
 ): RenderedChunk | null {
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
-    const moduleTexts: string[] = [];
+    /** The chunk's module region, as parts. ONE list, not a `string[]` beside a `Part[]` — see the
+     *  assembly at the end of this function for why that pairing is a defect generator. */
     const moduleParts: Part[] = [];
     const mapSources: string[] = [];
     const mapSourcesContent: string[] = [];
@@ -1510,12 +1511,13 @@ function renderChunk(
                 mapOk
             ) {
                 modInc.stats.moduleReused++;
-                if (entry.text !== '') moduleTexts.push(entry.text);
-                if (wantMap && entry.text !== '') {
-                    mapSources.push(mod.id);
-                    mapSourcesContent.push(mod.source);
-                    moduleParts.push(entry.mapPart!);
-                    if (entry.nsCode !== null) moduleParts.push({ code: entry.nsCode });
+                if (entry.text !== '') {
+                    if (wantMap) {
+                        mapSources.push(mod.id);
+                        mapSourcesContent.push(mod.source);
+                        moduleParts.push(entry.mapPart!);
+                        if (entry.nsCode !== null) moduleParts.push({ code: entry.nsCode });
+                    } else moduleParts.push({ code: entry.text });
                 }
                 continue;
             }
@@ -1732,13 +1734,17 @@ function renderChunk(
                 }
             }
         }
-        if (out !== '') moduleTexts.push(out);
-        if (wantMap && out !== '') {
-            mapSources.push(mod.id);
-            mapSourcesContent.push(mod.source);
-            if (splitMapParts !== null) moduleParts.push(...splitMapParts);
-            else moduleParts.push(mapPart!);
-            if (nsCode !== null) moduleParts.push({ code: nsCode });
+        if (out !== '') {
+            if (wantMap) {
+                mapSources.push(mod.id);
+                mapSourcesContent.push(mod.source);
+                // Finer-grained than `out` on purpose: the namespace object and the split module's
+                // two regions are separate parts so `joinParts` can give each its own line span.
+                // Their codes still concatenate back to exactly `out`.
+                if (splitMapParts !== null) moduleParts.push(...splitMapParts);
+                else moduleParts.push(mapPart!);
+                if (nsCode !== null) moduleParts.push({ code: nsCode });
+            } else moduleParts.push({ code: out });
         }
         // Cache the render for reuse — unless it carries a per-build hash placeholder (its bytes
         // are not counter-stable, so it must re-render every build).
@@ -1904,7 +1910,7 @@ function renderChunk(
 
     // Empty non-entry chunk with nothing to emit: drop it.
     const isEmpty =
-        moduleTexts.length === 0 &&
+        moduleParts.length === 0 &&
         exportLine === null &&
         cjsEntryDefault === null &&
         starLines.length === 0 &&
@@ -1927,39 +1933,32 @@ function renderChunk(
     const outro = naming.outro(preInfo);
     const footer = naming.footer(preInfo);
 
-    const parts: string[] = [];
-    if (banner !== '') parts.push(banner);
-    if (intro !== '') parts.push(intro);
-    parts.push(...crossImportLines);
-    parts.push(...extImports);
-    parts.push(...helperLines);
-    parts.push(...moduleTexts);
-    if (exportLine !== null) parts.push(exportLine);
-    if (cjsEntryDefault !== null) parts.push(cjsEntryDefault);
-    parts.push(...starLines);
-    if (outro !== '') parts.push(outro);
-    if (footer !== '') parts.push(footer);
-    const code = `${parts.join('\n')}\n`;
-
-    // Per-chunk map Parts (synthetic leading parts for banner/intro so joinParts counts their
-    // lines and every source segment shifts by exactly that many lines — the classic footgun).
-    const mapParts: Part[] = [];
-    if (wantMap) {
-        if (banner !== '') mapParts.push({ code: banner });
-        if (intro !== '') mapParts.push({ code: intro });
-        for (const s of crossImportLines) mapParts.push({ code: s });
-        for (const s of extImports) mapParts.push({ code: s });
-        // The CommonJS runtime helpers are in `parts` but were MISSING here, so every mapped line
-        // sat ~30 generated lines above where it belonged and the whole chunk's map pointed at the
-        // wrong source lines — silently, since a map that decodes fine looks fine. `joinParts`
-        // derives each part's line span from its `code`, so the two lists have to agree exactly.
-        for (const s of helperLines) mapParts.push({ code: s });
-        mapParts.push(...moduleParts);
-        if (exportLine !== null) mapParts.push({ code: exportLine });
-        for (const s of starLines) mapParts.push({ code: s });
-        if (outro !== '') mapParts.push({ code: outro });
-        if (footer !== '') mapParts.push({ code: footer });
-    }
+    // ONE list. The emitted text and the sourcemap parts are the SAME sequence, so they are built
+    // once and `code` is derived from it — `joinParts` (sourcemap.ts) derives each part's line span
+    // from its own `code`, so any disagreement silently shifts every following mapping.
+    //
+    // This used to be a `string[]` for the code beside a `Part[]` for the map, and it drifted twice.
+    // `helperLines` was once missing from the map list, putting every mapped line ~30 generated
+    // lines above where it belonged — for any chunk carrying CommonJS helpers, including its plain
+    // ES modules. `cjsEntryDefault` was missing too: a CommonJS ENTRY chunk emitted a map one line
+    // short (measured: 12 emitted lines, 12 mapped, where every other shape gives n+1). Both were
+    // silent — a map that decodes cleanly and has the right `sources` looks fine.
+    //
+    // Unmapped parts (banner, imports, helper text) carry `code` only; `joinParts` counts their
+    // lines and emits empty segments, which is exactly what shifts the mapped parts into place.
+    const parts: Part[] = [];
+    if (banner !== '') parts.push({ code: banner });
+    if (intro !== '') parts.push({ code: intro });
+    for (const s of crossImportLines) parts.push({ code: s });
+    for (const s of extImports) parts.push({ code: s });
+    for (const s of helperLines) parts.push({ code: s });
+    parts.push(...moduleParts);
+    if (exportLine !== null) parts.push({ code: exportLine });
+    if (cjsEntryDefault !== null) parts.push({ code: cjsEntryDefault });
+    for (const s of starLines) parts.push({ code: s });
+    if (outro !== '') parts.push({ code: outro });
+    if (footer !== '') parts.push({ code: footer });
+    const code = `${parts.map((p) => p.code).join('\n')}\n`;
 
     const importNames: string[] = [];
     for (const p of chunk.imports.keys()) importNames.push(chunkGraph.chunks[p].name);
@@ -1972,7 +1971,7 @@ function renderChunk(
         chunkIdx,
         prelim,
         code,
-        parts: mapParts,
+        parts,
         mapSources,
         mapSourcesContent,
         name: chunk.name,
