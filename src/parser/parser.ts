@@ -1331,6 +1331,9 @@ function parseObjectMember(state: ParserState): Node {
     if (kind !== 0 || async || generator || isP(state, P.LPAREN)) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
         flags |= kind << FL.KIND_SHIFT;
+        // `get`/`set` already print in shorthand form off `kind`; FL.METHOD marks the plain
+        // `{ m(){} }` case so the printer does not degrade it to `{ m: function(){} }`.
+        if (kind === 0) flags |= FL.METHOD;
         return create.ObjectProperty(start, fn.end, flags, key, fn);
     }
     if (isP(state, P.COLON)) {

@@ -271,6 +271,20 @@ function emitObjectMember(p: Printer, n: Node): void {
         emitFunctionTail(p, data(value));
         return;
     }
+    // `{ m(){} }`. Printing this as `{ m: function(){} }` is NOT equivalent: the longhand form is
+    // constructible and has no [[HomeObject]], so `({ m(){ super.x() } })` became invalid JS.
+    // Modifiers come off the value FunctionExpression, as they do for a class method.
+    if (d.method as boolean) {
+        const vd = data(value);
+        if (vd.async as boolean) {
+            write(p, 'async');
+            space(p);
+        }
+        if (vd.generator as boolean) write(p, '*');
+        emitPropertyKey(p, d.key as Node, computed);
+        emitFunctionTail(p, vd);
+        return;
+    }
     emitPropertyKey(p, d.key as Node, computed);
     if (d.shorthand as boolean) {
         // Shorthand omits the value — but if the value binding was RENAMED (bundle deconflict /

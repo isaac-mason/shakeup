@@ -28,6 +28,10 @@ export const FL = {
     EXPR_BODY: 1 << 10,
     DEFINITE: 1 << 10,
     CONST_ENUM: 1 << 10,
+    /** `{ m(){} }` shorthand-method syntax on an `ObjectProperty`. Shares bit 10 with the three
+     *  above, none of which is ever set on an ObjectProperty (they are arrow-body, declarator and
+     *  enum flags respectively) — the same overloading `SHORTHAND` does on bit 9. */
+    METHOD: 1 << 10,
     NAMESPACE: 1 << 11,
     KIND_SHIFT: 12,
     ACCESS_SHIFT: 14,
@@ -130,6 +134,7 @@ export const ObjectProperty = (s: number, e: number, flags: number, key: Node, v
         kind: PROPERTY_KIND[(flags >> FL.KIND_SHIFT) & 3],
         computed: (flags & FL.COMPUTED) !== 0,
         shorthand: (flags & FL.SHORTHAND) !== 0,
+        method: (flags & FL.METHOD) !== 0,
     });
 export const CallExpression = (
     s: number,

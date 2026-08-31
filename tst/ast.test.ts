@@ -195,7 +195,17 @@ describe('DataOf<X> is structurally identical to the old *Data shapes', () => {
     type Eq<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
     const assertEq = <T extends true>(): T => true as T;
 
-    type OldObjectProperty = { key: Node; value: Node; kind: 'init' | 'get' | 'set'; computed: boolean; shorthand: boolean };
+    // `method` is NOT part of the frozen pre-migration shape — it was added afterwards to fix a real
+    // miscompile (`{ m(){} }` printed as `{ m: function(){} }`, which is not equivalent and emits
+    // invalid JS when the body uses `super`). Deliberate schema growth, so the gate moves with it.
+    type OldObjectProperty = {
+        key: Node;
+        value: Node;
+        kind: 'init' | 'get' | 'set';
+        computed: boolean;
+        shorthand: boolean;
+        method: boolean;
+    };
     type OldTSMappedType = {
         typeParameter: Node;
         nameType: Node | null;

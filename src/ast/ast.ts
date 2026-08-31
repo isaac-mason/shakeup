@@ -79,6 +79,10 @@ export const DEFS = [
         kind: scalar<'init' | 'get' | 'set'>(),
         computed: boolean,
         shorthand: boolean,
+        /** `{ m(){} }` rather than `{ m: function(){} }`. NOT cosmetic: a method is not
+         *  constructible and carries a [[HomeObject]], so `super` resolves inside it. Printing one
+         *  as the other made `({ m(){ super.x() } })` emit invalid JS. */
+        method: boolean,
     }),
     def('SpreadElement', { argument: child }),
     def('BinaryExpression', { operator: string, left: child, right: child }),

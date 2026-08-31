@@ -196,18 +196,11 @@ const ident = (name: string, start: number, end: number): ESTreeNode => ({ type:
  *  so the list is always empty.
  *
  *  `generator` on an arrow — arrows cannot be generators, so ESTree's field is always `false`.
- *
- *  `method` on a Property is the ONE field here that can be wrong. shakeup does not distinguish
- *  `{ m(){} }` from `{ m: function(){} }` — both parse to an ObjectProperty with kind `init` and a
- *  FunctionExpression value — so a genuine shorthand method converts with `method: false`. That gap
- *  is not cosmetic: the printer round-trips the shorthand form INTO the longhand one, which changes
- *  semantics (a method is not constructible and carries a [[HomeObject]] for `super`). Fixing it
- *  means storing the flag on `ObjectProperty`; until then this field is a known lie. */
+ */
 const CONSTANT_FIELDS: Record<number, Record<string, unknown>> = {
     [N.MethodDefinition]: { decorators: [] },
     [N.PropertyDefinition]: { decorators: [] },
     [N.ArrowFunctionExpression]: { generator: false, id: null },
-    [N.ObjectProperty]: { method: false },
 };
 
 /** Decode a raw string-literal source text to its value. */

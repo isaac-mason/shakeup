@@ -45,21 +45,18 @@ export function estreeDiff(ours: unknown, reference: unknown, limit = 25): strin
     return out;
 }
 
-/** Divergences that are NOT parser bugs, keyed by the trailing field of the reported path.
+/** Divergences that are NOT bugs — each one a deliberate shakeup design decision.
  *
- *  `.method` — ESTree's `Property.method` distinguishes `{ m(){} }` from `{ m: function(){} }`.
- *  shakeup does not model it: both parse to an ObjectProperty with kind `init` and a
- *  FunctionExpression value, so the projection always reports `false`. The gap is real and tracked —
- *  the printer round-trips the shorthand form INTO the longhand one, which changes semantics (a
- *  method is not constructible, and carries a [[HomeObject]] so `super` resolves). Closing it means
- *  storing the flag on `ObjectProperty` in `DEFS`, the parser and the printer. Until then, allowing
- *  it here keeps the rest of the check honest rather than disabling the whole comparison. */
-/*  `openingElement.name` / `closingElement.name` — the JSX head-role split. shakeup classifies a
+ *  Keep this list SHORT and justified. The `.method` entry that used to sit here was not a design
+ *  decision, it was a real miscompile hiding behind an exception: shakeup did not model
+ *  `{ m(){} }` and the printer degraded it to `{ m: function(){} }`, which emits invalid JS when the
+ *  body uses `super`. It is fixed, and the exception is gone.
+ *
+ *  `openingElement.name` / `closingElement.name` — the JSX head-role split. shakeup classifies a
  *  capitalized or member-headed tag name as an `IdentifierReference` (and `this` as a
  *  `ThisExpression`) so a component reference participates in scope analysis and tree-shaking;
- *  meriyah emits a flat `JSXIdentifier`. Deliberate and already documented as a group in the count
- *  comparison — projecting it back to `JSXIdentifier` would throw away the resolution shakeup went
- *  out of its way to compute. */
-export const KNOWN_GAPS = [/\.method: /, /Element\.name(?:\.object)*: type (?:Identifier|ThisExpression) vs JSXIdentifier/];
+ *  meriyah emits a flat `JSXIdentifier`. Projecting it back would throw away resolution shakeup went
+ *  out of its way to compute. Already documented as a group in the count comparison. */
+export const KNOWN_GAPS = [/Element\.name(?:\.object)*: type (?:Identifier|ThisExpression) vs JSXIdentifier/];
 
 export const isKnownGap = (d: string): boolean => KNOWN_GAPS.some((re) => re.test(d));
