@@ -96,29 +96,6 @@ export type Semantic = {
      * `symbols[sym].flags` (`SYM.VAR`/`LET`/`CONST`), so a consumer that cares still has it.
      */
     symbolInit: Map<number, Node>;
-
-    /**
-     * Reference and declaration SCOPES, as flat parallel pairs — oxc's mangler liveness inputs.
-     *
-     * oxc's `SlotAssignment::compute` (`oxc_mangler/src/lib.rs:665-672`) reads liveness straight off
-     * the semantic — `get_resolved_references(symbol_id).map(Reference::scope_id)` plus the declaring
-     * and redeclaring scopes — and never walks the AST for it. Ours re-walked every module in a
-     * dedicated traversal (97 calls, 122,202 node visits, 14.3% of ALL node visits in a crashcat
-     * bundle) purely to recover what `analyze` already had in hand and threw away.
-     *
-     * `declScopeIds` is the scope the binding IDENTIFIER APPEARS in, which is NOT `symbols[sym].scope`:
-     * that is the hoisted OWNER. oxc keeps the distinction for the same reason (lib.rs:664, "`var` is
-     * hoisted, so include the scope where it is declared"). Redeclarations land here too, matching
-     * oxc's `symbol_redeclarations`, because `declare` records on both its branches.
-     *
-     * Flat pairs, not `number[][]` per symbol: that would allocate `symbolCount` arrays per analyze
-     * call, and `analyze` runs ~190x per bundle. Bucketing is the consumer's job — which is what the
-     * mangler already did.
-     */
-    refSyms: number[];
-    refScopeIds: number[];
-    declSyms: number[];
-    declScopeIds: number[];
 };
 
 /** Read/write tally for one symbol. */
@@ -254,10 +231,6 @@ export function createSemantic(): Semantic {
         shorthand: new Set(),
         exported: new Set(),
         symbolInit: new Map(),
-        refSyms: [],
-        refScopeIds: [],
-        declSyms: [],
-        declScopeIds: [],
         unresolved: [],
         names: new Map(),
         bindings: new Map(),
@@ -330,18 +303,12 @@ function declare(state: AnalyseState, identNode: Node, flags: number, ns: number
     if (existing !== undefined) {
         state.sem.symbols[existing].flags |= flags;
         identNode.sym = existing;
-        // A REDECLARATION — oxc folds these into liveness via `symbol_redeclarations` (lib.rs:667).
-        state.sem.declSyms.push(existing);
-        state.sem.declScopeIds.push(state.scope);
         return existing;
     }
     const id = state.sem.symbols.length;
     state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId });
     state.sem.bindings.set(key, id);
     identNode.sym = id;
-    // `state.scope`, not `targetScope`: the APPEARANCE scope (see `declScopeIds`).
-    state.sem.declSyms.push(id);
-    state.sem.declScopeIds.push(state.scope);
     return id;
 }
 
@@ -417,10 +384,6 @@ function resetSem(out: Semantic): void {
     out.shorthand.clear();
     out.exported.clear();
     out.symbolInit.clear();
-    out.refSyms.length = 0;
-    out.refScopeIds.length = 0;
-    out.declSyms.length = 0;
-    out.declScopeIds.length = 0;
 }
 
 /**
@@ -445,8 +408,6 @@ export function analyze(out: Semantic, program: Node): void {
         // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
         const sym = node.sym;
         if (sym === 0) continue;
-        out.refSyms.push(sym);
-        out.refScopeIds.push(state.scope);
         const f = state.pendFlags[i];
         if ((f & (REF_READ | REF_WRITE)) !== 0) {
             const c = refFor(out, sym);
