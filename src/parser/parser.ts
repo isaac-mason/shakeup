@@ -4,7 +4,6 @@ import {
     type IdentifierName,
     type IdentifierReference,
     type LabelIdentifier,
-    lineColOf,
     N,
     type Node,
     type NodeOf,
@@ -15,7 +14,6 @@ import * as create from './create.ts';
 import { FL, type KeywordType, OP, VAR_KIND } from './create.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
-    buildLineStarts,
     C_DIG,
     C_ID,
     C_NL,
@@ -341,14 +339,6 @@ function push(state: ParserState, v: Ref): void {
     }
     stk[state.sp++] = v;
 }
-const DEV = process.env.NODE_ENV !== 'production';
-
-/** Position of the current token as `line:col`, for invariant messages. The line table
- * is built deferred (not during lex), so compute it on demand here — dev/error path only. */
-function here(state: ParserState): string {
-    const { line, column } = lineColOf(buildLineStarts(state.src), state.tokStart);
-    return `${line}:${column}`;
-}
 
 /** Materialize [from, sp) into a fresh exact-size packed array (dropping the run).
  * Grammar-guaranteed list: asserts (dev) that no hole slipped through. */
@@ -361,9 +351,6 @@ const EMPTY_LIST: Node[] = Object.freeze([]) as unknown as Node[];
 function finishList(state: ParserState, from: number): Node[] {
     if (from === state.sp) return EMPTY_LIST;
     const stk = state.stk;
-    if (DEV)
-        for (let i = from; i < state.sp; i++)
-            if (stk[i] === null) throw new Error(`parser invariant: null in list at ${here(state)}`);
     const out = stk.slice(from, state.sp) as Node[];
     state.sp = from;
     return out;

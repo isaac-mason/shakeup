@@ -1,3 +1,4 @@
+import { semanticVerifyOn } from '../analysis/ref-facts.ts';
 // Verification-only: assert every node sits in a slot that ACCEPTS it.
 //
 // The other half of the loop-head miscompile, and the half that did not announce itself.
@@ -22,7 +23,7 @@
 import { CHILD_FIELDS, N, type Node, walk } from '../ast.ts';
 
 /** `SEMANTIC_VERIFY=1` turns this on, alongside the semantic differential it rides with. */
-export const structureVerifyOn = (): boolean => process.env.SEMANTIC_VERIFY === '1';
+export const structureVerifyOn = (): boolean => semanticVerifyOn();
 
 const STATEMENT = new Set<number>([
     N.ExpressionStatement,

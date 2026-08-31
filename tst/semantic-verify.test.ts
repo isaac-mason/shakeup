@@ -1,10 +1,10 @@
-import { describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import { setSemanticVerify, setVerifyExtras } from '../src/analysis/ref-facts.ts';
 import { bundle } from '../src/bundle.ts';
-import { setSemanticVerify } from '../src/analysis/ref-facts.ts';
 
 // END-TO-END guard for the incremental semantic (llm/notes/incremental-vs-rebuild-plan.md).
 //
@@ -42,22 +42,26 @@ describe('the maintained semantic matches the tree, end to end', () => {
     for (const [name, entry, external] of CORPORA) {
         // Generous timeout: verifying rebuilds the whole semantic at every boundary, so this is far
         // slower than a normal build by design. It is a correctness guard, not a benchmark.
-        it.skipIf(!existsSync(entry))(`${name}: no divergence, no stale symbols, valid output`, { timeout: 300_000 }, async () => {
-            setSemanticVerify(true);
-            process.env.VERIFY_EXTRAS = '1';
-            let code: string;
-            try {
-                const r = await bundle({ entry, fs: diskFs, external, output: { minify: true, optimize: true } } as never);
-                code = (r as { code: string }).code;
-            } finally {
-                setSemanticVerify(false);
-                delete process.env.VERIFY_EXTRAS;
-            }
-            expect(code.length).toBeGreaterThan(0);
+        it.skipIf(!existsSync(entry))(
+            `${name}: no divergence, no stale symbols, valid output`,
+            { timeout: 300_000 },
+            async () => {
+                setSemanticVerify(true);
+                setVerifyExtras(true);
+                let code: string;
+                try {
+                    const r = await bundle({ entry, fs: diskFs, external, output: { minify: true, optimize: true } } as never);
+                    code = (r as { code: string }).code;
+                } finally {
+                    setSemanticVerify(false);
+                    setVerifyExtras(false);
+                }
+                expect(code.length).toBeGreaterThan(0);
 
-            const f = join(mkdtempSync(join(tmpdir(), 'sv-')), 'b.mjs');
-            writeFileSync(f, code);
-            expect(() => execFileSync(process.execPath, ['--check', f])).not.toThrow();
-        });
+                const f = join(mkdtempSync(join(tmpdir(), 'sv-')), 'b.mjs');
+                writeFileSync(f, code);
+                expect(() => execFileSync(process.execPath, ['--check', f])).not.toThrow();
+            },
+        );
     }
 });

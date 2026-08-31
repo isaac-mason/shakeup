@@ -255,10 +255,18 @@ export function addRefFacts(sem: { refs: ({ reads: number; writes: number } | un
  *  Lives here rather than in the compress driver because BOTH the compress loop and the optimize tier
  *  check it — flow-inline's block-scope escape lived in the optimize tier and was only caught two
  *  stages later, at a compress boundary. */
-let SEMANTIC_VERIFY = process.env.SEMANTIC_VERIFY === '1';
+let SEMANTIC_VERIFY = false;
+/** Report SAFE-direction divergence too (stale EXTRA symbols). Separate from `SEMANTIC_VERIFY`
+ *  because an extra live symbol costs a mangled name, not correctness — but corpus-level zero is
+ *  what made the post-compress rebuild removable, so `tst/semantic-verify.test.ts` asserts it. */
+let VERIFY_EXTRAS = false;
+export const setVerifyExtras = (on: boolean): void => {
+    VERIFY_EXTRAS = on;
+};
 export const semanticVerifyOn = (): boolean => SEMANTIC_VERIFY;
-/** Enable programmatically. The env var is read at MODULE LOAD, so a test setting `process.env` in its
- *  body has no effect — the first version of `tst/semantic-verify.test.ts` did that and was vacuous. */
+/** Enable it. This is the ONLY door: there was also an env var read at module load, which meant a test
+ *  setting `process.env` in its body had no effect — the first `tst/semantic-verify.test.ts` did
+ *  exactly that and was vacuous. One door, and the tests already use it. */
 export const setSemanticVerify = (on: boolean): void => {
     SEMANTIC_VERIFY = on;
 };
@@ -442,7 +450,7 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
         if (d !== null && d.scopeId !== undefined) d.scopeId = beforeScope.get(n) ?? 0;
     }
 
-    if (process.env.VERIFY_EXTRAS === '1') {
+    if (VERIFY_EXTRAS) {
         // Diagnostic only: SAFE-direction divergence. Stale EXTRA symbols cost a mangled name, not
         // correctness — but they are exactly what makes the maintained table produce different
         // identifiers from a rebuilt one, which is what keeps `refreshFull` load-bearing.
