@@ -72,7 +72,7 @@ const TS_PASSES_WITH_SHAPES: Visitor[] = [shapeCollector, tsLower, tsStrip];
 const EMPTY_PASSES: Visitor[] = [];
 
 export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
-let LOWER_SEMANTIC_MODE: LowerSemanticMode = (process.env.LOWER_SEMANTIC_MODE as LowerSemanticMode | undefined) ?? 'maintain';
+let LOWER_SEMANTIC_MODE: LowerSemanticMode = 'maintain';
 export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
     LOWER_SEMANTIC_MODE = m;
     // `traverse`'s hook-conflict assertion rides the same mode; it cannot read this module (scan

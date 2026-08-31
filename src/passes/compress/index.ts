@@ -188,7 +188,7 @@ export type DeltaMode = 'on' | 'verify';
 // (interleaved, alternating order, same process — min 383ms -> 279ms, median 513ms -> 368ms), with
 // byte-identical output on both corpora. Env-selectable so the WHOLE suite can be run under
 // verification with `DELTA_MODE=verify pnpm test`; `tst/delta-refs-verify.test.ts` pins a subset.
-let DELTA_MODE: DeltaMode = (process.env.DELTA_MODE as DeltaMode | undefined) ?? 'on';
+let DELTA_MODE: DeltaMode = 'on';
 export const setDeltaMode = (m: DeltaMode): void => {
     DELTA_MODE = m;
 };
