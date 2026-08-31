@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { DEFS } from '../src/ast/ast.ts';
@@ -21,6 +22,16 @@ import { DEFS } from '../src/ast/ast.ts';
 // reading the literal can see that.
 
 const src = (rel: string) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');
+
+/** Every `.ts` file under `src/`. */
+function allSourceFiles(dir = fileURLToPath(new URL('../src', import.meta.url)), out: string[] = []): string[] {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) allSourceFiles(p, out);
+        else if (e.name.endsWith('.ts')) out.push(p);
+    }
+    return out;
+}
 const CREATE = src('../src/ast/create.ts');
 const BUILD = src('../src/ast/build.ts');
 
@@ -120,6 +131,29 @@ describe('create.ts builders agree with DEFS', () => {
                 wrong.push(`${type}: builder=[${common}] defs=[${expected}]`);
         }
         expect(wrong).toEqual([]);
+    });
+});
+
+describe('every node record is built in one place', () => {
+    // The node record's PROPERTY ORDER fixes its V8 hidden class. Two construction sites that
+    // disagree on order produce nodes with identical properties, identical behaviour, and a second
+    // hidden class — every downstream `n.type` / `n.data` read goes polymorphic. Nothing fails; it
+    // is just permanently slower. No behavioural test can see it.
+    //
+    // The parser used to build leaf nodes (identifiers, literals, `#private`, JSX names/text) from
+    // inline literals to skip a call, giving SEVEN sites. They all happened to agree, but nothing
+    // made them. They now all route through `node()`, which a paired bench showed costs nothing —
+    // medians 22.09ms -> 22.14ms at ±2.4% resolution, i.e. V8 inlines it. This keeps it that way.
+    it('constructs node records only in ast/ast.ts', () => {
+        const offenders: string[] = [];
+        for (const file of allSourceFiles()) {
+            if (file.endsWith('src/ast/ast.ts')) continue; // `node()` and `rebuild()` live here
+            const text = readFileSync(file, 'utf8');
+            // A node-record literal is the one that assigns `sym` alongside `type`.
+            for (const m of text.matchAll(/\{[^{}]*\btype\s*:[^{}]*\bsym\s*:[^{}]*\}/gs))
+                offenders.push(`${file.split('/src/')[1]}: ${m[0].slice(0, 60).replace(/\s+/g, ' ')}…`);
+        }
+        expect(offenders).toEqual([]);
     });
 });
 

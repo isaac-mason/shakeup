@@ -1,5 +1,4 @@
 import {
-    allocId,
     type BindingIdentifier,
     create,
     FL,
@@ -9,8 +8,11 @@ import {
     type LabelIdentifier,
     N,
     type Node,
+    node,
     type NodeOf,
+    type NodeType,
     OP,
+    peekNextId,
     type Program,
     VAR_KIND,
 } from '../ast/index.ts';
@@ -137,7 +139,10 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         awaitOk: options.kind !== 'commonjs',
         yieldOk: false,
         errors: [],
-        baseId: 0,
+        // The id the first node of this parse will get. `nodeCount` is `program.id - baseId + 1`,
+        // which only needs ids to be contiguous and monotonic — peeked here rather than captured on
+        // the way past the first allocation, so every node can be built by `node()` (see peekNextId).
+        baseId: peekNextId(),
         itKeys: new Array(cap),
         itHashes: new Int32Array(cap),
         itMask: cap - 1,
@@ -158,12 +163,6 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         chainSawOptional: false,
         noCondType: false,
     };
-}
-
-function nextId(state: ParserState): number {
-    const id = allocId();
-    if (state.baseId === 0) state.baseId = id;
-    return id;
 }
 
 // `v` is a packed token constant (P.* / K.*); packed values are unique per kind,
@@ -245,10 +244,10 @@ function ident(state: ParserState, role: number, start: number, end: number): Id
     // Cheap syntactic gate for the `require("lit")` edge walk — set here rather than by a dedicated
     // pass, exactly as `sawJSX` is. A false positive (a local named `require`) only costs one walk.
     if (name.length === 7 && name === 'require') state.sawRequire = true;
-    return { id: nextId(state), type: role, start, end, name, sym: 0, data: null } as Identifier;
+    return node(role as NodeType, start, end, name, null) as Identifier;
 }
 function leafRaw(state: ParserState, flatType: number, start: number, end: number): Node {
-    return { id: nextId(state), type: flatType, start, end, name: sliceFlat(state, start, end), sym: 0, data: null } as Node;
+    return node(flatType as NodeType, start, end, sliceFlat(state, start, end), null);
 }
 /** Parse an identifier token in the given role. `role` picks the leaf type. */
 function parseIdent(state: ParserState, role: number): Identifier {
@@ -293,8 +292,8 @@ function parseNameAsIdent(state: ParserState, role: number): Identifier {
     nextToken(state);
     return id;
 }
-function makeMissingIdent(state: ParserState, role: number): Identifier {
-    return { id: nextId(state), type: role, start: 0, end: 0, name: '', sym: 0, data: null } as Identifier;
+function makeMissingIdent(_state: ParserState, role: number): Identifier {
+    return node(role as NodeType, 0, 0, '', null) as Identifier;
 }
 /** A literal/leaf of the given flat type at the current token span. */
 function leaf(state: ParserState, flatType: number, start: number, end: number): Node {
@@ -819,20 +818,15 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
 }
 
 function parsePrivate(state: ParserState): Node {
-    const id: Node = {
-        id: nextId(state),
-        type: N.PrivateIdentifier,
-        start: state.tokStart,
-        end: state.tokEnd,
-        // An escaped private name (`#\u0061`) carries its decoded name on the token, like any other
-        // escaped identifier — the source slice would be the escape text.
-        name:
-            (state.tokFlags & F_ESCAPED) !== 0
-                ? internString(state, state.tokCooked)
-                : intern(state, state.tokStart + 1, state.tokEnd, state.tokHash),
-        sym: 0,
-        data: null,
-    };
+    const start = state.tokStart;
+    const end = state.tokEnd;
+    // An escaped private name (`#\u0061`) carries its decoded name on the token, like any other
+    // escaped identifier — the source slice would be the escape text.
+    const name =
+        (state.tokFlags & F_ESCAPED) !== 0
+            ? internString(state, state.tokCooked)
+            : intern(state, start + 1, end, state.tokHash);
+    const id = node(N.PrivateIdentifier, start, end, name, null);
     nextToken(state);
     return id;
 }
@@ -913,15 +907,7 @@ function skipJSXTagWs(state: ParserState): void {
 
 /** A JSXIdentifier leaf (data:null, raw name in the name slot). */
 function jsxIdent(state: ParserState, start: number, end: number): Node {
-    return {
-        id: nextId(state),
-        type: N.JSXIdentifier,
-        start,
-        end,
-        name: sliceFlat(state, start, end),
-        sym: 0,
-        data: null,
-    } as Node;
+    return node(N.JSXIdentifier, start, end, sliceFlat(state, start, end), null);
 }
 
 function parseJSXName(state: ParserState): Node {
@@ -1080,15 +1066,7 @@ function parseJSXChildren(state: ParserState): Node[] {
             state.pos++;
         }
         if (state.pos > textStart)
-            push(state, {
-                id: nextId(state),
-                type: N.JSXText,
-                start: textStart,
-                end: state.pos,
-                name: sliceFlat(state, textStart, state.pos),
-                sym: 0,
-                data: null,
-            } as Node);
+            push(state, node(N.JSXText, textStart, state.pos, sliceFlat(state, textStart, state.pos), null));
         if (state.pos >= srcLen) {
             raise(state, ParseErrorCode.UnterminatedJSXElement);
             break;

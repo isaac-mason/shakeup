@@ -485,6 +485,15 @@ let idCounter = 0;
 /** globally unique, never reset — ids are unique across parses and clones */
 export const allocId = (): number => ++idCounter;
 
+/** The id the NEXT {@link allocId} will return, without consuming it.
+ *
+ *  Ids are contiguous and monotonic, so a parse's node count is `lastId - firstId + 1`. The parser
+ *  used to capture that first id by routing every node through a `nextId(state)` wrapper that
+ *  recorded it on the way past — which meant the leaf builders could not call {@link node}, and the
+ *  node record ended up constructed at seven different sites. Peeking once at parse entry costs
+ *  nothing and lets every node come from one place. */
+export const peekNextId = (): number => idCounter + 1;
+
 export function node<Id extends NodeType>(type: Id, start: number, end: number, name: string, data: DataForId<Id>): Node {
     return { id: allocId(), type, start, end, name, sym: 0, data } as Node;
 }

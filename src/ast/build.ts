@@ -49,7 +49,7 @@ export const ref = (name: string, at = SPAN): Node => node(N.IdentifierReference
  *  this use to its declaration. */
 export const boundRef = (name: string, sym: number, at = SPAN): Node => {
     const n = node(N.IdentifierReference, at, at, name, null);
-    (n as { sym: number }).sym = sym;
+    n.sym = sym;
     return n;
 };
 
