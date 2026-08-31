@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundle.ts';
-import { createDevServer, type DevServerOptions } from '../src/runtime/dev-server.ts';
 import { createMemoryFs, type Fs } from '../src/fs.ts';
 import type { Plugin } from '../src/plugin.ts';
+import { createDevServer, type DevServerOptions } from '../src/runtime/dev-server.ts';
 import { createModuleRunner } from '../src/runtime/module-runner.ts';
 
 function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'> = {}) {
@@ -65,7 +65,7 @@ describe('dev server — resolution + serving', () => {
         expect(s.devTransformMs).toBeGreaterThanOrEqual(0); // timers populated, non-negative
     });
 
-    it('preTransform eagerly warms a module\'s static-import closure in the background', async () => {
+    it("preTransform eagerly warms a module's static-import closure in the background", async () => {
         const { server } = setup({
             '/entry.ts': `import { v } from './dep';\nexport const result = v;`,
             '/dep.ts': `export const v = 7;`,
@@ -298,5 +298,33 @@ describe('dev server — watch (change source)', () => {
         await emit(['/m.ts', '/m.ts']);
         expect((globalThis as { __seen?: number[] }).__seen).toEqual([2]);
         (globalThis as { __seen?: number[] }).__seen = undefined;
+    });
+});
+
+// A rejecting fetch must reject ONCE, for the caller. The in-flight cleanup used to be
+// `void p.finally(…)`, and `finally` returns a NEW promise that adopts p's rejection — discarded
+// unhandled, so every throwing plugin hook raised a second, unownable rejection alongside the
+// error the caller was already handling.
+describe('dev server — a rejecting fetch does not orphan a rejection', () => {
+    it('reports the failure to the caller and nowhere else', async () => {
+        const boom: Plugin = {
+            name: 'boom',
+            load: () => {
+                throw new Error('load exploded');
+            },
+        };
+        const { server } = setup({ '/a.ts': 'export const a = 1;' }, { plugins: [boom] });
+
+        const orphaned: unknown[] = [];
+        const onUnhandled = (reason: unknown) => orphaned.push(reason);
+        process.on('unhandledRejection', onUnhandled);
+        try {
+            await expect(server.fetchModule('/a.ts')).rejects.toThrow('load exploded');
+            // a rejection is only reported as unhandled after a turn with no handler attached.
+            await new Promise((r) => setTimeout(r, 10));
+        } finally {
+            process.off('unhandledRejection', onUnhandled);
+        }
+        expect(orphaned).toEqual([]);
     });
 });
