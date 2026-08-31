@@ -453,7 +453,7 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
     if (VERIFY_EXTRAS) {
         // Diagnostic only: SAFE-direction divergence. Stale EXTRA symbols cost a mangled name, not
         // correctness — but they are exactly what makes the maintained table produce different
-        // identifiers from a rebuilt one, which is what keeps `refreshFull` load-bearing.
+        // identifiers from a rebuilt one.
         let liveM = 0;
         for (let i = 1; i < maintained.symbols.length; i++) if (maintained.symbols[i].scope !== 0) liveM++;
         let liveT = 0;

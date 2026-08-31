@@ -41,7 +41,6 @@ export type Semantic = {
 
     // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
 
-
     unresolved: Node[];
 
     names: Map<string, number>;
@@ -120,13 +119,6 @@ export type Semantic = {
     refScopeIds: number[];
     declSyms: number[];
     declScopeIds: number[];
-    /**
-     * True iff the four lists above describe the CURRENT tree, i.e. `analyze` has run since the last
-     * mutation. Compress maintains `refs`/`uses` incrementally via `applyRefDelta` without re-analyzing,
-     * and measured over crashcat that leaves 6 of 97 modules stale (91 end with `refreshFull`, 3 mutate
-     * nothing). Consumers must fall back to walking when this is false.
-     */
-    refsCurrent: boolean;
 };
 
 /** Read/write tally for one symbol. */
@@ -266,7 +258,6 @@ export function createSemantic(): Semantic {
         refScopeIds: [],
         declSyms: [],
         declScopeIds: [],
-        refsCurrent: false,
         unresolved: [],
         names: new Map(),
         bindings: new Map(),
@@ -430,7 +421,6 @@ function resetSem(out: Semantic): void {
     out.refScopeIds.length = 0;
     out.declSyms.length = 0;
     out.declScopeIds.length = 0;
-    out.refsCurrent = true;
 }
 
 /**
@@ -603,11 +593,7 @@ function declareCollectParams(state: AnalyseState, list: Node[]): void {
  * `({ x } = o)` WRITES it, and `computePrelude` (via `walkRefIdents`) marks both, so missing the
  * target case desynchronises the two.
  */
-function collectShorthandProp(
-    state: AnalyseState,
-    data: { shorthand: boolean; value: Node },
-    base: number,
-): boolean {
+function collectShorthandProp(state: AnalyseState, data: { shorthand: boolean; value: Node }, base: number): boolean {
     if (!data.shorthand) return false;
     const v = data.value;
     if (v.type === N.IdentifierReference) {
@@ -755,8 +741,7 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.AssignmentExpression: {
             const { operator, left, right } = node.data;
             // `x += 1` READS x as well as writing it; `x = 1` only writes.
-            if (operator !== '=' && left.type === N.IdentifierReference)
-                collect(state, left, NS_VALUE, REF_READ | REF_WRITE);
+            if (operator !== '=' && left.type === N.IdentifierReference) collect(state, left, NS_VALUE, REF_READ | REF_WRITE);
             else collectTarget(state, left);
             visit(state, right);
             return;
