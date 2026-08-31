@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // oxc `replace_known_methods`: `try_fold_number_constants` (lib.rs:480) and the regex `"source"` arm
 // (lib.rs:445). Established by DIFFERENTIAL against the real `oxc-minify` package, not by reading the

@@ -1,7 +1,7 @@
 import { decode } from '@jridgewell/sourcemap-codec';
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // cjs.md §"NOT YET PROBED" — sourcemap accuracy for a wrapped module. It was listed as "partially
 // probed; the text splice makes it suspect", and the suspicion was right, twice over:

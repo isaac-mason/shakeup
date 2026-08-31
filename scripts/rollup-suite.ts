@@ -39,7 +39,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 const ROOT = 'llm/libs/rollup/test/function/samples';
 // A FIXTURE'S floating promise must not kill the run. Several samples do

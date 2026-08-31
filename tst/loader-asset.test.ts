@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // P1 item 8 of the alignment plan: the `text` / `base64` / `dataurl` / `binary` / `empty` loaders.
 // All five were in `ModuleType` (which is rolldown's enum, transcribed) but only `json` was ever

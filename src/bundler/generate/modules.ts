@@ -6,8 +6,8 @@
 // builds `Map<Node, string>` overrides that `printModule` consumes and discards, so collection and
 // printing are one unit. That is deliberate: the module AST is reused across builds through
 // `options.cache`, and mutating it during render would poison the next build.
-import { SYM, symbolOf } from '../analysis/semantic.ts';
-import { N, type Node, walk } from '../ast/index.ts';
+import { SYM, symbolOf } from '../../analysis/semantic.ts';
+import { N, type Node, walk } from '../../ast/index.ts';
 import type { Chunk } from '../chunk-graph.ts';
 import {
     type Graph,
@@ -21,13 +21,13 @@ import {
 } from '../graph-types.ts';
 import { initRefForRecord, recordIsInitObligation } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
-import { lazySplit } from '../passes/lazy-split.ts';
-import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../passes/wrap-module.ts';
-import { printModule } from '../print/print-js.ts';
-import { createPrinter, finishPrinter } from '../print/printer.ts';
+import { lazySplit } from '../../passes/lazy-split.ts';
+import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../passes/wrap-module.ts';
+import { printModule } from '../../print/print-js.ts';
+import { createPrinter, finishPrinter } from '../../print/printer.ts';
 import { isRequireCall } from '../scan.ts';
-import type { Mappings } from '../sourcemap.ts';
-import { buildLineTable, type Part, trimMappings } from '../sourcemap.ts';
+import type { Mappings } from '../../sourcemap.ts';
+import { buildLineTable, type Part, trimMappings } from '../../sourcemap.ts';
 import {
     clauseSep,
     type EmitCtx,

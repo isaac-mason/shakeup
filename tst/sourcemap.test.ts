@@ -1,7 +1,7 @@
 import { decode } from '@jridgewell/sourcemap-codec';
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 import {
     addLine,
     addSegment,
@@ -11,7 +11,7 @@ import {
     inlineSourceMapComment,
     newMappings,
 } from '../src/sourcemap.ts';
-import { devTransform } from '../src/transform.ts';
+import { devTransform } from '../src/bundler/transform.ts';
 
 // UTF-16 positions via plain JS string indexing (JS strings are UTF-16, matching SMv3 columns).
 const lineStarts = (s: string): number[] => {

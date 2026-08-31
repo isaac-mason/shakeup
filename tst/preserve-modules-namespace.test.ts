@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 const build = async (files: Record<string, string>, preserveModules = true) => {
     const result = await bundle({

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 describe('output.advancedChunks', () => {
     it('a test-based vendor group splits node_modules into its own chunk', async () => {

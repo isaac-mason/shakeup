@@ -2,7 +2,7 @@ import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 // THE GATE THAT WAS MISSING. Nothing executed corpus output, so a tree-shaking bug that dropped
 // `Object3D.DEFAULT_UP = new Vector3(0,1,0)` shipped past 2,050 green tests AND past the byte gate —

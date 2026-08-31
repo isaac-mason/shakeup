@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { runModule } from './exec-helpers.ts';
 
 // Single-use inline across a GAP — compilecat `inline_variables` path 1 (`single_use_safe`), which

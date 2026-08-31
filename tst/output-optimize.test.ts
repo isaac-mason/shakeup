@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 // `output.optimize` gates the directive tier (default true). crashcat authors 32 @optimize + 10 @inline
 // + 1 @sroa directives, so it is the corpus that actually exercises the tier — toggling the option must

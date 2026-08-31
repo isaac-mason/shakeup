@@ -1,5 +1,5 @@
-import type { CompressMode } from './passes/compress';
-import { type GetHash, type HashCharacters, hasherByType } from './util/hash';
+import type { CompressMode } from '../passes/compress';
+import { type GetHash, type HashCharacters, hasherByType } from '../util/hash';
 
 /** Slim `PreRenderedChunk` passed to filename functions. */
 export type PreRenderedChunk = {

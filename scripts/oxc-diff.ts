@@ -11,8 +11,8 @@
 // Cases are grouped by the oxc pass they exercise. Fixed gaps are KEPT as regression cases.
 // Mangled names differ between the two by nature — compare SHAPE, not spelling.
 import { minifySync } from 'oxc-minify';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 type Case = [group: string, label: string, body: string];
 const CASES: Case[] = [

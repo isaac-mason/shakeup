@@ -13,8 +13,8 @@
 // `isPureStatement` drop a discarded call to it. The per-module pass inside `runCompress` cannot see
 // across module boundaries — scan analyses each module before link binds them together — so this is
 // the point where the interprocedural answer becomes available.
-import type { Node } from './ast/index.ts';
-import { collect, solve, stamp, type Summary } from './analysis/purity.ts';
+import type { Node } from '../ast/index.ts';
+import { collect, solve, stamp, type Summary } from '../analysis/purity.ts';
 import type { Graph, Linked } from './graph-types.ts';
 import { packRef } from './graph-types.ts';
 

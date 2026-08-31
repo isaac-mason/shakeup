@@ -37,7 +37,7 @@ import { cpus, loadavg, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { brotliCompressSync, gzipSync } from 'node:zlib';
 import { transformSync } from 'esbuild';
-import { bundle as shakeupBundle } from '../src/bundle.ts';
+import { bundle as shakeupBundle } from '../src/bundler/bundle.ts';
 
 type Corpus = { name: string; entry: string; external: string[] };
 const CORPORA: Record<string, Corpus> = {

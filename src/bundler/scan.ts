@@ -1,7 +1,7 @@
-import { resolveNoSideEffects } from './analysis/purity';
-import { semanticVerifyOn, verifySemantic } from './analysis/ref-facts';
-import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from './analysis/semantic';
-import { isJSXNode, N, type Node, type Program, walk } from './ast';
+import { resolveNoSideEffects } from '../analysis/purity';
+import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts';
+import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic';
+import { isJSXNode, N, type Node, type Program, walk } from '../ast';
 import type { Fs, MaybePromise } from './fs';
 import {
     type CachedParse,
@@ -18,19 +18,19 @@ import {
 } from './graph-types';
 import { compileToModule, loaderWantsBytes } from './loaders';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
-import { parse } from './parser';
-import { runCompress } from './passes/compress';
-import { compileDefines, makeDefine } from './passes/define';
-import { makeJsxLower } from './passes/lower-jsx';
-import { sawUnloweredTs, tsLower } from './passes/lower-ts';
-import { eliminateDeadStores } from './passes/optimize/dead-store';
-import { flowInlineVariables } from './passes/optimize/flow-inline';
-import { inlineFunctions } from './passes/optimize/inline-functions';
-import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
-import { scalarReplaceAggregates } from './passes/optimize/sroa';
-import { unrollLoops } from './passes/optimize/unroll';
-import { tsStrip } from './passes/strip-ts';
-import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from './passes/traverse';
+import { parse } from '../parser';
+import { runCompress } from '../passes/compress';
+import { compileDefines, makeDefine } from '../passes/define';
+import { makeJsxLower } from '../passes/lower-jsx';
+import { sawUnloweredTs, tsLower } from '../passes/lower-ts';
+import { eliminateDeadStores } from '../passes/optimize/dead-store';
+import { flowInlineVariables } from '../passes/optimize/flow-inline';
+import { inlineFunctions } from '../passes/optimize/inline-functions';
+import { resolveShapes, shapeCollector } from '../passes/optimize/shapes';
+import { scalarReplaceAggregates } from '../passes/optimize/sroa';
+import { unrollLoops } from '../passes/optimize/unroll';
+import { tsStrip } from '../passes/strip-ts';
+import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse';
 import {
     type CustomPluginOptions,
     compilePipeline,

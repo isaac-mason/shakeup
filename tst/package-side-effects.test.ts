@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import type { Fs } from '../src/fs.ts';
-import type { Plugin } from '../src/plugin.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import type { Fs } from '../src/bundler/fs.ts';
+import type { Plugin } from '../src/bundler/plugin.ts';
 
 // `package.json#sideEffects`, read through the resolver (rolldown returns the owning manifest from
 // `resolve`; shakeup now does too). Laid out as pnpm does it — `node_modules/pkg` is a SYMLINK into

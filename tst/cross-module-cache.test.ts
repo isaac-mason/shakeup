@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createBuildContext } from '../src/bundle.ts';
-import type { Fs } from '../src/fs.ts';
+import { createBuildContext } from '../src/bundler/bundle.ts';
+import type { Fs } from '../src/bundler/fs.ts';
 
 function mutableFs(files: Record<string, string>): Fs {
     return { read: (id) => files[id] ?? null, exists: (id) => id in files };

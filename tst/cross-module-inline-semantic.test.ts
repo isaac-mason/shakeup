@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 import { setSemanticVerify } from '../src/analysis/ref-facts.ts';
 
 // Coverage for the CROSS-MODULE `@inline` path (`bundle.ts`'s `inlineCrossModule`), which neither

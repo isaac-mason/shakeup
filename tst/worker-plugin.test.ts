@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createDevServer } from '../src/runtime/dev-server.ts';
-import { createMemoryFs, type Fs } from '../src/fs.ts';
-import { createModuleRunner } from '../src/runtime/module-runner.ts';
-import { worker } from '../src/plugins/worker.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
+import { worker } from '../src/bundler/plugins/worker.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 
 const lib = '/lib.ts';
 const files = (spec: string) => ({

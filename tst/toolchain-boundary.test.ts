@@ -23,35 +23,10 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 /** The language toolchain: everything oxc would own. */
 const TOOLCHAIN = ['ast', 'parser', 'analysis', 'passes', 'print', 'mangle', 'util'];
 
-/** The bundler: everything rolldown would own. Modules, not paths — matched on the first segment
- *  of a relative specifier that escapes the toolchain directory. */
-const BUNDLER = new Set([
-    'scan',
-    'link',
-    'bundle',
-    'chunk-graph',
-    'treeshake',
-    'deconflict',
-    'graph-types',
-    'init-obligations',
-    'chunk-compress',
-    'resolve',
-    'node-resolve',
-    'loaders',
-    'plugin',
-    'output-options',
-    'patches',
-    'transform',
-    'watch',
-    'fs',
-    'purity-graph',
-    'generate',
-    'plugins',
-    'runtime',
-    // The package entry re-exports both halves, so reaching the bundler THROUGH it is the same
-    // violation wearing a different specifier.
-    'index',
-]);
+/** The bundler: everything rolldown would own. Since the split it is one directory, so the check is
+ *  a single name — plus the package entry, which re-exports both halves, so reaching the bundler
+ *  THROUGH it is the same violation wearing a different specifier. */
+const BUNDLER = new Set(['bundler', 'index']);
 
 /** Every reference form, not just `import … from`. A dynamic import or a re-export is the same edge. */
 const SPECIFIERS = [/from\s+'([^']+)'/g, /import\s*\(\s*'([^']+)'\s*\)/g, /require\s*\(\s*'([^']+)'\s*\)/g];

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // cjs.md D4 / Track 7 — `isNodeMode`, the second argument to `__toESM`.
 //

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createBuildContext } from '../src/bundle.ts';
+import { createBuildContext } from '../src/bundler/bundle.ts';
 import { isPureExpr, markInferredPure, resetInferredPure } from '../src/analysis/effects.ts';
-import type { Fs } from '../src/fs.ts';
+import type { Fs } from '../src/bundler/fs.ts';
 import { N, walk } from '../src/ast/index.ts';
 import { parse } from '../src/index.ts';
 

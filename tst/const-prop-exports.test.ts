@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // `const-prop` replaces reads of a primitive-valued `const`/`let` with the literal. An export
 // specifier's `local` is an IdentifierReference too — but it NAMES the export, it is not a value

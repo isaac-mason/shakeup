@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { Fs } from '../src/fs.ts';
-import { createDevServer, type DevServer } from '../src/runtime/dev-server.ts';
-import { createEnvironment, type Environment, type HmrUpdate } from '../src/runtime/environment.ts';
+import type { Fs } from '../src/bundler/fs.ts';
+import { createDevServer, type DevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createEnvironment, type Environment, type HmrUpdate } from '../src/bundler/runtime/environment.ts';
 
 // HMR propagation, end to end over the real dev server: an edit lands in the fs, `handleChange`
 // re-transforms once and fans `applyEdit` to every registered environment, and each env walks its

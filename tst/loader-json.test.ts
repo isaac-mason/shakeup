@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import type { Plugin } from '../src/plugin.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import type { Plugin } from '../src/bundler/plugin.ts';
 
 // P1 step 1 of the alignment plan: the LOADER STAGE. `ModuleType` has declared
 // `json | text | base64 | dataurl | binary` for a long time and `moduleTypeOf()` already returned

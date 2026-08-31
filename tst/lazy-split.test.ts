@@ -109,8 +109,8 @@ describe('the split keeps every binding on ONE name', () => {
         '/main.js': "import d from './d.cjs';\nexport const x = d;",
     };
     const run = async (minify: boolean) => {
-        const { bundle } = await import('../src/bundle.ts');
-        const { createMemoryFs } = await import('../src/fs.ts');
+        const { bundle } = await import('../src/bundler/bundle.ts');
+        const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), output: minify ? { minify: true } : {} });
         expect(r.errors).toEqual([]);
         return r.code;
@@ -130,8 +130,8 @@ describe('the split keeps every binding on ONE name', () => {
         //
         // `other.js` is imported FIRST so it keeps `a` and the lazy module is the one renamed —
         // the other order leaves the lazy binding on its source name and proves nothing.
-        const { bundle } = await import('../src/bundle.ts');
-        const { createMemoryFs } = await import('../src/fs.ts');
+        const { bundle } = await import('../src/bundler/bundle.ts');
+        const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({
             entry: '/main.js',
             fs: createMemoryFs({

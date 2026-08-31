@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import type { Fs } from '../src/fs.ts';
-import { normalizePath } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import type { Fs } from '../src/bundler/fs.ts';
+import { normalizePath } from '../src/bundler/fs.ts';
 
 type SymlinkFs = Fs & { realpath(id: string): string };
 

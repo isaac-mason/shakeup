@@ -42,17 +42,17 @@
 // Re-parse + re-analyse is 17%, not 60%, and COMPRESS is now the cost. Concatenating module ASTs
 // would buy back ~80ms of a ~240ms regression and would entangle the compressor with per-module link
 // state to do it. If this is revisited, the target is the 335ms compressor, not the 47ms parse.
-import { analyze, createSemantic } from './analysis/semantic';
-import type { Node } from './ast';
+import { analyze, createSemantic } from '../analysis/semantic';
+import type { Node } from '../ast';
+import { mangleProgram } from '../mangle/program';
+import { parse } from '../parser';
+import { runCompress } from '../passes/compress';
+import { printModule } from '../print/print-js';
+import type { PrinterConfig, PrintOptions } from '../print/printer';
+import { createPrinter, finishPrinter } from '../print/printer';
+import type { Mappings } from '../sourcemap';
+import { buildLineTable, trimMappings } from '../sourcemap';
 import { RESERVED } from './deconflict';
-import { mangleProgram } from './mangle/program';
-import { parse } from './parser';
-import { runCompress } from './passes/compress';
-import { printModule } from './print/print-js';
-import type { PrinterConfig, PrintOptions } from './print/printer';
-import { createPrinter, finishPrinter } from './print/printer';
-import type { Mappings } from './sourcemap';
-import { buildLineTable, trimMappings } from './sourcemap';
 
 export type ChunkCompressResult = { code: string; map: Mappings | null };
 

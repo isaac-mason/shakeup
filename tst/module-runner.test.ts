@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createModuleRunner, defaultEvaluator } from '../src/runtime/module-runner.ts';
-import { devTransform } from '../src/transform.ts';
+import { createModuleRunner, defaultEvaluator } from '../src/bundler/runtime/module-runner.ts';
+import { devTransform } from '../src/bundler/transform.ts';
 
 /** A runner over an in-memory source graph. Ids ARE the import specifiers; any
  *  unknown specifier is treated as external. Each module is transformed for real

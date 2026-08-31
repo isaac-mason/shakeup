@@ -1,5 +1,5 @@
 import { bench, group } from '@pmndrs/labs';
-import { createBuildContext } from '../../src/bundle';
+import { createBuildContext } from '../../src/bundler/bundle';
 import { makeGraph } from '../_graph';
 
 // The dev-loop metric: a warm BuildContext rebuilding after a single body-only edit. The graph is

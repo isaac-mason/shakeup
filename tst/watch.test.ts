@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { bundle, createBuildContext } from '../src/bundle.ts';
-import type { Fs } from '../src/fs.ts';
-import { driveWatch, type FileEvent, type Watcher } from '../src/watch.ts';
+import { bundle, createBuildContext } from '../src/bundler/bundle.ts';
+import type { Fs } from '../src/bundler/fs.ts';
+import { driveWatch, type FileEvent, type Watcher } from '../src/bundler/watch.ts';
 
 /** A watcher whose `emit` we drive by hand — no real filesystem, fully deterministic. */
 function manualWatcher(): { watcher: Watcher; emit: (events: FileEvent[]) => void; closed: () => boolean } {

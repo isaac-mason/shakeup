@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // A failed build still returns a `BundleResult`, and what it carries is API surface: a caller reads
 // `result.errors`, but also `result.graph` / `.linked` / `.shaken` to see how far the build got and

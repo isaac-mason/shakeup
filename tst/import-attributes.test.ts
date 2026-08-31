@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { N } from '../src/ast/index.ts';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 import { parse } from '../src/parser/index.ts';
 
 // P1 step 2 of the alignment plan: the import-attributes clause — `with { type: "json" }`, and the

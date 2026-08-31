@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { setLowerSemanticMode } from '../src/scan.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { setLowerSemanticMode } from '../src/bundler/scan.ts';
 
 // The TS/JSX lowering stage no longer rebuilds the semantic from scratch. The pre-lowering one is
 // MAINTAINED across the lowering — scope-owning nodes the passes mint are registered

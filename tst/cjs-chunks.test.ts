@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 import { runChunks } from './exec-helpers.ts';
 
 // KNOWN GAP — CommonJS is single-chunk only. `cjsWrap`/`cjsNamespace` mint chunk-local NAMES that

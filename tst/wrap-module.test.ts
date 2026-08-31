@@ -76,8 +76,8 @@ describe('wrapModuleBody builds the wrapper as AST', () => {
 // emits a closure whose body references a binding the closure never bound.
 describe('CommonJS wrapper parameters follow rolldown', () => {
     const build = async (src: string, importer = "import x from './c.cjs';\nexport const out = x;") => {
-        const { bundle } = await import('../src/bundle.ts');
-        const { createMemoryFs } = await import('../src/fs.ts');
+        const { bundle } = await import('../src/bundler/bundle.ts');
+        const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({
             entry: '/main.mjs',
             fs: createMemoryFs({ '/main.mjs': importer, '/c.cjs': src }),
@@ -91,8 +91,8 @@ describe('CommonJS wrapper parameters follow rolldown', () => {
         // Reaching it needs a module that is WRAPPED but references neither binding: wrapping is
         // driven by `require`, so a CommonJS module required purely for its side effect qualifies.
         // Imported for effect from ESM it is not wrapped at all — it inlines.
-        const { bundle } = await import('../src/bundle.ts');
-        const { createMemoryFs } = await import('../src/fs.ts');
+        const { bundle } = await import('../src/bundler/bundle.ts');
+        const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({
             entry: '/main.mjs',
             fs: createMemoryFs({

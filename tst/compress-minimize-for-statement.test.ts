@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // oxc `minimize_for_statement` (a port of esbuild's `mangleFor`) plus the constant-operand logical
 // fold (`try_fold_and_or`) it depends on to finish the job.

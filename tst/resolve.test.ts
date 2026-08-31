@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs, type Fs } from '../src/fs.ts';
-import { createNodeResolver, EMPTY_MODULE_ID } from '../src/node-resolve.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
+import { createNodeResolver, EMPTY_MODULE_ID } from '../src/bundler/node-resolve.ts';
 import { loadResolveFixtures } from './fixtures/resolve.ts';
 
 type Probe = {
@@ -235,7 +235,7 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
     });
 });
 
-import { createMemoryFs as mkFs } from '../src/fs.ts';
+import { createMemoryFs as mkFs } from '../src/bundler/fs.ts';
 
 function probeFs(files: Record<string, string>, overrides: Partial<Parameters<typeof createNodeResolver>[0]> = {}) {
     const fs = mkFs(files);

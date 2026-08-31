@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createDevServer } from '../src/runtime/dev-server.ts';
-import { createMemoryFs, type Fs } from '../src/fs.ts';
-import { createModuleRunner } from '../src/runtime/module-runner.ts';
-import { asset } from '../src/plugins/asset.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
+import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
+import { asset } from '../src/bundler/plugins/asset.ts';
 
 const FILES = {
     '/main.ts': "import u from './data.txt?url';\nexport const url = u;",

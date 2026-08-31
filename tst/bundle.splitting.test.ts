@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { bundle, type OutputChunk } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle, type OutputChunk } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 /** Write the chunks to a temp dir under their logical fileNames and import each entry via a
  *  file URL (cross-chunk `./name.js` specifiers resolve against the same dir). */

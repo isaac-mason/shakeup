@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 // THE GATE THAT WAS MISSING. Every other corpus test validates output with `parse()` — shakeup's OWN
 // parser — which `semantic.ts` documents as having "no TDZ or redeclaration diagnostics". So the one

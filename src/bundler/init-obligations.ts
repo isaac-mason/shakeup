@@ -12,7 +12,7 @@
 // rolldown gets evaluation order right (`cjs.md` §7.25d). Registration and emission for that one must
 // stay in lockstep, "or a registered-but-never-emitted wrapper import (or vice versa) appears" — so
 // the predicate lives here rather than being written a third time at the new call site.
-import { N, type Node } from './ast';
+import { N, type Node } from '../ast';
 import { type Graph, type ImportRecord, isEsmFormat, type Linked } from './graph-types';
 
 /**

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { setSemanticVerify, setVerifyExtras } from '../src/analysis/ref-facts.ts';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 // END-TO-END guard for the incremental semantic (llm/notes/incremental-vs-rebuild-plan.md).
 //

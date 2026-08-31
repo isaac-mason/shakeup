@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import { buildGraph } from '../src/scan.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import { buildGraph } from '../src/bundler/scan.ts';
 
 const build = async (files: Record<string, string>) => {
     const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });

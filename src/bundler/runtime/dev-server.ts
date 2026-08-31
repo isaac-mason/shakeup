@@ -1,7 +1,7 @@
-import { analyze, createSemantic } from '../analysis/semantic.ts';
+import { analyze, createSemantic } from '../../analysis/semantic.ts';
 import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
-import { parse } from '../parser';
+import { parse } from '../../parser';
 import {
     compilePipeline,
     type ModuleInfo,
@@ -15,7 +15,7 @@ import {
     runTransform,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
-import type { SourceMap } from '../sourcemap.ts';
+import type { SourceMap } from '../../sourcemap.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
 import type { HmrUpdate } from './environment.ts';
 

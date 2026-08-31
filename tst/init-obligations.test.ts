@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ImportRecord, Linked } from '../src/graph-types.ts';
-import { initRefForRecord, recordIsInitObligation } from '../src/init-obligations.ts';
+import type { ImportRecord, Linked } from '../src/bundler/graph-types.ts';
+import { initRefForRecord, recordIsInitObligation } from '../src/bundler/init-obligations.ts';
 
 // The single definition of "which wrapped modules must this record initialize" — see
 // `init-obligations.ts`. rolldown keeps this in one file because three consumers each carried their

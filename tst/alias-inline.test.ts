@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { runModule } from './exec-helpers.ts';
 
 // Alias inline — path 3 of compilecat `inline_variables`. See src/passes/compress/alias-inline.ts.

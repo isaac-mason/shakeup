@@ -1,5 +1,5 @@
 import { bench, group } from '@pmndrs/labs';
-import { bundle } from '../../src/bundle';
+import { bundle } from '../../src/bundler/bundle';
 import { makeGraph } from '../_graph';
 
 group('full build @bundle @full', () => {

@@ -1,7 +1,7 @@
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
 import type { ParseCache } from './graph-types';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve';
-import type { CompressMode } from './passes/compress';
+import type { CompressMode } from '../passes/compress';
 import type { ModuleType, Plugin } from './plugin';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —

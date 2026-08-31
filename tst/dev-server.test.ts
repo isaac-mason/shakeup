@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs, type Fs } from '../src/fs.ts';
-import type { Plugin } from '../src/plugin.ts';
-import { createDevServer, type DevServerOptions } from '../src/runtime/dev-server.ts';
-import { createModuleRunner } from '../src/runtime/module-runner.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
+import type { Plugin } from '../src/bundler/plugin.ts';
+import { createDevServer, type DevServerOptions } from '../src/bundler/runtime/dev-server.ts';
+import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 
 function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'> = {}) {
     const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
@@ -272,9 +272,9 @@ describe('dev server — cache + invalidation', () => {
 
 describe('dev server — watch (change source)', () => {
     it('batches + de-dups changed paths and drives handleChange', async () => {
-        const { createDevServer } = await import('../src/runtime/dev-server.ts');
-        const { watch } = await import('../src/runtime/dev-server.ts');
-        const { createEnvironment } = await import('../src/runtime/environment.ts');
+        const { createDevServer } = await import('../src/bundler/runtime/dev-server.ts');
+        const { watch } = await import('../src/bundler/runtime/dev-server.ts');
+        const { createEnvironment } = await import('../src/bundler/runtime/environment.ts');
         const files: Record<string, string> = {
             '/m.ts': `globalThis.__seen ??= [];\nexport let v = 1;\nimport.meta.hot.accept((nm) => { globalThis.__seen.push(nm.v); });`,
         };

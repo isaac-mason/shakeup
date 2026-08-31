@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // `bindingKey` packs (scope, namespace, name) into one integer, taking a Smi-range fast path when the
 // fields fit and a disjoint wide form when they do not. A collision between the two forms — or within

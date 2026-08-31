@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import type { Platform } from '../src/resolve.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import type { Platform } from '../src/bundler/resolve.ts';
 import { runChunks } from './exec-helpers.ts';
 
 // cjs.md §"NOT YET PROBED" — the seven configurations three audit passes had never RUN. Five of them

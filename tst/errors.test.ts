@@ -291,8 +291,8 @@ describe('`with` statements are refused with a reason', () => {
     });
 
     it('reports it against the right file when bundling', async () => {
-        const { bundle } = await import('../src/bundle.ts');
-        const { createMemoryFs } = await import('../src/fs.ts');
+        const { bundle } = await import('../src/bundler/bundle.ts');
+        const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({
             entry: '/main.js',
             external: [],

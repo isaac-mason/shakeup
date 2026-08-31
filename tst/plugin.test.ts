@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import type { Plugin } from '../src/plugin.ts';
-import { json } from '../src/plugins/json.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import type { Plugin } from '../src/bundler/plugin.ts';
+import { json } from '../src/bundler/plugins/json.ts';
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;

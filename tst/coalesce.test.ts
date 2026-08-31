@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { setCoalesceEnabled, setSemanticVerify } from '../src/passes/compress/index.ts';
 import { runModule } from './exec-helpers.ts';
 

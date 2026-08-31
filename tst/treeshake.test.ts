@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import { linkGraph } from '../src/link.ts';
-import { buildGraph } from '../src/scan.ts';
-import type { ModuleSideEffects } from '../src/plugin.ts';
-import { treeshake } from '../src/treeshake.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import { linkGraph } from '../src/bundler/link.ts';
+import { buildGraph } from '../src/bundler/scan.ts';
+import type { ModuleSideEffects } from '../src/bundler/plugin.ts';
+import { treeshake } from '../src/bundler/treeshake.ts';
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;

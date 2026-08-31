@@ -1,5 +1,5 @@
-import type { Fs } from '../src/fs.ts';
-import type { PluginCtx } from '../src/plugin.ts';
+import type { Fs } from '../src/bundler/fs.ts';
+import type { PluginCtx } from '../src/bundler/plugin.ts';
 
 /** A minimal full {@link PluginCtx} for unit tests that drive a single hook in
  *  isolation (resolve/getModuleInfo/getModuleIds are inert stubs). */

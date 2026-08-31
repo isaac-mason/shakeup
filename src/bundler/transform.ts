@@ -1,14 +1,14 @@
-import { analyze, createSemantic, type Semantic, symbolOf } from './analysis/semantic';
-import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from './ast';
+import { analyze, createSemantic, type Semantic, symbolOf } from '../analysis/semantic';
+import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from '../ast';
 import { type JSXOptions, resolveJSXOptions } from './resolve';
-import { parse } from './parser';
-import { makeJsxLower } from './passes/lower-jsx';
-import { tsLower } from './passes/lower-ts';
-import { tsStrip } from './passes/strip-ts';
-import { traverse } from './passes/traverse';
-import { printModule } from './print/print-js';
-import { createPrinter, finishPrinter, printerPart } from './print/printer';
-import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from './sourcemap';
+import { parse } from '../parser';
+import { makeJsxLower } from '../passes/lower-jsx';
+import { tsLower } from '../passes/lower-ts';
+import { tsStrip } from '../passes/strip-ts';
+import { traverse } from '../passes/traverse';
+import { printModule } from '../print/print-js';
+import { createPrinter, finishPrinter, printerPart } from '../print/printer';
+import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../sourcemap';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
  *  filename extension when omitted. */

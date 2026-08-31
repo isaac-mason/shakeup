@@ -1,8 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, watch as fsWatch, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { type BundleOptions, type BundleResult, bundle, createBuildContext } from '../bundle';
-import { type Fs, normalizePath } from '../fs';
-import { driveWatch, type FileChangeKind, type FileEvent, type Watcher } from '../watch';
+import { type BundleOptions, type BundleResult, bundle, createBuildContext } from '../bundler/bundle';
+import { type Fs, normalizePath } from '../bundler/fs';
+import { driveWatch, type FileChangeKind, type FileEvent, type Watcher } from '../bundler/watch';
 
 /** Fs backed by the real node filesystem. */
 export function createNodeFs(): Fs {

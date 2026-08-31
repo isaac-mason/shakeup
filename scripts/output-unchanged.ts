@@ -61,9 +61,16 @@ const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
 ];
 const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
+/** `bundle.ts` moved under `src/bundler/` — a ref from before that move still has it at the old
+ *  path, and this script must load BOTH sides, so it probes rather than assuming one layout. */
+const entryOf = (base: string): string => {
+    for (const p of ['src/bundler/bundle.ts', 'src/bundle.ts']) if (existsSync(join(base, p))) return join(base, p);
+    throw new Error(`no bundle.ts under ${base}`);
+};
+
 async function main(): Promise<void> {
-    const { bundle: cur } = await import(join(root, 'src/bundle.ts'));
-    const { bundle: base } = await import(join(dir, 'src/bundle.ts'));
+    const { bundle: cur } = await import(entryOf(root));
+    const { bundle: base } = await import(entryOf(dir));
     console.log(`baseline: ${ref}   working tree vs that\n`);
     let allSame = true;
     for (const c of CASES) {

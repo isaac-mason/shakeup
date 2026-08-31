@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import type { Fs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import type { Fs } from '../src/bundler/fs.ts';
 
 // First-class async Fs: a browser/OPFS fs answers read/exists/realpath asynchronously. These tests
 // prove the graph build awaits real Promises AND produces output byte-identical to a sync fs.

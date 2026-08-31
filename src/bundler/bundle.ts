@@ -1,5 +1,8 @@
-import { resetInferredPure } from './analysis/effects';
-import { stampPureCallsGraph } from './purity-graph.ts';
+import { resetInferredPure } from '../analysis/effects';
+import { runCompress } from '../passes/compress';
+import { inlineCrossModule } from '../passes/optimize/inline-functions';
+import type { SourceMap } from '../sourcemap';
+import * as Timer from '../util/timer';
 import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { type Fs, normalizePath, relativePath } from './fs';
 import {
@@ -12,7 +15,7 @@ import {
     renderChunks,
 } from './generate/chunks.ts';
 import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
-import { externalKey, type Graph, type Linked, packRef, type ParseCache, type ParseStats, refMod, refSym } from './graph-types';
+import { externalKey, type Graph, type Linked, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types';
 import { computeInteropOwners } from './init-obligations';
 import { linkGraph } from './link';
 import {
@@ -21,14 +24,11 @@ import {
     type OutputOptionsNaming,
     resolveMinify,
 } from './output-options';
-import { runCompress } from './passes/compress';
-import { inlineCrossModule } from './passes/optimize/inline-functions';
 import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin';
+import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve';
 import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan';
-import type { SourceMap } from './sourcemap';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
-import * as Timer from './util/timer';
 import type { FileEvent } from './watch';
 
 /** The `{ getModuleInfo }` context threaded into user chunk `name`/`test` functions. */

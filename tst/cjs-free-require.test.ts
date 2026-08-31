@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
-import type { Platform } from '../src/resolve.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
+import type { Platform } from '../src/bundler/resolve.ts';
 
 // cjs.md D7-D10 — a `require` reference that is NOT a call: `typeof require`, `require.resolve(x)`,
 // `require.cache`, a bare `require` passed as a value. Each one used to reach the output verbatim,

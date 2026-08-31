@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { devTransform } from '../src/transform.ts';
+import { devTransform } from '../src/bundler/transform.ts';
 
 const noop = () => {};
 

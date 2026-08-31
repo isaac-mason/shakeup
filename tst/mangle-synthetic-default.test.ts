@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { runModule } from './exec-helpers.ts';
 
 // `export default <expression>` mints a SYNTHETIC symbol in link (`syntheticRef`), whose id is

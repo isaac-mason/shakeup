@@ -1,7 +1,7 @@
 import { decode } from '@jridgewell/sourcemap-codec';
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 const FILES = {
     '/main.ts': "import { add } from './math';\nexport const r: number = add(2, 3);",

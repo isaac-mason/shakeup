@@ -1,5 +1,5 @@
 import { bench, group } from '@pmndrs/labs';
-import { bundle } from '../../src/bundle';
+import { bundle } from '../../src/bundler/bundle';
 import { makeDeepModule, makeGraph } from '../_graph';
 
 // The MINIFY tier had no bench coverage at all: `makeGraph().opts()` passes no `output`, so every

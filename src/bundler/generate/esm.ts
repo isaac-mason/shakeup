@@ -4,14 +4,14 @@
 // rolldown has `ecmascript/format/{esm,cjs,iife,umd}.rs`, rollup has `finalisers/{es,cjs,amd,iife,
 // umd,system}.ts`. Emitting a format's import/export statements and framing its body is one
 // decision. shakeup emits only `es` today, so a second format arrives as a sibling file.
-import { N, type Node, walk } from '../ast/index.ts';
+import { N, type Node, walk } from '../../ast/index.ts';
+import type { Part } from '../../sourcemap.ts';
 import type { Chunk } from '../chunk-graph.ts';
 import { relativePath } from '../fs.ts';
 import { type Graph, type Linked, type Module, NAME_DEFAULT, NAME_NAMESPACE } from '../graph-types.ts';
 import { finalNameOf } from '../link.ts';
 import type { PreRenderedChunk } from '../output-options.ts';
 import { isAnyRequireCall } from '../scan.ts';
-import type { Part } from '../sourcemap.ts';
 import {
     clauseSep,
     isIdentName,

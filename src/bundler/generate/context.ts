@@ -4,12 +4,13 @@
 // The LEAF of `generate/` — it imports from the link stage and the graph model, and nothing here
 // imports a sibling. Extracted first, for the same reason `graph-types.ts` was extracted first when
 // `module-graph.ts` was dissolved: every further split then points downward and cannot cycle.
+
+import type { Part } from '../../sourcemap.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
 import { externalKey, type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE } from '../graph-types.ts';
 import type { InteropOwner } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
 import type { NormalizedOutputNaming } from '../output-options.ts';
-import type { Part } from '../sourcemap.ts';
 import type { TreeshakeResult } from '../treeshake.ts';
 
 /** Per-module render context. Built once per module inside `renderChunk`'s loop, and by nothing

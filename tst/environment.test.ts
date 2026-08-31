@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createDevServer } from '../src/runtime/dev-server.ts';
-import { createEnvironment } from '../src/runtime/environment.ts';
-import type { Fs } from '../src/fs.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createEnvironment } from '../src/bundler/runtime/environment.ts';
+import type { Fs } from '../src/bundler/fs.ts';
 
 /** ONE dev server (shared transform) + a factory for named environments (each its
  *  own runner/instances + its own import.meta.env). */
@@ -341,9 +341,9 @@ describe('environment — HMR edge cases', () => {
 
 describe('environment — source maps', () => {
     it('threads the dev-server map through to the evaluator (shifted for startOffset)', async () => {
-        const { createDevServer } = await import('../src/runtime/dev-server.ts');
-        const { createEnvironment } = await import('../src/runtime/environment.ts');
-        const { defaultEvaluator } = await import('../src/runtime/module-runner.ts');
+        const { createDevServer } = await import('../src/bundler/runtime/dev-server.ts');
+        const { createEnvironment } = await import('../src/bundler/runtime/environment.ts');
+        const { defaultEvaluator } = await import('../src/bundler/runtime/module-runner.ts');
         const files: Record<string, string> = { '/m.ts': `export const v: number = 1;` };
         const server = createDevServer({ fs: { read: (id) => files[id] ?? null, exists: (id) => id in files }, sourcemap: true });
 

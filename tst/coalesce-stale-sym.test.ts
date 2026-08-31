@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { setCoalesceEnabled, setSemanticVerify } from '../src/passes/compress/index.ts';
 
 // The documented `STALE SYM 65 (table size 64)` crash that kept `coalesceVariableNames` disabled.

@@ -2,9 +2,9 @@
 // depends only on ast/semantic/plugin/fs types, imported by every stage (scan/link/deconflict/
 // treeshake/chunk-graph/bundle). No stage logic here.
 
-import type { Semantic } from './analysis/semantic';
-import type { Node, Program } from './ast';
-import type { CompressMode } from './passes/compress';
+import type { Semantic } from '../analysis/semantic';
+import type { Node, Program } from '../ast';
+import type { CompressMode } from '../passes/compress';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
 import type { Platform } from './resolve';
 

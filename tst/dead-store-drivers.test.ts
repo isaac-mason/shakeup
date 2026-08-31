@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 import { getLivenessDriver, type LivenessDriver, setLivenessDriver } from '../src/passes/optimize/dead-store.ts';
 import { runModule } from './exec-helpers.ts';
 

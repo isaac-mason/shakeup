@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { bundle } from '../src/bundle.ts';
-import { createMemoryFs } from '../src/fs.ts';
+import { bundle } from '../src/bundler/bundle.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 
 // oxc `remove_unused_private_members`. A `#name` is reachable only from inside its own class body —
 // there is no `obj["#x"]` escape hatch — so an unread one is provably dead. Every guard below is a
