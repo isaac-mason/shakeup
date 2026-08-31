@@ -328,3 +328,56 @@ describe('dev server — a rejecting fetch does not orphan a rejection', () => {
         expect(orphaned).toEqual([]);
     });
 });
+
+// ── sourcemap policy ────────────────────────────────────────────────────────────────────────
+//
+// The dev server defaults to the node_modules rule the OUTPUT side already defaults to
+// (`sourcemapIgnoreList`, output-options.ts). A built dependency's map points at the built file —
+// there is no original source in reach — and it is not free: a full SMv3 map per module, base64'd
+// into a `sourceMappingURL` appended to every module body, re-paid on every boot in every
+// environment. On a seeded engine graph that is more map than code.
+describe('dev server — sourcemap policy', () => {
+    const FILES = {
+        '/src/app.ts': `import { v } from '/node_modules/dep/index.js';\nexport const app = v;`,
+        '/node_modules/dep/index.js': `export const v = 1;`,
+    };
+
+    it('maps project modules but not node_modules, by default', async () => {
+        const { server } = setup(FILES);
+        expect((await server.fetchModule('/src/app.ts')).map?.sources).toEqual(['/src/app.ts']);
+        expect((await server.fetchModule('/node_modules/dep/index.js')).map).toBeUndefined();
+    });
+
+    it('sourcemap:false emits none, sourcemap:true emits for node_modules too', async () => {
+        const off = setup(FILES, { sourcemap: false }).server;
+        expect((await off.fetchModule('/src/app.ts')).map).toBeUndefined();
+        expect((await off.fetchModule('/node_modules/dep/index.js')).map).toBeUndefined();
+
+        const on = setup(FILES, { sourcemap: true }).server;
+        expect((await on.fetchModule('/src/app.ts')).map).toBeDefined();
+        expect((await on.fetchModule('/node_modules/dep/index.js')).map).toBeDefined();
+    });
+
+    it('honours a predicate', async () => {
+        const { server } = setup(FILES, { sourcemap: (id) => id.endsWith('/index.js') });
+        expect((await server.fetchModule('/src/app.ts')).map).toBeUndefined();
+        expect((await server.fetchModule('/node_modules/dep/index.js')).map).toBeDefined();
+    });
+
+    // Same contract `sourcemapIgnoreList` enforces: a predicate that doesn't answer is a
+    // misconfiguration that would otherwise look like it worked.
+    it('rejects a predicate that does not return a boolean', async () => {
+        const { server } = setup(FILES, { sourcemap: (() => undefined) as unknown as (id: string) => boolean });
+        await expect(server.fetchModule('/src/app.ts')).rejects.toThrow('sourcemap function must return a boolean.');
+    });
+
+    // The map is cached on the ModuleNode, so a policy applied only on the transform path would
+    // be invisible from the second fetch onward. This is the test that catches that.
+    it('serves the same verdict from the graph cache', async () => {
+        const { server } = setup(FILES);
+        expect((await server.fetchModule('/node_modules/dep/index.js')).map).toBeUndefined();
+        expect((await server.fetchModule('/node_modules/dep/index.js')).map).toBeUndefined();
+        expect((await server.fetchModule('/src/app.ts')).map).toBeDefined();
+        expect((await server.fetchModule('/src/app.ts')).map).toBeDefined();
+    });
+});
