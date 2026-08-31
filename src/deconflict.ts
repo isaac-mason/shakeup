@@ -84,19 +84,6 @@ export function base54(n: number): string {
     return out;
 }
 
-/** A `claim` closure that hands out the shortest unused base54 name, ignoring the requested
- *  base — the mangling name policy. Collisions with `taken` (reserved words, globals, and
- *  already-claimed names) are skipped. */
-export function makeMangleClaim(taken: Set<string>): (base: string) => string {
-    let i = 0;
-    return (_base: string): string => {
-        let name = base54(i++);
-        while (taken.has(name)) name = base54(i++);
-        taken.add(name);
-        return name;
-    };
-}
-
 /** Deconflict the module-scope symbols, synthetics, namespaces, and external locals of a
  *  set of modules (`memberOrder`, exec-ordered) into a FRESH scope. Whole-bundle deconflict
  *  is this run over `linked.order`; it runs once per chunk (each chunk = one lexical scope, so
@@ -114,11 +101,7 @@ export function deconflictChunk(
     memberOrder: number[],
     memberSet: Set<number> | null,
     seed: Iterable<string>,
-    mangle = false,
     taken: Set<string> = new Set<string>(),
-    /** Per-top-level-symbol claim weight (`packRef` → its SLOT's total reference count), from
-     *  `topLevelSlotWeights`. Null keeps the historical module/symbol-id claim order. */
-    weights: Map<number, number> | null = null,
 ): (base: string) => string {
     for (const name of RESERVED) taken.add(name);
     for (const name of seed) taken.add(name);
@@ -126,18 +109,7 @@ export function deconflictChunk(
         const mod = graph.modules[idx];
         for (const node of mod.semantic.unresolved) taken.add(node.name);
     }
-    // Mangling reassigns the shortest base54 names instead of readable deconflicted ones;
-    // both share the same collision-free `taken` discipline (esbuild/oxc_mangler model).
-    const claim = mangle ? makeMangleClaim(taken) : makeClaim(taken);
-    // Top-level claims, hottest slot first (oxc Phase 3, `SlotRanking::tally`). `makeMangleClaim`
-    // ignores its base and hands out base54 names in CALL order, and base54 names get LONGER as they
-    // are consumed — 54 one-character names, then two-character. Claiming in module/symbol-id order
-    // therefore spent every one-character name on whichever symbols came first: measured on crashcat,
-    // all 54 were in use and the coldest of them was referenced 7 times.
-    //
-    // The weight is the SLOT's traffic, not the symbol's — see `topLevelSlotWeights`. Collecting the
-    // list first and sorting it is what makes this a reordering and nothing more; the claims issued
-    // are exactly the same ones, and `taken` (not order) is what keeps them collision-free.
+    const claim = makeClaim(taken);
     // External locals, deduped to one entry per (specifier, name) — several modules importing the
     // same name share ONE emitted local. Discovery only READS `binds`/`exportMaps`, so hoisting it
     // above the claim phase changes nothing; it just makes the set available to rank.
@@ -168,24 +140,6 @@ export function deconflictChunk(
         }
     }
 
-    // An external local anchors no slot — nothing inherits its name — so the number of times it is
-    // PRINTED is simply its own reference count, which is directly comparable to a slot's weight.
-    // Without this they were claimed after every module symbol and landed deep in the two-character
-    // range: crashcat's `vec3`, at 2483 uses, came out as `$G`.
-    const extWeight = new Map<string, number>();
-    if (weights !== null) {
-        for (const idx of memberOrder) {
-            const mod = graph.modules[idx];
-            for (const sym of mod.semantic.refSyms) {
-                if (sym <= 0 || !mod.namedImports.has(sym)) continue;
-                const bind = linked.binds.get(packRef(idx, sym));
-                if (bind?.kind !== 'external') continue;
-                const key = externalKey(bind.specifier, bind.name);
-                extWeight.set(key, (extWeight.get(key) ?? 0) + 1);
-            }
-        }
-    }
-
     const claimExternal = (key: string, base: string): void => {
         if (!linked.externalLocals.has(key)) linked.externalLocals.set(key, claim(base));
     };
@@ -206,29 +160,12 @@ export function deconflictChunk(
             topLevel.push({ ref: packRef(idx, sym), original: sem.symbols[sym].decl!.name });
         }
     }
-    if (weights === null) {
-        // No ranking: claim in exactly the historical order (readable names depend on it).
-        for (const { ref, original } of topLevel) {
-            const final = claim(original);
-            if (final !== original) linked.finalNames.set(ref, final);
-        }
-    } else {
-        // Module symbols and external locals compete in ONE queue — they draw from the same base54
-        // sequence, so ranking either alone just moves the misallocation to the other. Stable sort,
-        // so equal weights keep the deterministic order the lists were built in.
-        const queue: { w: number; run: () => void }[] = [];
-        for (const { ref, original } of topLevel) {
-            queue.push({
-                w: weights.get(ref) ?? 0,
-                run: () => {
-                    const final = claim(original);
-                    if (final !== original) linked.finalNames.set(ref, final);
-                },
-            });
-        }
-        for (const [key, base] of extBase) queue.push({ w: extWeight.get(key) ?? 0, run: () => claimExternal(key, base) });
-        queue.sort((a, b) => b.w - a.w);
-        for (const q of queue) q.run();
+    // Claimed in the order the modules were walked — readable names depend on it. (There used to be a
+    // frequency-ranked alternative here, feeding shortest names to the busiest slots; it was reachable
+    // only from the link-time mangler, which no longer exists. The chunk mangler ranks its own slots.)
+    for (const { ref, original } of topLevel) {
+        const final = claim(original);
+        if (final !== original) linked.finalNames.set(ref, final);
     }
     // No ad-hoc claiming for the CJS wrapper/namespace: they are synthetic REFS now, so the
     // `syntheticNames` loop below already names them — the same path `*_default` uses.
@@ -240,7 +177,7 @@ export function deconflictChunk(
         if (memberSet !== null && !memberSet.has(modIdx)) continue;
         linked.namespaceOf.set(modIdx, claim(base));
     }
-    if (weights === null) for (const [key, base] of extBase) claimExternal(key, base);
+    for (const [key, base] of extBase) claimExternal(key, base);
     // AFTER every top-level name is final: only then is it known which names a nested binding would
     // capture.
     deshadowLocals(graph, linked, memberSet, claim);

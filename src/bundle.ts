@@ -1239,7 +1239,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, false);
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic);
     // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
     // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
     // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the
