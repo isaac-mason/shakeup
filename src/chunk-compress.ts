@@ -75,9 +75,20 @@ export function compressChunk(
     const semantic = createSemantic();
     analyze(semantic, parsed.program);
     if (compress) runCompress(parsed.program, semantic, 'full');
+    // A SECOND, FRESH semantic for the mangler — oxc's `Minifier::build` verbatim: one
+    // `SemanticBuilder::build` for the compressor (`oxc_minifier/src/lib.rs:131`) and another for the
+    // mangler (`:157`). Compress maintains reference COUNTS as it mutates, but nothing maintains the
+    // scope a reference sits in, and oxc does not either — `Reference::scope_id` is write-once. So the
+    // scopes the mangler reads have to come from a build over the tree as it now is.
+    //
+    // `true` opts into the per-symbol scope pairs, the way oxc's mangler build opts into
+    // `with_build_nodes`/`with_class_table` that the compressor's build omits. The ~97 per-module
+    // analyses stay on the cheap path.
+    const mangleSemantic = createSemantic(true);
+    analyze(mangleSemantic, parsed.program);
     // MANGLE LAST, after the compressor has finished deleting things — otherwise short names are
     // spent on bindings that do not survive. See `mangle/program.ts`.
-    const names = mangle ? mangleProgram(parsed.program, semantic, new Set(RESERVED)) : null;
+    const names = mangle ? mangleProgram(parsed.program, mangleSemantic, new Set(RESERVED)) : null;
     const cfg: PrinterConfig = wantMap ? { srcLines: Uint32Array.from(buildLineTable(code)), sourceIdx: 0 } : {};
     if (names !== null) cfg.nameOf = (idNode: Node) => (idNode.sym === 0 ? idNode.name : (names.get(idNode.sym) ?? idNode.name));
     const printer = createPrinter(opts, cfg);
