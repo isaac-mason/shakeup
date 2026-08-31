@@ -54,7 +54,7 @@ export interface SlotInput {
     symbolCount: number;
 }
 
-export interface SlotResult {
+export type SlotResult = {
     /** `slots[sym]` = assigned slot, or {@link SLOT_UNASSIGNED}. */
     slots: Int32Array;
     /** Number of distinct slots allocated. */
