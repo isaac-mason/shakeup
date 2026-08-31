@@ -1277,21 +1277,23 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
     const renderer: ChunkRenderer = (chunk, ci, prelim, pathToChunk, want) =>
         renderChunk(
-            graph,
-            linked,
-            chunkGraph,
-            chunk,
-            ci,
-            shaken,
-            interopOwners,
-            warnings,
-            want,
-            // Emit-glue spacing and module printing both stay readable when the chunk pass will
-            // minify: it re-parses this text, and minified printing loses `@__PURE__`.
-            min.compress === 'full' ? false : min.whitespace,
-            min.compress === 'full',
-            naming,
-            pathToChunk,
+            {
+                graph,
+                linked,
+                chunkGraph,
+                chunk,
+                chunkIdx: ci,
+                shaken,
+                interopOwners,
+                warnings,
+                naming,
+                wantMap: want,
+                // Emit-glue spacing and module printing both stay readable when the chunk pass will
+                // minify: it re-parses this text, and minified printing loses `@__PURE__`.
+                tight: min.compress === 'full' ? false : min.whitespace,
+                deferMinify: min.compress === 'full',
+                pathToChunk,
+            },
             prelim,
             inc?.mod ?? null,
         );
@@ -1424,29 +1426,41 @@ function isFileNameOutsideOutputDirectory(fileName: string): boolean {
  *  `chunk.imports`/`chunk.exports`, their paths resolved via `pathToChunk` (preliminary,
  *  placeholder-bearing filenames — the real hashed path is substituted in pass C). Banner/intro
  *  are prepended as SYNTHETIC leading map Parts so the per-chunk sourcemap stays in offset. */
-function renderChunk(
-    graph: Graph,
-    linked: Linked,
-    chunkGraph: ChunkGraph,
-    chunk: Chunk,
-    chunkIdx: number,
-    shaken: TreeshakeResult | null,
+/** Everything one chunk's render reads that does not change while rendering it.
+ *
+ *  This is not a new abstraction: `bundle()` already builds exactly this set as the captured
+ *  environment of its `renderer` closure, then expands it back into positional arguments one line
+ *  later. Naming it stops the expansion, and gives the render phases something to share.
+ *
+ *  Per-CHUNK, not per-build — `chunk`, `chunkIdx` and `pathToChunk` are in here, matching rolldown's
+ *  `GenerateContext` (`types/generator.rs`), which likewise carries `chunk` and `chunk_idx` beside
+ *  `link_output`, `chunk_graph` and `used_symbol_refs`. */
+type RenderCtx = {
+    graph: Graph;
+    linked: Linked;
+    chunkGraph: ChunkGraph;
+    chunk: Chunk;
+    chunkIdx: number;
+    shaken: TreeshakeResult | null;
     /** Decided once for the whole bundle, beside `shaken` — see `computeInteropOwners`. */
-    interopOwners: Map<number, InteropOwner>,
-    warnings: string[],
-    wantMap: boolean,
-    tight: boolean,
+    interopOwners: Map<number, InteropOwner>;
+    warnings: string[];
+    naming: NormalizedOutputNaming;
+    wantMap: boolean;
+    tight: boolean;
     /** The cosmetic tier runs later over the assembled chunk, so this render must stay READABLE.
      *  Minified printing drops `/*@__PURE__*​/` annotations (1146 → 0 on crashcat), and the chunk
      *  compress re-parses this text — so minifying here would destroy the purity information it
      *  needs and it would keep calls it could otherwise drop. rolldown renders the chunk un-minified
      *  for the same reason and lets `dce_or_minify` do the minifying once, at the end. */
-    deferMinify: boolean,
-    naming: NormalizedOutputNaming,
-    pathToChunk: (targetChunkIdx: number) => string,
-    prelim: PreliminaryFileName,
-    modInc: ModuleRenderCtx | null,
-): RenderedChunk | null {
+    deferMinify: boolean;
+    /** Resolve a target chunk idx to the import specifier this chunk uses for it. */
+    pathToChunk: (targetChunkIdx: number) => string;
+};
+
+function renderChunk(ctx: RenderCtx, prelim: PreliminaryFileName, modInc: ModuleRenderCtx | null): RenderedChunk | null {
+    const { graph, linked, chunkGraph, chunk, chunkIdx, shaken, interopOwners, warnings } = ctx;
+    const { naming, wantMap, tight, deferMinify, pathToChunk } = ctx;
     const entryStarSpecs: string[] = [];
     const sideEffectSpecs = new Set<string>();
     /** The chunk's module region, as parts. ONE list, not a `string[]` beside a `Part[]` — see the
@@ -1505,11 +1519,13 @@ function renderChunk(
         // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
         // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
         {
-            const ctx: EmitCtx = { linked, mod, warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
-            trackChunkSpecs(ctx, mod.isEntry, entryStarSpecs, sideEffectSpecs);
-            const overrides = collectLinkOverrides(ctx);
-            const initCalls = collectInitCalls(ctx);
-            collectRequireOverrides(ctx, overrides);
+            // Named `emit`, not `ctx`: the enclosing function's parameter is the per-CHUNK
+            // `RenderCtx`, and the two share six field names. A shadow here would resolve silently.
+            const emit: EmitCtx = { linked, mod, warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
+            trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);
+            const overrides = collectLinkOverrides(emit);
+            const initCalls = collectInitCalls(emit);
+            collectRequireOverrides(emit, overrides);
             const renameCache: (string | null | undefined)[] = [];
             // A FACTORY, not a single printer: a module that needs the declaration/initializer split
             // (cjs.md §7.25) is printed as two regions — hoisted bindings and function declarations
@@ -1524,13 +1540,13 @@ function renderChunk(
                         // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
                         // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
                         // collapses that to one. Correct per printer because the answer depends on
-                        // `ctx.chunk`, and a printer is created per module PER CHUNK render.
+                        // `emit.chunk`, and a printer is created per module PER CHUNK render.
                         nameOf: (idNode: Node) => {
                             const sym = idNode.sym;
                             if (sym === 0) return idNode.name; // unresolved: the name varies per node
                             const hit = renameCache[sym];
                             if (hit !== undefined) return hit ?? idNode.name;
-                            const v = renameOf(ctx, idNode) ?? null;
+                            const v = renameOf(emit, idNode) ?? null;
                             renameCache[sym] = v;
                             return v ?? idNode.name;
                         },
