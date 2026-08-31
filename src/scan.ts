@@ -30,7 +30,7 @@ import { resolveShapes, shapeCollector } from './passes/optimize/shapes';
 import { scalarReplaceAggregates } from './passes/optimize/sroa';
 import { unrollLoops } from './passes/optimize/unroll';
 import { tsStrip } from './passes/strip-ts';
-import { applyRefDelta, type RefDelta, traverse, type Visitor } from './passes/traverse';
+import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from './passes/traverse';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -75,6 +75,9 @@ export type LowerSemanticMode = 'rebuild' | 'maintain' | 'verify';
 let LOWER_SEMANTIC_MODE: LowerSemanticMode = (process.env.LOWER_SEMANTIC_MODE as LowerSemanticMode | undefined) ?? 'maintain';
 export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
     LOWER_SEMANTIC_MODE = m;
+    // `traverse`'s hook-conflict assertion rides the same mode; it cannot read this module (scan
+    // imports traverse, not the other way round), so the mode is pushed to it here.
+    setHookConflictCheck(m === 'verify');
 };
 
 /** Flag emit-unsupported TS constructs that would otherwise miscompile SILENTLY. A value
@@ -1211,15 +1214,6 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 topLevelThis = hit.topLevelThis;
                 noSideEffects = hit.noSideEffects;
                 graph.parseStats.reused++;
-                // EXPERIMENT (`RECOMPRESS_CACHED=1`): re-run compress on a module restored from the
-                // parse cache, simulating "we cache parse + semantic but NOT compress" — i.e. what an
-                // incremental rebuild would cost if compress moved after tree-shaking the way
-                // rolldown does it. Isolates the value of caching COMPRESS from the value of caching
-                // the parse, which is the question the divergence actually turns on.
-                if (process.env.RECOMPRESS_CACHED && compress !== false) {
-                    const refreshed2 = runCompress(program, semantic, compress);
-                    if (refreshed2 !== null) semantic = refreshed2;
-                }
             } else {
                 // Parse TS syntax only for actual TS modules — a `.js`/`.jsx` file is JavaScript, so
                 // TS-mode parsing there is both wrong (rejects valid JS the TS grammar disallows) and

@@ -15,9 +15,9 @@
 // refreshed mid-loop; today we refresh ONCE at the end (returning a fresh `Semantic` when anything
 // changed) and will tighten to per-iteration when such a pass lands.
 import { stampPureCalls } from '../../analysis/purity.ts';
-import { emitRefFacts, REF, semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
+import { semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
 import { structureVerifyOn, verifyStructure } from '../verify-structure.ts';
-import { refFor, type Semantic } from '../../analysis/semantic.ts';
+import type { Semantic } from '../../analysis/semantic.ts';
 import type { Node } from '../../ast.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
@@ -177,15 +177,13 @@ const loopPassesFor = (mode: CompressMode): Visitor[] => {
  *  never hangs the build. */
 /**
  * Incremental reference maintenance (oxc `PassChanges` / `flush_pass_changes`).
- *   'off'    — recompute the facts each round with `refreshRefs` (the shipped default until this is
- *              proven; a full walk, but never wrong).
  *   'on'     — apply the traversal's recorded deltas; no walk.
  *   'verify' — apply deltas AND recompute ground truth, throwing on any divergence. This is the
  *              development and test mode: subtree MOVES are the hazard (a pass that relocates a node
  *              and then drops its old parent double-counts the move as a removal), and a hand audit of
  *              every pass is exactly what this exists to replace.
  */
-export type DeltaMode = 'off' | 'on' | 'verify';
+export type DeltaMode = 'on' | 'verify';
 // Default 'on': measured ~27% faster compress on three.core.js than recomputing the facts each round
 // (interleaved, alternating order, same process — min 383ms -> 279ms, median 513ms -> 368ms), with
 // byte-identical output on both corpora. Env-selectable so the WHOLE suite can be run under
@@ -214,60 +212,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
     // (`CallExpression.pure`) that the removal passes then act on, so it belongs to the semantic tier
     // and runs in every mode. Stamping does not itself change the program, hence no `any = true`.
     stampPureCalls(program);
-    /**
-     * Between-round refresh. Recomputes ONLY the reference facts, in one walk over the already
-     * resolved tree, instead of rebuilding the whole `Semantic`.
-     *
-     * WHY THIS IS ENOUGH, measured rather than argued. Running the loop with NO refresh at all costs
-     * output size but never correctness (three +204 bytes, crashcat +1,646; across 1509 tests the only
-     * failures were four `aliasInline` assertions that an optimization FIRED — stale counts are pure
-     * over-counting, which is oxc's documented safe direction). Running it with a refs-only refresh is
-     * BYTE-IDENTICAL to the full rebuild on both corpora. So the entire value of the old
-     * `createSemantic() + analyze()` was its reference counts; the scopes, symbols, bindings and
-     * `nodeScope` it also rebuilt were worth nothing between rounds — and `analyze` is not cheap, since
-     * it re-creates every scope, re-declares every binding and re-runs `resolveRef`'s scope-chain walk
-     * per reference (4.0% of profile on its own).
-     *
-     * `node.sym` is NOT reassigned, so symbol ids stay stable across rounds and every id already in
-     * `symbols`/`bindings`/`symbolInit` remains valid.
-     *
-     * STALENESS THAT REMAINS, deliberately. `symbolInit` keeps entries for declarators later removed or
-     * moved. That is safe because it is only ever read together with the FRESH counts: a symbol whose
-     * declarator went away has no reads left, and both consumers skip on `reads === 0`. A future pass
-     * that reads `symbolInit` WITHOUT checking counts would need this revisited.
-     */
-    const refreshRefs = (): void => {
-        // Reset IN PLACE rather than building fresh tables: `refs`/`uses` are symbol-indexed arrays
-        // whose capacity (and `refsPool`'s records) is worth keeping across rounds. `refs` clears to
-        // `undefined` — absent — never to zeroed records, which `movement.ts` distinguishes.
-        for (let i = 1; i < cur.refs.length; i++) cur.refs[i] = undefined;
-        for (let i = 1; i < cur.uses.length; i++) cur.uses[i] = 0;
-        const shorthand = new Set<number>();
-        const exported = new Set<number>();
-        emitRefFacts(program, (sym, flags) => {
-            if ((flags & (REF.READ | REF.WRITE)) !== 0) {
-                const c = refFor(cur, sym);
-                if ((flags & REF.READ) !== 0) c.reads++;
-                if ((flags & REF.WRITE) !== 0) c.writes++;
-            }
-            cur.uses[sym] = (cur.uses[sym] ?? 0) + 1;
-            if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
-            if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
-        });
-        cur.shorthand = shorthand;
-        cur.exported = exported;
-    };
 
-    /**
-     * FULL rebuild — a genuinely fresh `Semantic`, symbol ids renumbered and `node.sym` reassigned.
-     *
-     * Needed exactly once, at the end: `runCompress` RETURNS this object and the caller installs it for
-     * the downstream tier, where the MANGLER walks `symbols` to assign short names. A semantic that has
-     * been carried through the loop still lists symbols whose declarations were deleted, so the mangler
-     * would allocate names against a stale set — output the same LENGTH but with different identifiers,
-     * which is exactly how this was caught (three.core.js unchanged at 381,846 bytes but a different
-     * hash). Between rounds nothing reads that; `refreshRefs` is enough there.
-     */
     /** Fold one round's signed movements into the maintained counts. */
     const applyDeltas = (delta: Map<number, RefDelta>): void => applyRefDelta(cur, delta);
 
@@ -293,7 +238,7 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         // The ordering that makes this sound: `refresh()` runs at the END of the previous round and
         // nothing mutates between there and here, so the facts describe exactly the tree this
         // traversal is about to see. Round 1 is the same case via the caller's own `analyze`.
-        const delta = DELTA_MODE === 'off' ? null : new Map<number, RefDelta>();
+        const delta = new Map<number, RefDelta>();
         const changed = traverse(program, cur, loop, delta);
         if (!changed) break;
         // Structural check BEFORE the semantic one: a tree with a statement in an expression slot
@@ -308,16 +253,13 @@ export function runCompress(program: Node, semantic: Semantic, mode: CompressMod
         any = true;
         // Rebuild semantic between iterations so ref-counting passes (drop-unused) see current
         // reference counts after this round's removals — the loop usually settles in 1–2 rounds.
-        if (delta === null) refreshRefs();
-        else {
-            applyDeltas(delta);
-            if (DELTA_MODE === 'verify') {
-                const problems = verifyRefFacts(cur, program);
-                if (problems.length > 0)
-                    throw new Error(
-                        `incremental reference facts diverged after round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`,
-                    );
-            }
+        applyDeltas(delta);
+        if (DELTA_MODE === 'verify') {
+            const problems = verifyRefFacts(cur, program);
+            if (problems.length > 0)
+                throw new Error(
+                    `incremental reference facts diverged after round ${i + 1}:\n  ${problems.slice(0, 20).join('\n  ')}`,
+                );
         }
         // AFTER the round's `RefDelta` is folded in — checking before it reports every reference the
         // round moved as UNDER-counted, which is the instrument lying rather than a real divergence.
