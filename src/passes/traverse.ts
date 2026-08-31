@@ -12,7 +12,7 @@
 //     `ctx.replaceWith` / `replaceWithMultiple` / `remove`. Whole-AST (expressions included).
 import { emitRefFacts, REF } from '../analysis/ref-facts.ts';
 import { refFor, retireSymbol as retireSymbolIn, type Semantic } from '../analysis/semantic.ts';
-import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast.ts';
+import { CHILD_FIELDS, N, type Node, TYPE_COUNT, walk } from '../ast/index.ts';
 
 type Hook = (node: Node, ctx: TransformCtx) => void;
 

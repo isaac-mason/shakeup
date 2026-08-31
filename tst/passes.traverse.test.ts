@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { type Node, TYPE_COUNT, walk } from '../src/ast.ts';
+import { type Node, TYPE_COUNT, walk } from '../src/ast/index.ts';
 import { traverse, type Visitor } from '../src/passes/traverse.ts';
 import { parse } from '../src/parser/index.ts';
 

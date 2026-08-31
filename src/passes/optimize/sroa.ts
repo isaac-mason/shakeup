@@ -24,9 +24,7 @@
 // annotations (`const v: Vec3 = mk()`) and across modules; that needs the typed AST captured at the
 // transform stage and is tracked separately.
 import { declareLocal, lookupValue, SYM, type Semantic } from '../../analysis/semantic.ts';
-import { N, type Node, node, walk } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
-import { VAR_KIND } from '../../parser/create.ts';
+import { create, N, type Node, node, VAR_KIND, walk } from '../../ast/index.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';

@@ -18,7 +18,7 @@ import { stampPureCalls } from '../../analysis/purity.ts';
 import { semanticVerifyOn, verifyRefFacts, verifySemantic } from '../../analysis/ref-facts.ts';
 import { structureVerifyOn, verifyStructure } from '../verify-structure.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
-import type { Node } from '../../ast.ts';
+import type { Node } from '../../ast/index.ts';
 import { applyRefDelta, type RefDelta, traverse, type Visitor } from '../traverse.ts';
 import { substituteAlternateSyntax } from './alternate-syntax.ts';
 import { blockFlatten } from './block-flatten.ts';

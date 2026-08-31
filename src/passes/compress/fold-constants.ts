@@ -27,7 +27,7 @@
 //  - Anything touching an identifier, call, template, or BigInt literal bails; member/regexp fold only
 //    in the exact static shapes above.
 import { isPureExpr } from '../../analysis/effects.ts';
-import { N, type Node, set } from '../../ast.ts';
+import { N, type Node, set } from '../../ast/index.ts';
 import { hookTable, type Visitor } from '../traverse.ts';
 
 // --- literal-kind probes -----------------------------------------------------------------------

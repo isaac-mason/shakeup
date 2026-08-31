@@ -51,8 +51,7 @@
 // the parens each context needs: `(a, b)` as a ternary/assignment RHS, `a || b` / `a && b` as operands.
 
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
-import { N, type Node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type CondData = { test: Node; consequent: Node; alternate: Node };

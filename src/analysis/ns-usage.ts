@@ -1,4 +1,4 @@
-import { N, type Node, walk, walkChildren } from '../ast.ts';
+import { N, type Node, walk, walkChildren } from '../ast/index.ts';
 import { type Semantic, symbolOf } from './semantic.ts';
 
 /** How a namespace-import binding (`import * as ns`) is consumed within one module.

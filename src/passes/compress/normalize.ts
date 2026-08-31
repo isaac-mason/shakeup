@@ -4,8 +4,7 @@
 //   • drop a trailing no-op `return` from a function body (`return;` / `return undefined;` /
 //     `return void 0;` as the LAST statement — the function falls through to the same `undefined`)
 //   • strip `EmptyStatement`s from statement lists (`;`)
-import { N, type Node, statementListOf } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node, statementListOf } from '../../ast/index.ts';
 import { attachScopeNode, createScope, SCOPE } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 

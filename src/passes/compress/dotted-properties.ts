@@ -20,7 +20,7 @@
 // array indices — `IDENT_KEY`'s leading `[A-Za-z_$]` already excludes a digit start), the empty
 // string (`a[""]`), escaped keys we can't verify byte-for-byte, and any non-string-literal computed
 // key (`a[x]`, `a[0]`, `a[`t${x}`]`).
-import { N, type Node, node } from '../../ast.ts';
+import { N, type Node, node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** Identifier-name shape — identical to the printer's object-key unquoting test (print-js.ts

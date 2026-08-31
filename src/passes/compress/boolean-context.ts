@@ -42,7 +42,7 @@
 // `const b = !!x` (b HOLDS the boolean — value context, not boolean context) is never reached and never
 // simplified, and a `?:` ARM outside a boolean context is likewise untouched. Every case not matched
 // falls through unchanged.
-import { N, type Node } from '../../ast.ts';
+import { N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type UnaryData = { operator: string; prefix: boolean; argument: Node };

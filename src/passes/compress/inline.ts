@@ -32,7 +32,7 @@ import type { Semantic } from '../../analysis/semantic.ts';
 // TDZ is never a concern: the init only ever moves LATER.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
 import { type RefCounts, readsMutableSymbol, substituteSingleUse } from '../../analysis/movement.ts';
-import { N, type Node, statementListOf, walkChildren } from '../../ast.ts';
+import { N, type Node, statementListOf, walkChildren } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Snapshot state for one traversal (set at Program enter; the driver rebuilds the semantic + these

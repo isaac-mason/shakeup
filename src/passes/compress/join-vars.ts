@@ -38,8 +38,7 @@
 //     elements in so we get one flat `(a(), b(), x)` rather than a nested `((a(), b()), x)`.
 //   - We rebuild the list into a fresh array and assign (dead-code's pattern) — never splice a
 //     possibly-frozen shared array in place.
-import { N, type Node, node, statementListOf } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node, node, statementListOf } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Narrow views for the data shapes we read off already-`.type`-checked nodes (the codebase's

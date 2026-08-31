@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { bundle, createMemoryFs } from '../src/index.ts';
 import { parse } from '../src/parser/index.ts';
 

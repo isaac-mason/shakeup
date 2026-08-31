@@ -31,8 +31,7 @@
 //   • never an escaped/captured local — a closure may read it at any time
 import { buildCfg } from '../../analysis/cfg.ts';
 import { computeLiveVars } from '../../analysis/live-vars.ts';
-import { N, node, type Node, statementListOf, walk } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, node, type Node, statementListOf, walk } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 const isFn = (n: Node): boolean =>

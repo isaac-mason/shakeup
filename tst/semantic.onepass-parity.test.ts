@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic, type Semantic, SYM } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { parse } from '../src/parser';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

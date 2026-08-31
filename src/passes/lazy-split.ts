@@ -1,5 +1,4 @@
-import { N, type Node, node, set } from '../ast';
-import * as create from '../parser/create';
+import { create, N, type Node, node, set } from '../ast/index.ts';
 
 /** A synthetic identifier at a zero-width span, the shape the other lowering passes use. */
 const ident = (name: string, at = 0): Node => node(N.IdentifierReference, at, at, name, null);

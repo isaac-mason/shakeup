@@ -34,9 +34,8 @@
 //     in the result — a getter/proxy hazard oxc guards with a mutation set we don't model).
 //
 // NOT De Morgan (`!(a||b)` → `!a&&!b`): that is `minimize-not`'s lane; doing it here would oscillate.
-import { N, type Node } from '../../ast.ts';
+import { create, N, type Node } from '../../ast/index.ts';
 import { boolCoerce } from './fold-constants.ts';
-import * as create from '../../parser/create.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type LogicalData = { operator: string; left: Node; right: Node };

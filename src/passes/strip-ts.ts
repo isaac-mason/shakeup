@@ -6,8 +6,7 @@
 // A1a (this file): the functional strip — unwrap type-assertion expressions, remove type-only
 // statements + class members, filter type-only import/export specifiers, and lower constructor
 // parameter properties. A1b (annotation-field clearing, for a fully plain-JS AST) is layered on top.
-import { N, type Node, node, walk } from '../ast.ts';
-import * as create from '../parser/create.ts';
+import { create, N, type Node, node, walk } from '../ast/index.ts';
 import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim)

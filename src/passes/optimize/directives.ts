@@ -11,7 +11,7 @@
 // template literal is not excluded. To matter it would have to sit at a position that also happens to
 // be a construct's exact start offset, which authored code does not produce by accident. compilecat
 // avoids this by reading the parser's comment list; if it ever bites, that is the fix.
-import { N, type Node, walk } from '../../ast.ts';
+import { N, type Node, walk } from '../../ast/index.ts';
 
 /** The authored optimization directives, as a bit per token. */
 export const DIRECTIVE = {

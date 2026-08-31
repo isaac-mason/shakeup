@@ -1,4 +1,4 @@
-import { isIdentifier, N, type Node, walkChildren } from '../ast.ts';
+import { isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
 
 /**
  * Visit every identifier in `node`'s subtree that carries a symbol — the

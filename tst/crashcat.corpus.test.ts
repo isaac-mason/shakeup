@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { buildCfg, verifyCfg } from '../src/analysis/cfg.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { bundle } from '../src/bundle.ts';
 import { parse } from '../src/index.ts';
 import { setLivenessDriver } from '../src/passes/optimize/dead-store.ts';

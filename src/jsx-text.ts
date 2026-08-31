@@ -1,4 +1,4 @@
-import { N, type Node } from './ast.ts';
+import { N, type Node } from './ast/index.ts';
 
 /**
  * JSX text/name utilities used by the JSX lowering pass (`passes/lower-jsx.ts`): entity decoding,

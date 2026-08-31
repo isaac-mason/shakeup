@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { N, type Node, node } from '../src/ast.ts';
-import * as create from '../src/parser/create.ts';
+import { create, N, type Node, node } from '../src/ast/index.ts';
 import { wrapModuleBody } from '../src/passes/wrap-module.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';

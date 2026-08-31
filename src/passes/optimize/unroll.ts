@@ -19,10 +19,9 @@
 // closure created in the body captures that iteration's value — exactly what substituting the literal
 // produces. Each iteration is wrapped in its own block so body-level `let`/`const` declarations don't
 // collide across copies.
-import { cloneNode, N, type Node, node, statementListOf, walk } from '../../ast.ts';
+import { cloneNode, create, N, type Node, node, statementListOf, walk } from '../../ast/index.ts';
 import { attachScopeNode, cloneSemanticSubtree, createScope, SCOPE } from '../../analysis/semantic.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
-import * as create from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 

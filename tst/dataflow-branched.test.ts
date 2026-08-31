@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { BRANCH, buildCfg } from '../src/analysis/cfg.ts';
 import { type DataflowSpec, solve } from '../src/analysis/dataflow.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { parse } from '../src/index.ts';
 
 // Exercises the two parts of the framework that backward liveness never touches:

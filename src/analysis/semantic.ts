@@ -1,4 +1,4 @@
-import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast.ts';
+import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */

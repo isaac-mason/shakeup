@@ -41,7 +41,7 @@
 //
 // CONSERVATIVE: behavior-identical only. Relational-operator flips are the NaN landmine — never done.
 // Anything not matched here keeps its `!` untouched (a bail is always correct).
-import { N, type Node } from '../../ast.ts';
+import { N, type Node } from '../../ast/index.ts';
 import { hookTable, type Visitor } from '../traverse.ts';
 
 type UnaryData = { operator: string; prefix: boolean; argument: Node };

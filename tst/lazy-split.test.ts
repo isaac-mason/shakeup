@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { Node } from '../src/ast.ts';
+import type { Node } from '../src/ast/index.ts';
 import { parse } from '../src/parser/index.ts';
 import { lazySplit } from '../src/passes/lazy-split.ts';
 import { printStmt } from '../src/print/print-js.ts';

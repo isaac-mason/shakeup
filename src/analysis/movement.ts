@@ -7,7 +7,7 @@
 // INVARIANT (same discipline as drop-unused): never UNDER-count writes. Over-counting a write only
 // costs a missed transform; under-counting is a miscompile (we'd move/inline a binding that is
 // actually reassigned). Every ambiguous target position is therefore counted as a write.
-import { N, type Node, walkChildren } from '../ast.ts';
+import { N, type Node, walkChildren } from '../ast/index.ts';
 import { mayHaveSideEffects } from './effects.ts';
 
 /** Per-symbol read/write reference counts. `reads` = value uses; `writes` = reassignments

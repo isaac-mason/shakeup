@@ -24,19 +24,17 @@
 //
 // SKIPPED for v1: `Infinity` → `1/0` (a BinaryExpression at multiplicative precedence — not always a
 // clean swap in context; deferred, low payoff).
-import { N, type Node, node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
-import { OP, UnaryExpression } from '../../parser/create.ts';
+import { create, N, type Node, node, OP } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** `NumericLiteral` `0`/`1` — data-less leaf; the printer emits `node.name` verbatim. */
 const num = (n: Node, text: string): Node => node(N.NumericLiteral, n.start, n.end, text, null);
 
 /** `!<0|1>` for a boolean literal: `true` → `!0`, `false` → `!1`. */
-const notNum = (n: Node, digit: string): Node => UnaryExpression(n.start, n.end, OP.NOT, num(n, digit));
+const notNum = (n: Node, digit: string): Node => create.UnaryExpression(n.start, n.end, OP.NOT, num(n, digit));
 
 /** `void 0` for a global `undefined` reference. */
-const voidZero = (n: Node): Node => UnaryExpression(n.start, n.end, OP.VOID, num(n, '0'));
+const voidZero = (n: Node): Node => create.UnaryExpression(n.start, n.end, OP.VOID, num(n, '0'));
 
 /** Is `n` an IdentifierReference to the GLOBAL `undefined`? `sym === 0` = unresolved/global, so a
  *  shadowed `let undefined = …` (nonzero sym) is correctly excluded. */
@@ -264,7 +262,7 @@ export const substituteAlternateSyntax: Visitor = {
             switch (prop) {
                 case 'NaN': ctx.replaceWith(div('0', '0')); return;
                 case 'POSITIVE_INFINITY': ctx.replaceWith(div('1', '0')); return;
-                case 'EPSILON': ctx.replaceWith(pow('2', UnaryExpression(n.start, n.end, OP.NEG, NUM('52')))); return;
+                case 'EPSILON': ctx.replaceWith(pow('2', create.UnaryExpression(n.start, n.end, OP.NEG, NUM('52')))); return;
                 case 'MAX_SAFE_INTEGER':
                     ctx.replaceWith(create.BinaryExpression(n.start, n.end, '-', pow('2', NUM('53')), NUM('1')));
                     return;
@@ -346,7 +344,9 @@ export const substituteAlternateSyntax: Visitor = {
             const arg = d.arguments[0];
             if (arg.type === N.SpreadElement) return;
             // `!!x` — inner `!` then outer `!`; the printer parenthesizes the argument as needed.
-            ctx.replaceWith(UnaryExpression(n.start, n.end, OP.NOT, UnaryExpression(arg.start, arg.end, OP.NOT, arg)));
+            ctx.replaceWith(
+                create.UnaryExpression(n.start, n.end, OP.NOT, create.UnaryExpression(arg.start, arg.end, OP.NOT, arg)),
+            );
         },
         // `return undefined;` / `return void 0;` → `return;` — a ReturnStatement whose argument is the
         // undefined value yields the same completion value with the argument dropped. (An implicit

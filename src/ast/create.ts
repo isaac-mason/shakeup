@@ -1,8 +1,13 @@
 // AST node builders — free functions, namespaced at call sites as `create.Foo(...)`
 // via `import * as create`. Owns the parse-flag vocabulary (FL / VAR_KIND / OP) the
-// builders decode from a `flags` int, so parser.ts imports both `* as create` and
-// those constants from here (clean ast <- create <- parser DAG).
-import { type Accessibility, N, type Node, node } from '../ast.ts';
+// builders decode from a `flags` int, so callers import both `* as create` and those
+// constants from here (clean `ast <- create <- {parser, passes}` DAG).
+//
+// This is the construction API for the WHOLE codebase, not a parser helper: the parser
+// and 22 pass files build nodes through it, which is why it lives beside `ast/index.ts`
+// rather than under `parser/` (oxc's `oxc_ast::AstBuilder`, shared by parser, transformer
+// and minifier alike).
+import { type Accessibility, N, type Node, node } from './ast.ts';
 import { enumeration } from '../util/enumeration';
 
 export const FL = {

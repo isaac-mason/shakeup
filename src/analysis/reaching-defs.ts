@@ -29,7 +29,7 @@
 import { type Cfg } from './cfg.ts';
 import { type DataflowSpec, solve } from './dataflow.ts';
 import { genKill } from './gen-kill.ts';
-import type { Node } from '../ast.ts';
+import type { Node } from '../ast/index.ts';
 
 /** No information — join identity. */
 export const TOP = -2;

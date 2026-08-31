@@ -12,7 +12,7 @@
 //      global is untouched. oxc's `is_global_or_ambient_reference`.
 //   2. Assignment targets are never replaced — `process.env.NODE_ENV = x` must not become
 //      `"production" = x`. oxc uses an AST-node lock; the enter-order equivalent is used here.
-import { N, type Node, node } from '../ast.ts';
+import { N, type Node, node } from '../ast/index.ts';
 import { parse } from '../parser/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 

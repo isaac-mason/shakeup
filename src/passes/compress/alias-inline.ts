@@ -29,7 +29,7 @@
 // IMPORT because an ESM import is a LIVE binding: `export let counter` can be reassigned by the
 // exporter, so a captured `const b = counter` is NOT interchangeable with a fresh read of `counter`.
 import { lookupValue, SYM } from '../../analysis/semantic.ts';
-import { N, node } from '../../ast.ts';
+import { N, node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** The binding a candidate alias stands for: its symbol id, and the name to print at each read. */

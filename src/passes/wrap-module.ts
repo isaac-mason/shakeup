@@ -19,8 +19,7 @@
 // after the wrapper is built (it is the last step before printing), and a chunk-level pass analyses
 // the assembled program from scratch. If that ever changes, mint the scope the way `ctx.mintBlock`
 // does rather than leaving it 0.
-import { cloneNode, N, type Node, node } from '../ast.ts';
-import * as create from '../parser/create.ts';
+import { cloneNode, create, N, type Node, node } from '../ast/index.ts';
 
 const S = 0; // synthetic: zero-width span, the shape the other lowering passes use
 const binding = (name: string): Node => node(N.BindingIdentifier, S, S, name, null);

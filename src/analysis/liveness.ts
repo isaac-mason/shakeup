@@ -17,7 +17,7 @@
 // initialiser). Everything else contributes reads only. Never killing where a kill is uncertain means
 // the analysis can only ever report a variable MORE live than it is — which loses optimizations,
 // never correctness.
-import { N, type Node } from '../ast.ts';
+import { N, type Node } from '../ast/index.ts';
 import { genKill } from './gen-kill.ts';
 
 /** Symbols live immediately AFTER each statement. */

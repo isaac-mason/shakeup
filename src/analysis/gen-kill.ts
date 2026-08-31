@@ -16,7 +16,7 @@
 //
 // Ported from Closure's `LiveVariablesAnalysis.computeGenKill`
 // (llm/closure/src/com/google/javascript/jscomp/LiveVariablesAnalysis.java:252).
-import { N, type Node, walkChildren } from '../ast.ts';
+import { N, type Node, walkChildren } from '../ast/index.ts';
 
 /**
  * Accumulate the symbols `n` READS (`gen`) and definitely OVERWRITES (`kill`).

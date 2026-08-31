@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildCfg } from '../src/analysis/cfg.ts';
 import { computeReachingUses } from '../src/analysis/reaching-uses.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { parse } from '../src/index.ts';
 
 // Maybe-reaching (upward-exposed) uses — Closure `MaybeReachingVariableUse`. The key questions for its

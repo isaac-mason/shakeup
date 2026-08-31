@@ -19,7 +19,7 @@
 //     Both are worklist algorithms over the same lattice — this changes only the visit ORDER, which
 //     affects how fast the fixed point is reached and never what it is.
 import { type Branch, type Cfg, IMPLICIT_RETURN } from './cfg.ts';
-import type { Node } from '../ast.ts';
+import type { Node } from '../ast/index.ts';
 
 /** Divergence guard (Closure's `MAX_STEPS_PER_NODE`), expressed as whole sweeps. */
 export const MAX_SWEEPS = 10_000;

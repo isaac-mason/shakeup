@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { N, type Node } from '../src/ast.ts';
+import { create, N, type Node } from '../src/ast/index.ts';
 import { parse } from '../src/parser';
-import * as create from '../src/parser/create.ts';
 import { verifyStructure } from '../src/passes/verify-structure.ts';
 
 // The verifier that would have caught the quieter half of the loop-head miscompile: `dropUnused`

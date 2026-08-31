@@ -21,7 +21,7 @@
 import { BRANCH, type Cfg } from './cfg.ts';
 import { genKill } from './gen-kill.ts';
 import { type DataflowSpec, solve } from './dataflow.ts';
-import type { Node } from '../ast.ts';
+import type { Node } from '../ast/index.ts';
 
 /** A dense bitset over the tracked-variable index space. */
 export type LiveSet = Uint32Array;

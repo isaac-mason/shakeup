@@ -28,7 +28,7 @@ import { isPureExpr, mayHaveSideEffects } from '../../analysis/effects.ts';
 import { buildCfg, type Cfg } from '../../analysis/cfg.ts';
 import { computeReachingDefs, TOP } from '../../analysis/reaching-defs.ts';
 import { computeReachingUses } from '../../analysis/reaching-uses.ts';
-import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast.ts';
+import { cloneNode, N, type Node, set, statementListOf, walk, walkChildren } from '../../ast/index.ts';
 import { attachScopeNode, lookupValue, retireSymbol, type Semantic, scopeOf } from '../../analysis/semantic.ts';
 import { addRefFacts, subtractRefFacts } from '../../analysis/ref-facts.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';

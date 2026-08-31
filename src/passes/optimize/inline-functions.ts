@@ -29,10 +29,8 @@
 //     mismatch. This also covers globals (`Math`), which a local binding at the call site can shadow.
 import { isPureExpr } from '../../analysis/effects.ts';
 import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
-import { cloneNode, N, type Node, node, walk, walkChildren } from '../../ast.ts';
+import { cloneNode, create, N, type Node, node, VAR_KIND, walk, walkChildren } from '../../ast/index.ts';
 import { attachScopeNode, createScope, declareLocal, SCOPE, SYM } from '../../analysis/semantic.ts';
-import * as create from '../../parser/create.ts';
-import { VAR_KIND } from '../../parser/create.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 import { mutateForBlockInline } from './block-mutate.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';

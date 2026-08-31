@@ -7,7 +7,7 @@ import {
     node,
     walk,
     walkChildren,
-} from '../src/ast.ts';
+} from '../src/ast/index.ts';
 import { parse } from '../src/parser';
 
 const snippet = `

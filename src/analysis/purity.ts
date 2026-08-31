@@ -23,7 +23,7 @@
 // would be computed too late for the passes that consume it. Within one module this still covers the
 // common case — helpers declared and called in the same file — and, for a scope-hoisted bundle, the
 // bundle IS one module.
-import { N, type Node, walk } from '../ast.ts';
+import { N, type Node, walk } from '../ast/index.ts';
 import { type Graph, type Linked, packRef } from '../graph-types.ts';
 import { markInferredPure } from './effects.ts';
 

@@ -26,7 +26,7 @@
 // are the shipping ones rather than a guess.
 import { readFileSync } from 'node:fs';
 import { parse } from '../../src/index.ts';
-import { N, type Node, TYPE_COUNT, walkChildren } from '../../src/ast.ts';
+import { N, type Node, TYPE_COUNT, walkChildren } from '../../src/ast/index.ts';
 import { substituteAlternateSyntax } from '../../src/passes/compress/alternate-syntax.ts';
 import { blockFlatten } from '../../src/passes/compress/block-flatten.ts';
 import { booleanContext } from '../../src/passes/compress/boolean-context.ts';

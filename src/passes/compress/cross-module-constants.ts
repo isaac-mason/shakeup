@@ -21,7 +21,7 @@
 //     this runs after scan's compress, which has already rewritten `const` → `let` in full-minify mode.
 //   • A binding the analysis cannot see whole (re-exported through a namespace, bound to something
 //     other than a literal) is simply not a candidate.
-import { cloneNode, N, type Node, walk } from '../../ast.ts';
+import { cloneNode, N, type Node, walk } from '../../ast/index.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
 

@@ -22,7 +22,7 @@
 // BAILS ENTIRELY when the class sits under a direct `eval`, which can name a private member at runtime
 // (oxc checks `contains_direct_eval` first).
 import { isPureExpr } from '../../analysis/effects.ts';
-import { N, type Node } from '../../ast.ts';
+import { N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** One frame per class; each holds the `#name`s READ inside it (minus those it declares, on exit). */

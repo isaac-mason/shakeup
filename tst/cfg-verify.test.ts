@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { BRANCH, buildCfg, IMPLICIT_RETURN, verifyCfg } from '../src/analysis/cfg.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { parse } from '../src/index.ts';
 
 // Phase 0c of the CFG migration: assert the graph is WELL-FORMED, independently of whether its answers

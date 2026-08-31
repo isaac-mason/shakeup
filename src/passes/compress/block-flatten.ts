@@ -17,7 +17,7 @@
 // LEFT INTACT: a block declaring a `function` or `class` (hoisting and id-renaming are not worth it),
 // and any block that is a control-flow body rather than a list element (`if (c) { … }` — `normalize`
 // owns that case, and unwrapping it there is subject to the dangling-`else` rule).
-import { N, type Node, statementListOf, walk } from '../../ast.ts';
+import { N, type Node, statementListOf, walk } from '../../ast/index.ts';
 import { scopeOf, type Semantic } from '../../analysis/semantic.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 

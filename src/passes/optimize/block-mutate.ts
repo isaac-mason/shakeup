@@ -26,9 +26,7 @@
 // is the caller's decision: it substitutes simple non-reassigned arguments directly into the body and
 // sends only the rest (reassigned params, and side-effecting args that must be evaluated exactly once).
 // α-renaming, when an argument references a param's name, is likewise the caller's job.
-import { N, type Node, node, walk } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
-import { VAR_KIND } from '../../parser/create.ts';
+import { create, N, type Node, node, VAR_KIND, walk } from '../../ast/index.ts';
 
 /** Synthetic span for generated nodes (shakeup's convention for compiler-generated code). */
 const S = 0;

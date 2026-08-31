@@ -15,9 +15,7 @@
 //
 // THE BREAK MUST BE UNLABELLED. A labelled `break L` may target an OUTER loop, so hoisting it into
 // THIS loop's test would change which loop exits.
-import { N, type Node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
-import { OP, UnaryExpression } from '../../parser/create.ts';
+import { create, N, type Node, OP } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type ForData = { init: Node | null; test: Node | null; update: Node | null; body: Node };
@@ -42,7 +40,7 @@ function not(expr: Node): Node {
         const d = expr.data as { operator: string; argument: Node };
         if (d.operator === '!') return d.argument;
     }
-    return UnaryExpression(expr.start, expr.end, OP.NOT, expr);
+    return create.UnaryExpression(expr.start, expr.end, OP.NOT, expr);
 }
 
 /** `test && extra`, or just `extra` when the loop had no test. */

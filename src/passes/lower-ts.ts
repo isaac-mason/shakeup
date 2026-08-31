@@ -3,9 +3,7 @@
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
 import { isPureExpr } from '../analysis/effects.ts';
 import { attachScopeNode, createScope, declareLocal, SCOPE, SYM, scopeOf, type Semantic } from '../analysis/semantic.ts';
-import { N, type Node, node, set, walk } from '../ast.ts';
-import * as create from '../parser/create.ts';
-import { FL, VAR_KIND } from '../parser/create.ts';
+import { create, FL, N, type Node, node, set, VAR_KIND, walk } from '../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the enum site)

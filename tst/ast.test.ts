@@ -11,7 +11,7 @@ import {
     type TypeName,
     walk,
     walkChildren,
-} from '../src/ast.ts';
+} from '../src/ast/index.ts';
 
 /** Frozen name->id snapshot taken from the pre-migration enumeration. Pins that
  * the DEFS-derived ids are byte-for-byte identical to the old vocabulary and that

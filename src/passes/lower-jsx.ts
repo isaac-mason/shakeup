@@ -9,10 +9,8 @@
 // `pure`-annotated per `resolveJSXOptions().pure`; standard side-effect detection judges it (oxc/rolldown
 // default — no bespoke JSX purity).
 import { declareSyntheticImport, type Semantic } from '../analysis/semantic.ts';
-import { N, type Node, node } from '../ast.ts';
+import { create, FL, N, type Node, node } from '../ast/index.ts';
 import { attrKeyText, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../jsx-text.ts';
-import * as create from '../parser/create.ts';
-import { FL } from '../parser/create.ts';
 import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
 
 const S = 0; // synthetic span (leaves print verbatim; spans collapse to the JSX site)

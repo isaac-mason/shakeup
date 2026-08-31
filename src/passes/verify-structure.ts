@@ -20,7 +20,7 @@ import { semanticVerifyOn } from '../analysis/ref-facts.ts';
 // Scope is deliberately the one direction that is expressible by mistake: a STATEMENT reaching a
 // slot that does not take one. Passes build statements and expressions and move them between slots;
 // nothing in the type system distinguishes the two, since every node is the same `Node` shape.
-import { CHILD_FIELDS, N, type Node, walk } from '../ast.ts';
+import { CHILD_FIELDS, N, type Node, walk } from '../ast/index.ts';
 
 /** `SEMANTIC_VERIFY=1` turns this on, alongside the semantic differential it rides with. */
 export const structureVerifyOn = (): boolean => semanticVerifyOn();

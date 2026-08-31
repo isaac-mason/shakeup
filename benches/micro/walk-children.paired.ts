@@ -26,7 +26,7 @@
 // resolution is ~+-33% (see ./lex-dispatch.paired.ts).
 import { readFileSync } from 'node:fs';
 import { parse } from '../../src/index.ts';
-import { CHILD_FIELDS, N, type Node, walkChildren } from '../../src/ast.ts';
+import { CHILD_FIELDS, N, type Node, walkChildren } from '../../src/ast/index.ts';
 
 type FieldSpec = { name: string; list: boolean };
 

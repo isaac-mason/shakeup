@@ -3,7 +3,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
 import { describe, expect, it } from 'vitest';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { ESTREE_TYPE } from '../src/estree.ts';
 import { parse } from '../src/parser';
 

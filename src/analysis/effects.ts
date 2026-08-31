@@ -1,4 +1,4 @@
-import { N, type Node } from '../ast.ts';
+import { N, type Node } from '../ast/index.ts';
 
 /**
  * Whether evaluating this expression MAY have an observable side effect (oxc's

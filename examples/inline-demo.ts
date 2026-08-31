@@ -1,6 +1,6 @@
 import { isPureExpr } from '../src/analysis/effects.ts';
 import { analyze, createSemantic, type Semantic, symbolOf } from '../src/analysis/semantic.ts';
-import { cloneNode, isIdentifier, N, type Node, type Program, walkChildren } from '../src/ast.ts';
+import { cloneNode, isIdentifier, N, type Node, type Program, walkChildren } from '../src/ast/index.ts';
 import { parse } from '../src/parser';
 
 const source = [

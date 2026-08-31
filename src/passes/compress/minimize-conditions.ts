@@ -40,8 +40,7 @@
 //     when the body is empty; dropping it would be a miscompile if `a` is impure.
 //   - Real nodes are built (never hand-formatted text) so the printer's precedence machinery adds
 //     exactly the parens it needs: `(a, b) && c()`, `a ? b : (c, d)`, `(a, b) || c()`, etc.
-import { N, type Node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 type IfData = { test: Node; consequent: Node; alternate: Node | null };

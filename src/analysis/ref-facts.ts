@@ -12,7 +12,7 @@
 // classification that added it. Getting `writes` wrong in particular is not a size regression — an
 // under-counted write makes `aliasInline` believe a binding is never reassigned, and it will happily
 // substitute across the reassignment.
-import { N, type Node, walk, walkChildren } from '../ast.ts';
+import { N, type Node, walk, walkChildren } from '../ast/index.ts';
 import { analyze, createSemantic, type Semantic } from './semantic.ts';
 
 /** Syntactic role of a reference. Mirrors the private flags in `semantic.ts` deliberately. */

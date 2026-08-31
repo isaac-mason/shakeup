@@ -18,8 +18,7 @@
 // list (list-container hook) so `if(true){a;b}` becomes `a;b` — but only when the block has no
 // block-scoped declarations (`let`/`const`/`class`/`function`) at its top level, else flattening
 // would leak lexical scope, so we keep the block intact.
-import { N, type Node, statementListOf } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node, statementListOf } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Narrow views used where the `Node` union isn't already refined by a `switch (node.type)`. The

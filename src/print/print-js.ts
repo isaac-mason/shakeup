@@ -1,4 +1,4 @@
-import { N, type Node, TYPE_COUNT, TYPE_NAME } from '../ast.ts';
+import { N, type Node, TYPE_COUNT, TYPE_NAME } from '../ast/index.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
 import { dropTrailingSemi, mark, type Printer, parens, semi, softNewline, softSpace, space, write } from './printer.ts';
 

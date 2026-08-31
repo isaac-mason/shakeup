@@ -9,8 +9,7 @@
 // oxc's `remove_unused_assignment_expr` needs position-sensitive liveness + `is_implicitly_observable`
 // + is itself gated behind a `CompressOptionsUnused` option — a larger, separately-gated pass.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
-import { N, type Node, statementListOf } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node, statementListOf } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** Combine effect-preserving remainders into one expression: none → null, one → itself, many → a

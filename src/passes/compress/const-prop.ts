@@ -16,7 +16,7 @@
 // win). A MULTI-read binding inlines only SMALL constants (int −99..999, string ≤3 chars, bool/null/
 // undefined) — duplicating a long string across many reads would bloat the output.
 import { SYM } from '../../analysis/semantic.ts';
-import { N, type Node, node } from '../../ast.ts';
+import { N, type Node, node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** Map from a candidate SymbolId to the literal template to copy into each of its reads. Set at

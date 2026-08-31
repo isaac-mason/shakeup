@@ -2,7 +2,7 @@
 // aliases (P / K / T_*), and diagnostic raising. Both lexer.ts and parser.ts
 // import from here, so this module depends on neither of them (a clean DAG:
 // state ← lexer ← parser).
-import type { Node } from '../ast.ts';
+import type { Node } from '../ast/index.ts';
 import { formatError, type ParseErrorCode } from './errors.ts';
 import { TOK } from './token.ts';
 

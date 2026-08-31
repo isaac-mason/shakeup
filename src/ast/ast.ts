@@ -1,4 +1,4 @@
-import { enumeration } from './util/enumeration';
+import { enumeration } from '../util/enumeration';
 
 type ChildSchema = { kind: 'child' };
 const child: ChildSchema = { kind: 'child' };

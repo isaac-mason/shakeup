@@ -28,9 +28,7 @@
 // The consequent must be a BARE `return;` — a `return <value>` is not equivalent (the function would
 // yield that value rather than `undefined`), and a `return undefined` spelling is left alone because
 // `substituteAlternateSyntax` only normalises those in the FINAL pass, after this one has run.
-import { N, type Node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
-import { OP, UnaryExpression } from '../../parser/create.ts';
+import { create, N, type Node, OP } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** The single statement a clause holds, unwrapping a one-statement block (`{ return; }` → `return;`). */
@@ -58,7 +56,7 @@ function foldGuard(body: Node[]): boolean {
         const rest = body.slice(i + 1);
         if (!rest.every((s) => s.type === N.ExpressionStatement)) continue;
         const block = create.BlockStatement(rest[0].start, rest[rest.length - 1].end, 0, rest);
-        const negated = UnaryExpression(test.start, test.end, OP.NOT, test);
+        const negated = create.UnaryExpression(test.start, test.end, OP.NOT, test);
         const rewritten = create.IfStatement(body[i].start, block.end, 0, negated, block, null);
         body.length = i;
         body.push(rewritten);

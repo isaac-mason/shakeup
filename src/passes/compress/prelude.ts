@@ -19,7 +19,7 @@
 // Keep it CORRECT, not merely historical: it is asserted equal to `analyze`, so a bug here reads as a
 // bug there. It has already had one (computed keys in a destructuring target went uncounted).
 import type { RefCounts } from '../../analysis/movement.ts';
-import type { Node } from '../../ast.ts';
+import type { Node } from '../../ast/index.ts';
 import { emitRefFacts, REF } from '../../analysis/ref-facts.ts';
 
 export type Prelude = {

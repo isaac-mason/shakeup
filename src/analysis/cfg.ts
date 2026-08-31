@@ -27,7 +27,7 @@
 // ON_EX edge to the nearest catch (or finally). `finallyMap` records transfers that must be rewired
 // once a finally block's own follow is known — Closure's mechanism for `break`/`return` crossing a
 // finally.
-import { N, type Node, walkChildren } from '../ast.ts';
+import { N, type Node, walkChildren } from '../ast/index.ts';
 
 /** Edge kinds. Closure `ControlFlowGraph.Branch`. */
 export const BRANCH = {

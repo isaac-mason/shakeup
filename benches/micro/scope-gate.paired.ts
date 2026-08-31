@@ -13,7 +13,7 @@
 // construction rather than a hand-maintained list — turns the common case into one typed-array load.
 import { readFileSync } from 'node:fs';
 import { parse } from '../../src/index.ts';
-import { type Node, TYPE_COUNT, walkChildren } from '../../src/ast.ts';
+import { type Node, TYPE_COUNT, walkChildren } from '../../src/ast/index.ts';
 import { analyze, createSemantic } from '../../src/analysis/semantic.ts';
 
 const SRC = readFileSync('/Users/isaacmason/Development/shakeup/llm/spikes/node_modules/three/build/three.core.js', 'utf8');

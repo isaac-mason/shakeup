@@ -16,7 +16,7 @@
 //
 // It models only the structure of WRITTEN annotations — no inference, no narrowing, no conditional or
 // mapped types. Anything unmodelled returns `null`, and `null` is always safe: SROA simply does not fire.
-import { N, type Node } from '../../ast.ts';
+import { N, type Node } from '../../ast/index.ts';
 import { hookTable, type Visitor } from '../traverse.ts';
 
 /** Declaration start offset → the aggregate's field names, in order. */

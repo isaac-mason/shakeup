@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildCfg } from '../src/analysis/cfg.ts';
 import { BOTTOM, computeReachingDefs, TOP } from '../src/analysis/reaching-defs.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { N, type Node, walk } from '../src/ast.ts';
+import { N, type Node, walk } from '../src/ast/index.ts';
 import { parse } from '../src/index.ts';
 
 // Must-be-reaching definitions (Closure `MustBeReachingVariableDef`). The properties worth pinning are

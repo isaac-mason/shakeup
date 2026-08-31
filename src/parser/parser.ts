@@ -1,17 +1,20 @@
 import {
     allocId,
     type BindingIdentifier,
+    create,
+    FL,
     type IdentifierName,
     type IdentifierReference,
+    type KeywordType,
     type LabelIdentifier,
     N,
     type Node,
     type NodeOf,
+    OP,
     type Program,
-} from '../ast.ts';
+    VAR_KIND,
+} from '../ast/index.ts';
 import { enumeration } from '../util/enumeration';
-import * as create from './create.ts';
-import { FL, type KeywordType, OP, VAR_KIND } from './create.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
     C_DIG,

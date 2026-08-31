@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { N } from '../src/ast.ts';
+import { N } from '../src/ast/index.ts';
 import { bundle } from '../src/bundle.ts';
 import { createMemoryFs } from '../src/fs.ts';
 import { parse } from '../src/parser/index.ts';

@@ -1,5 +1,5 @@
 import type { AST_NODE_TYPES } from '@typescript-eslint/types';
-import { N, NODE_TYPE_NAMES, TYPE_COUNT, type TypeName } from './ast.ts';
+import { N, NODE_TYPE_NAMES, TYPE_COUNT, type TypeName } from './ast/index.ts';
 
 type ESTreeTypeName = `${AST_NODE_TYPES}`;
 

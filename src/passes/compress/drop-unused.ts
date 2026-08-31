@@ -30,8 +30,7 @@
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
 import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
-import { N, type Node } from '../../ast.ts';
-import * as create from '../../parser/create.ts';
+import { create, N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Use-count snapshot for the current traversal, keyed by SymbolId. Set on Program-enter (fires once,
