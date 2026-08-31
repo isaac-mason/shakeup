@@ -48,7 +48,7 @@ function not(expr: Node): Node {
 /** `test && extra`, or just `extra` when the loop had no test. */
 function andWith(test: Node | null, extra: Node): Node {
     if (test === null) return extra;
-    return create.LogicalExpression(test.start, extra.end, '&&', test, extra) as Node;
+    return create.LogicalExpression(test.start, extra.end, '&&', test, extra);
 }
 
 /** Replace the body's FIRST statement with `next` (or drop it when there is none). */

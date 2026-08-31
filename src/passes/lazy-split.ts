@@ -133,12 +133,7 @@ function toAssignment(decl: Node): Node[] {
         if (dd.init === null) continue;
         const target = toTarget(dd.id);
         out.push(
-            create.ExpressionStatement(
-                d.start,
-                d.end,
-                0,
-                create.AssignmentExpression(d.start, d.end, '=', target, dd.init),
-            ) as Node,
+            create.ExpressionStatement(d.start, d.end, 0, create.AssignmentExpression(d.start, d.end, '=', target, dd.init)),
         );
     }
     return out;
@@ -176,7 +171,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                         stmt.end,
                         0,
                         create.AssignmentExpression(stmt.start, stmt.end, '=', ident(defaultName, stmt.start), decl),
-                    ) as Node,
+                    ),
                 );
             }
         } else unwrapped.push(stmt);
@@ -208,7 +203,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                         stmt.end,
                         0,
                         create.AssignmentExpression(stmt.start, stmt.end, '=', ident(id.name, id.start), expr),
-                    ) as Node,
+                    ),
                 );
                 continue;
             }
@@ -228,9 +223,9 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                     // resolve the declaration and its uses to one name.
                     const b = binding(n.name, n.start);
                     b.sym = n.sym;
-                    return create.VariableDeclarator(0, 0, 0, b, null, null) as Node;
+                    return create.VariableDeclarator(0, 0, 0, b, null, null);
                 }),
-            ) as Node,
+            ),
         );
     }
     return { hoisted, functions, body: out };

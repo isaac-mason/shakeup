@@ -18,7 +18,7 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 function seqOf(parts: Node[]): Node | null {
     if (parts.length === 0) return null;
     if (parts.length === 1) return parts[0];
-    return create.SequenceExpression(parts[0].start, parts[parts.length - 1].end, 0, parts) as Node;
+    return create.SequenceExpression(parts[0].start, parts[parts.length - 1].end, 0, parts);
 }
 
 /** Reduce a VALUE-DISCARDED expression to just its observable effects, or `null` if it has none
@@ -60,7 +60,7 @@ function stripDiscarded(node: Node): Node | null {
             const rs = stripDiscarded(d.right as Node);
             if (rs === null) return stripDiscarded(d.left as Node);
             if (rs === d.right) return node; // unchanged — do not rebuild (see `sameList`)
-            return create.LogicalExpression(node.start, node.end, d.operator as string, d.left as Node, rs) as Node;
+            return create.LogicalExpression(node.start, node.end, d.operator as string, d.left as Node, rs);
         }
         case N.ArrayExpression: {
             // The literal itself is inert; keep only effectful elements (a spread iterates → keep whole).

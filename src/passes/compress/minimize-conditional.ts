@@ -150,8 +150,8 @@ function hoistCommonAssign(n: Node, test: Node, consequent: Node, alternate: Nod
     // Same binding, not merely the same spelling — a shadowed name would be a different variable.
     if ((c.left as { sym: number }).sym !== (a.left as { sym: number }).sym) return null;
     if (c.left.name !== a.left.name) return null;
-    const inner = create.ConditionalExpression(n.start, n.end, 0, test, c.right, a.right) as Node;
-    return create.AssignmentExpression(n.start, n.end, '=', c.left, inner) as Node;
+    const inner = create.ConditionalExpression(n.start, n.end, 0, test, c.right, a.right);
+    return create.AssignmentExpression(n.start, n.end, '=', c.left, inner);
 }
 
 function minimizeConditional(n: Node): Node | null {

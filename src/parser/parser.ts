@@ -375,7 +375,7 @@ function parseExpression(state: ParserState, noIn = false): Node {
         const from = state.sp;
         push(state, expr);
         while (eatP(state, P.COMMA)) push(state, parseAssign(state, noIn));
-        return create.SequenceExpression(start, state.tokStart, 0, finishList(state, from)) as Node;
+        return create.SequenceExpression(start, state.tokStart, 0, finishList(state, from));
     }
     return expr;
 }
@@ -563,7 +563,7 @@ function parseAssign(state: ParserState, noIn = false): Node {
             !isP(state, P.COLON)
         )
             arg = parseAssign(state, noIn);
-        return create.YieldExpression(start, arg ? arg.end : state.tokStart, flags, arg) as Node;
+        return create.YieldExpression(start, arg ? arg.end : state.tokStart, flags, arg);
     }
 
     const left = parseConditional(state, noIn);
@@ -574,7 +574,7 @@ function parseAssign(state: ParserState, noIn = false): Node {
         checkAssignTarget(state, left, op !== '=');
         nextToken(state);
         const right = parseAssign(state, noIn);
-        return create.AssignmentExpression(left.start, right.end, op, left, right) as Node;
+        return create.AssignmentExpression(left.start, right.end, op, left, right);
     }
     return left;
 }
@@ -586,7 +586,7 @@ function parseConditional(state: ParserState, noIn: boolean): Node {
     const cons = parseAssign(state, false);
     expectP(state, P.COLON, "':'");
     const alt = parseAssign(state, noIn);
-    return create.ConditionalExpression(test.start, alt.end, 0, test, cons, alt) as Node;
+    return create.ConditionalExpression(test.start, alt.end, 0, test, cons, alt);
 }
 
 function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
@@ -599,8 +599,8 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
             nextToken(state);
             const ty = parseType(state);
             left = satisfies
-                ? (create.TSSatisfiesExpression(left.start, ty.end, 0, left, ty) as Node)
-                : (create.TSAsExpression(left.start, ty.end, 0, left, ty) as Node);
+                ? create.TSSatisfiesExpression(left.start, ty.end, 0, left, ty)
+                : create.TSAsExpression(left.start, ty.end, 0, left, ty);
             continue;
         }
         // One uniform path: punctuator ops and `in`/`instanceof` all carry precedence
@@ -613,8 +613,8 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
         const right = parseBinary(state, tok === P.STARSTAR ? prec - 1 : prec, noIn);
         const op = opTextOf(tok);
         left = isLogical(tok)
-            ? (create.LogicalExpression(left.start, right.end, op, left, right) as Node)
-            : (create.BinaryExpression(left.start, right.end, op, left, right) as Node);
+            ? create.LogicalExpression(left.start, right.end, op, left, right)
+            : create.BinaryExpression(left.start, right.end, op, left, right);
     }
 }
 
@@ -630,7 +630,7 @@ function parseUnary(state: ParserState): Node {
                     state.tok === P.PLUS ? OP.POS : state.tok === P.MINUS ? OP.NEG : state.tok === P.BANG ? OP.NOT : OP.BIT_NOT;
                 nextToken(state);
                 const arg = parseUnary(state);
-                return create.UnaryExpression(start, arg.end, op, arg) as Node;
+                return create.UnaryExpression(start, arg.end, op, arg);
             }
             case P.PLUSPLUS:
             case P.MINUSMINUS: {
@@ -639,7 +639,7 @@ function parseUnary(state: ParserState): Node {
                 const arg = parseUnary(state);
                 // `++f()` / `++1`: an update reads AND writes, so only a simple target will do.
                 checkAssignTarget(state, arg, true);
-                return create.UpdateExpression(start, arg.end, op | FL.PREFIX, arg) as Node;
+                return create.UpdateExpression(start, arg.end, op | FL.PREFIX, arg);
             }
         }
     } else if (isKeyword(state.tok)) {
@@ -650,7 +650,7 @@ function parseUnary(state: ParserState): Node {
                 const op = state.tok === K.TYPEOF ? OP.TYPEOF : state.tok === K.VOID ? OP.VOID : OP.DELETE;
                 nextToken(state);
                 const arg = parseUnary(state);
-                return create.UnaryExpression(start, arg.end, op, arg) as Node;
+                return create.UnaryExpression(start, arg.end, op, arg);
             }
             case K.AWAIT: {
                 // Only an operator where `await` is in scope. Elsewhere it is an ordinary
@@ -660,7 +660,7 @@ function parseUnary(state: ParserState): Node {
                 if (state.fnDepth === 0) state.sawTopLevelAwait = true;
                 nextToken(state);
                 const arg = parseUnary(state);
-                return create.AwaitExpression(start, arg.end, 0, arg) as Node;
+                return create.AwaitExpression(start, arg.end, 0, arg);
             }
         }
     }
@@ -669,7 +669,7 @@ function parseUnary(state: ParserState): Node {
         const op = state.tok === P.PLUSPLUS ? OP.INC : OP.DEC;
         checkAssignTarget(state, expr, true);
         nextToken(state);
-        expr = create.UpdateExpression(expr.start, state.tokStart, op, expr) as Node;
+        expr = create.UpdateExpression(expr.start, state.tokStart, op, expr);
     }
     return expr;
 }
@@ -689,7 +689,7 @@ function parseNew(state: ParserState): Node {
         // Chained, exactly like the NewExpression path below. `new.target` is an ordinary expression
         // and `new.target.value` / `new.target?.name` are legal — returning it unchained stopped the
         // parse at the `.` with `expected ';'`. 8 real webpack files, found by `pnpm parsercorpus`.
-        return parseMemberChain(state, create.NewTarget(start, state.tokStart, 0) as Node, true);
+        return parseMemberChain(state, create.NewTarget(start, state.tokStart, 0), true);
     }
     let callee: Node;
     if (isK(state, K.NEW)) {
@@ -714,7 +714,7 @@ function parseNew(state: ParserState): Node {
         args = parseArgs(state);
         end = state.tokStart;
     }
-    const nw = create.NewExpression(start, end, pure, callee, args, typeArgs) as Node;
+    const nw = create.NewExpression(start, end, pure, callee, args, typeArgs);
     return parseMemberChain(state, nw, true);
 }
 
@@ -726,7 +726,7 @@ function parseArgs(state: ParserState): Node[] {
             const s = state.tokStart;
             nextToken(state);
             const arg = parseAssign(state);
-            push(state, create.SpreadElement(s, arg.end, 0, arg) as Node);
+            push(state, create.SpreadElement(s, arg.end, 0, arg));
         } else push(state, parseAssign(state));
         if (!eatP(state, P.COMMA)) break;
     }
@@ -745,7 +745,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
     let sawOptional = false;
     const finish = (e: Node): Node => {
         state.chainSawOptional = sawOptional;
-        return sawOptional ? (create.ChainExpression(e.start, e.end, 0, e) as Node) : e;
+        return sawOptional ? create.ChainExpression(e.start, e.end, 0, e) : e;
     };
     for (;;) {
         if (!isMemberCont(state.tok)) return finish(expr);
@@ -753,10 +753,10 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             nextToken(state);
             if (state.tok === T_PRIVATE) {
                 const prop = parsePrivate(state);
-                expr = create.PrivateFieldExpression(expr.start, prop.end, 0, expr, prop) as Node;
+                expr = create.PrivateFieldExpression(expr.start, prop.end, 0, expr, prop);
             } else {
                 const prop = parseNameAsIdent(state, R_NAME);
-                expr = create.StaticMemberExpression(expr.start, prop.end, 0, expr, prop) as Node;
+                expr = create.StaticMemberExpression(expr.start, prop.end, 0, expr, prop);
             }
         } else if (isP(state, P.QDOT)) {
             sawOptional = true;
@@ -765,51 +765,51 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 if (!allowCall) return finish(expr);
                 const pure = pureFlag(state, expr.start);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL | pure, expr, args, null) as Node;
+                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL | pure, expr, args, null);
             } else if (isP(state, P.LBRACKET)) {
                 nextToken(state);
                 const prop = parseExpression(state);
                 expectP(state, P.RBRACKET, "']'");
-                expr = create.ComputedMemberExpression(expr.start, state.tokStart, FL.OPTIONAL, expr, prop) as Node;
+                expr = create.ComputedMemberExpression(expr.start, state.tokStart, FL.OPTIONAL, expr, prop);
             } else if (state.tok === T_PRIVATE) {
                 const prop = parsePrivate(state);
-                expr = create.PrivateFieldExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop) as Node;
+                expr = create.PrivateFieldExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop);
             } else {
                 const prop = parseNameAsIdent(state, R_NAME);
-                expr = create.StaticMemberExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop) as Node;
+                expr = create.StaticMemberExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop);
             }
         } else if (isP(state, P.LBRACKET)) {
             nextToken(state);
             const prop = parseExpression(state);
             expectP(state, P.RBRACKET, "']'");
-            expr = create.ComputedMemberExpression(expr.start, state.tokStart, 0, expr, prop) as Node;
+            expr = create.ComputedMemberExpression(expr.start, state.tokStart, 0, expr, prop);
         } else if (allowCall && isP(state, P.LPAREN)) {
             const pure = pureFlag(state, expr.start);
             const args = parseArgs(state);
-            expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, null) as Node;
+            expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, null);
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
             if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
             const quasi = parseTemplate(state);
-            expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
+            expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi);
         } else if (state.tsMode && isP(state, P.BANG) && (state.tokFlags & F_NL) === 0) {
             nextToken(state);
-            expr = create.TSNonNullExpression(expr.start, state.tokStart, 0, expr) as Node;
+            expr = create.TSNonNullExpression(expr.start, state.tokStart, 0, expr);
         } else if (state.tsMode && allowCall && isP(state, P.LT)) {
             const t = tryParseTypeArgsForCall(state);
             if (t === null) return finish(expr);
             if (isP(state, P.LPAREN)) {
                 const pure = pureFlag(state, expr.start);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, t) as Node;
+                expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, t);
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
                 if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
                 const quasi = parseTemplate(state);
-                expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi) as Node;
+                expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi);
             } else {
                 // bare instantiation expression `f<number>`: keep the type args as a
                 // node so emit strips them. tryParseTypeArgsForCall's follow-set
                 // already gated that `<...>` is type args here (not a `<` comparison).
-                expr = create.TSInstantiationExpression(expr.start, t.end, 0, expr, t) as Node;
+                expr = create.TSInstantiationExpression(expr.start, t.end, 0, expr, t);
             }
         } else return finish(expr);
     }
@@ -839,7 +839,7 @@ function parseTemplate(state: ParserState): Node {
     if (state.tok === T_TEMPLATE_FULL) {
         const q = leaf(state, N.TemplateElement, start + 1, state.tokEnd - 1);
         nextToken(state);
-        return create.TemplateLiteral(start, q.end + 1, 0, [q], []) as Node;
+        return create.TemplateLiteral(start, q.end + 1, 0, [q], []);
     }
     const qFrom = state.sp;
     const eFrom: Node[] = [];
@@ -861,7 +861,7 @@ function parseTemplate(state: ParserState): Node {
         nextToken(state);
     }
     const quasis = finishList(state, qFrom);
-    return create.TemplateLiteral(start, state.tokStart, 0, quasis, eFrom) as Node;
+    return create.TemplateLiteral(start, state.tokStart, 0, quasis, eFrom);
 }
 
 /** Is `c` a valid start char of a JSX identifier (letter / `_` / `$`, or any
@@ -927,30 +927,27 @@ function parseJSXName(state: ParserState): Node {
     skipJSXTagWs(state);
     if (!isJSXIdentStart(src.charCodeAt(state.pos))) {
         raise(state, ParseErrorCode.ExpectedJSXName);
-        return makeMissingIdent(state, R_NAME) as Node;
+        return makeMissingIdent(state, R_NAME);
     }
     const [s0, e0] = scanJSXName(state);
     const first = src.charCodeAt(s0);
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 58) {
         state.pos++;
         const [s1, e1] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1)) as Node;
+        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1));
     }
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
         const isThis = e0 - s0 === 4 && src.startsWith('this', s0);
-        let obj: Node = isThis
-            ? recordThis(state, create.ThisExpression(s0, e0, 0) as Node)
-            : (ident(state, R_REF, s0, e0) as Node);
+        let obj: Node = isThis ? recordThis(state, create.ThisExpression(s0, e0, 0)) : ident(state, R_REF, s0, e0);
         while (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
             state.pos++;
             const [ps, pe] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-            obj = create.JSXMemberExpression(s0, pe, 0, obj, jsxIdent(state, ps, pe)) as Node;
+            obj = create.JSXMemberExpression(s0, pe, 0, obj, jsxIdent(state, ps, pe));
         }
         return obj;
     }
-    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0))
-        return recordThis(state, create.ThisExpression(s0, e0, 0) as Node);
-    if (first >= 65 && first <= 90) return ident(state, R_REF, s0, e0) as Node;
+    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0)) return recordThis(state, create.ThisExpression(s0, e0, 0));
+    if (first >= 65 && first <= 90) return ident(state, R_REF, s0, e0);
     return jsxIdent(state, s0, e0);
 }
 
@@ -962,7 +959,7 @@ function parseJSXAttributeName(state: ParserState): Node {
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 58) {
         state.pos++;
         const [s1, e1] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1)) as Node;
+        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1));
     }
     return jsxIdent(state, s0, e0);
 }
@@ -976,18 +973,18 @@ function parseJSXBrace(state: ParserState, inChildren: boolean): Node {
         nextToken(state);
         const arg = parseAssign(state);
         node = inChildren
-            ? (create.JSXSpreadChild(bracePos, state.tokEnd, 0, arg) as Node)
-            : (create.JSXExpressionContainer(bracePos, state.tokEnd, 0, arg) as Node);
+            ? create.JSXSpreadChild(bracePos, state.tokEnd, 0, arg)
+            : create.JSXExpressionContainer(bracePos, state.tokEnd, 0, arg);
     } else if (isP(state, P.RBRACE)) {
         node = create.JSXExpressionContainer(
             bracePos,
             state.tokEnd,
             0,
-            create.JSXEmptyExpression(bracePos + 1, state.tokStart, 0) as Node,
-        ) as Node;
+            create.JSXEmptyExpression(bracePos + 1, state.tokStart, 0),
+        );
     } else {
         const expr = parseExpression(state);
-        node = create.JSXExpressionContainer(bracePos, state.tokEnd, 0, expr) as Node;
+        node = create.JSXExpressionContainer(bracePos, state.tokEnd, 0, expr);
     }
     if (isP(state, P.RBRACE)) {
         state.pos = state.tokEnd;
@@ -1004,7 +1001,7 @@ function parseJSXSpreadAttribute(state: ParserState): Node {
     nextToken(state);
     if (!eatP(state, P.DOTDOTDOT)) raise(state, ParseErrorCode.ExpectedJSXSpread);
     const arg = parseAssign(state);
-    const node = create.JSXSpreadAttribute(bracePos, state.tokEnd, 0, arg) as Node;
+    const node = create.JSXSpreadAttribute(bracePos, state.tokEnd, 0, arg);
     if (isP(state, P.RBRACE)) {
         state.pos = state.tokEnd;
     } else {
@@ -1061,7 +1058,7 @@ function parseJSXAttributes(state: ParserState): Node[] {
                 raise(state, ParseErrorCode.ExpectedJSXAttrValue);
             }
         }
-        push(state, create.JSXAttribute(name.start, end, 0, name, value) as Node);
+        push(state, create.JSXAttribute(name.start, end, 0, name, value));
     }
     return finishList(state, from);
 }
@@ -1113,15 +1110,15 @@ function parseJSXNested(state: ParserState): Node {
     state.pos++;
     skipJSXTagWs(state);
     if (state.pos < srcLen && src.charCodeAt(state.pos) === 62) {
-        const openFrag = create.JSXOpeningFragment(start, state.pos + 1, 0) as Node;
+        const openFrag = create.JSXOpeningFragment(start, state.pos + 1, 0);
         state.pos++;
         const children = parseJSXChildren(state);
         const closeStart = state.pos;
         state.pos += 2;
         skipJSXTagWs(state);
         expectRawChar(state, 62, "'>'");
-        const closeFrag = create.JSXClosingFragment(closeStart, state.pos, 0) as Node;
-        return create.JSXFragment(start, state.pos, 0, openFrag, children, closeFrag) as Node;
+        const closeFrag = create.JSXClosingFragment(closeStart, state.pos, 0);
+        return create.JSXFragment(start, state.pos, 0, openFrag, children, closeFrag);
     }
     const name = parseJSXName(state);
     let typeArgs: Ref = null;
@@ -1139,19 +1136,19 @@ function parseJSXNested(state: ParserState): Node {
         state.pos++;
         skipJSXTagWs(state);
         expectRawChar(state, 62, "'>'");
-        const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs) as Node;
-        return create.JSXElement(start, state.pos, 0, open, [], null) as Node;
+        const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs);
+        return create.JSXElement(start, state.pos, 0, open, [], null);
     }
     expectRawChar(state, 62, "'>'");
-    const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs) as Node;
+    const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs);
     const children = parseJSXChildren(state);
     const closeStart = state.pos;
     state.pos += 2;
     const closeName = parseJSXName(state);
     skipJSXTagWs(state);
     expectRawChar(state, 62, "'>'");
-    const close = create.JSXClosingElement(closeStart, state.pos, 0, closeName) as Node;
-    return create.JSXElement(start, state.pos, 0, open, children, close) as Node;
+    const close = create.JSXClosingElement(closeStart, state.pos, 0, closeName);
+    return create.JSXElement(start, state.pos, 0, open, children, close);
 }
 
 function parseJSXRoot(state: ParserState): Node {
@@ -1231,13 +1228,13 @@ function parsePrimary(state: ParserState): Node {
                         const s = state.tokStart;
                         nextToken(state);
                         const arg = parseAssign(state);
-                        push(state, create.SpreadElement(s, arg.end, 0, arg) as Node);
+                        push(state, create.SpreadElement(s, arg.end, 0, arg));
                     } else push(state, parseAssign(state));
                     if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
                     if (noProgress(state, mark)) break;
                 }
                 expectP(state, P.RBRACKET, "']'");
-                return create.ArrayExpression(start, state.tokStart, 0, finishListWithHoles(state, from)) as Node;
+                return create.ArrayExpression(start, state.tokStart, 0, finishListWithHoles(state, from));
             }
             case P.LBRACE:
                 return parseObjectLiteral(state);
@@ -1246,19 +1243,19 @@ function parsePrimary(state: ParserState): Node {
         switch (state.tok as number) {
             case K.THIS:
                 nextToken(state);
-                return recordThis(state, create.ThisExpression(start, state.tokStart, 0) as Node);
+                return recordThis(state, create.ThisExpression(start, state.tokStart, 0));
             case K.SUPER:
                 nextToken(state);
-                return create.Super(start, state.tokStart, 0) as Node;
+                return create.Super(start, state.tokStart, 0);
             case K.TRUE:
                 nextToken(state);
-                return create.BooleanLiteral(start, state.tokStart, 1) as Node;
+                return create.BooleanLiteral(start, state.tokStart, 1);
             case K.FALSE:
                 nextToken(state);
-                return create.BooleanLiteral(start, state.tokStart, 0) as Node;
+                return create.BooleanLiteral(start, state.tokStart, 0);
             case K.NULL:
                 nextToken(state);
-                return create.NullLiteral(start, state.tokStart, 0) as Node;
+                return create.NullLiteral(start, state.tokStart, 0);
             case K.FUNCTION:
                 return parseFunction(state, false, false, true);
             case K.ASYNC:
@@ -1273,7 +1270,7 @@ function parsePrimary(state: ParserState): Node {
                     nextToken(state);
                     parseNameAsIdent(state, R_NAME);
                     state.sawImportSyntax = true;
-                    return create.ImportMeta(start, state.tokStart, 0) as Node;
+                    return create.ImportMeta(start, state.tokStart, 0);
                 }
                 expectP(state, P.LPAREN, "'('");
                 const source = parseAssign(state);
@@ -1282,7 +1279,7 @@ function parsePrimary(state: ParserState): Node {
                 eatP(state, P.COMMA);
                 expectP(state, P.RPAREN, "')'");
                 state.sawImportSyntax = true;
-                return create.ImportExpression(start, state.tokStart, 0, source, options) as Node;
+                return create.ImportExpression(start, state.tokStart, 0, source, options);
             }
             case K.NEW:
                 return parseNew(state);
@@ -1310,12 +1307,12 @@ function parseObjectLiteral(state: ParserState): Node {
             const s = state.tokStart;
             nextToken(state);
             const arg = parseAssign(state);
-            push(state, create.SpreadElement(s, arg.end, 0, arg) as Node);
+            push(state, create.SpreadElement(s, arg.end, 0, arg));
         } else push(state, parseObjectMember(state));
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
     }
     expectP(state, P.RBRACE, "'}'");
-    return create.ObjectExpression(start, state.tokStart, 0, finishList(state, from)) as Node;
+    return create.ObjectExpression(start, state.tokStart, 0, finishList(state, from));
 }
 
 function parseObjectMember(state: ParserState): Node {
@@ -1353,21 +1350,21 @@ function parseObjectMember(state: ParserState): Node {
     if (kind !== 0 || async || generator || isP(state, P.LPAREN)) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
         flags |= kind << FL.KIND_SHIFT;
-        return create.ObjectProperty(start, fn.end, flags, key, fn) as Node;
+        return create.ObjectProperty(start, fn.end, flags, key, fn);
     }
     if (isP(state, P.COLON)) {
         nextToken(state);
         const value = parseAssign(state);
-        return create.ObjectProperty(start, value.end, flags, key, value) as Node;
+        return create.ObjectProperty(start, value.end, flags, key, value);
     }
     const shorthandRef = ident(state, R_REF, key.start, key.end);
     if (isP(state, P.EQ)) {
         nextToken(state);
         const right = parseAssign(state);
-        const value = create.AssignmentPattern(key.start, right.end, 0, shorthandRef, right) as Node;
-        return create.ObjectProperty(start, right.end, flags | FL.SHORTHAND, key, value) as Node;
+        const value = create.AssignmentPattern(key.start, right.end, 0, shorthandRef, right);
+        return create.ObjectProperty(start, right.end, flags | FL.SHORTHAND, key, value);
     }
-    return create.ObjectProperty(start, key.end, flags | FL.SHORTHAND, key, shorthandRef) as Node;
+    return create.ObjectProperty(start, key.end, flags | FL.SHORTHAND, key, shorthandRef);
 }
 
 function nextIsPropertyEnd(state: ParserState): boolean {
@@ -1403,7 +1400,7 @@ function parseMethodTail(state: ParserState, start: number, flags: number): Node
     let body: Ref = null;
     if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
     else consumeSemi(state);
-    return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body) as Node;
+    return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body);
 }
 
 function arrowAheadFromParen(state: ParserState): boolean {
@@ -1538,11 +1535,11 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
         true,
     );
     if (exprBody) flags |= FL.EXPR_BODY;
-    return create.ArrowFunctionExpression(start, body.end, flags, typeParams, params, returnType, body) as Node;
+    return create.ArrowFunctionExpression(start, body.end, flags, typeParams, params, returnType, body);
 }
 
 function parseArrowAfterSingleParam(state: ParserState, start: number, id: Identifier, flags: number, identStart?: number): Node {
-    const param = create.FormalParameter(identStart ?? start, id.end, 0, id, null, null) as Node;
+    const param = create.FormalParameter(identStart ?? start, id.end, 0, id, null, null);
     expectP(state, P.ARROW, "'=>'");
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
@@ -1557,7 +1554,7 @@ function parseArrowAfterSingleParam(state: ParserState, start: number, id: Ident
         true,
     );
     if (exprBody) flags |= FL.EXPR_BODY;
-    return create.ArrowFunctionExpression(start, body.end, flags, null, [param], null, body) as Node;
+    return create.ArrowFunctionExpression(start, body.end, flags, null, [param], null, body);
 }
 
 function parseBindingTarget(state: ParserState): Node {
@@ -1576,13 +1573,13 @@ function parseBindingTarget(state: ParserState): Node {
                 const s = state.tokStart;
                 nextToken(state);
                 const arg = parseBindingTarget(state);
-                push(state, create.RestElement(s, arg.end, 0, arg, null) as Node);
+                push(state, create.RestElement(s, arg.end, 0, arg, null));
             } else push(state, parseBindingElement(state));
             if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACKET, "']'");
-        return create.ArrayPattern(start, state.tokStart, 0, finishListWithHoles(state, from)) as Node;
+        return create.ArrayPattern(start, state.tokStart, 0, finishListWithHoles(state, from));
     }
     if (isP(state, P.LBRACE)) {
         const start = state.tokStart;
@@ -1594,7 +1591,7 @@ function parseBindingTarget(state: ParserState): Node {
                 const s = state.tokStart;
                 nextToken(state);
                 const arg = parseBindingTarget(state);
-                push(state, create.RestElement(s, arg.end, 0, arg, null) as Node);
+                push(state, create.RestElement(s, arg.end, 0, arg, null));
             } else {
                 const s = state.tokStart;
                 let flags = 0;
@@ -1618,25 +1615,19 @@ function parseBindingTarget(state: ParserState): Node {
                 } else if (isP(state, P.EQ)) {
                     nextToken(state);
                     const right = parseAssign(state);
-                    value = create.AssignmentPattern(
-                        key.start,
-                        right.end,
-                        0,
-                        ident(state, R_BIND, key.start, key.end),
-                        right,
-                    ) as Node;
+                    value = create.AssignmentPattern(key.start, right.end, 0, ident(state, R_BIND, key.start, key.end), right);
                     flags |= FL.SHORTHAND;
                 } else {
                     value = ident(state, R_BIND, key.start, key.end);
                     flags |= FL.SHORTHAND;
                 }
-                push(state, create.ObjectProperty(s, value.end, flags, key, value) as Node);
+                push(state, create.ObjectProperty(s, value.end, flags, key, value));
             }
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACE, "'}'");
-        return create.ObjectPattern(start, state.tokStart, 0, finishList(state, from)) as Node;
+        return create.ObjectPattern(start, state.tokStart, 0, finishList(state, from));
     }
     return parseIdent(state, R_BIND);
 }
@@ -1646,7 +1637,7 @@ function parseBindingElement(state: ParserState): Node {
     if (isP(state, P.EQ)) {
         nextToken(state);
         const right = parseAssign(state);
-        return create.AssignmentPattern(target.start, right.end, 0, target, right) as Node;
+        return create.AssignmentPattern(target.start, right.end, 0, target, right);
     }
     return target;
 }
@@ -1693,13 +1684,13 @@ function parseParams(state: ParserState): Node[] {
             const arg = parseBindingTarget(state);
             let typeAnn: Ref = null;
             if (state.tsMode && isP(state, P.COLON)) typeAnn = parseTypeAnn(state);
-            push(state, create.RestElement(start, state.tokStart, 0, arg, typeAnn) as Node);
+            push(state, create.RestElement(start, state.tokStart, 0, arg, typeAnn));
         } else if (isK(state, K.THIS) && state.tsMode) {
             const t = ident(state, R_BIND, state.tokStart, state.tokEnd);
             nextToken(state);
             let typeAnn: Ref = null;
             if (isP(state, P.COLON)) typeAnn = parseTypeAnn(state);
-            push(state, create.FormalParameter(start, state.tokStart, 0, t, typeAnn, null) as Node);
+            push(state, create.FormalParameter(start, state.tokStart, 0, t, typeAnn, null));
         } else {
             const pattern = parseBindingTarget(state);
             if (state.tsMode && isP(state, P.QUESTION)) {
@@ -1713,7 +1704,7 @@ function parseParams(state: ParserState): Node[] {
                 nextToken(state);
                 init = parseAssign(state);
             }
-            push(state, create.FormalParameter(start, state.tokStart, flags, pattern, typeAnn, init) as Node);
+            push(state, create.FormalParameter(start, state.tokStart, flags, pattern, typeAnn, init));
         }
         if (!eatP(state, P.COMMA)) break;
     }
@@ -1776,8 +1767,8 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
     if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
     else consumeSemi(state);
     return isDecl && !isExpr
-        ? (create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body) as Node)
-        : (create.FunctionExpression(start, state.tokStart, flags, id, typeParams, params, returnType, body) as Node);
+        ? create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body)
+        : create.FunctionExpression(start, state.tokStart, flags, id, typeParams, params, returnType, body);
 }
 
 function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, startOverride = -1): Node {
@@ -1807,14 +1798,14 @@ function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, sta
             while (isP(state, P.DOT)) {
                 nextToken(state);
                 const r = parseNameAsIdent(state, R_NAME);
-                expr = create.TSQualifiedName(s, r.end, 0, expr, r) as Node;
+                expr = create.TSQualifiedName(s, r.end, 0, expr, r);
             }
             let targs: Ref = null;
             if (isP(state, P.LT)) {
                 const t = tryParseTypeArgsInType(state);
                 if (t !== null) targs = t;
             }
-            push(state, create.TSClassImplements(s, state.tokStart, 0, expr, targs) as Node);
+            push(state, create.TSClassImplements(s, state.tokStart, 0, expr, targs));
         } while (eatP(state, P.COMMA));
     }
     const impls = finishList(state, implFrom);
@@ -1822,28 +1813,8 @@ function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, sta
     const body = parseClassBody(state);
     state.thisDepth--;
     return isExpr
-        ? (create.ClassExpression(
-              start,
-              state.tokStart,
-              extraFlags,
-              id,
-              typeParams,
-              superClass,
-              superTypeArgs,
-              impls,
-              body,
-          ) as Node)
-        : (create.ClassDeclaration(
-              start,
-              state.tokStart,
-              extraFlags,
-              id,
-              typeParams,
-              superClass,
-              superTypeArgs,
-              impls,
-              body,
-          ) as Node);
+        ? create.ClassExpression(start, state.tokStart, extraFlags, id, typeParams, superClass, superTypeArgs, impls, body)
+        : create.ClassDeclaration(start, state.tokStart, extraFlags, id, typeParams, superClass, superTypeArgs, impls, body);
 }
 
 function parseClassBody(state: ParserState): Node[] {
@@ -1884,7 +1855,7 @@ function parseClassMember(state: ParserState): Node {
                 state.awaitOk = outerAwait;
                 state.newTargetDepth--;
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
-                return create.StaticBlock(start, state.tokStart, 0, body) as Node;
+                return create.StaticBlock(start, state.tokStart, 0, body);
             }
             restoreState(state, s);
             flags |= FL.STATIC;
@@ -1927,12 +1898,12 @@ function parseClassMember(state: ParserState): Node {
             const name = parseIdent(state, R_BIND);
             if (isP(state, P.COLON)) {
                 const keyAnn = parseTypeAnn(state);
-                const param = create.FormalParameter(name.start, state.tokStart, 0, name, keyAnn, null) as Node;
+                const param = create.FormalParameter(name.start, state.tokStart, 0, name, keyAnn, null);
                 expectP(state, P.RBRACKET, "']'");
                 let ann: Ref = null;
                 if (isP(state, P.COLON)) ann = parseTypeAnn(state);
                 consumeSemi(state);
-                return create.TSIndexSignature(start, state.tokStart, flags & FL.READONLY, param, ann) as Node;
+                return create.TSIndexSignature(start, state.tokStart, flags & FL.READONLY, param, ann);
             }
             restoreState(state, s);
         }
@@ -1975,7 +1946,7 @@ function parseClassMember(state: ParserState): Node {
 
     if (kind !== 0 || async || generator || isP(state, P.LPAREN) || (state.tsMode && isP(state, P.LT))) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
-        return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), key, fn) as Node;
+        return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), key, fn);
     }
     if (state.tsMode && isP(state, P.BANG)) {
         flags |= FL.DEFINITE;
@@ -1989,7 +1960,7 @@ function parseClassMember(state: ParserState): Node {
         value = parseAssign(state);
     }
     consumeSemi(state);
-    return create.PropertyDefinition(start, state.tokStart, flags, key, typeAnn, value) as Node;
+    return create.PropertyDefinition(start, state.tokStart, flags, key, typeAnn, value);
 }
 
 function isAccessModifier(state: ParserState): boolean {
@@ -2043,7 +2014,7 @@ function parseBlock(state: ParserState): Node {
         if (noProgress(state, mark)) break;
     }
     expectP(state, P.RBRACE, "'}'");
-    return create.BlockStatement(start, state.tokStart, 0, finishList(state, from)) as Node;
+    return create.BlockStatement(start, state.tokStart, 0, finishList(state, from));
 }
 
 function parseStatement(state: ParserState): Node {
@@ -2058,7 +2029,7 @@ function parseStatement(state: ParserState): Node {
                 return parseBlock(state);
             case P.SEMI:
                 nextToken(state);
-                return create.EmptyStatement(start, state.tokStart, 0) as Node;
+                return create.EmptyStatement(start, state.tokStart, 0);
             case P.AT:
                 raise(state, ParseErrorCode.DecoratorsUnsupported);
                 nextToken(state);
@@ -2176,7 +2147,7 @@ function parseStatement(state: ParserState): Node {
                 const cons = parseStatement(state);
                 let alt: Ref = null;
                 if (eatK(state, K.ELSE)) alt = parseStatement(state);
-                return create.IfStatement(start, state.tokStart, 0, test, cons, alt) as Node;
+                return create.IfStatement(start, state.tokStart, 0, test, cons, alt);
             }
             case K.FOR:
                 return parseFor(state, start);
@@ -2188,14 +2159,14 @@ function parseStatement(state: ParserState): Node {
             // used to surface as a bare `unexpected token 'with' in expression`.
             case K.WITH:
                 raise(state, ParseErrorCode.WithStatement);
-                return create.EmptyStatement(start, state.tokStart, 0) as Node;
+                return create.EmptyStatement(start, state.tokStart, 0);
             case K.WHILE: {
                 nextToken(state);
                 expectP(state, P.LPAREN, "'('");
                 const test = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
                 const body = parseStatement(state);
-                return create.WhileStatement(start, body.end, 0, test, body) as Node;
+                return create.WhileStatement(start, body.end, 0, test, body);
             }
             case K.DO: {
                 nextToken(state);
@@ -2205,7 +2176,7 @@ function parseStatement(state: ParserState): Node {
                 const test = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
                 eatP(state, P.SEMI);
-                return create.DoWhileStatement(start, state.tokStart, 0, body, test) as Node;
+                return create.DoWhileStatement(start, state.tokStart, 0, body, test);
             }
             case K.SWITCH: {
                 nextToken(state);
@@ -2235,11 +2206,11 @@ function parseStatement(state: ParserState): Node {
                     )
                         push(state, parseStatement(state));
                     const body = finishList(state, bodyFrom);
-                    push(state, create.SwitchCase(cs, state.tokStart, 0, test, body) as Node);
+                    push(state, create.SwitchCase(cs, state.tokStart, 0, test, body));
                     if (noProgress(state, mark)) break;
                 }
                 expectP(state, P.RBRACE, "'}'");
-                return create.SwitchStatement(start, state.tokStart, 0, disc, finishList(state, from)) as Node;
+                return create.SwitchStatement(start, state.tokStart, 0, disc, finishList(state, from));
             }
             case K.TRY: {
                 nextToken(state);
@@ -2256,10 +2227,10 @@ function parseStatement(state: ParserState): Node {
                         expectP(state, P.RPAREN, "')'");
                     }
                     const cbody = parseBlock(state);
-                    handler = create.CatchClause(cs, state.tokStart, 0, param, cbody) as Node;
+                    handler = create.CatchClause(cs, state.tokStart, 0, param, cbody);
                 }
                 if (eatK(state, K.FINALLY)) finalizer = parseBlock(state);
-                return create.TryStatement(start, state.tokStart, 0, block, handler, finalizer) as Node;
+                return create.TryStatement(start, state.tokStart, 0, block, handler, finalizer);
             }
             case K.RETURN: {
                 nextToken(state);
@@ -2270,13 +2241,13 @@ function parseStatement(state: ParserState): Node {
                     state.sawTopLevelReturn = true;
                     if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
                 }
-                return create.ReturnStatement(start, state.tokStart, 0, arg) as Node;
+                return create.ReturnStatement(start, state.tokStart, 0, arg);
             }
             case K.THROW: {
                 nextToken(state);
                 const arg = parseExpression(state);
                 consumeSemi(state);
-                return create.ThrowStatement(start, state.tokStart, 0, arg) as Node;
+                return create.ThrowStatement(start, state.tokStart, 0, arg);
             }
             case K.BREAK:
             case K.CONTINUE: {
@@ -2286,13 +2257,13 @@ function parseStatement(state: ParserState): Node {
                 if (isIdentLike(state) && (state.tokFlags & F_NL) === 0) label = parseIdent(state, R_LABEL);
                 consumeSemi(state);
                 return isBreak
-                    ? (create.BreakStatement(start, state.tokStart, 0, label) as Node)
-                    : (create.ContinueStatement(start, state.tokStart, 0, label) as Node);
+                    ? create.BreakStatement(start, state.tokStart, 0, label)
+                    : create.ContinueStatement(start, state.tokStart, 0, label);
             }
             case K.DEBUGGER:
                 nextToken(state);
                 consumeSemi(state);
-                return create.DebuggerStatement(start, state.tokStart, 0) as Node;
+                return create.DebuggerStatement(start, state.tokStart, 0);
             case K.IMPORT: {
                 const s = saveState(state);
                 nextToken(state);
@@ -2368,13 +2339,7 @@ function parseStatement(state: ParserState): Node {
                                 if (noProgress(state, mark)) break;
                             }
                             expectP(state, P.RBRACE, "'}'");
-                            const mod = create.TSModuleDeclaration(
-                                start,
-                                state.tokStart,
-                                0,
-                                gid,
-                                finishList(state, from),
-                            ) as Node;
+                            const mod = create.TSModuleDeclaration(start, state.tokStart, 0, gid, finishList(state, from));
                             applyDeclare(mod, start);
                             return mod;
                         }
@@ -2415,13 +2380,7 @@ function parseStatement(state: ParserState): Node {
                                 if (noProgress(state, mark)) break;
                             }
                             expectP(state, P.RBRACE, "'}'");
-                            return create.TSModuleDeclaration(
-                                start,
-                                state.tokStart,
-                                FL.NAMESPACE,
-                                id,
-                                finishList(state, from),
-                            ) as Node;
+                            return create.TSModuleDeclaration(start, state.tokStart, FL.NAMESPACE, id, finishList(state, from));
                         }
                     }
                     restoreState(state, s);
@@ -2434,10 +2393,10 @@ function parseStatement(state: ParserState): Node {
         nextToken(state);
         const body = parseStatement(state);
         const label = ident(state, R_LABEL, expr.start, expr.end);
-        return create.LabeledStatement(start, body.end, 0, label, body) as Node;
+        return create.LabeledStatement(start, body.end, 0, label, body);
     }
     consumeSemi(state);
-    return create.ExpressionStatement(start, state.tokStart, 0, expr) as Node;
+    return create.ExpressionStatement(start, state.tokStart, 0, expr);
 }
 
 function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Node {
@@ -2459,10 +2418,10 @@ function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Nod
             nextToken(state);
             init = parseAssign(state);
         }
-        push(state, create.VariableDeclarator(ds, state.tokStart, flags, target, typeAnn, init) as Node);
+        push(state, create.VariableDeclarator(ds, state.tokStart, flags, target, typeAnn, init));
     } while (eatP(state, P.COMMA));
     consumeSemi(state);
-    return create.VariableDeclaration(start, state.tokStart, kind | extraFlags, finishList(state, from)) as Node;
+    return create.VariableDeclaration(start, state.tokStart, kind | extraFlags, finishList(state, from));
 }
 
 function parseFor(state: ParserState, start: number): Node {
@@ -2513,14 +2472,14 @@ function parseFor(state: ParserState, start: number): Node {
             if (isK(state, K.OF) || isK(state, K.IN)) {
                 const isOf = isK(state, K.OF);
                 nextToken(state);
-                const dtor = create.VariableDeclarator(ds, state.tokStart, 0, target, null, null) as Node;
-                const decl = create.VariableDeclaration(ds, state.tokStart, kind, [dtor]) as Node;
+                const dtor = create.VariableDeclarator(ds, state.tokStart, 0, target, null, null);
+                const decl = create.VariableDeclaration(ds, state.tokStart, kind, [dtor]);
                 const right = isOf ? parseAssign(state) : parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
                 const body = parseStatement(state);
                 return isOf
-                    ? (create.ForOfStatement(start, body.end, flags, decl, right, body) as Node)
-                    : (create.ForInStatement(start, body.end, 0, decl, right, body) as Node);
+                    ? create.ForOfStatement(start, body.end, flags, decl, right, body)
+                    : create.ForInStatement(start, body.end, 0, decl, right, body);
             }
             const dFrom = state.sp;
             {
@@ -2536,7 +2495,7 @@ function parseFor(state: ParserState, start: number): Node {
                     nextToken(state);
                     dinit = parseAssign(state, true);
                 }
-                push(state, create.VariableDeclarator(ds, state.tokStart, dflags, target, typeAnn, dinit) as Node);
+                push(state, create.VariableDeclarator(ds, state.tokStart, dflags, target, typeAnn, dinit));
             }
             while (eatP(state, P.COMMA)) {
                 const ds2 = state.tokStart;
@@ -2548,9 +2507,9 @@ function parseFor(state: ParserState, start: number): Node {
                     nextToken(state);
                     dinit = parseAssign(state, true);
                 }
-                push(state, create.VariableDeclarator(ds2, state.tokStart, 0, t2, typeAnn, dinit) as Node);
+                push(state, create.VariableDeclarator(ds2, state.tokStart, 0, t2, typeAnn, dinit));
             }
-            init = create.VariableDeclaration(ds, state.tokStart, kind, finishList(state, dFrom)) as Node;
+            init = create.VariableDeclaration(ds, state.tokStart, kind, finishList(state, dFrom));
             expectP(state, P.SEMI, "';'");
         } else {
             init = parseExpression(state, true);
@@ -2564,8 +2523,8 @@ function parseFor(state: ParserState, start: number): Node {
                 expectP(state, P.RPAREN, "')'");
                 const body = parseStatement(state);
                 return isOf
-                    ? (create.ForOfStatement(start, body.end, flags, init, right, body) as Node)
-                    : (create.ForInStatement(start, body.end, 0, init, right, body) as Node);
+                    ? create.ForOfStatement(start, body.end, flags, init, right, body)
+                    : create.ForInStatement(start, body.end, 0, init, right, body);
             }
             expectP(state, P.SEMI, "';'");
         }
@@ -2577,7 +2536,7 @@ function parseFor(state: ParserState, start: number): Node {
     if (!isP(state, P.RPAREN)) update = parseExpression(state);
     expectP(state, P.RPAREN, "')'");
     const body = parseStatement(state);
-    return create.ForStatement(start, body.end, 0, init, test, update, body) as Node;
+    return create.ForStatement(start, body.end, 0, init, test, update, body);
 }
 
 function parseImport(state: ParserState): Node {
@@ -2615,13 +2574,13 @@ function parseImport(state: ParserState): Node {
         const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmImport = true;
-        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source, attrs, phase) as Node;
+        return create.ImportDeclaration(start, state.tokStart, flags, finishList(state, from), source, attrs, phase);
     }
     if (isIdentLike(state)) {
         const local = parseIdent(state, R_BIND);
         // `import X = …` — TS import-equals, not an ESM default import.
         if (isP(state, P.EQ)) return finishImportEquals(state, start, flags, local);
-        push(state, create.ImportDefaultSpecifier(local.start, local.end, 0, local) as Node);
+        push(state, create.ImportDefaultSpecifier(local.start, local.end, 0, local));
         eatP(state, P.COMMA);
     }
     if (isP(state, P.STAR)) {
@@ -2629,7 +2588,7 @@ function parseImport(state: ParserState): Node {
         nextToken(state);
         if (!eatK(state, K.AS)) raise(state, ParseErrorCode.Expected, "'as'");
         const local = parseIdent(state, R_BIND);
-        push(state, create.ImportNamespaceSpecifier(s, local.end, 0, local) as Node);
+        push(state, create.ImportNamespaceSpecifier(s, local.end, 0, local));
     } else if (isP(state, P.LBRACE)) {
         nextToken(state);
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
@@ -2648,7 +2607,7 @@ function parseImport(state: ParserState): Node {
                     : parseNameAsIdent(state, R_NAME);
             if ((state.tok as number) === T_STR) nextToken(state);
             const local = eatK(state, K.AS) ? parseIdent(state, R_BIND) : ident(state, R_BIND, imported.start, imported.end);
-            push(state, create.ImportSpecifier(ss, state.tokStart, specFlags, local, imported) as Node);
+            push(state, create.ImportSpecifier(ss, state.tokStart, specFlags, local, imported));
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
@@ -2671,7 +2630,7 @@ function parseImport(state: ParserState): Node {
         source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
         attrs,
         phase,
-    ) as Node;
+    );
 }
 
 /**
@@ -2714,7 +2673,7 @@ function parseImportAttributes(state: ParserState): Node[] | null {
         const value = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         if ((state.tok as number) === T_STR) nextToken(state);
         else raise(state, ParseErrorCode.Expected, 'a string');
-        push(state, create.ImportAttribute(s, state.tokStart, 0, key, value) as Node);
+        push(state, create.ImportAttribute(s, state.tokStart, 0, key, value));
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
         if (noProgress(state, mark)) break;
     }
@@ -2726,11 +2685,11 @@ function parseImportAttributes(state: ParserState): Node[] | null {
  *  the import-equals module reference and the same shape as a type-position `typeName`. */
 function parseEntityNameRef(state: ParserState): Node {
     const s = state.tokStart;
-    let name: Node = parseNameAsIdent(state, R_REF) as Node;
+    let name: Node = parseNameAsIdent(state, R_REF);
     while (isP(state, P.DOT)) {
         nextToken(state);
         const r = parseNameAsIdent(state, R_NAME);
-        name = create.TSQualifiedName(s, r.end, 0, name, r) as Node;
+        name = create.TSQualifiedName(s, r.end, 0, name, r);
     }
     return name;
 }
@@ -2753,7 +2712,7 @@ function finishImportEquals(state: ParserState, start: number, flags: number, id
             if ((state.tok as number) === T_STR) nextToken(state);
             else raise(state, ParseErrorCode.ExpectedModuleSpecifier);
             expectP(state, P.RPAREN, "')'");
-            moduleRef = create.TSExternalModuleReference(rs, state.tokStart, 0, expr) as Node;
+            moduleRef = create.TSExternalModuleReference(rs, state.tokStart, 0, expr);
         } else {
             restoreState(state, save);
             moduleRef = parseEntityNameRef(state);
@@ -2762,7 +2721,7 @@ function finishImportEquals(state: ParserState, start: number, flags: number, id
         moduleRef = parseEntityNameRef(state);
     }
     consumeSemi(state);
-    return create.TSImportEqualsDeclaration(start, state.tokStart, flags, id as Node, moduleRef) as Node;
+    return create.TSImportEqualsDeclaration(start, state.tokStart, flags, id as Node, moduleRef);
 }
 
 /** Is the `async` at the cursor the start of an `async function` declaration, rather than an async
@@ -2796,7 +2755,7 @@ function parseExport(state: ParserState): Node {
             consumeSemi(state);
         }
         state.sawEsmExport = true;
-        return create.ExportDefaultDeclaration(start, state.tokStart, 0, decl) as Node;
+        return create.ExportDefaultDeclaration(start, state.tokStart, 0, decl);
     }
     if (isP(state, P.STAR)) {
         nextToken(state);
@@ -2824,7 +2783,7 @@ function parseExport(state: ParserState): Node {
             source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
             exported,
             attrs,
-        ) as Node;
+        );
     }
     let flags = 0;
     if (state.tsMode && isK(state, K.TYPE)) {
@@ -2864,7 +2823,7 @@ function parseExport(state: ParserState): Node {
                     nextToken(state);
                 } else exported = parseNameAsIdent(state, R_NAME);
             } else exported = local.type === N.StringLiteral ? local : ident(state, R_NAME, local.start, local.end);
-            push(state, create.ExportSpecifier(ss, state.tokStart, specFlags, local, exported) as Node);
+            push(state, create.ExportSpecifier(ss, state.tokStart, specFlags, local, exported));
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
@@ -2879,14 +2838,14 @@ function parseExport(state: ParserState): Node {
         const attrs = parseImportAttributes(state);
         consumeSemi(state);
         state.sawEsmExport = true;
-        return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source, attrs) as Node;
+        return create.ExportNamedDeclaration(start, state.tokStart, flags, null, finishList(state, from), source, attrs);
     }
     // The DECLARATION an `export` prefixes is still at module scope — `export import X = o.Y` is a
     // TypeScript import-equals, and `parseStatement` cleared the flag on the way in here.
     state.moduleScope = true;
     const decl = parseStatement(state);
     state.sawEsmExport = true;
-    return create.ExportNamedDeclaration(start, state.tokStart, flags, decl, [], null) as Node;
+    return create.ExportNamedDeclaration(start, state.tokStart, flags, decl, [], null);
 }
 
 function parseInterface(state: ParserState, start: number, extraFlags: number): Node {
@@ -2905,19 +2864,19 @@ function parseInterface(state: ParserState, start: number, extraFlags: number): 
             while (isP(state, P.DOT)) {
                 nextToken(state);
                 const r = parseNameAsIdent(state, R_NAME);
-                expr = create.TSQualifiedName(s, r.end, 0, expr, r) as Node;
+                expr = create.TSQualifiedName(s, r.end, 0, expr, r);
             }
             let targs: Ref = null;
             if (isP(state, P.LT)) {
                 const t = tryParseTypeArgsInType(state);
                 if (t !== null) targs = t;
             }
-            push(state, create.TSInterfaceHeritage(s, state.tokStart, 0, expr, targs) as Node);
+            push(state, create.TSInterfaceHeritage(s, state.tokStart, 0, expr, targs));
         } while (eatP(state, P.COMMA));
     }
     const ext = finishList(state, extFrom);
     const body = parseTypeMembers(state);
-    return create.TSInterfaceDeclaration(start, state.tokStart, extraFlags, id, typeParams, ext, body) as Node;
+    return create.TSInterfaceDeclaration(start, state.tokStart, extraFlags, id, typeParams, ext, body);
 }
 
 function parseTypeAlias(state: ParserState, start: number, extraFlags: number): Node {
@@ -2931,7 +2890,7 @@ function parseTypeAlias(state: ParserState, start: number, extraFlags: number): 
     expectP(state, P.EQ, "'='");
     const ty = parseType(state);
     consumeSemi(state);
-    return create.TSTypeAliasDeclaration(start, state.tokStart, extraFlags, id, typeParams, ty) as Node;
+    return create.TSTypeAliasDeclaration(start, state.tokStart, extraFlags, id, typeParams, ty);
 }
 
 function parseEnum(state: ParserState, start: number, extraFlags: number): Node {
@@ -2952,12 +2911,12 @@ function parseEnum(state: ParserState, start: number, extraFlags: number): Node 
             nextToken(state);
             init = parseAssign(state);
         }
-        push(state, create.TSEnumMember(ms, state.tokStart, 0, key, init) as Node);
+        push(state, create.TSEnumMember(ms, state.tokStart, 0, key, init));
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
         if (noProgress(state, mark)) break;
     }
     expectP(state, P.RBRACE, "'}'");
-    return create.TSEnumDeclaration(start, state.tokStart, extraFlags, id, finishList(state, from)) as Node;
+    return create.TSEnumDeclaration(start, state.tokStart, extraFlags, id, finishList(state, from));
 }
 
 function parseTypeAnn(state: ParserState): Node {
@@ -2967,12 +2926,7 @@ function parseTypeAnn(state: ParserState): Node {
         nextToken(state);
         if (isIdentLike(state) || isK(state, K.THIS)) nextToken(state);
         if (eatK(state, K.IS)) parseType(state);
-        return create.TSTypeAnnotation(
-            start,
-            state.tokStart,
-            0,
-            create.keyword(start, state.tokStart, N.TSAnyKeyword) as Node,
-        ) as Node;
+        return create.TSTypeAnnotation(start, state.tokStart, 0, create.keyword(start, state.tokStart, N.TSAnyKeyword));
     }
     // Type predicate `x is T` / `this is T`: detect the `is` with an allocation-free scalar
     // rewind (fires on every ident-led annotation, e.g. `: Foo`), and only when the annotation
@@ -2988,7 +2942,7 @@ function parseTypeAnn(state: ParserState): Node {
         if (isK(state, K.IS)) {
             nextToken(state);
             const ty = parseType(state);
-            return create.TSTypeAnnotation(start, state.tokStart, 0, ty) as Node;
+            return create.TSTypeAnnotation(start, state.tokStart, 0, ty);
         }
         state.pos = p;
         state.tok = tk;
@@ -2998,7 +2952,7 @@ function parseTypeAnn(state: ParserState): Node {
         state.tokHash = th;
     }
     const ty = parseType(state);
-    return create.TSTypeAnnotation(start, ty.end, 0, ty) as Node;
+    return create.TSTypeAnnotation(start, ty.end, 0, ty);
 }
 
 /** Public type entry: conditional types are ALLOWED here (a trailing `? … : …` starts a new
@@ -3029,8 +2983,8 @@ function parseTypeInner(state: ParserState): Node {
         const params = parseParams(state);
         expectP(state, P.ARROW, "'=>'");
         const ret = parseType(state);
-        const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret) as Node;
-        return create.TSConstructorType(start, state.tokStart, 0, tp, params, ann) as Node;
+        const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret);
+        return create.TSConstructorType(start, state.tokStart, 0, tp, params, ann);
     }
     return parseConditionalTypeOrHigher(state);
 }
@@ -3040,8 +2994,8 @@ function parseFnType(state: ParserState, abstractFlag: number, typeParams: Ref):
     const params = parseParams(state);
     expectP(state, P.ARROW, "'=>'");
     const ret = parseType(state);
-    const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret) as Node;
-    return create.TSFunctionType(start, state.tokStart, abstractFlag, typeParams, params, ann) as Node;
+    const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret);
+    return create.TSFunctionType(start, state.tokStart, abstractFlag, typeParams, params, ann);
 }
 
 function fnTypeAhead(state: ParserState): boolean {
@@ -3081,7 +3035,7 @@ function parseConditionalTypeOrHigher(state: ParserState): Node {
     const trueType = parseType(state);
     expectP(state, P.COLON, "':'");
     const falseType = parseType(state);
-    return create.TSConditionalType(checkType.start, falseType.end, 0, checkType, extendsType, trueType, falseType) as Node;
+    return create.TSConditionalType(checkType.start, falseType.end, 0, checkType, extendsType, trueType, falseType);
 }
 
 function parseUnionType(state: ParserState): Node {
@@ -3092,7 +3046,7 @@ function parseUnionType(state: ParserState): Node {
     const from = state.sp;
     push(state, first);
     while (eatP(state, P.PIPE)) push(state, parseIntersectionType(state));
-    return create.TSUnionType(start, state.tokStart, 0, finishList(state, from)) as Node;
+    return create.TSUnionType(start, state.tokStart, 0, finishList(state, from));
 }
 
 function parseIntersectionType(state: ParserState): Node {
@@ -3103,7 +3057,7 @@ function parseIntersectionType(state: ParserState): Node {
     const from = state.sp;
     push(state, first);
     while (eatP(state, P.AMP)) push(state, parseTypeOperator(state));
-    return create.TSIntersectionType(start, state.tokStart, 0, finishList(state, from)) as Node;
+    return create.TSIntersectionType(start, state.tokStart, 0, finishList(state, from));
 }
 
 function parseTypeOperator(state: ParserState): Node {
@@ -3111,17 +3065,17 @@ function parseTypeOperator(state: ParserState): Node {
     if (isK(state, K.KEYOF)) {
         nextToken(state);
         const t = parseTypeOperator(state);
-        return create.TSTypeOperator(start, t.end, TSOP.KEYOF, t) as Node;
+        return create.TSTypeOperator(start, t.end, TSOP.KEYOF, t);
     }
     if (isK(state, K.READONLY)) {
         nextToken(state);
         const t = parseTypeOperator(state);
-        return create.TSTypeOperator(start, t.end, TSOP.READONLY, t) as Node;
+        return create.TSTypeOperator(start, t.end, TSOP.READONLY, t);
     }
     if (isK(state, K.UNIQUE)) {
         nextToken(state);
         const t = parseTypeOperator(state);
-        return create.TSTypeOperator(start, t.end, TSOP.UNIQUE, t) as Node;
+        return create.TSTypeOperator(start, t.end, TSOP.UNIQUE, t);
     }
     if (isK(state, K.INFER)) {
         nextToken(state);
@@ -3140,8 +3094,8 @@ function parseTypeOperator(state: ParserState): Node {
             if (inDisallow || !isP(state, P.QUESTION)) constraint = c;
             else restoreState(state, s);
         }
-        const tp = create.TSTypeParameter(name.start, state.tokStart, 0, name, constraint, null) as Node;
-        return create.TSInferType(start, state.tokStart, 0, tp) as Node;
+        const tp = create.TSTypeParameter(name.start, state.tokStart, 0, name, constraint, null);
+        return create.TSInferType(start, state.tokStart, 0, tp);
     }
     return parseTypePostfixAndCond(state, parsePrimaryType(state));
 }
@@ -3152,11 +3106,11 @@ function parseTypePostfixAndCond(state: ParserState, t: Node): Node {
             nextToken(state);
             if (isP(state, P.RBRACKET)) {
                 nextToken(state);
-                t = create.TSArrayType(t.start, state.tokStart, 0, t) as Node;
+                t = create.TSArrayType(t.start, state.tokStart, 0, t);
             } else {
                 const idx = parseType(state);
                 expectP(state, P.RBRACKET, "']'");
-                t = create.TSIndexedAccessType(t.start, state.tokStart, 0, t, idx) as Node;
+                t = create.TSIndexedAccessType(t.start, state.tokStart, 0, t, idx);
             }
         } else return t;
     }
@@ -3174,17 +3128,17 @@ function parsePrimaryType(state: ParserState): Node {
     if ((state.tok as number) === T_STR) {
         const l = leaf(state, N.StringLiteral, start, state.tokEnd);
         nextToken(state);
-        return create.TSLiteralType(start, state.tokStart, 0, l) as Node;
+        return create.TSLiteralType(start, state.tokStart, 0, l);
     }
     if (state.tok === T_NUM) {
         const l = leaf(state, N.NumericLiteral, start, state.tokEnd);
         nextToken(state);
-        return create.TSLiteralType(start, state.tokStart, 0, l) as Node;
+        return create.TSLiteralType(start, state.tokStart, 0, l);
     }
     if (state.tok === T_BIGINT) {
         const l = leaf(state, N.BigIntLiteral, start, state.tokEnd);
         nextToken(state);
-        return create.TSLiteralType(start, state.tokStart, 0, l) as Node;
+        return create.TSLiteralType(start, state.tokStart, 0, l);
     }
     if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) return parseTemplateLiteralType(state);
     if (isP(state, P.MINUS)) {
@@ -3192,10 +3146,10 @@ function parsePrimaryType(state: ParserState): Node {
         if (state.tok === T_NUM) {
             const l = leaf(state, N.NumericLiteral, start, state.tokEnd);
             nextToken(state);
-            return create.TSLiteralType(start, state.tokStart, 0, l) as Node;
+            return create.TSLiteralType(start, state.tokStart, 0, l);
         }
         raise(state, ParseErrorCode.ExpectedNumber);
-        return create.keyword(start, state.tokStart, N.TSAnyKeyword) as Node;
+        return create.keyword(start, state.tokStart, N.TSAnyKeyword);
     }
     if (isP(state, P.LBRACKET)) {
         nextToken(state);
@@ -3217,11 +3171,11 @@ function parsePrimaryType(state: ParserState): Node {
                     if (isP(state, P.COLON)) {
                         nextToken(state);
                         const ty = parseType(state);
-                        t = create.TSNamedTupleMember(label.start, ty.end, opt, label, ty) as Node;
+                        t = create.TSNamedTupleMember(label.start, ty.end, opt, label, ty);
                     } else restoreState(state, sv);
                 }
                 if (t === null) t = parseType(state);
-                push(state, create.TSTypeOperator(s, t.end, 0, t) as Node);
+                push(state, create.TSTypeOperator(s, t.end, 0, t));
             } else {
                 const s = saveState(state);
                 if (isIdentLike(state)) {
@@ -3234,7 +3188,7 @@ function parsePrimaryType(state: ParserState): Node {
                     if (isP(state, P.COLON)) {
                         nextToken(state);
                         const t = parseType(state);
-                        push(state, create.TSNamedTupleMember(label.start, t.end, opt, label, t) as Node);
+                        push(state, create.TSNamedTupleMember(label.start, t.end, opt, label, t));
                         if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
                         continue;
                     }
@@ -3250,12 +3204,12 @@ function parsePrimaryType(state: ParserState): Node {
             if (noProgress(state, mark)) break;
         }
         expectP(state, P.RBRACKET, "']'");
-        return create.TSTupleType(start, state.tokStart, 0, finishList(state, from)) as Node;
+        return create.TSTupleType(start, state.tokStart, 0, finishList(state, from));
     }
     if (isP(state, P.LBRACE)) {
         if (mappedTypeAhead(state)) return parseMappedType(state);
         const members = parseTypeMembers(state);
-        return create.TSTypeLiteral(start, state.tokStart, 0, members) as Node;
+        return create.TSTypeLiteral(start, state.tokStart, 0, members);
     }
     if (isK(state, K.TYPEOF)) {
         nextToken(state);
@@ -3264,7 +3218,7 @@ function parsePrimaryType(state: ParserState): Node {
         // parse a reserved-word-tolerant entity name here.
         let expr: Node;
         if (isK(state, K.THIS)) {
-            expr = create.ThisExpression(state.tokStart, state.tokEnd, 0) as Node;
+            expr = create.ThisExpression(state.tokStart, state.tokEnd, 0);
             nextToken(state);
         } else {
             expr = parseIdent(state, R_REF);
@@ -3272,14 +3226,14 @@ function parsePrimaryType(state: ParserState): Node {
         while (isP(state, P.DOT)) {
             nextToken(state);
             const r = parseNameAsIdent(state, R_NAME);
-            expr = create.TSQualifiedName(s, r.end, 0, expr, r) as Node;
+            expr = create.TSQualifiedName(s, r.end, 0, expr, r);
         }
         let targs: Ref = null;
         if (isP(state, P.LT)) {
             const t = tryParseTypeArgsInType(state);
             if (t !== null) targs = t;
         }
-        return create.TSTypeQuery(start, state.tokStart, 0, expr, targs) as Node;
+        return create.TSTypeQuery(start, state.tokStart, 0, expr, targs);
     }
     if (isK(state, K.IMPORT)) {
         nextToken(state);
@@ -3297,7 +3251,7 @@ function parsePrimaryType(state: ParserState): Node {
             while (isP(state, P.DOT)) {
                 nextToken(state);
                 const r = parseNameAsIdent(state, R_NAME);
-                q = create.TSQualifiedName(q.start, r.end, 0, q, r) as Node;
+                q = create.TSQualifiedName(q.start, r.end, 0, q, r);
             }
             qualifier = q;
         }
@@ -3313,35 +3267,35 @@ function parsePrimaryType(state: ParserState): Node {
             source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
             qualifier,
             targs,
-        ) as Node;
+        );
     }
     if (isK(state, K.THIS)) {
         nextToken(state);
-        return create.keyword(start, state.tokStart, N.TSThisType) as Node;
+        return create.keyword(start, state.tokStart, N.TSThisType);
     }
     if (isIdentLike(state) || isKeyword(state.tok)) {
         const kw = tsKeywordType(state);
         if (kw !== 0) {
             nextToken(state);
-            return create.keyword(start, state.tokStart, kw) as Node;
+            return create.keyword(start, state.tokStart, kw);
         }
         const s = state.tokStart;
         let name: Node = parseNameAsIdent(state, R_REF);
         while (isP(state, P.DOT)) {
             nextToken(state);
             const r = parseNameAsIdent(state, R_NAME);
-            name = create.TSQualifiedName(s, r.end, 0, name, r) as Node;
+            name = create.TSQualifiedName(s, r.end, 0, name, r);
         }
         let targs: Ref = null;
         if (isP(state, P.LT)) {
             const t = tryParseTypeArgsInType(state);
             if (t !== null) targs = t;
         }
-        return create.TSTypeReference(start, state.tokStart, 0, name, targs) as Node;
+        return create.TSTypeReference(start, state.tokStart, 0, name, targs);
     }
     raise(state, ParseErrorCode.ExpectedType);
     nextToken(state);
-    return create.keyword(start, state.tokStart, N.TSAnyKeyword) as Node;
+    return create.keyword(start, state.tokStart, N.TSAnyKeyword);
 }
 
 function tsKeywordType(state: ParserState): KeywordType | 0 {
@@ -3381,7 +3335,7 @@ function parseTemplateLiteralType(state: ParserState): Node {
     if (state.tok === T_TEMPLATE_FULL) {
         const q = leaf(state, N.TemplateElement, start + 1, state.tokEnd - 1);
         nextToken(state);
-        return create.TSTemplateLiteralType(start, state.tokStart, 0, [q], []) as Node;
+        return create.TSTemplateLiteralType(start, state.tokStart, 0, [q], []);
     }
     const qFrom = state.sp;
     const types: Node[] = [];
@@ -3403,7 +3357,7 @@ function parseTemplateLiteralType(state: ParserState): Node {
         nextToken(state);
     }
     const quasis = finishList(state, qFrom);
-    return create.TSTemplateLiteralType(start, state.tokStart, 0, quasis, types) as Node;
+    return create.TSTemplateLiteralType(start, state.tokStart, 0, quasis, types);
 }
 
 function mappedTypeAhead(state: ParserState): boolean {
@@ -3455,8 +3409,8 @@ function parseMappedType(state: ParserState): Node {
     }
     eatP(state, P.SEMI);
     expectP(state, P.RBRACE, "'}'");
-    const tp = create.TSTypeParameter(name.start, constraint.end, 0, name, constraint, null) as Node;
-    return create.TSMappedType(start, state.tokStart, flags, tp, nameType, typeAnn) as Node;
+    const tp = create.TSTypeParameter(name.start, constraint.end, 0, name, constraint, null);
+    return create.TSMappedType(start, state.tokStart, flags, tp, nameType, typeAnn);
 }
 
 function parseTypeMembers(state: ParserState): Node[] {
@@ -3495,7 +3449,7 @@ function parseTypeMember(state: ParserState): Node {
         const params = parseParams(state);
         let ret: Ref = null;
         if (isP(state, P.COLON)) ret = parseTypeAnn(state);
-        return create.TSConstructSignatureDeclaration(start, state.tokStart, 0, tp, params, ret) as Node;
+        return create.TSConstructSignatureDeclaration(start, state.tokStart, 0, tp, params, ret);
     }
     if (isP(state, P.LPAREN) || isP(state, P.LT)) {
         let tp: Ref = null;
@@ -3506,7 +3460,7 @@ function parseTypeMember(state: ParserState): Node {
         const params = parseParams(state);
         let ret: Ref = null;
         if (isP(state, P.COLON)) ret = parseTypeAnn(state);
-        return create.TSCallSignatureDeclaration(start, state.tokStart, 0, tp, params, ret) as Node;
+        return create.TSCallSignatureDeclaration(start, state.tokStart, 0, tp, params, ret);
     }
     if (isP(state, P.LBRACKET)) {
         nextToken(state);
@@ -3514,24 +3468,17 @@ function parseTypeMember(state: ParserState): Node {
         const name = parseNameAsIdent(state, R_REF);
         if (isP(state, P.COLON)) {
             const keyAnn = parseTypeAnn(state);
-            const param = create.FormalParameter(
-                ps,
-                state.tokStart,
-                0,
-                ident(state, R_BIND, name.start, name.end),
-                keyAnn,
-                null,
-            ) as Node;
+            const param = create.FormalParameter(ps, state.tokStart, 0, ident(state, R_BIND, name.start, name.end), keyAnn, null);
             expectP(state, P.RBRACKET, "']'");
             let ann: Ref = null;
             if (isP(state, P.COLON)) ann = parseTypeAnn(state);
-            return create.TSIndexSignature(start, state.tokStart, flags, param, ann) as Node;
+            return create.TSIndexSignature(start, state.tokStart, flags, param, ann);
         }
         let key: Node = name;
         while (isP(state, P.DOT)) {
             nextToken(state);
             const r = parseNameAsIdent(state, R_NAME);
-            key = create.StaticMemberExpression(ps, r.end, 0, key, r) as Node;
+            key = create.StaticMemberExpression(ps, r.end, 0, key, r);
         }
         expectP(state, P.RBRACKET, "']'");
         let mflags = flags | FL.COMPUTED;
@@ -3548,11 +3495,11 @@ function parseTypeMember(state: ParserState): Node {
             const params = parseParams(state);
             let ret: Ref = null;
             if (isP(state, P.COLON)) ret = parseTypeAnn(state);
-            return create.TSMethodSignature(start, state.tokStart, mflags, key, tp, params, ret) as Node;
+            return create.TSMethodSignature(start, state.tokStart, mflags, key, tp, params, ret);
         }
         let ann: Ref = null;
         if (isP(state, P.COLON)) ann = parseTypeAnn(state);
-        return create.TSPropertySignature(start, state.tokStart, mflags, key, ann) as Node;
+        return create.TSPropertySignature(start, state.tokStart, mflags, key, ann);
     }
     let kind = 0;
     if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state)) {
@@ -3580,11 +3527,11 @@ function parseTypeMember(state: ParserState): Node {
         const params = parseParams(state);
         let ret: Ref = null;
         if (isP(state, P.COLON)) ret = parseTypeAnn(state);
-        return create.TSMethodSignature(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), key, tp, params, ret) as Node;
+        return create.TSMethodSignature(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), key, tp, params, ret);
     }
     let ann: Ref = null;
     if (isP(state, P.COLON)) ann = parseTypeAnn(state);
-    return create.TSPropertySignature(start, state.tokStart, flags, key, ann) as Node;
+    return create.TSPropertySignature(start, state.tokStart, flags, key, ann);
 }
 
 function expectGtInType(state: ParserState): void {
@@ -3647,13 +3594,13 @@ function tryParseTypeParams(state: ParserState): Node | null {
                 nextToken(state);
                 dflt = parseType(state);
             }
-            push(state, create.TSTypeParameter(ts, state.tokStart, flags, name, constraint, dflt) as Node);
+            push(state, create.TSTypeParameter(ts, state.tokStart, flags, name, constraint, dflt));
             if (!eatP(state, P.COMMA)) break;
         }
         if (!isGtLike(state)) throw 0;
         expectGtInType(state);
         state.speculating--;
-        return create.TSTypeParameterDeclaration(startPos, state.tokStart, 0, finishList(state, from)) as Node;
+        return create.TSTypeParameterDeclaration(startPos, state.tokStart, 0, finishList(state, from));
     } catch {
         state.speculating--;
         state.sp = from;
@@ -3684,7 +3631,7 @@ function tryParseTypeArgsInType(state: ParserState): Node | null {
         if (!isGtLike(state)) throw 0;
         expectGtInType(state);
         state.speculating--;
-        return create.TSTypeParameterInstantiation(startPos, state.tokStart, 0, finishList(state, from)) as Node;
+        return create.TSTypeParameterInstantiation(startPos, state.tokStart, 0, finishList(state, from));
     } catch {
         state.speculating--;
         state.sp = from;

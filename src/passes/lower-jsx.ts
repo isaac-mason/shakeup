@@ -20,7 +20,7 @@ const S = 0; // synthetic span (leaves print verbatim; spans collapse to the JSX
 const idName = (name: string): Node => node(N.IdentifierName, S, S, name, null);
 const str = (text: string): Node => node(N.StringLiteral, S, S, JSON.stringify(text), null);
 const boolTrue = (): Node => node(N.BooleanLiteral, S, S, 'true', null);
-const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop) as Node;
+const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop);
 // Loose payload view — JSX node types aren't narrowable through `n.data`.
 const jd = (n: Node): Record<string, Node | (Node | null)[] | string> => n.data as never;
 
@@ -99,10 +99,10 @@ function buildAttrValue(value: Node | null): Node {
 
 /** One attribute → an object member: spread → `...arg`; else `key: value`. */
 function buildAttr(a: Node): Node {
-    if (a.type === N.JSXSpreadAttribute) return create.SpreadElement(S, S, 0, jd(a).argument as Node) as Node;
+    if (a.type === N.JSXSpreadAttribute) return create.SpreadElement(S, S, 0, jd(a).argument as Node);
     const keyText = attrKeyText(jd(a).name as Node);
     const key = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyText) ? idName(keyText) : str(keyText.slice(1, -1));
-    return create.ObjectProperty(S, S, 0, key, buildAttrValue(jd(a).value as Node | null)) as Node;
+    return create.ObjectProperty(S, S, 0, key, buildAttrValue(jd(a).value as Node | null));
 }
 
 /** Children that survive to runtime (text collapses/drops per JSX whitespace rules). At exit-time
@@ -125,7 +125,7 @@ function collectChildren(children: Node[]): Node[] {
 function buildChild(child: Node): Node {
     if (child.type === N.JSXText) return str(normalizeJSXText(child.name) as string);
     if (child.type === N.JSXExpressionContainer) return jd(child).expression as Node;
-    if (child.type === N.JSXSpreadChild) return create.SpreadElement(S, S, 0, jd(child).expression as Node) as Node;
+    if (child.type === N.JSXSpreadChild) return create.SpreadElement(S, S, 0, jd(child).expression as Node);
     return child;
 }
 
@@ -138,10 +138,10 @@ function buildPropsWithChildren(attrs: Node[], childItems: Node[]): Node {
         const value =
             childItems.length === 1 && childItems[0].type !== N.JSXSpreadChild
                 ? buildChild(childItems[0])
-                : (create.ArrayExpression(S, S, 0, childItems.map(buildChild)) as Node);
-        props.push(create.ObjectProperty(S, S, 0, idName('children'), value) as Node);
+                : create.ArrayExpression(S, S, 0, childItems.map(buildChild));
+        props.push(create.ObjectProperty(S, S, 0, idName('children'), value));
     }
-    return create.ObjectExpression(S, S, 0, props) as Node;
+    return create.ObjectExpression(S, S, 0, props);
 }
 
 /** true when a `key` attribute appears AFTER a spread — forces the classic `createElement` form. */
@@ -169,10 +169,10 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
         const propAttrs = attributes.filter((a) => a.type === N.JSXSpreadAttribute || a.type === N.JSXAttribute);
         const props =
             propAttrs.length > 0
-                ? (create.ObjectExpression(S, S, 0, propAttrs.map(buildAttr)) as Node)
+                ? create.ObjectExpression(S, S, 0, propAttrs.map(buildAttr))
                 : node(N.NullLiteral, S, S, 'null', null);
         const args = [tag, props, ...childItems.map(buildChild)];
-        return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, 'createElement'), args, null) as Node;
+        return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, 'createElement'), args, null);
     }
 
     // Split out `key`; the rest become props.
@@ -195,7 +195,7 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
     const useJsxs = childItems.length > 0 && childrenAreStatic(childItems.map(childText));
     const args = [tag, buildPropsWithChildren(propAttrs, childItems)];
     if (hasKey) args.push(buildAttrValue(keyValue ?? null));
-    return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, useJsxs ? 'jsxs' : 'jsx'), args, null) as Node;
+    return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, useJsxs ? 'jsxs' : 'jsx'), args, null);
 }
 
 /** The JSX lowering pass — a factory holding per-module runtime-import state. Lowers on EXIT (so nested
@@ -231,13 +231,13 @@ export function makeJsxLower(
                 const jsxSpecs: Node[] = [];
                 const rootSpecs: Node[] = [];
                 for (const [name, local] of rt.minted) {
-                    const spec = create.ImportSpecifier(S, S, 0, local, idName(name)) as Node;
+                    const spec = create.ImportSpecifier(S, S, 0, local, idName(name));
                     (name === 'createElement' ? rootSpecs : jsxSpecs).push(spec);
                 }
                 const imports: Node[] = [];
                 if (jsxSpecs.length > 0)
-                    imports.push(create.ImportDeclaration(S, S, 0, jsxSpecs, str(`${importSource}/jsx-runtime`)) as Node);
-                if (rootSpecs.length > 0) imports.push(create.ImportDeclaration(S, S, 0, rootSpecs, str(importSource)) as Node);
+                    imports.push(create.ImportDeclaration(S, S, 0, jsxSpecs, str(`${importSource}/jsx-runtime`)));
+                if (rootSpecs.length > 0) imports.push(create.ImportDeclaration(S, S, 0, rootSpecs, str(importSource)));
                 (n.data as { body: Node[] }).body.unshift(...imports);
             },
         }),

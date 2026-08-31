@@ -167,7 +167,7 @@ export const normalize: Visitor = {
         [N.LogicalExpression]: reassociateLogical,
         [N.WhileStatement]: (n, ctx: TransformCtx) => {
             const d = n.data as { test: Node; body: Node };
-            const f = create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body) as Node;
+            const f = create.ForStatement(n.start, n.end, 0, null, d.test, null, d.body);
             // A `ForStatement` OWNS A SCOPE (it can declare `for (let i …)`); a `WhileStatement` does
             // not. So minting one here without a scope leaves a scope-owning node with `scopeId` 0,
             // which a fresh `analyze()` would give a real scope — drift, and the differential

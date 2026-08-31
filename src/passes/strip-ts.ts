@@ -18,9 +18,9 @@ const idRef = (name: string, sym: number): Node => {
     (n as { sym: number }).sym = sym;
     return n;
 };
-const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop) as Node;
-const assign = (l: Node, r: Node): Node => create.AssignmentExpression(S, S, '=', l, r) as Node;
-const exprStmt = (e: Node): Node => create.ExpressionStatement(S, S, 0, e) as Node;
+const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop);
+const assign = (l: Node, r: Node): Node => create.AssignmentExpression(S, S, '=', l, r);
+const exprStmt = (e: Node): Node => create.ExpressionStatement(S, S, 0, e);
 
 /** A whole statement that erases in strip mode (mirrors the printer's `isErasedStmt`): type
  *  declarations, `declare` ambients, body-less overload signatures, type-only import/export. Value
@@ -81,10 +81,7 @@ function lowerParamProps(ctor: Node, ctx: TransformCtx): void {
         if (pat.type !== N.BindingIdentifier) continue; // TS forbids destructuring param props
         assigns.push(
             exprStmt(
-                assign(
-                    member(create.ThisExpression(S, S, 0) as Node, idName(pat.name)),
-                    idRef(pat.name, (pat as { sym: number }).sym),
-                ),
+                assign(member(create.ThisExpression(S, S, 0), idName(pat.name)), idRef(pat.name, (pat as { sym: number }).sym)),
             ),
         );
     }
