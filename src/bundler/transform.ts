@@ -1,14 +1,14 @@
-import { analyze, createSemantic, type Semantic, symbolOf } from '../analysis/semantic';
-import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from '../ast';
-import { type JSXOptions, resolveJSXOptions } from './resolve';
-import { parse } from '../parser';
-import { makeJsxLower } from '../passes/lower-jsx';
-import { tsLower } from '../passes/lower-ts';
-import { tsStrip } from '../passes/strip-ts';
-import { traverse } from '../passes/traverse';
-import { printModule } from '../print/print-js';
-import { createPrinter, finishPrinter, printerPart } from '../print/printer';
-import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../sourcemap';
+import { analyze, createSemantic, type Semantic, symbolOf } from '../analysis/semantic.ts';
+import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from '../ast/index.ts';
+import { type JSXOptions, resolveJSXOptions } from './resolve.ts';
+import { parse } from '../parser/index.ts';
+import { makeJsxLower } from '../passes/lower-jsx.ts';
+import { tsLower } from '../passes/lower-ts.ts';
+import { tsStrip } from '../passes/strip-ts.ts';
+import { traverse } from '../passes/traverse.ts';
+import { printModule } from '../print/print-js.ts';
+import { createPrinter, finishPrinter, printerPart } from '../print/printer.ts';
+import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../sourcemap.ts';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
  *  filename extension when omitted. */

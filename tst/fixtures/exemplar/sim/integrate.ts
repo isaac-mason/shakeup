@@ -2,11 +2,11 @@
 // `vec2.add(...)`. Also imports vec3 the same way — the two namespaces keep the
 // colliding `add`/`dot` apart. Consumes the barrel's named chain export (clamp).
 
-import { clamp } from '../math';
-import * as vec2 from '../math/vec2';
-import * as vec3 from '../math/vec3';
-import { MotionType } from '../motion';
-import type { Particle } from '../types';
+import { clamp } from '../math/index.ts';
+import * as vec2 from '../math/vec2.ts';
+import * as vec3 from '../math/vec3.ts';
+import { MotionType } from '../motion.ts';
+import type { Particle } from '../types.ts';
 
 // one Euler step: STATIC never moves, DYNAMIC integrates vel, KINEMATIC moves
 // at a fixed clamped rate. Enum switch over MotionType.

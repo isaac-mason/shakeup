@@ -1,10 +1,10 @@
-import { isPureExpr, isPureStatement } from '../analysis/effects';
-import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from '../analysis/ns-usage';
-import { walkRefIdents } from '../analysis/refs';
-import { scopeOf, symbolOf } from '../analysis/semantic';
-import { N, type Node, walk } from '../ast';
-import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
-import { staticImportRunsTarget } from './init-obligations';
+import { isPureExpr, isPureStatement } from '../analysis/effects.ts';
+import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from '../analysis/ns-usage.ts';
+import { walkRefIdents } from '../analysis/refs.ts';
+import { scopeOf, symbolOf } from '../analysis/semantic.ts';
+import { N, type Node, walk } from '../ast/index.ts';
+import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
+import { staticImportRunsTarget } from './init-obligations.ts';
 
 export type TreeshakeResult = {
     live: Set<number>[];

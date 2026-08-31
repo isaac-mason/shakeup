@@ -47,8 +47,10 @@ const PREC_BY_TYPE = (() => {
 })();
 
 function precOf(n: Node): Prec {
+    // `Int8Array` erases the element type to `number`, so the table's `Prec` values need naming
+    // back on the way out. The sentinel is exactly -1 (see the table above).
     const p = PREC_BY_TYPE[n.type];
-    if (p >= 0) return p;
+    if (p >= 0) return p as Prec;
     switch (n.type) {
         case N.LogicalExpression:
             return LOGICAL_PREC[data(n).operator as string];
@@ -139,7 +141,7 @@ function emitBinary(p: Printer, n: Node): void {
     const wordOp = op === 'in' || op === 'instanceof';
     if (op === '**') {
         // right-assoc; a unary/lower left operand must be parenthesised (`(-2)**2`).
-        printBinaryOperand(p, d.left as Node, Prec.Unary + 1);
+        printBinaryOperand(p, d.left as Node, (Prec.Unary + 1) as Prec);
     } else {
         printBinaryOperand(p, d.left as Node, prec);
     }

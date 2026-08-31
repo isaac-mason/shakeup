@@ -4,7 +4,7 @@
 // string; the `%0` placeholders carry the runtime-variable parts (the expected
 // token text, an offending character). This de-strings the parser: message
 // wording lives here in one table, not scattered across `parser.ts`.
-import { enumeration } from '../util/enumeration';
+import { enumeration } from '../util/enumeration.ts';
 
 export const ParseErrorCode = enumeration(
     // Parameterized (%0 = token text / character).

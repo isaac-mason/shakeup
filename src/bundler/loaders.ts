@@ -1,4 +1,4 @@
-import type { ModuleType } from './plugin';
+import type { ModuleType } from './plugin.ts';
 
 /** The module types whose loader reads BYTES rather than text.
  *

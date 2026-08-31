@@ -8,7 +8,7 @@
 // rather than under `parser/` (oxc's `oxc_ast::AstBuilder`, shared by parser, transformer
 // and minifier alike).
 import { type Accessibility, N, type Node, node } from './ast.ts';
-import { enumeration } from '../util/enumeration';
+import { enumeration } from '../util/enumeration.ts';
 
 export const FL = {
     NAMED: 1 << 0,

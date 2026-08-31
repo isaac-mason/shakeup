@@ -1,4 +1,4 @@
-import type { ShapeDef } from './registry';
+import type { ShapeDef } from './registry.ts';
 
 // `satisfies` must be stripped; the value survives.
 export const def = {

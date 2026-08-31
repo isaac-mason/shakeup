@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignSlots, SLOT_UNASSIGNED } from '../src/mangle/slots';
+import { assignSlots, SLOT_UNASSIGNED } from '../src/mangle/slots.ts';
 
 // Hand-derived from the ported oxc `SlotAssignment::compute` algorithm. Each case's expected slots
 // are traced by hand against the liveness rule (a slot is live from each use up to, excluding, the

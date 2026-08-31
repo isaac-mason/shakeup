@@ -1,4 +1,4 @@
-import type { Fs } from '../src/bundler/fs';
+import type { Fs } from '../src/bundler/fs.ts';
 
 export type SyntheticGraph = {
     files: Record<string, string>;

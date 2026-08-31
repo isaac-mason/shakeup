@@ -1,7 +1,7 @@
 import { analyze, createSemantic } from '../../analysis/semantic.ts';
 import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
-import { parse } from '../../parser';
+import { parse } from '../../parser/index.ts';
 import {
     compilePipeline,
     type ModuleInfo,

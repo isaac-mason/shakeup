@@ -1,6 +1,6 @@
-import { bundle } from '../bundle';
-import type { Plugin } from '../plugin';
-import type { JSXOptions } from '../resolve';
+import { bundle } from '../bundle.ts';
+import type { Plugin } from '../plugin.ts';
+import type { JSXOptions } from '../resolve.ts';
 
 /** Virtual-id prefixes for a resolved `?worker` entry — inline (blob) vs chunk (emitted file). */
 const INLINE_PREFIX = '\0worker-inline:';

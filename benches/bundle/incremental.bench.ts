@@ -1,6 +1,6 @@
 import { bench, group } from '@pmndrs/labs';
-import { createBuildContext } from '../../src/bundler/bundle';
-import { makeGraph } from '../_graph';
+import { createBuildContext } from '../../src/bundler/bundle.ts';
+import { makeGraph } from '../_graph.ts';
 
 // The dev-loop metric: a warm BuildContext rebuilding after a single body-only edit. The graph is
 // primed once in setup; each measured iteration edits one module and rebuilds, reusing the parse,

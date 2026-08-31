@@ -1,4 +1,4 @@
-import type { Plugin } from '../plugin';
+import type { Plugin } from '../plugin.ts';
 
 /** Turns `.json` imports into a module with the value as default export. */
 export function json(): Plugin {

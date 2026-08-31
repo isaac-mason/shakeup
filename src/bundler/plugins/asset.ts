@@ -1,4 +1,4 @@
-import type { Plugin } from '../plugin';
+import type { Plugin } from '../plugin.ts';
 
 /** Virtual-id prefix for a resolved `?url` asset. The `load` hook serves these as a JS module whose
  *  default export is the asset's URL, so the `.png`/`.svg`/… in the tail never reaches the fs or a

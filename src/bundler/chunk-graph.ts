@@ -1,8 +1,8 @@
 import { helpersNeededBy } from './generate/esm.ts';
-import { deconflictChunk } from './deconflict';
-import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
-import { initRefForRecord } from './init-obligations';
-import { finalNameOf, reprName } from './link';
+import { deconflictChunk } from './deconflict.ts';
+import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
+import { initRefForRecord } from './init-obligations.ts';
+import { finalNameOf, reprName } from './link.ts';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
 export type CrossImport = { imported: string; local: string };

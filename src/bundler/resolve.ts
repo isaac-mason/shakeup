@@ -1,8 +1,8 @@
-import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs';
-import type { ParseCache } from './graph-types';
-import { createNodeResolver, packageSideEffectsFor } from './node-resolve';
-import type { CompressMode } from '../passes/compress';
-import type { ModuleType, Plugin } from './plugin';
+import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs.ts';
+import type { ParseCache } from './graph-types.ts';
+import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
+import type { CompressMode } from '../passes/compress/index.ts';
+import type { ModuleType, Plugin } from './plugin.ts';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
  * automatic runtime only. */

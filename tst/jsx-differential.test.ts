@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { N, type Node, walk } from '../src/ast/index.ts';
 import { astToEstree, ESTREE_TYPE } from '../src/estree.ts';
 import { estreeDiff, isKnownGap } from './estree-diff.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const JSX_DIR = resolve(__dirname, 'fixtures/jsx');

@@ -1,8 +1,8 @@
-import type { Semantic } from '../analysis/semantic';
-import type { Program } from '../ast';
-import type { Fs, MaybePromise } from './fs';
-import { applyEdits, type Edit } from './patches';
-import type { SourceMap } from '../sourcemap';
+import type { Semantic } from '../analysis/semantic.ts';
+import type { Program } from '../ast/index.ts';
+import type { Fs, MaybePromise } from './fs.ts';
+import { applyEdits, type Edit } from './patches.ts';
+import type { SourceMap } from '../sourcemap.ts';
 
 /** false = no side effects (droppable if unused); true = default liveness;
  *  'no-treeshake' = keep every statement + always include the module. */

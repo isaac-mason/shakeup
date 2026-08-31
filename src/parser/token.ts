@@ -22,7 +22,7 @@
 // The upshot for `parseBinary`: `in`/`instanceof` carry precedence 8 + IsBinaryOp
 // like any punctuator, so the punct-vs-keyword branch disappears — one uniform
 // `precedenceOf(state.tok)` / `isBinaryOp(state.tok)` loop.
-import { enumeration } from '../util/enumeration';
+import { enumeration } from '../util/enumeration.ts';
 
 // Kind ids (the low byte). Literal/structural classes, then punctuators, then
 // keywords — names mirror the old `T_*` / `P` / `K` spaces exactly.

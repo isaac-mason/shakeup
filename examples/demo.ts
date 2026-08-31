@@ -8,7 +8,7 @@ import {
     walk,
     walkChildren,
 } from '../src/ast/index.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 const snippet = `
 export interface Vec3 { x: number; y: number; z: number }

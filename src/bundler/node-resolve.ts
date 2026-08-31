@@ -1,5 +1,5 @@
-import { dirnameOf, type Fs, joinPath, normalizePath } from './fs';
-import type { ModuleDefFormat } from './graph-types';
+import { dirnameOf, type Fs, joinPath, normalizePath } from './fs.ts';
+import type { ModuleDefFormat } from './graph-types.ts';
 
 /** The minimal context the resolver needs: a diagnostics sink. */
 type ResolveCtx = { warn(message: string): void };

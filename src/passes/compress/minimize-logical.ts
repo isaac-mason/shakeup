@@ -75,11 +75,8 @@ const isUndefined = (n: Node): boolean => {
 };
 
 /** Category of a null-or-undefined operand. */
-enum NullKind {
-    None = 0,
-    Null = 1,
-    Undefined = 2,
-}
+const NullKind = { None: 0, Null: 1, Undefined: 2 } as const;
+type NullKind = (typeof NullKind)[keyof typeof NullKind];
 const nullKind = (n: Node): NullKind => (isNull(n) ? NullKind.Null : isUndefined(n) ? NullKind.Undefined : NullKind.None);
 
 /** For one side `left <cmp> right`, split into (the null/undefined operand's kind, the OTHER operand).

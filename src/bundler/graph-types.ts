@@ -2,11 +2,11 @@
 // depends only on ast/semantic/plugin/fs types, imported by every stage (scan/link/deconflict/
 // treeshake/chunk-graph/bundle). No stage logic here.
 
-import type { Semantic } from '../analysis/semantic';
-import type { Node, Program } from '../ast';
-import type { CompressMode } from '../passes/compress';
-import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin';
-import type { Platform } from './resolve';
+import type { Semantic } from '../analysis/semantic.ts';
+import type { Node, Program } from '../ast/index.ts';
+import type { CompressMode } from '../passes/compress/index.ts';
+import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin.ts';
+import type { Platform } from './resolve.ts';
 
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';

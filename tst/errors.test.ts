@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 import { formatError, ParseErrorCode } from '../src/parser/errors.ts';
 
 const first = (src: string, ts = true, jsx = false) => parse(src, { ts, jsx }).errors[0];

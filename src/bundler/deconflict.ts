@@ -3,10 +3,10 @@
 // side-maps (`linked.finalNames`/`namespaceOf`/`externalLocals`) — NO AST mutation; the printer
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
-import { SCOPE, scopeOf } from '../analysis/semantic';
-import { N, type Node, walkChildren } from '../ast';
-import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types';
-import { finalNameOf } from './link';
+import { SCOPE, scopeOf } from '../analysis/semantic.ts';
+import { N, type Node, walkChildren } from '../ast/index.ts';
+import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types.ts';
+import { finalNameOf } from './link.ts';
 
 export const RESERVED = new Set([
     'break',

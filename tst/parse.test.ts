@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, test } from 'vitest';
 import { N, type Node, TYPE_NAME, walk } from '../src/ast/index.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(__dirname, '..');

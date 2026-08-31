@@ -1,5 +1,5 @@
-import type { Graph, ImportBind, Linked, Module } from './graph-types';
-import { isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
+import type { Graph, ImportBind, Linked, Module } from './graph-types.ts';
+import { isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
 
 type LinkCtx = {
     graph: Graph;

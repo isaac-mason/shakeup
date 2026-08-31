@@ -1,17 +1,17 @@
 // Entry. Order matters: the side-effect import comes FIRST — its observable
 // result (registry.size === 2) proves it ran exactly once.
-import './shapes/register-all';
+import './shapes/register-all.ts';
 
-import config from './config'; // anonymous default (object literal)
-import { Emitter } from './emitter';
-import labelFor from './label'; // named default (function)
-import { clamp } from './math'; // 3-deep named re-export chain (a->b->c)
-import * as vec2 from './math/vec2'; // namespace import, calling style
-import { Collide, MotionType, Phase } from './motion';
+import config from './config.ts'; // anonymous default (object literal)
+import { Emitter } from './emitter.ts';
+import labelFor from './label.ts'; // named default (function)
+import { clamp } from './math/index.ts'; // 3-deep named re-export chain (a->b->c)
+import * as vec2 from './math/vec2.ts'; // namespace import, calling style
+import { Collide, MotionType, Phase } from './motion.ts';
 // mixed named / default / namespace imports
-import { areaOf, registry } from './shapes/registry';
-import { step } from './sim/integrate';
-import type { Particle } from './types';
+import { areaOf, registry } from './shapes/registry.ts';
+import { step } from './sim/integrate.ts';
+import type { Particle } from './types.ts';
 
 // local `x`/`y` that COLLIDE with vec2.splat's shorthand locals after renaming
 const x = 100;
@@ -62,5 +62,5 @@ export const registrySize = registry.size; // 2
 export const enums = { motionName, collideBoth, phaseLive };
 
 // re-exports: named `export { ... } from` and `export * as ops from`
-export { clamp } from './math';
-export * as ops from './math/vec2';
+export { clamp } from './math/index.ts';
+export * as ops from './math/vec2.ts';

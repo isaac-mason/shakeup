@@ -1,6 +1,6 @@
 import { bench, group } from '@pmndrs/labs';
-import { bundle } from '../../src/bundler/bundle';
-import { makeDeepModule, makeGraph } from '../_graph';
+import { bundle } from '../../src/bundler/bundle.ts';
+import { makeDeepModule, makeGraph } from '../_graph.ts';
 
 // The MINIFY tier had no bench coverage at all: `makeGraph().opts()` passes no `output`, so every
 // existing bundle bench measured parse/link/tree-shake/render with compress and mangle switched off.

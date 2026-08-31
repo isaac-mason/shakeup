@@ -1,4 +1,4 @@
-import type { Plugin } from '../plugin';
+import type { Plugin } from '../plugin.ts';
 
 export type CssOptions = {
     /** How a `.css` import becomes a JS module:

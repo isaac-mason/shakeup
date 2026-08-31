@@ -1,7 +1,7 @@
 // The ONE class in the exemplar (a spawner). TS modifiers: private + readonly
 // fields, an optional method. Exported and instantiated by the entry.
-import type { Vec2 } from './math/vec2';
-import { create as vec } from './math/vec2';
+import type { Vec2 } from './math/vec2.ts';
+import { create as vec } from './math/vec2.ts';
 
 export class Emitter {
     // readonly + private fields with TS modifiers

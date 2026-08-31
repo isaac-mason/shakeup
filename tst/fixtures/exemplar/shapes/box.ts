@@ -1,4 +1,4 @@
-import type { ShapeDef } from './registry';
+import type { ShapeDef } from './registry.ts';
 
 // second def object — `as ShapeDef` cast must be stripped.
 export const def = {

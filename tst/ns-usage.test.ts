@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { analyzeDynamicUsage, analyzeNsUsage } from '../src/analysis/ns-usage.ts';
 import { analyze, createSemantic, symbolOf } from '../src/analysis/semantic.ts';
 import { N, walk } from '../src/ast/index.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 /** Parse `src`, resolve symbols, and classify the `import * as ns` binding named `nsName`. */
 function usageOf(src: string, nsName = 'ns'): { escapes: boolean; members: string[] } {

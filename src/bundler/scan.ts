@@ -1,8 +1,8 @@
-import { resolveNoSideEffects } from '../analysis/purity';
-import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts';
-import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic';
-import { isJSXNode, N, type Node, type Program, walk } from '../ast';
-import type { Fs, MaybePromise } from './fs';
+import { resolveNoSideEffects } from '../analysis/purity.ts';
+import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts.ts';
+import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic.ts';
+import { isJSXNode, N, type Node, type Program, walk } from '../ast/index.ts';
+import type { Fs, MaybePromise } from './fs.ts';
 import {
     type CachedParse,
     type ExportsKind,
@@ -15,22 +15,22 @@ import {
     type ModuleDefFormat,
     NAME_DEFAULT,
     NAME_NAMESPACE,
-} from './graph-types';
-import { compileToModule, loaderWantsBytes } from './loaders';
-import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve';
-import { parse } from '../parser';
-import { runCompress } from '../passes/compress';
-import { compileDefines, makeDefine } from '../passes/define';
-import { makeJsxLower } from '../passes/lower-jsx';
-import { sawUnloweredTs, tsLower } from '../passes/lower-ts';
-import { eliminateDeadStores } from '../passes/optimize/dead-store';
-import { flowInlineVariables } from '../passes/optimize/flow-inline';
-import { inlineFunctions } from '../passes/optimize/inline-functions';
-import { resolveShapes, shapeCollector } from '../passes/optimize/shapes';
-import { scalarReplaceAggregates } from '../passes/optimize/sroa';
-import { unrollLoops } from '../passes/optimize/unroll';
-import { tsStrip } from '../passes/strip-ts';
-import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse';
+} from './graph-types.ts';
+import { compileToModule, loaderWantsBytes } from './loaders.ts';
+import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve.ts';
+import { parse } from '../parser/index.ts';
+import { runCompress } from '../passes/compress/index.ts';
+import { compileDefines, makeDefine } from '../passes/define.ts';
+import { makeJsxLower } from '../passes/lower-jsx.ts';
+import { sawUnloweredTs, tsLower } from '../passes/lower-ts.ts';
+import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
+import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
+import { inlineFunctions } from '../passes/optimize/inline-functions.ts';
+import { resolveShapes, shapeCollector } from '../passes/optimize/shapes.ts';
+import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
+import { unrollLoops } from '../passes/optimize/unroll.ts';
+import { tsStrip } from '../passes/strip-ts.ts';
+import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse.ts';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -46,8 +46,8 @@ import {
     runLoad,
     runResolveId,
     runTransform,
-} from './plugin';
-import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve';
+} from './plugin.ts';
+import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve.ts';
 
 /** How the semantic reaches the passes that run AFTER the TS/JSX lowering.
  *

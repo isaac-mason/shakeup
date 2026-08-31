@@ -1,5 +1,5 @@
 import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
-import { enumeration } from '../util/enumeration';
+import { enumeration } from '../util/enumeration.ts';
 
 /** Scope kinds, stored in `ScopeRec.flags`. */
 export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');

@@ -2,8 +2,8 @@
 
 // type-only external import (must vanish entirely from the bundle)
 import type { ParsedPath } from 'node:path';
-import type { Vec2 } from './math/vec2';
-import type { MotionType } from './motion';
+import type { Vec2 } from './math/vec2.ts';
+import type { MotionType } from './motion.ts';
 
 export interface Particle {
     pos: Vec2;

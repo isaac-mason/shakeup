@@ -16,7 +16,7 @@ import {
     type Program,
     VAR_KIND,
 } from '../ast/index.ts';
-import { enumeration } from '../util/enumeration';
+import { enumeration } from '../util/enumeration.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
     C_DIG,

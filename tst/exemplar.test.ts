@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic, scopeOf } from '../src/analysis/semantic.ts';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(__dirname, 'fixtures', 'exemplar');

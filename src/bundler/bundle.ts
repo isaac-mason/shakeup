@@ -1,10 +1,10 @@
-import { resetInferredPure } from '../analysis/effects';
-import { runCompress } from '../passes/compress';
-import { inlineCrossModule } from '../passes/optimize/inline-functions';
-import type { SourceMap } from '../sourcemap';
-import * as Timer from '../util/timer';
-import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
-import { type Fs, normalizePath, relativePath } from './fs';
+import { resetInferredPure } from '../analysis/effects.ts';
+import { runCompress } from '../passes/compress/index.ts';
+import { inlineCrossModule } from '../passes/optimize/inline-functions.ts';
+import type { SourceMap } from '../sourcemap.ts';
+import * as Timer from '../util/timer.ts';
+import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph.ts';
+import { type Fs, normalizePath, relativePath } from './fs.ts';
 import {
     type ChunkRenderer,
     hashLiveSet,
@@ -15,21 +15,21 @@ import {
     renderChunks,
 } from './generate/chunks.ts';
 import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
-import { externalKey, type Graph, type Linked, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types';
-import { computeInteropOwners } from './init-obligations';
-import { linkGraph } from './link';
+import { externalKey, type Graph, type Linked, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types.ts';
+import { computeInteropOwners } from './init-obligations.ts';
+import { linkGraph } from './link.ts';
 import {
     type NormalizedOutputNaming,
     normalizeOutputOptions,
     type OutputOptionsNaming,
     resolveMinify,
-} from './output-options';
-import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin';
+} from './output-options.ts';
+import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
-import type { GraphOptions } from './resolve';
-import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan';
-import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake';
-import type { FileEvent } from './watch';
+import type { GraphOptions } from './resolve.ts';
+import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
+import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake.ts';
+import type { FileEvent } from './watch.ts';
 
 /** The `{ getModuleInfo }` context threaded into user chunk `name`/`test` functions. */
 export type ChunkMeta = { getModuleInfo: (id: string) => ModuleInfo | null };

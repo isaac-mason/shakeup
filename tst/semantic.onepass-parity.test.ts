@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic, type Semantic, SYM } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { parse } from '../src/parser';
+import { parse } from '../src/parser/index.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SELF_SRC = resolve(__dirname, '..', 'src');

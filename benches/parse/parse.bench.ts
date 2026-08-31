@@ -1,5 +1,5 @@
 import { bench, group } from '@pmndrs/labs';
-import { parse } from '../../src/parser';
+import { parse } from '../../src/parser/index.ts';
 
 /** A single large TS module: `n` declarations mixing types, generics, functions and expressions —
  *  the parser's steady-state workload (type-stripping needs the full type grammar parsed). */
