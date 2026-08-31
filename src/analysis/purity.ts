@@ -24,7 +24,6 @@
 // common case — helpers declared and called in the same file — and, for a scope-hoisted bundle, the
 // bundle IS one module.
 import { N, type Node, walk } from '../ast/index.ts';
-import { type Graph, type Linked, packRef } from '../graph-types.ts';
 import { markInferredPure } from './effects.ts';
 
 /** A call to `Math.<anything>()` on the GLOBAL `Math` (unresolved binding). The Math methods are
@@ -44,7 +43,7 @@ const bodyOf = (fn: Node): Node | null => (fn.data as { body: Node | null }).bod
 const isFunctionNode = (n: Node): boolean =>
     n.type === N.FunctionDeclaration || n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression;
 
-type Summary = { impure: boolean; callees: Set<number> };
+export type Summary = { impure: boolean; callees: Set<number> };
 
 const EMPTY_SYMS: ReadonlySet<number> = new Set<number>();
 
@@ -267,7 +266,7 @@ function record(
 }
 
 /** Collect summaries for every bound function in `program`, keyed by `key(sym)`. */
-function collect(
+export function collect(
     program: Node,
     summaries: Map<number, Summary>,
     key: (sym: number) => number,
@@ -311,7 +310,7 @@ function collect(
 }
 
 /** Propagate impurity callee→caller to a fixed point, poisoning anything that calls out of the set. */
-function solve(summaries: Map<number, Summary>): void {
+export function solve(summaries: Map<number, Summary>): void {
     for (const s of summaries.values()) {
         for (const c of s.callees) {
             if (!summaries.has(c)) {
@@ -336,7 +335,7 @@ function solve(summaries: Map<number, Summary>): void {
 }
 
 /** Stamp `pure` on calls in `program` whose callee resolves to a proven-pure summary. */
-function stamp(calls: readonly Node[], summaries: Map<number, Summary>, key: (sym: number) => number | null): boolean {
+export function stamp(calls: readonly Node[], summaries: Map<number, Summary>, key: (sym: number) => number | null): boolean {
     let stamped = false;
     for (const n of calls) {
         const d = n.data as { callee: Node; pure?: boolean };
@@ -377,34 +376,3 @@ export function stampPureCalls(program: Node, asserted: ReadonlySet<number> = EM
  * A callee that leaves the analysed set (an external package, a namespace import, an unresolved bind)
  * is treated as unknown code and poisons its caller, exactly like an unresolved local callee.
  */
-export function stampPureCallsGraph(graph: Graph, linked: Linked): boolean {
-    /** Local symbol → a graph-wide key, following an import to the symbol that actually defines it. */
-    const resolveIn =
-        (idx: number) =>
-        (sym: number): number | null => {
-            if (!graph.modules[idx].namedImports.has(sym)) return packRef(idx, sym);
-            const bind = linked.binds.get(packRef(idx, sym));
-            return bind !== undefined && bind.kind === 'found' ? bind.ref : null;
-        };
-
-    const summaries = new Map<number, Summary>();
-    // Candidate call sites per module, harvested by the collect walk so the stamp pass below needs no
-    // walk of its own.
-    const callsByModule = new Map<number, Node[]>();
-    for (let idx = 0; idx < graph.modules.length; idx++) {
-        const mod = graph.modules[idx];
-        if (mod.program === null) continue;
-        callsByModule.set(
-            idx,
-            collect(mod.program, summaries, (sym) => packRef(idx, sym), resolveIn(idx), mod.noSideEffects),
-        );
-    }
-    if (summaries.size === 0) return false;
-    solve(summaries);
-
-    let stamped = false;
-    for (const [idx, calls] of callsByModule) {
-        if (stamp(calls, summaries, resolveIn(idx))) stamped = true;
-    }
-    return stamped;
-}

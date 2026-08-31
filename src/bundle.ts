@@ -1,5 +1,5 @@
 import { resetInferredPure } from './analysis/effects';
-import { stampPureCallsGraph } from './analysis/purity';
+import { stampPureCallsGraph } from './purity-graph.ts';
 import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph';
 import { type Fs, normalizePath, relativePath } from './fs';
 import {
