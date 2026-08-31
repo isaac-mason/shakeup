@@ -14,9 +14,10 @@
 // owns its mangler, and rolldown's `minify_chunks` runs that whole thing.
 //
 // `assignSlots` is reused verbatim — its `SlotInput` was already free of any graph/module notion.
-import { scopeOf, type Semantic } from '../analysis/semantic.ts';
-import { type Node } from '../ast.ts';
+import { type Semantic, scopeOf } from '../analysis/semantic.ts';
+import { N, type Node } from '../ast.ts';
 import { base54 } from '../deconflict.ts';
+import { hookTable, type TransformCtx, traverse, type Visitor } from '../passes/traverse.ts';
 import { assignSlots, SLOT_UNASSIGNED } from './slots.ts';
 
 /**
@@ -26,7 +27,7 @@ import { assignSlots, SLOT_UNASSIGNED } from './slots.ts';
  * `reserved` is every name the result must avoid — globals the chunk references, plus anything the
  * caller wants left alone.
  */
-export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string>): Map<number, string> {
+export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string>, debug = false): Map<number, string> {
     const out = new Map<number, string>();
     // Direct `eval` can see every binding by its source name (oxc reserves per-scope, lib.rs:604-608).
     // shakeup's semantic does not track it, so bail for the whole program — correctness over precision,
@@ -61,6 +62,8 @@ export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string
         if (sym > 0) declScopes[sym].push(declScopeIds[i]);
     }
 
+    if (debug) verifyScopesAgainstWalk(program, sem, symbolCount, refScopes, declScopes);
+
     const { slots, totalSlots } = assignSlots({ scopeCount, root, parent, bindingsByScope, refScopes, declScopes, symbolCount });
 
     // oxc Phase 3 (`SlotRanking::tally`): rank slots by REFERENCE FREQUENCY and hand out names
@@ -84,4 +87,58 @@ export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string
         if (slot !== SLOT_UNASSIGNED) out.set(sym, slotName[slot]);
     }
     return out;
+}
+
+/**
+ * DIFFERENTIAL CHECK on the scopes above — the one `mangle/chunk.ts` ran as `MANGLE_SCOPES=verify`,
+ * salvaged here when that file (a second mangler, unreachable since link-time mangling was removed)
+ * was deleted. Without it the comparison would have gone with the file, and it is the only thing that
+ * tests the assumption this function rests on.
+ *
+ * THE ASSUMPTION. The scopes come off the semantic (`refScopeIds`/`declScopeIds` — oxc's
+ * `get_resolved_references(sym).scope_id`, no traversal), which is only sound while those lists
+ * describe the CURRENT tree. `chunk-compress.ts` runs `analyze()` -> `runCompress()` -> here, and
+ * compress mutates, so measured on both corpora the semantic reaching this function is marked stale
+ * every single time (crashcat 1/1, three 1/1). The deleted mangler guarded that case by walking
+ * instead; this one does not, so the assumption is that compress never MOVES a reference between
+ * scopes — only adds and removes, which the counts already track.
+ *
+ * That is what this asserts, by rebuilding the same two tables from a walk of the tree as it actually
+ * is and comparing. Compared as MULTISETS: `assignSlots` only ever tests set membership, so order and
+ * duplicates are not observable, but a MISSING or EXTRA scope is.
+ */
+function verifyScopesAgainstWalk(
+    program: Node,
+    sem: Semantic,
+    symbolCount: number,
+    refScopes: number[][],
+    declScopes: number[][],
+): void {
+    const rw: number[][] = Array.from({ length: symbolCount }, () => []);
+    const dw: number[][] = Array.from({ length: symbolCount }, () => []);
+    const visitor: Visitor = {
+        name: 'mangle-verify-collect',
+        enter: hookTable({
+            [N.IdentifierReference]: (n: Node, ctx: TransformCtx) => {
+                const s = (n as { sym: number }).sym;
+                if (s > 0) rw[s].push(ctx.currentScope);
+            },
+            [N.BindingIdentifier]: (n: Node, ctx: TransformCtx) => {
+                const s = (n as { sym: number }).sym;
+                if (s > 0) dw[s].push(ctx.currentScope);
+            },
+        }),
+        exit: null,
+    };
+    traverse(program, sem, [visitor]);
+
+    const key = (a: number[]): string => [...a].sort((x, y) => x - y).join(',');
+    for (let sym = 1; sym < symbolCount; sym++) {
+        if (key(rw[sym]) !== key(refScopes[sym]))
+            throw new Error(`mangle refScopes diverged, sym ${sym}: walk [${key(rw[sym])}] vs semantic [${key(refScopes[sym])}]`);
+        if (key(dw[sym]) !== key(declScopes[sym]))
+            throw new Error(
+                `mangle declScopes diverged, sym ${sym}: walk [${key(dw[sym])}] vs semantic [${key(declScopes[sym])}]`,
+            );
+    }
 }
