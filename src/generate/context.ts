@@ -158,3 +158,37 @@ export type RenderedChunk = {
     dynamicImports: string[];
     exports: string[];
 };
+
+export type RenderStats = { rendered: number; reused: number; moduleRendered: number; moduleReused: number };
+
+/** A single module's rendered contribution to its chunk, reusable across builds. The rendered
+ *  text is a pure function of the module's source (→ `changed` set), its liveness (`liveHash`),
+ *  the final names it references (globally gated by `namesStable`), and its chunk perspective
+ *  (`chunkKey`). Modules whose text carries a per-build hash placeholder are never cached. */
+export type CachedModuleRender = {
+    liveHash: number;
+    chunkKey: string;
+    /** Full module text (type-stripped body + any appended namespace object), '' if it emits nothing. */
+    text: string;
+    /** Source-map part for the module body, and its baked source index (position in `mapSources`). */
+    mapPart: Part | null;
+    srcIdx: number;
+    /** Namespace-object code for the separate map part, when this module has one. */
+    nsCode: string | null;
+};
+/** Persistent per-module render cache + the naming signature of the build that populated it.
+ *  A rename anywhere (`namesHash` mismatch) disables per-module reuse for that build. */
+export type ModuleRenderCache = { modules: Map<string, CachedModuleRender>; namesHash: number };
+
+/** Per-module render REUSE: what lets an unchanged module skip re-rendering. Named for the job, not
+ *  for the incremental machinery it arrives from (`RenderIncremental.mod`). */
+export type ModuleReuse = {
+    cache: Map<string, CachedModuleRender>;
+    /** Every final name is unchanged from the cached build → referenced names are stable. */
+    namesStable: boolean;
+    /** Module ids re-parsed this build (source changed) — never reused. */
+    changed: Set<string>;
+    /** Per-module-index liveness hash (0 when tree-shaking is off). */
+    liveHash: number[];
+    stats: RenderStats;
+};
