@@ -3,7 +3,6 @@ import { deconflictChunk } from './deconflict';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types';
 import { initRefForRecord } from './init-obligations';
 import { finalNameOf, reprName } from './link';
-import { type ChunkSlots, computeChunkSlots, mangleChunkScopes, topLevelSlotWeights } from './mangle/chunk';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
 export type CrossImport = { imported: string; local: string };
@@ -423,14 +422,13 @@ export function buildChunkGraph(
     linked: Linked,
     options: ChunkOptions,
     deadDynamic: Set<number> = new Set(),
-    mangle = false,
 ): ChunkGraph {
     const N = graph.modules.length;
 
     if (options.preserveModules) {
         const formed = formPreserveModulesChunks(graph, linked);
         const color: bigint[] = graph.modules.map(() => ZERO);
-        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf, mangle);
+        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf);
         addRuntimeChunk(graph, linked, formed.chunks);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
@@ -512,7 +510,7 @@ export function buildChunkGraph(
         groupNames,
     );
 
-    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, mangle);
+    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf);
     addRuntimeChunk(graph, linked, chunks);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
@@ -525,7 +523,6 @@ function wireAndDeconflict(
     chunks: Chunk[],
     chunkByModule: Int32Array,
     entryChunkOf: Map<number, number>,
-    mangle = false,
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
@@ -550,22 +547,10 @@ function wireAndDeconflict(
     // here (producer role), then in a second pass add the cross-chunk import locals (consumer
     // role) with the producer names already reserved in that chunk's taken set — reusing the
     // same `taken` via seed.
-    // Slot assignment runs FIRST. It depends only on the chunk's shape — scopes, bindings, reference
-    // sites — never on names, so it is free to precede deconflict, and the per-slot weights it yields
-    // are what let deconflict spend its shortest names on the busiest slots instead of on whichever
-    // module happened to be ordered first. The same computation is handed to the mangler below, so
-    // slots are assigned once per chunk, not twice.
-    const chunkSlots: (ChunkSlots | null)[] = [];
     const chunkClaim: ((base: string) => string)[] = [];
-    const chunkTaken: Set<string>[] = [];
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
-        chunkTaken.push(taken);
-        const pre = mangle ? computeChunkSlots(graph, linked, chunks[c].modules) : null;
-        chunkSlots.push(pre);
-        const weights = pre === null ? null : topLevelSlotWeights(pre);
-        const claim = deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], mangle, taken, weights);
-        chunkClaim.push(claim);
+        chunkClaim.push(deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], taken));
     }
 
     // Wire imports/exports. For every imported binding whose producer lands in another chunk,
@@ -679,12 +664,6 @@ function wireAndDeconflict(
     // Mangle nested locals last, once each chunk's top-level name set (`chunkTaken[c]`) is
     // complete — including cross-chunk import locals claimed above — so no local shadows a
     // chunk-top name it references.
-    if (mangle) {
-        for (let c = 0; c < chunks.length; c++) {
-            const pre = chunkSlots[c];
-            if (pre !== null) mangleChunkScopes(graph, linked, chunkTaken[c], pre);
-        }
-    }
 }
 
 /** Whether module `modIdx`'s namespace can be handed to another chunk as a NATIVE `import * as`
