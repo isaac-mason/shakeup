@@ -6,20 +6,8 @@
 // A1a (this file): the functional strip — unwrap type-assertion expressions, remove type-only
 // statements + class members, filter type-only import/export specifiers, and lower constructor
 // parameter properties. A1b (annotation-field clearing, for a fully plain-JS AST) is layered on top.
-import { create, N, type Node, node, walk } from '../ast/index.ts';
-import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
-
-const S = 0; // synthetic span (leaves print verbatim)
-
-const idName = (name: string): Node => node(N.IdentifierName, S, S, name, null);
-const idRef = (name: string, sym: number): Node => {
-    const n = node(N.IdentifierReference, S, S, name, null);
-    (n as { sym: number }).sym = sym;
-    return n;
-};
-const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop);
-const assign = (l: Node, r: Node): Node => create.AssignmentExpression(S, S, '=', l, r);
-const exprStmt = (e: Node): Node => create.ExpressionStatement(S, S, 0, e);
+import { assign, boundRef, create, exprStmt, idName, member, N, type Node, SPAN, walk } from '../ast/index.ts';
+import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
 /** A whole statement that erases in strip mode (mirrors the printer's `isErasedStmt`): type
  *  declarations, `declare` ambients, body-less overload signatures, type-only import/export. Value
@@ -80,7 +68,10 @@ function lowerParamProps(ctor: Node, ctx: TransformCtx): void {
         if (pat.type !== N.BindingIdentifier) continue; // TS forbids destructuring param props
         assigns.push(
             exprStmt(
-                assign(member(create.ThisExpression(S, S, 0), idName(pat.name)), idRef(pat.name, (pat as { sym: number }).sym)),
+                assign(
+                    member(create.ThisExpression(SPAN, SPAN, 0), idName(pat.name)),
+                    boundRef(pat.name, (pat as { sym: number }).sym),
+                ),
             ),
         );
     }

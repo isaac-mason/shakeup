@@ -26,25 +26,29 @@
 // is the caller's decision: it substitutes simple non-reassigned arguments directly into the body and
 // sends only the rest (reassigned params, and side-effecting args that must be evaluated exactly once).
 // α-renaming, when an argument references a param's name, is likewise the caller's job.
-import { create, N, type Node, node, VAR_KIND, walk } from '../../ast/index.ts';
-
-/** Synthetic span for generated nodes (shakeup's convention for compiler-generated code). */
-const S = 0;
-
-const ref = (name: string): Node => node(N.IdentifierReference, S, S, name, null);
-const bindingId = (name: string): Node => node(N.BindingIdentifier, S, S, name, null);
-const labelId = (name: string): Node => node(N.LabelIdentifier, S, S, name, null);
+//
+// SYMBOLS: the names bound here (`_r`, the prologue's param copies) are minted by the CALLER and
+// resolved by a later analysis, so these references are unbound — `ref`, not `boundRef`.
+import {
+    assign,
+    binding,
+    create,
+    exprStmt,
+    labelId,
+    N,
+    type Node,
+    ref,
+    SPAN,
+    VAR_KIND,
+    void0,
+    walk,
+} from '../../ast/index.ts';
 
 /** The returned expression of a `return`, or `null` for a bare `return;`. */
 const argOf = (ret: Node): Node | null => (ret.data as { argument: Node | null }).argument;
 
-/** `void 0` — the `undefined` value in expression position. */
-const voidZero = (): Node =>
-    create.UnaryExpression(S, S, create.OP.VOID, node(N.NumericLiteral, S, S, '0', null));
-
 /** `<name> = <value>;` */
-const assignStmt = (name: string, value: Node): Node =>
-    create.ExpressionStatement(S, S, 0, create.AssignmentExpression(S, S, '=', ref(name), value));
+const assignStmt = (name: string, value: Node): Node => exprStmt(assign(ref(name), value));
 
 /** Whether `target` REBINDS `name`. A member/element write mutates the object the binding points at,
  *  not the binding itself, so it does not count (compilecat keeps such params `const`). */
@@ -120,13 +124,13 @@ function rewriteReturns(stmts: Node[], label: string, resultName: string, needsR
     const returnBlock = (arg: Node | null): Node => {
         const inner: Node[] = [];
         if (needsResult) {
-            inner.push(assignStmt(resultName, arg ?? voidZero()));
+            inner.push(assignStmt(resultName, arg ?? void0()));
             wrote = true;
         } else if (arg !== null && !isInert(arg)) {
-            inner.push(create.ExpressionStatement(S, S, 0, arg));
+            inner.push(create.ExpressionStatement(SPAN, SPAN, 0, arg));
         }
-        inner.push(create.BreakStatement(S, S, 0, labelId(label)));
-        return create.BlockStatement(S, S, 0, inner);
+        inner.push(create.BreakStatement(SPAN, SPAN, 0, labelId(label)));
+        return create.BlockStatement(SPAN, SPAN, 0, inner);
     };
     /** Replace every `return` in `holder`'s subtree, wherever it sits — a statement-list slot or a
      *  bare clause slot (`if (c) return x`). Scanning the data fields generically covers every
@@ -178,10 +182,10 @@ export function mutateForBlockInline(input: BlockMutateInput): BlockMutateOutput
     const prologue: Node[] = [];
     for (let i = 0; i < params.length; i++) {
         const name = params[i];
-        const arg = args[i] ?? voidZero();
+        const arg = args[i] ?? void0();
         const kind = isReassigned(bodyStmts, name) ? VAR_KIND.LET : VAR_KIND.CONST;
-        const declarator = create.VariableDeclarator(S, S, 0, bindingId(name), null, arg);
-        prologue.push(create.VariableDeclaration(S, S, kind, [declarator]));
+        const declarator = create.VariableDeclarator(SPAN, SPAN, 0, binding(name), null, arg);
+        prologue.push(create.VariableDeclaration(SPAN, SPAN, kind, [declarator]));
     }
 
     let hasResultWrite = false;
@@ -194,22 +198,22 @@ export function mutateForBlockInline(input: BlockMutateInput): BlockMutateOutput
         const ret = bodyStmts.pop() as Node;
         const arg = argOf(ret);
         if (needsResult) {
-            bodyStmts.push(assignStmt(resultName, arg ?? voidZero()));
+            bodyStmts.push(assignStmt(resultName, arg ?? void0()));
             hasResultWrite = true;
         } else if (arg !== null && !isInert(arg)) {
-            bodyStmts.push(create.ExpressionStatement(S, S, 0, arg));
+            bodyStmts.push(create.ExpressionStatement(SPAN, SPAN, 0, arg));
         }
     } else if (needsResult) {
         // Falls off the end → the caller must read `undefined`, not a stale value.
-        bodyStmts.push(assignStmt(resultName, voidZero()));
+        bodyStmts.push(assignStmt(resultName, void0()));
         hasResultWrite = true;
     }
 
     // ── Interior returns → `result = X; break LABEL;`, wrapped in a labeled block ──
     if (interiorReturns > 0) {
         if (rewriteReturns(bodyStmts, label, resultName, needsResult)) hasResultWrite = true;
-        const block = create.BlockStatement(S, S, 0, [...prologue, ...bodyStmts]);
-        return { block: create.LabeledStatement(S, S, 0, labelId(label), block), hasResultWrite };
+        const block = create.BlockStatement(SPAN, SPAN, 0, [...prologue, ...bodyStmts]);
+        return { block: create.LabeledStatement(SPAN, SPAN, 0, labelId(label), block), hasResultWrite };
     }
-    return { block: create.BlockStatement(S, S, 0, [...prologue, ...bodyStmts]), hasResultWrite };
+    return { block: create.BlockStatement(SPAN, SPAN, 0, [...prologue, ...bodyStmts]), hasResultWrite };
 }

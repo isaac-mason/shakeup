@@ -19,11 +19,11 @@
 // after the wrapper is built (it is the last step before printing), and a chunk-level pass analyses
 // the assembled program from scratch. If that ever changes, mint the scope the way `ctx.mintBlock`
 // does rather than leaving it 0.
-import { cloneNode, create, N, type Node, node } from '../ast/index.ts';
-
-const S = 0; // synthetic: zero-width span, the shape the other lowering passes use
-const binding = (name: string): Node => node(N.BindingIdentifier, S, S, name, null);
-const ident = (name: string): Node => node(N.IdentifierReference, S, S, name, null);
+//
+// SYMBOLS: the wrapper's names (`__commonJS`, `__toESM`, the generated `require_x`) are resolved by
+// the deconflict stage, not by the semantic model, so these bindings and references are deliberately
+// UNBOUND — hence `binding`/`ref` rather than their `bound*` counterparts.
+import { binding, cloneNode, create, N, type Node, num, ref, SPAN } from '../ast/index.ts';
 
 export type WrapOptions = {
     /** The binding the wrapper is assigned to: `var <name> = …`. */
@@ -43,11 +43,12 @@ export type WrapOptions = {
 
 /** `var <name> = [/*@__PURE__*​/] <helper>(<params> => { <body> });` */
 export function wrapModuleBody(opts: WrapOptions): Node {
-    const params = opts.params.map((p) => create.FormalParameter(S, S, 0, binding(p), null, null));
-    const closure = create.ArrowFunctionExpression(S, S, 0, null, params, null, create.BlockStatement(S, S, 0, opts.body));
-    const call = create.CallExpression(S, S, opts.pure ? create.FL.PURE : 0, ident(opts.helper), [closure], null);
-    const decl = create.VariableDeclarator(S, S, 0, binding(opts.name), null, call);
-    return create.VariableDeclaration(S, S, create.VAR_KIND.VAR, [decl]);
+    const params = opts.params.map((p) => create.FormalParameter(SPAN, SPAN, 0, binding(p), null, null));
+    const body = create.BlockStatement(SPAN, SPAN, 0, opts.body);
+    const closure = create.ArrowFunctionExpression(SPAN, SPAN, 0, null, params, null, body);
+    const call = create.CallExpression(SPAN, SPAN, opts.pure ? create.FL.PURE : 0, ref(opts.helper), [closure], null);
+    const decl = create.VariableDeclarator(SPAN, SPAN, 0, binding(opts.name), null, call);
+    return create.VariableDeclaration(SPAN, SPAN, create.VAR_KIND.VAR, [decl]);
 }
 
 /** `var <name> = /*@__PURE__*​/ __toESM(<wrapper>()[, 1]);`
@@ -60,11 +61,11 @@ export function wrapModuleBody(opts: WrapOptions): Node {
  *  `__toESM(require_d(), 1)`, which skips the `__esModule` check and hands back the whole
  *  `module.exports` as `default` — what Node actually does. */
 export function interopNamespace(name: string, wrapperName: string, nodeMode: boolean): Node {
-    const call = create.CallExpression(S, S, 0, ident(wrapperName), [], null);
-    const args: Node[] = nodeMode ? [call, node(N.NumericLiteral, S, S, '1', null)] : [call];
-    const toEsm = create.CallExpression(S, S, create.FL.PURE, ident('__toESM'), args, null);
-    return create.VariableDeclaration(S, S, create.VAR_KIND.VAR, [
-        create.VariableDeclarator(S, S, 0, binding(name), null, toEsm),
+    const call = create.CallExpression(SPAN, SPAN, 0, ref(wrapperName), [], null);
+    const args: Node[] = nodeMode ? [call, num(1)] : [call];
+    const toEsm = create.CallExpression(SPAN, SPAN, create.FL.PURE, ref('__toESM'), args, null);
+    return create.VariableDeclaration(SPAN, SPAN, create.VAR_KIND.VAR, [
+        create.VariableDeclarator(SPAN, SPAN, 0, binding(name), null, toEsm),
     ]);
 }
 

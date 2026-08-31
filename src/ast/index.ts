@@ -16,6 +16,11 @@
 //
 // `create.ts` imports `./ast.ts` directly rather than this file — importing the root from
 // inside the module would be a cycle.
+// `build`'s helpers are exported FLAT rather than namespaced, unlike `create`. They exist to keep
+// construction call sites short — `exprStmt(assign(computed(p, str(k)), v))` — and prefixing every
+// one of them would undo exactly what they are for. `create.*` keeps its namespace because call
+// sites already read that way and its 127 builder names would swamp the flat surface.
 export * from './ast.ts';
+export * from './build.ts';
 export * as create from './create.ts';
 export { FL, type KeywordType, OP, VAR_KIND } from './create.ts';

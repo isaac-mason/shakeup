@@ -1,8 +1,7 @@
-import { create, N, type Node, node, set } from '../ast/index.ts';
-
-/** A synthetic identifier at a zero-width span, the shape the other lowering passes use. */
-const ident = (name: string, at = 0): Node => node(N.IdentifierReference, at, at, name, null);
-const binding = (name: string, at = 0): Node => node(N.BindingIdentifier, at, at, name, null);
+// The hoisted bindings and the references that replace them are minted UNBOUND and then have the
+// ORIGINAL node's `sym` copied onto them by hand (see `toTarget` and the hoist loop) — the symbol
+// has to survive the split, but it is carried over rather than known up front.
+import { binding, create, N, type Node, node, ref, set } from '../ast/index.ts';
 
 /**
  * Split a module's top-level DECLARATIONS from their INITIALIZERS, so the whole body can move inside
@@ -169,7 +168,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                         stmt.start,
                         stmt.end,
                         0,
-                        create.AssignmentExpression(stmt.start, stmt.end, '=', ident(defaultName, stmt.start), decl),
+                        create.AssignmentExpression(stmt.start, stmt.end, '=', ref(defaultName, stmt.start), decl),
                     ),
                 );
             }
@@ -201,7 +200,7 @@ export function lazySplit(body: Node[], defaultName?: string): LazySplit {
                         stmt.start,
                         stmt.end,
                         0,
-                        create.AssignmentExpression(stmt.start, stmt.end, '=', ident(id.name, id.start), expr),
+                        create.AssignmentExpression(stmt.start, stmt.end, '=', ref(id.name, id.start), expr),
                     ),
                 );
                 continue;

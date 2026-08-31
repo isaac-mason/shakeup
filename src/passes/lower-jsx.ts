@@ -9,16 +9,23 @@
 // `pure`-annotated per `resolveJSXOptions().pure`; standard side-effect detection judges it (oxc/rolldown
 // default — no bespoke JSX purity).
 import { declareSyntheticImport, type Semantic } from '../analysis/semantic.ts';
-import { create, FL, N, type Node, node } from '../ast/index.ts';
+import {
+    binding,
+    bool,
+    boundRef,
+    create,
+    FL,
+    idName,
+    member,
+    N,
+    type Node,
+    nullLit,
+    SPAN,
+    str,
+} from '../ast/index.ts';
 import { attrKeyText, childrenAreStatic, decodeJSXEntities, normalizeJSXText } from '../jsx-text.ts';
-import { hookTable, type Visitor, type TransformCtx } from './traverse.ts';
+import { hookTable, type TransformCtx, type Visitor } from './traverse.ts';
 
-const S = 0; // synthetic span (leaves print verbatim; spans collapse to the JSX site)
-
-const idName = (name: string): Node => node(N.IdentifierName, S, S, name, null);
-const str = (text: string): Node => node(N.StringLiteral, S, S, JSON.stringify(text), null);
-const boolTrue = (): Node => node(N.BooleanLiteral, S, S, 'true', null);
-const member = (obj: Node, prop: Node): Node => create.StaticMemberExpression(S, S, 0, obj, prop);
 // Loose payload view — JSX node types aren't narrowable through `n.data`.
 const jd = (n: Node): Record<string, Node | (Node | null)[] | string> => n.data as never;
 
@@ -60,14 +67,13 @@ function initOwner(rt: Runtime, n: Node): number | undefined {
 function runtimeRef(rt: Runtime, name: keyof JsxRuntimeSyms): Node {
     let local = rt.minted.get(name);
     if (local === undefined) {
-        local = node(N.BindingIdentifier, S, S, name, null);
+        // Unbound at mint time — `declareSyntheticImport` is what assigns the symbol.
+        local = binding(name);
         declareSyntheticImport(rt.semantic, local); // sets local.sym (SYM.IMPORT, module scope)
         rt.minted.set(name, local);
         rt.out[name] = (local as { sym: number }).sym;
     }
-    const ref = node(N.IdentifierReference, S, S, name, null);
-    (ref as { sym: number }).sym = (local as { sym: number }).sym;
-    return ref;
+    return boundRef(name, (local as { sym: number }).sym);
 }
 
 /** The tag argument: intrinsic name → string literal; Fragment → the runtime Fragment ref; component
@@ -89,7 +95,7 @@ function buildTag(rt: Runtime, tagName: Node | null): Node {
 /** An attribute value → an expression: absent → `true`; string → decoded literal; `{expr}`/element →
  *  the (already-lowered) expression. */
 function buildAttrValue(value: Node | null): Node {
-    if (value === null) return boolTrue();
+    if (value === null) return bool(true);
     if (value.type === N.StringLiteral) return str(decodeJSXEntities(value.name.slice(1, -1)));
     if (value.type === N.JSXExpressionContainer) return jd(value).expression as Node;
     return value;
@@ -97,10 +103,10 @@ function buildAttrValue(value: Node | null): Node {
 
 /** One attribute → an object member: spread → `...arg`; else `key: value`. */
 function buildAttr(a: Node): Node {
-    if (a.type === N.JSXSpreadAttribute) return create.SpreadElement(S, S, 0, jd(a).argument as Node);
+    if (a.type === N.JSXSpreadAttribute) return create.SpreadElement(SPAN, SPAN, 0, jd(a).argument as Node);
     const keyText = attrKeyText(jd(a).name as Node);
     const key = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(keyText) ? idName(keyText) : str(keyText.slice(1, -1));
-    return create.ObjectProperty(S, S, 0, key, buildAttrValue(jd(a).value as Node | null));
+    return create.ObjectProperty(SPAN, SPAN, 0, key, buildAttrValue(jd(a).value as Node | null));
 }
 
 /** Children that survive to runtime (text collapses/drops per JSX whitespace rules). At exit-time
@@ -123,7 +129,7 @@ function collectChildren(children: Node[]): Node[] {
 function buildChild(child: Node): Node {
     if (child.type === N.JSXText) return str(normalizeJSXText(child.name) as string);
     if (child.type === N.JSXExpressionContainer) return jd(child).expression as Node;
-    if (child.type === N.JSXSpreadChild) return create.SpreadElement(S, S, 0, jd(child).expression as Node);
+    if (child.type === N.JSXSpreadChild) return create.SpreadElement(SPAN, SPAN, 0, jd(child).expression as Node);
     return child;
 }
 
@@ -136,10 +142,10 @@ function buildPropsWithChildren(attrs: Node[], childItems: Node[]): Node {
         const value =
             childItems.length === 1 && childItems[0].type !== N.JSXSpreadChild
                 ? buildChild(childItems[0])
-                : create.ArrayExpression(S, S, 0, childItems.map(buildChild));
-        props.push(create.ObjectProperty(S, S, 0, idName('children'), value));
+                : create.ArrayExpression(SPAN, SPAN, 0, childItems.map(buildChild));
+        props.push(create.ObjectProperty(SPAN, SPAN, 0, idName('children'), value));
     }
-    return create.ObjectExpression(S, S, 0, props);
+    return create.ObjectExpression(SPAN, SPAN, 0, props);
 }
 
 /** true when a `key` attribute appears AFTER a spread — forces the classic `createElement` form. */
@@ -167,10 +173,10 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
         const propAttrs = attributes.filter((a) => a.type === N.JSXSpreadAttribute || a.type === N.JSXAttribute);
         const props =
             propAttrs.length > 0
-                ? create.ObjectExpression(S, S, 0, propAttrs.map(buildAttr))
-                : node(N.NullLiteral, S, S, 'null', null);
+                ? create.ObjectExpression(SPAN, SPAN, 0, propAttrs.map(buildAttr))
+                : nullLit();
         const args = [tag, props, ...childItems.map(buildChild)];
-        return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, 'createElement'), args, null);
+        return create.CallExpression(SPAN, SPAN, flags(rt.pure), runtimeRef(rt, 'createElement'), args, null);
     }
 
     // Split out `key`; the rest become props.
@@ -193,7 +199,7 @@ function lowerJsx(rt: Runtime, tagName: Node | null, attributes: Node[], childre
     const useJsxs = childItems.length > 0 && childrenAreStatic(childItems.map(childText));
     const args = [tag, buildPropsWithChildren(propAttrs, childItems)];
     if (hasKey) args.push(buildAttrValue(keyValue ?? null));
-    return create.CallExpression(S, S, flags(rt.pure), runtimeRef(rt, useJsxs ? 'jsxs' : 'jsx'), args, null);
+    return create.CallExpression(SPAN, SPAN, flags(rt.pure), runtimeRef(rt, useJsxs ? 'jsxs' : 'jsx'), args, null);
 }
 
 /** The JSX lowering pass — a factory holding per-module runtime-import state. Lowers on EXIT (so nested
@@ -229,13 +235,13 @@ export function makeJsxLower(
                 const jsxSpecs: Node[] = [];
                 const rootSpecs: Node[] = [];
                 for (const [name, local] of rt.minted) {
-                    const spec = create.ImportSpecifier(S, S, 0, local, idName(name));
+                    const spec = create.ImportSpecifier(SPAN, SPAN, 0, local, idName(name));
                     (name === 'createElement' ? rootSpecs : jsxSpecs).push(spec);
                 }
                 const imports: Node[] = [];
                 if (jsxSpecs.length > 0)
-                    imports.push(create.ImportDeclaration(S, S, 0, jsxSpecs, str(`${importSource}/jsx-runtime`)));
-                if (rootSpecs.length > 0) imports.push(create.ImportDeclaration(S, S, 0, rootSpecs, str(importSource)));
+                    imports.push(create.ImportDeclaration(SPAN, SPAN, 0, jsxSpecs, str(`${importSource}/jsx-runtime`)));
+                if (rootSpecs.length > 0) imports.push(create.ImportDeclaration(SPAN, SPAN, 0, rootSpecs, str(importSource)));
                 (n.data as { body: Node[] }).body.unshift(...imports);
             },
         }),
