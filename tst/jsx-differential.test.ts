@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
 import { describe, expect, it } from 'vitest';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { ESTREE_TYPE } from '../src/estree.ts';
+import { astToEstree, ESTREE_TYPE } from '../src/estree.ts';
+import { estreeDiff, isKnownGap } from './estree-diff.ts';
 import { parse } from '../src/parser';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,6 +113,26 @@ describe('JSX differential vs meriyah (jsx:true corpus)', () => {
                 );
             }
             expect(diffs).toEqual([]);
+        });
+    }
+});
+
+describe('structural JSX differential vs meriyah', () => {
+    // The count comparison above cannot see a JSX child in the wrong slot or an attribute value
+    // attached to the wrong element; this can.
+    for (const f of fixtures) {
+        it(`agrees with meriyah on every field it asserts for ${f}`, () => {
+            const src = readFileSync(resolve(JSX_DIR, f), 'utf8');
+            const { program, errors } = parse(src, { ts: false, jsx: true });
+            expect(errors, `our parser produced errors on ${f}`).toEqual([]);
+
+            const diffs = estreeDiff(
+                astToEstree(program as Node),
+                meriyah.parse(src, { module: true, next: true, jsx: true, ranges: true, raw: true }),
+            ).filter((d) => !isKnownGap(d));
+
+            if (diffs.length > 0)
+                expect.fail(`\nStructural mismatches vs meriyah (${f}):\n${diffs.map((d) => `  ${d}`).join('\n')}\n`);
         });
     }
 });

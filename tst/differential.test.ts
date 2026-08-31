@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import * as meriyah from 'meriyah';
 import { describe, expect, it } from 'vitest';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { ESTREE_TYPE } from '../src/estree.ts';
+import { astToEstree, ESTREE_TYPE } from '../src/estree.ts';
+import { estreeDiff, isKnownGap } from './estree-diff.ts';
 import { parse } from '../src/parser';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -143,5 +144,27 @@ describe('differential vs meriyah (three.core.js)', () => {
         expect(forNode).not.toBeNull();
         const init = (forNode as unknown as { data: { init: Node } }).data.init;
         expect(init.type).toBe(N.AssignmentExpression);
+    });
+});
+
+describe('structural differential vs meriyah (three.core.js)', () => {
+    // Strictly stronger than the count comparison above: it compares the SHAPE, so a wrong nesting,
+    // a swapped operand or a bad flag fails here where counts would balance out. Runs through
+    // `astToEstree`, which is what makes shakeup's tree comparable field-for-field.
+    it('agrees with meriyah on every field meriyah asserts', () => {
+        const src = readFileSync(THREE, 'utf8');
+        const { program, errors } = parse(src, { ts: false, jsx: false });
+        expect(errors).toEqual([]);
+
+        const diffs = estreeDiff(
+            astToEstree(program as Node),
+            meriyah.parse(src, { module: true, next: true, ranges: true, raw: true }),
+        ).filter((d) => !isKnownGap(d));
+
+        if (diffs.length > 0)
+            expect.fail(
+                `\nStructural mismatches vs meriyah (three.core.js):\n${diffs.map((d) => `  ${d}`).join('\n')}\n\n` +
+                    `Each is a LIKELY REAL PARSER OR PROJECTION BUG. Localize it before widening KNOWN_GAPS.\n`,
+            );
     });
 });
