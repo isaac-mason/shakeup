@@ -66,23 +66,6 @@ export function makeClaim(taken: Set<string>): (base: string) => string {
     };
 }
 
-// Frequency-ordered mangle alphabet — most-used JS identifier chars first, so short names
-// bias toward bytes that gzip well. First char from the identifier-START set (54), the rest
-// from the full identifier-PART set (adds digits). Ported verbatim from
-// `llm/libs/oxc/crates/oxc_mangler/src/base54.rs:31`.
-const BASE54_CHARS = 'etnriaoscludfpmhg_vybxSCwTEDOkAjMNPFILRzBVHUWGKqJYXZQ$1024368579';
-
-/** The n-th shortest mangled identifier (`0→e`, `53→$`, `54→ee`, …). */
-export function base54(n: number): string {
-    let out = BASE54_CHARS[n % 54];
-    let num = Math.floor(n / 54);
-    while (num > 0) {
-        num -= 1;
-        out += BASE54_CHARS[num % 64];
-        num = Math.floor(num / 64);
-    }
-    return out;
-}
 
 /** Deconflict the module-scope symbols, synthetics, namespaces, and external locals of a
  *  set of modules (`memberOrder`, exec-ordered) into a FRESH scope. Whole-bundle deconflict

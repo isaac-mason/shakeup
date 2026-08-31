@@ -16,7 +16,7 @@
 // `assignSlots` is reused verbatim — its `SlotInput` was already free of any graph/module notion.
 import { type Semantic, scopeOf } from '../analysis/semantic.ts';
 import type { Node } from '../ast/index.ts';
-import { base54 } from '../deconflict.ts';
+import { base54 } from '../util/base54.ts';
 import { assignSlots, SLOT_UNASSIGNED } from './slots.ts';
 
 /**
