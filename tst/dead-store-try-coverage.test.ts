@@ -51,3 +51,44 @@ describe('dead stores inside try-containing functions are eliminated', () => {
         expect((await runModule(code)).out).toBe(1);
     });
 });
+
+// ── exception edges, the part that is load-bearing now ────────────────────────────────────────────
+//
+// With the switch gone, the CFG's exception modelling is the ONLY thing standing between dead-store
+// and a miscompile. The dangerous direction is not "fails to remove a dead store" — that is a missed
+// optimisation — it is removing a store that an exception makes LIVE:
+//
+//     let a; a = 1; try { g(p); a = 2; } catch (e) {} return a;
+//
+// `a = 2` looks like it kills `a = 1`, and on the normal path it does. But if `g(p)` throws, `a = 2`
+// never runs and `return a` observes 1. An analysis that treats a try block as straight-line deletes
+// `a = 1` and silently changes the answer.
+//
+// These assert RUNTIME RESULTS on both the throwing and non-throwing path, deliberately, rather than
+// matching text. The probe that built this table showed why: in the `read in catch` shape the store
+// really is gone from the output and the program is still correct, because const-propagation rewrote
+// the read instead. Text says "removed", execution says "correct", and only one of those is the
+// property worth pinning.
+describe('stores kept alive by an exception edge are not deleted', () => {
+    const f = async (body: string) => {
+        const src =
+            `/* @optimize */\nfunction f(p){ ${body} }\n` +
+            `globalThis.g = (p) => { if (p) throw new Error('x'); };\nglobalThis.h = () => {};\n` +
+            `export const thrown = f(1);\nexport const clean = f(0);\n`;
+        const ns = (await runModule(await build(src))) as { thrown: unknown; clean: unknown };
+        return [ns.thrown, ns.clean];
+    };
+
+    it.each([
+        // shape                                                                      throws  normal
+        ['overwrite inside try — throw skips the kill', 'let a; a = 1; try { g(p); a = 2; } catch(e){} return a;', 1, 2],
+        ['the catch block reads it', 'let a; a = 1; try { g(p); a = 2; } catch(e){ return a; } return a;', 1, 2],
+        ['a finally clause intervenes', 'let a; a = 1; try { g(p); a = 2; } catch(e){} finally { h(); } return a;', 1, 2],
+        ['both arms assign, so the first IS dead', 'let a; a = 1; try { g(p); a = 2; } catch(e){ a = 3; } return a;', 3, 2],
+        ['dead before the try entirely', 'let a; a = 1; a = 2; try { g(p); } catch(e){} return a;', 2, 2],
+        ['dead after the try entirely', 'let a; try { g(p); } catch(e){} a = 1; a = 2; return a;', 2, 2],
+        ['nested try, inner throw skips the kill', 'let a; a = 1; try { try { g(p); a = 2; } finally { h(); } } catch(e){} return a;', 1, 2],
+    ])('%s', async (_label, body, whenThrows, whenNot) => {
+        expect(await f(body)).toEqual([whenThrows, whenNot]);
+    });
+});
