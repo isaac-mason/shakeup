@@ -14,6 +14,7 @@
         "test": "vitest run",
         "bench": "pnpm --filter benches exec labs",
         "standing": "tsx scripts/standing.ts",
+        "stages": "tsx scripts/stages.ts",
         "regress": "tsx scripts/regress.ts",
         "oxcdiff": "tsx scripts/oxc-diff.ts",
         "cjsdiff": "tsx scripts/cjs-diff.ts",
