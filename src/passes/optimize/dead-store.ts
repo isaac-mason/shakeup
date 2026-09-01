@@ -18,12 +18,11 @@
 //   • A function whose flow the analysis cannot model (a `try`, an unresolved `break` target) is
 //     skipped wholesale.
 import { buildCfg } from '../../analysis/cfg.ts';
-import { computeLiveVars } from '../../analysis/live-vars.ts';
-import { computeLiveness } from '../../analysis/liveness.ts';
 import { isPureExpr } from '../../analysis/effects.ts';
+import { computeLiveVars } from '../../analysis/live-vars.ts';
+import type { Semantic } from '../../analysis/semantic.ts';
 import { create, N, type Node, statementListOf, walk } from '../../ast/index.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
-import type { Semantic } from '../../analysis/semantic.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 import { Gate } from './gate.ts';
 
@@ -67,31 +66,24 @@ function deadCandidate(stmt: Node, tracked: ReadonlySet<number>): { sym: number;
 }
 
 /**
- * Which liveness driver dead-store uses. Both compute the SAME answer — `tst/cfg-equivalence.test.ts`
- * asserts exact agreement across three.core.js — so this exists to migrate safely, not to choose
- * between two behaviours.
+ * LIVENESS COMES FROM THE CFG, unconditionally.
  *
- * The one real difference is COVERAGE: the structural walker bails on a function containing `try`
- * (and, before it was fixed, on labelled `continue`), skipping it entirely. The CFG models exception
- * edges, so it analyses those functions and can additionally suppress a kill that an exception might
- * skip past (a "conditional kill"). So `'cfg'` should be a strict superset of `'structural'`.
- */
-export type LivenessDriver = 'structural' | 'cfg';
-let DRIVER: LivenessDriver = 'structural';
-export const setLivenessDriver = (d: LivenessDriver): void => {
-    DRIVER = d;
-};
-export const getLivenessDriver = (): LivenessDriver => DRIVER;
+ * There used to be a `setLivenessDriver('structural' | 'cfg')` switch here, from the staged migration
+ * off the structural walker. It is gone: the CFG driver is a strict SUPERSET — the structural walker
+ * bails on any function containing `try` and skips it whole, while the CFG models exception edges and
+ * analyses it — and the cost that kept the switch alive no longer exists. Dead-store moved out of the
+ * compress fixed point into the optimize tier, so it runs ONCE per module rather than per iteration:
+ * measured on crashcat, 31 CFG builds over 31 distinct bodies, zero rebuilds, 5.1ms total. Keeping a
+ * permanent fork in liveness for 5ms was worse than either branch.
+ *
+ * `analysis/liveness.ts` still exists and is still tested. It ships nothing now; it is the independent
+ * ORACLE that `tst/cfg-equivalence.test.ts` checks the CFG port against, statement by statement over
+ * three.core.js. That check matters more now than during the migration, not less, because the CFG is
+ * the only implementation that reaches output.
 
-/** Live-out lookup for `body`, or null when the driver cannot model this function's flow. */
-function liveOutOf(body: Node, tracked: ReadonlySet<number>): ((stmt: Node) => ReadonlySet<number> | null) | null {
-    if (DRIVER === 'cfg') {
-        // Never bails — that is the point of the CFG.
-        const flow = computeLiveVars(buildCfg(body), tracked, EMPTY);
-        return flow.liveOut;
-    }
-    const map = computeLiveness(body, tracked, EMPTY);
-    return map === null ? null : (stmt: Node) => map.get(stmt) ?? null;
+/** Live-out lookup for `body`. Never null — modelling every function is the point of the CFG. */
+function liveOutOf(body: Node, tracked: ReadonlySet<number>): (stmt: Node) => ReadonlySet<number> | null {
+    return computeLiveVars(buildCfg(body), tracked, EMPTY).liveOut;
 }
 
 const EMPTY: ReadonlySet<number> = new Set<number>();
@@ -105,7 +97,6 @@ const fnHook = (fn: Node, ctx: TransformCtx): void => {
     if (tracked.size === 0) return;
 
     const liveOut = liveOutOf(body, tracked);
-    if (liveOut === null) return; // flow this driver does not model — skip the function
 
     // Rewrite dead stores in every statement list inside this function.
     let changed = false;

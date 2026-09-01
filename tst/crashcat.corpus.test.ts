@@ -1,11 +1,10 @@
-import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
 import { buildCfg, verifyCfg } from '../src/analysis/cfg.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
 import { bundle } from '../src/bundler/bundle.ts';
 import { parse } from '../src/index.ts';
-import { setLivenessDriver } from '../src/passes/optimize/dead-store.ts';
 
 // crashcat as a corpus. It covers ground three.js structurally CANNOT:
 //   • real multi-module TYPESCRIPT (97 modules), so the whole TS pipeline runs end to end
@@ -23,9 +22,6 @@ const diskFs = {
     exists: (i: string) => existsSync(i),
 };
 
-const buildIt = async () =>
-    (await bundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output: { minify: true } })).code;
-
 describe.skipIf(!existsSync(ENTRY))('crashcat corpus (real multi-module TS with directives)', () => {
     it('bundles, minifies, and round-trips as valid JS', async () => {
         const r = await bundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output: { minify: true } });
@@ -33,16 +29,6 @@ describe.skipIf(!existsSync(ENTRY))('crashcat corpus (real multi-module TS with 
         expect(r.code.length).toBeGreaterThan(100_000);
         expect(() => parse(r.code, { ts: false, jsx: false })).not.toThrow();
     }, 180000);
-
-    it('both liveness drivers produce identical output', async () => {
-        // The Phase 2 differential, on the corpus that actually exercises the optimize tier.
-        setLivenessDriver('structural');
-        const a = await buildIt();
-        setLivenessDriver('cfg');
-        const b = await buildIt();
-        setLivenessDriver('structural');
-        expect(b).toBe(a);
-    }, 240000);
 
     it('every function builds a well-formed CFG', () => {
         // Over the SOURCE modules, not the bundle, so TS-derived shapes are covered too.

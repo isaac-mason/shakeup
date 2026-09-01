@@ -1,4 +1,15 @@
-// Backward liveness over structured control flow — the analysis dead-store elimination needs.
+// Backward liveness over structured control flow.
+//
+// THIS SHIPS NOTHING. It is the independent ORACLE for the CFG port: `tst/cfg-equivalence.test.ts`
+// runs it against `{cfg,dataflow,live-vars}.ts` statement by statement over three.core.js, and they
+// must agree everywhere this one produces an answer. dead-store used to be able to run on it via a
+// `setLivenessDriver` switch; that switch is gone and the CFG is the only driver (see
+// `passes/optimize/dead-store.ts`).
+//
+// Keeping it is deliberate. A second, structurally different implementation is the only check on the
+// one that now reaches output — and it is worth MORE after the migration than during it. Where this
+// walker bails (`try`), the CFG still answers; that gap is the capability, not a disagreement, and
+// `tst/dead-store-try-coverage.test.ts` pins it.
 //
 // A variable is LIVE at a point if its current value might still be read. Computing that requires
 // control flow, which is why dead-store is the one optimization with an irreducible flow dependency.
