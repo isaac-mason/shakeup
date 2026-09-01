@@ -24,7 +24,7 @@ const build = (src: string, minify = false) =>
 const run = async (src: string) => {
     const r = await build(src, true);
     expect(r.errors).toEqual([]);
-    return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as Record<string, unknown>;
+    return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
 };
 
 describe('dropUnused: a declaration in a loop head', () => {
@@ -49,7 +49,7 @@ describe('dropUnused: a declaration in a loop head', () => {
         // `for (in b)` does not parse, so the declaration is not removable at any price. oxc emits
         // `for (let _ in b)` for exactly this input — it keeps it too.
         const r = await build('export function f(b){let n=0;for(const _ in b){n+=1;}return n;}', true);
-        expect(r.code).toMatch(/for\s*\(\s*(?:const|let|var)\s+\w+\s+in\b/);
+        expect(r.chunks[0].code).toMatch(/for\s*\(\s*(?:const|let|var)\s+\w+\s+in\b/);
         const m = (await run('export function f(b){let n=0;for(const _ in b){n+=1;}return n;}')) as { f: (o: object) => number };
         expect(m.f({ a: 1, b: 2, c: 3 })).toBe(3);
     });
@@ -58,15 +58,15 @@ describe('dropUnused: a declaration in a loop head', () => {
         // The one loop head where a removal is expressible — and it has to be done from the parent
         // (`init = null`), not by unlinking the declaration. oxc emits `for (; n < 3; n++)`.
         const r = await build('export function f(){let n=0;for(let _=0;n<3;n++){n+=1;}return n;}', true);
-        expect(r.code).toMatch(/for\s*\(\s*;/);
+        expect(r.chunks[0].code).toMatch(/for\s*\(\s*;/);
         const m = (await run('export function f(){let n=0;for(let _=0;n<3;n++){n+=1;}return n;}')) as { f: () => number };
         expect(m.f()).toBe(4); // body adds 1, update adds 1 → 0, 2, 4
     });
 
     it('prunes only the dead declarator when a sibling in the head is live', async () => {
         const r = await build('export function f(){let n=0;for(let _=0,q=0;q<3;q++){n+=1;}return n;}', true);
-        expect(r.code).not.toMatch(/for\s*\(\s*;/); // the head survives…
-        expect(/for\s*\(\s*let\s+[^;]*,/.test(r.code)).toBe(false); // …with one declarator, not two
+        expect(r.chunks[0].code).not.toMatch(/for\s*\(\s*;/); // the head survives…
+        expect(/for\s*\(\s*let\s+[^;]*,/.test(r.chunks[0].code)).toBe(false); // …with one declarator, not two
         const m = (await run('export function f(){let n=0;for(let _=0,q=0;q<3;q++){n+=1;}return n;}')) as { f: () => number };
         expect(m.f()).toBe(3);
     });
@@ -82,12 +82,12 @@ describe('dropUnused: a declaration in a loop head', () => {
         ]) {
             const r = await build(src, true);
             expect(r.errors).toEqual([]);
-            expect(/for\s*\(\s*let\s+[^;]*,/.test(r.code), src).toBe(false); // one declarator left…
-            expect(r.code, src).toMatch(/for\s*\(\s*let\s+\w+\s*=\s*\w+\(\)/); // …and it is the impure one
+            expect(/for\s*\(\s*let\s+[^;]*,/.test(r.chunks[0].code), src).toBe(false); // one declarator left…
+            expect(r.chunks[0].code, src).toMatch(/for\s*\(\s*let\s+\w+\s*=\s*\w+\(\)/); // …and it is the impure one
         }
         // Two impure dead declarators: both survive, in oxc too.
         const both = await build('export function f(g,h){let n=0;for(let _=g(),z=h();n<3;n++){n+=1;}return n;}', true);
-        expect(/for\s*\(\s*let\s+[^;]*,/.test(both.code)).toBe(true);
+        expect(/for\s*\(\s*let\s+[^;]*,/.test(both.chunks[0].code)).toBe(true);
     });
 
     it('never drops an IMPURE init, and runs it exactly once', async () => {
@@ -110,6 +110,6 @@ describe('dropUnused: a declaration in a loop head', () => {
         // The guard must be narrow: it protects loop heads, not every declaration.
         const r = await build('export function f(){const _=1;let n=0;n+=1;return n;}', true);
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toMatch(/=\s*1\s*[,;]\s*\w+\s*=\s*0/);
+        expect(r.chunks[0].code).not.toMatch(/=\s*1\s*[,;]\s*\w+\s*=\s*0/);
     });
 });

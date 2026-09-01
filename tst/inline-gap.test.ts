@@ -15,7 +15,7 @@ const build = async (src: string) => {
         external: [],
         output: { minify: { compress: true } }, // inline is cosmetic → 'full' only
     });
-    return r.code;
+    return r.chunks[0].code;
 };
 
 describe('single-use inline — non-adjacent use', () => {

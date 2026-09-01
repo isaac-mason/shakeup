@@ -28,13 +28,13 @@ describe('chunk mangler — synthetic default-export refs', () => {
     };
 
     it('mangles a chunk containing a bare-expression default export without crashing', async () => {
-        const { code } = await build(FILES, true);
+        const { chunks: [{ code }] } = await build(FILES, true);
         expect((await runModule(code)).out).toBe('void main() {}'.length + 41);
     });
 
     it('agrees with the unmangled build', async () => {
-        const mangled = (await runModule((await build(FILES, true)).code)).out;
-        const plain = (await runModule((await build(FILES, false)).code)).out;
+        const mangled = (await runModule((await build(FILES, true)).chunks[0].code)).out;
+        const plain = (await runModule((await build(FILES, false)).chunks[0].code)).out;
         expect(mangled).toBe(plain);
     });
 });

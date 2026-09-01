@@ -19,7 +19,7 @@ const effectsOf = async (stmt: string): Promise<unknown> => {
         fs: createMemoryFs({ '/main.js': `${HEAD}${stmt}\nexport const n = effects;` }),
     });
     expect(r.errors).toEqual([]);
-    return ((await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { n: unknown }).n;
+    return ((await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { n: unknown }).n;
 };
 
 describe('an unused destructuring declaration still performs its reads', () => {
@@ -45,6 +45,6 @@ describe('an unused destructuring declaration still performs its reads', () => {
             fs: createMemoryFs({ '/main.js': 'const unused = 1;\nexport const a = 2;' }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('unused');
+        expect(r.chunks[0].code).not.toContain('unused');
     });
 });

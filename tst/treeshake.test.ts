@@ -28,7 +28,7 @@ describe('tree shaking', () => {
     };
 
     it('drops unused exports, locals, and transitive helpers of dead code', async () => {
-        const { code, shaken } = await build(files);
+        const { chunks: [{ code }], shaken } = await build(files);
         expect(code).not.toContain('DEAD_MARKER_EXPORT');
         expect(code).not.toContain('DEAD_MARKER_LOCAL');
         expect(code).not.toContain('DEAD_MARKER_CONST');
@@ -39,7 +39,7 @@ describe('tree shaking', () => {
     });
 
     it('treeshake: false keeps everything', async () => {
-        const { code, shaken } = await build(files, false);
+        const { chunks: [{ code }], shaken } = await build(files, false);
         expect(code).toContain('DEAD_MARKER_EXPORT');
         expect(shaken).toBeNull();
         const mod = await run(code);
@@ -47,7 +47,7 @@ describe('tree shaking', () => {
     });
 
     it('a wholly-dead module leaves no trace', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { keep } from './used';", 'export const v = keep;'].join('\n'),
             '/used.ts': ["export { keep } from './deep';", 'export const DEAD_BARREL_ONLY = 1;'].join('\n'),
             '/deep.ts': 'export const keep = 7;',
@@ -56,7 +56,7 @@ describe('tree shaking', () => {
     });
 
     it('side effects are preserved even in otherwise-dead modules', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import './effects';",
                 "import { registry } from './registry';",
@@ -77,7 +77,7 @@ describe('tree shaking', () => {
     });
 
     it('dead enums vanish including their lowering; live enums stay', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { Live } from './enums';", 'export const kind = Live[Live.B];'].join('\n'),
             '/enums.ts': ['export enum Live { A, B }', 'export enum DeadEnum { X = 1 }'].join('\n'),
         });
@@ -87,7 +87,7 @@ describe('tree shaking', () => {
     });
 
     it('impure top-level initializers are conservatively kept', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { pure } from './lib';", 'export const out = pure;'].join('\n'),
             '/lib.ts': ['export const pure = 1;', 'const kept = Math.max(1, 2);'].join('\n'),
         });
@@ -97,7 +97,7 @@ describe('tree shaking', () => {
     });
 
     it('narrows a namespace object to the members actually read', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import * as ops from './ops';", 'export const r = ops.a();'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
@@ -108,7 +108,7 @@ describe('tree shaking', () => {
     });
 
     it('keeps the whole namespace surface when the namespace escapes', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import * as ops from './ops';", 'export const ns = ops;'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
@@ -120,7 +120,7 @@ describe('tree shaking', () => {
     });
 
     it('unions member reads across multiple namespace importers', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import * as ops from './ops';",
                 "import { viaB } from './other';",
@@ -137,7 +137,7 @@ describe('tree shaking', () => {
     });
 
     it('keeps the whole surface when the module is also dynamically imported', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import * as ops from './ops';",
                 'export const r = ops.a();',
@@ -152,7 +152,7 @@ describe('tree shaking', () => {
     });
 
     it('keeps the whole surface when re-exported as a namespace', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import * as ops from './ops';", "export * as reexport from './ops';", 'export const r = ops.a();'].join(
                 '\n',
             ),
@@ -213,7 +213,7 @@ describe('external import specifiers shake individually', () => {
     const buildExt = async (main: string) => {
         const result = await bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': main }), external: ['ext'] });
         expect(result.errors).toEqual([]);
-        return result.code;
+        return result.chunks[0].code;
     };
 
     it('drops an unused specifier while a used sibling keeps the statement', async () => {

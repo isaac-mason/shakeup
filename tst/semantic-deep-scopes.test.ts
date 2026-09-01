@@ -13,7 +13,7 @@ const run = (code: string): unknown => {
 };
 const build = async (src: string): Promise<string> => {
     const r = await bundle({ entry: '/e.js', fs: createMemoryFs({ '/e.js': src }), external: [], output: { minify: true, optimize: true } } as never);
-    return (r as { code: string }).code;
+    return r.chunks[0].code;
 };
 
 describe('scope/name packing resolves correctly at scale', () => {

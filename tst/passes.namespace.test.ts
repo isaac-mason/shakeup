@@ -129,7 +129,7 @@ describe('namespace keys are sorted', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { keys: string[] };
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { keys: string[] };
         // Code-unit order puts uppercase before lowercase and non-ASCII last — `localeCompare` would
         // interleave them, which is the specific thing this pins.
         expect(mod.keys).toEqual(['$', 'A', 'Z', 'aa', 'default', 'foo', 'z', 'ö']);
@@ -158,7 +158,7 @@ describe('a namespace object has a null prototype', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as {
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as {
             proto: unknown;
             hasToString: boolean;
             value: number;

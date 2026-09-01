@@ -55,7 +55,7 @@ async function evaluate(code: string, tag: string): Promise<Record<string, unkno
 async function build(mode: 'rebuild' | 'maintain' | 'verify', minify: unknown): Promise<string> {
     setLowerSemanticMode(mode);
     try {
-        return (await bundle({ entry: '/entry.ts', fs, output: { minify } as never })).code;
+        return (await bundle({ entry: '/entry.ts', fs, output: { minify } as never })).chunks[0].code;
     } finally {
         setLowerSemanticMode('maintain');
     }

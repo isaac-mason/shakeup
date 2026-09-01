@@ -20,7 +20,7 @@ const run = async (files: Record<string, string | Uint8Array>, main: string, opt
         ...opts,
     });
     expect(r.errors).toEqual([]);
-    return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+    return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
 };
 
 /** A PNG header followed by bytes that are NOT valid UTF-8 — the case a text read corrupts. */
@@ -152,7 +152,7 @@ describe('the binary loader', () => {
             moduleTypes: { bin: 'binary' },
         });
         expect(r.errors).toEqual([]);
-        expect(r.code.match(/var __toBinary =/g)?.length).toBe(1);
+        expect(r.chunks[0].code.match(/var __toBinary =/g)?.length).toBe(1);
     });
 
     it('does not emit `__toBinary` when no module uses it', async () => {
@@ -161,7 +161,7 @@ describe('the binary loader', () => {
             external: [],
             fs: createMemoryFs({ '/main.js': 'export const x = 1;' }),
         });
-        expect(r.code).not.toMatch(/__toBinary/);
+        expect(r.chunks[0].code).not.toMatch(/__toBinary/);
     });
 });
 
@@ -244,6 +244,6 @@ describe('loader tree-shaking', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toMatch(/UNIQUE_MARKER_TEXT/);
+        expect(r.chunks[0].code).not.toMatch(/UNIQUE_MARKER_TEXT/);
     });
 });

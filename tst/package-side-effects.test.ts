@@ -27,7 +27,7 @@ const fsFor = (sideEffects: unknown, extra: Record<string, string> = {}): Fs => 
 const build = async (sideEffects: unknown, plugins: Plugin[] = []) => {
     const r = await bundle({ entry: '/app/src/index.js', fs: fsFor(sideEffects), plugins });
     expect(r.errors).toEqual([]);
-    return r.code;
+    return r.chunks[0].code;
 };
 
 describe('package.json sideEffects', () => {
@@ -77,7 +77,7 @@ describe('bindings keep their augmentations under sideEffects: false', () => {
             output: { minify: { whitespace: false, mangle: false, compress } },
         });
         expect(r.errors).toEqual([]);
-        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as Record<string, unknown>;
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
     };
 
     const CASES: [string, string][] = [

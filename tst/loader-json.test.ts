@@ -17,7 +17,7 @@ const build = async (files: Record<string, string>, main: string, opts: Record<s
 const run = async (files: Record<string, string>, main: string, opts: Record<string, unknown> = {}) => {
     const r = await build(files, main, opts);
     expect(r.errors).toEqual([]);
-    return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+    return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
 };
 
 const D = { '/d.json': '{"used":1,"unused":2,"nested":{"a":[1,2]},"with-dash":3}' };

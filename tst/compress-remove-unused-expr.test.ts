@@ -7,7 +7,7 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 const build = async (src: string, minify: boolean | { compress?: boolean }) => {
     const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify } });
     expect(result.errors).toEqual([]);
-    return result.code;
+    return result.chunks[0].code;
 };
 
 function normalize(v: unknown): unknown {

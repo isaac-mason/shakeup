@@ -62,8 +62,8 @@ describe('a nested PURE annotation does not steal the outer one', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('blockTexture(');
-        expect(r.code).not.toContain('asset(');
+        expect(r.chunks[0].code).not.toContain('blockTexture(');
+        expect(r.chunks[0].code).not.toContain('asset(');
     });
 
     it('an UNANNOTATED impure argument still blocks the drop', async () => {
@@ -78,6 +78,6 @@ describe('a nested PURE annotation does not steal the outer one', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('asset(');
+        expect(r.chunks[0].code).toContain('asset(');
     });
 });

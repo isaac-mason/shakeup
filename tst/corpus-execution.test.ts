@@ -30,7 +30,7 @@ describe.skipIf(!existsSync(THREE))('three.core.js executes after bundling', () 
     it.each(modes)('%s', { timeout: 120_000 }, async (label, output) => {
         const result = await bundle({ entry: THREE, fs: diskFs, output } as never);
         expect((result as { errors: unknown[] }).errors).toEqual([]);
-        const code = (result as { code: string }).code;
+        const code = (result as { chunks: { code: string }[] }).chunks[0].code;
         // Import through a real file: a data: URL of a ~380KB module is fragile to encode.
         const file = join(tmpdir(), `shakeup-three-${label.replace(/\W+/g, '-')}-${process.pid}.mjs`);
         writeFileSync(file, code);

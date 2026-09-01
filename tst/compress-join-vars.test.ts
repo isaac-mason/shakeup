@@ -11,7 +11,7 @@ const build = async (src: string, compress: boolean) => {
         output: { minify: compress ? { compress: true } : false },
     });
     expect(result.errors).toEqual([]);
-    return result.code;
+    return result.chunks[0].code;
 };
 
 /** A function's identity/source legitimately differs compress-vs-plain, so compare exports generically:

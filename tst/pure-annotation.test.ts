@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bundle, createMemoryFs } from '../src/index.ts';
 
 const build = async (src: string) =>
-    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: true } })).code;
+    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: true } })).chunks[0].code;
 
 // `readIt` does a member read, so the interprocedural analysis can NOT prove it pure — only the
 // annotation can make these calls droppable. That keeps the tests about the annotation itself.
@@ -34,7 +34,7 @@ describe('/*@__PURE__*/ annotations', () => {
         const src = `${PRELUDE}export const out = /*@__PURE__*/ readIt(o);`;
         const readable = (
             await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress: false } } })
-        ).code;
+        ).chunks[0].code;
         // Readable output keeps the marker so downstream tools (and a re-parse) still see it...
         expect(readable).toContain('__PURE__');
         // ...while minified output drops it: the marker has been consumed by this build, and oxc

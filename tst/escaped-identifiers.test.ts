@@ -48,7 +48,7 @@ describe('escaped identifiers', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        const m = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: number };
+        const m = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: number };
         expect(m.x).toBe(42);
     });
 

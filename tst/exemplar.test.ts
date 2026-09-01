@@ -37,7 +37,7 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('executes and every exported value is exact', async () => {
-        const mod = await run(built.code);
+        const mod = await run(built.chunks[0].code);
         expect(mod.snapshot).toEqual({
             finalPos: { x: 4, y: 2 },
             spawnA: { x: 11, y: 0 },
@@ -61,11 +61,11 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('emits exactly one deduped external import line for node:path', () => {
-        expect(stripComments(built.code).match(/from 'node:path'/g)?.length).toBe(1);
+        expect(stripComments(built.chunks[0].code).match(/from 'node:path'/g)?.length).toBe(1);
     });
 
     it('strips all TS type syntax from the output', () => {
-        const c = stripComments(built.code);
+        const c = stripComments(built.chunks[0].code);
         expect(c).not.toMatch(/\binterface\b/);
         expect(c).not.toMatch(/\bimport type\b/);
         expect(c).not.toMatch(/\bsatisfies\b/);
@@ -76,7 +76,7 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('has no stray export keywords beyond the final entry export statements', () => {
-        const lines = stripComments(built.code).split('\n');
+        const lines = stripComments(built.chunks[0].code).split('\n');
         const exportLines = lines.filter((l) => /\bexport\b/.test(l));
         for (const line of exportLines) {
             expect(line.trim()).toMatch(/^export (\{|\* )/);
@@ -85,12 +85,12 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('self-oracle: our parser accepts the bundle with 0 errors', () => {
-        const { errors } = parse(built.code, { ts: false, jsx: false });
+        const { errors } = parse(built.chunks[0].code, { ts: false, jsx: false });
         expect(errors).toEqual([]);
     });
 
     it('self-oracle: no duplicate top-level declarations; unresolved globals are exactly the expected set', () => {
-        const { program, errors } = parse(built.code, { ts: false, jsx: false });
+        const { program, errors } = parse(built.chunks[0].code, { ts: false, jsx: false });
         expect(errors).toEqual([]);
         const sem = createSemantic();
         analyze(sem, program);
@@ -116,7 +116,7 @@ describe('exemplar: pinned known limitations', () => {
     const buildOne = async (files: Record<string, string>) => bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });
 
     it('lowered enum qualifies intra-enum member references (A | B → E.A | E.B)', async () => {
-        const { code } = await buildOne({
+        const { chunks: [{ code }] } = await buildOne({
             '/main.ts': "import { E } from './e';\nexport const both = E.BOTH;",
             '/e.ts': 'export enum E { A = 1, B = 2, BOTH = A | B }',
         });
@@ -131,7 +131,7 @@ describe('exemplar: pinned known limitations', () => {
     // returns the spec-correct 1. Kept here as the regression pin for that limitation; the broader
     // live-binding coverage lives in `bundle.test.ts`.
     it('namespace objects expose live bindings for mutated `let` exports', async () => {
-        const { code } = await buildOne({
+        const { chunks: [{ code }] } = await buildOne({
             '/main.ts': [
                 "import * as ns from './c';",
                 "import { bump } from './c';",

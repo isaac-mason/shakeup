@@ -15,7 +15,7 @@ const diskFs = {
 
 describe.skipIf(!existsSync(ENTRY))('output.optimize gates the directive tier', () => {
     const build = (optimize: boolean) =>
-        bundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output: { minify: true, optimize } }).then((r) => r.code);
+        bundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output: { minify: true, optimize } }).then((r) => r.chunks[0].code);
 
     it('optimize:false changes the output vs the default (directives are ignored)', async () => {
         const on = await build(true);

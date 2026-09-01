@@ -140,7 +140,7 @@ describe('emit-layer glue respects minify.whitespace', () => {
     const build = async (minify: boolean | Record<string, unknown>) => {
         const r = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: ['ext', 'ext2'], output: { minify } });
         expect(r.errors).toEqual([]);
-        return r.code;
+        return r.chunks[0].code;
     };
 
     it('emits import and export clauses with no readability padding', async () => {
@@ -180,7 +180,7 @@ describe('emit-layer glue respects minify.whitespace', () => {
         };
         const r = await bundle({ entry: '/main.ts', fs: createMemoryFs(files2), output: { minify: true } });
         expect(r.errors).toEqual([]);
-        expect((await evalModule(r.code)).out).toBe(3);
+        expect((await evalModule(r.chunks[0].code)).out).toBe(3);
     });
 
     it('produces a source map whose line count matches the minified code', async () => {
@@ -192,15 +192,20 @@ describe('emit-layer glue respects minify.whitespace', () => {
             fs: createMemoryFs(files),
             external: ['ext', 'ext2'],
             output: { minify: true, sourcemap: true },
-        })) as unknown as { code: string; map?: { mappings: string } };
-        const mappings = r.map?.mappings;
+        }));
+        // Read through the CHUNK, not a cast. This assertion previously went through
+        // `as unknown as { code, map }`, which bypassed type checking entirely — so when the
+        // deprecated `BundleResult.code`/`.map` aliases were removed, tsc flagged 319 sites and
+        // silently missed this one. It failed at runtime instead.
+        const entry = r.chunks[0];
+        const mappings = entry.map?.mappings;
         expect(mappings).toBeTruthy();
         // What this guards is a GROSS desync — a map describing a different chunk than the code, the
         // failure mode `joinParts` warns about where every line sat ~30 lines off. It is deliberately
         // not exact: `joinParts` appends one empty mapping line for the trailing newline, and whether
         // a `//# sourceMappingURL=` line is appended shifts the count again, so pinning equality makes
         // the test fail on newline conventions rather than on broken maps.
-        const codeLines = r.code.replace(/\n$/, '').split('\n').length;
+        const codeLines = entry.code.replace(/\n$/, '').split('\n').length;
         const groups = mappings!.split(';').length;
         expect(groups).toBeGreaterThanOrEqual(codeLines);
         expect(groups).toBeLessThanOrEqual(codeLines + 1);
@@ -221,7 +226,7 @@ describe('the minify sub-options compose independently', () => {
     const build = async (minify: unknown) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(SRC), output: { minify } as never });
         expect(r.errors).toEqual([]);
-        return r.code;
+        return r.chunks[0].code;
     };
 
     it('mangles when asked, even with the compress tier off', async () => {

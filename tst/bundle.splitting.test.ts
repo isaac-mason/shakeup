@@ -161,7 +161,7 @@ describe('bundle: base automatic chunking', () => {
         expect(r.errors).toEqual([]);
         expect(r.chunks).toHaveLength(1);
         expect(r.chunks[0].isEntry).toBe(true);
-        expect(r.code).toBe(r.chunks[0].code);
+        expect(r.chunks[0].code).toBe(r.chunks[0].code);
         expect(r.chunks[0].imports).toEqual([]);
     });
 });

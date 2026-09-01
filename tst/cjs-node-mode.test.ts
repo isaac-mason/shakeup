@@ -21,8 +21,8 @@ const CJS = ['exports.__esModule = true;', "exports.default = 'REAL';", "exports
 const run = async (files: Record<string, string>, entry: string) => {
     const r = await bundle({ entry, external: [], fs: createMemoryFs(files) });
     expect(r.errors).toEqual([]);
-    const ns = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
-    return { value: ns.x, code: r.code };
+    const ns = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
+    return { value: ns.x, code: r.chunks[0].code };
 };
 
 describe('isNodeMode is decided per importer', () => {

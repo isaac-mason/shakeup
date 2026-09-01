@@ -47,7 +47,7 @@ describe('emitted bundles are valid JavaScript (independent parser)', () => {
         for (const [name, minify] of stages) {
             it(`${name}`, async () => {
                 const r = await bundle({ entry: THREE, fs: diskFs, output: { minify } });
-                assertParses(r.code, `three-${name}`);
+                assertParses(r.chunks[0].code, `three-${name}`);
             }, 180000);
         }
     });
@@ -62,7 +62,7 @@ describe('emitted bundles are valid JavaScript (independent parser)', () => {
                         external: ['math', 'math/shapes', 'three'],
                         output: { minify, optimize },
                     });
-                    assertParses(r.code, `cc-${optimize}-${name}`);
+                    assertParses(r.chunks[0].code, `cc-${optimize}-${name}`);
                 }, 180000);
             }
         }

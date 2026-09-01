@@ -16,7 +16,7 @@ const OPS = 'export const AAA = () => 111;\nexport const BBB = () => 222;';
 
 describe('dynamic-import member narrowing', () => {
     it('narrows a same-chunk (inlined) dynamic import to the members read', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             { '/main.ts': 'export const load = async () => (await import("./ops")).AAA();', '/ops.ts': OPS },
             { codeSplitting: false },
         );
@@ -27,7 +27,7 @@ describe('dynamic-import member narrowing', () => {
     });
 
     it('narrows a same-chunk destructured dynamic import', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             { '/main.ts': 'export const load = async () => { const { AAA } = await import("./ops"); return AAA(); };', '/ops.ts': OPS },
             { codeSplitting: false },
         );
@@ -48,7 +48,7 @@ describe('dynamic-import member narrowing', () => {
     });
 
     it('keeps the whole surface when the dynamic result escapes', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             { '/main.ts': 'export const load = () => import("./ops").then((m) => globalThis.sink = m);', '/ops.ts': OPS },
             { codeSplitting: false },
         );
@@ -57,7 +57,7 @@ describe('dynamic-import member narrowing', () => {
     });
 
     it('unions static named imports with dynamic member reads', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             {
                 '/main.ts': [
                     'import { AAA } from "./ops";',

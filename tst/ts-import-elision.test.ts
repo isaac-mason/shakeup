@@ -33,7 +33,7 @@ describe('type-only named imports are elided without an explicit marker', () => 
     it('a specifier used only in a type annotation', async () => {
         const r = await build("import { makeNode, Node } from './lib';\nlet n: Node;\nexport const v = makeNode();");
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toMatch(/\bNode\b/);
+        expect(r.chunks[0].code).not.toMatch(/\bNode\b/);
     });
 
     it('a specifier used only in a function signature', async () => {
@@ -64,7 +64,7 @@ describe('type-only named imports are elided without an explicit marker', () => 
     it('an explicit `type` marker is elided', async () => {
         const r = await build("import { makeNode, type Node } from './lib';\nlet n: Node;\nexport const v = makeNode();");
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toMatch(/\bNode\b/);
+        expect(r.chunks[0].code).not.toMatch(/\bNode\b/);
     });
 
     it('an unused specifier of a real VALUE export still resolves', async () => {
@@ -76,7 +76,7 @@ describe('type-only named imports are elided without an explicit marker', () => 
     it('a name used as BOTH a value and a type is kept', async () => {
         const r = await build("import { makeNode, other } from './lib';\nlet o: typeof other;\nexport const v = makeNode() + other();");
         expect(r.errors).toEqual([]);
-        expect(r.code).toMatch(/\bother\b/);
+        expect(r.chunks[0].code).toMatch(/\bother\b/);
     });
 });
 
@@ -92,7 +92,7 @@ describe('import elision leaves externals and JavaScript alone', () => {
         // unreferenced one survives is decided later by `pruneUnusedExternals` via symbol liveness —
         // which needs the binding to still exist. Eliding collapsed `import { a } from 'ext'` to a
         // bare `import 'ext'`, which reads as side-effectful and could then never be pruned.
-        const { code } = await buildWith({ '/main.ts': "import { a, b } from 'ext';\nexport const out = 1;" }, ['ext']);
+        const { chunks: [{ code }] } = await buildWith({ '/main.ts': "import { a, b } from 'ext';\nexport const out = 1;" }, ['ext']);
         expect(code).toMatch(/from\s*['"]ext['"]/);
     });
 
@@ -104,7 +104,7 @@ describe('import elision leaves externals and JavaScript alone', () => {
             name: 'ext-side-effects',
             resolveId: (spec) => (spec === 'clean-lib' ? { id: 'clean-lib', external: true, moduleSideEffects: false } : null),
         };
-        const { code } = await buildWith({ '/main.ts': "import { a } from 'clean-lib';\nexport const out = 1;" }, [], [plugin]);
+        const { chunks: [{ code }] } = await buildWith({ '/main.ts': "import { a } from 'clean-lib';\nexport const out = 1;" }, [], [plugin]);
         expect(code).not.toContain('clean-lib');
     });
 
@@ -117,6 +117,6 @@ describe('import elision leaves externals and JavaScript alone', () => {
     it('keeps a bare side-effect import', async () => {
         const r = await buildWith({ '/main.ts': "import './s';\nexport const x = globalThis.__hit;", '/s.ts': 'globalThis.__hit = 1;' });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('__hit = 1');
+        expect(r.chunks[0].code).toContain('__hit = 1');
     });
 });

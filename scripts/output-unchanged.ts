@@ -61,6 +61,16 @@ const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
 ];
 const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
+/** The deprecated `BundleResult.code` alias was removed; the entry chunk's code is the replacement.
+ *  Like `entryOf` below, this script loads TWO layouts at once — the working tree and an archived git
+ *  ref — so it must read a result from either era. A ref older than that removal still returns `code`,
+ *  and reading only `chunks[0]` there would compare `undefined` against real output and report a
+ *  spurious CHANGED (or, if both sides went undefined, a spurious IDENTICAL — which is worse). */
+const entryCodeOf = (r: unknown): string => {
+    const o = r as { chunks?: { code?: string }[]; code?: string };
+    return o.chunks?.[0]?.code ?? o.code ?? '';
+};
+
 /** `bundle.ts` moved under `src/bundler/` — a ref from before that move still has it at the old
  *  path, and this script must load BOTH sides, so it probes rather than assuming one layout. */
 const entryOf = (base: string): string => {
@@ -78,8 +88,8 @@ async function main(): Promise<void> {
             console.log(`  SKIP      ${c.name} (corpus missing)`);
             continue;
         }
-        const a = (await base(c.opts())).code as string;
-        const b = (await cur(c.opts())).code as string;
+        const a = entryCodeOf(await base(c.opts()));
+        const b = entryCodeOf(await cur(c.opts()));
         const same = a === b;
         if (!same) allSame = false;
         console.log(

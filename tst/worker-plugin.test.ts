@@ -22,10 +22,10 @@ describe('worker plugin — ?worker imports', () => {
             plugins: [worker()],
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('WorkerWrapper');
+        expect(r.chunks[0].code).toContain('WorkerWrapper');
         // the worker's dep is inlined into the embedded blob code, not left as an import.
-        expect(r.code).toContain('n * 42');
-        expect(r.code).toContain('createObjectURL');
+        expect(r.chunks[0].code).toContain('n * 42');
+        expect(r.chunks[0].code).toContain('createObjectURL');
         expect((r.assets ?? []).some((a) => a.fileName.includes('worker'))).toBe(false);
     });
 
@@ -43,9 +43,9 @@ describe('worker plugin — ?worker imports', () => {
         expect(chunk).toBeDefined();
         expect(chunk!.source).toContain('n * 42');
         // ...and the main module loads it by URL, not as a blob.
-        expect(r.code).toContain('new URL(');
-        expect(r.code).toContain(chunk!.fileName);
-        expect(r.code).not.toContain('createObjectURL');
+        expect(r.chunks[0].code).toContain('new URL(');
+        expect(r.chunks[0].code).toContain(chunk!.fileName);
+        expect(r.chunks[0].code).not.toContain('createObjectURL');
     });
 
     it('DEV SERVER: a plain ?worker falls back to inline (no output sink) + default-exports the ctor', async () => {

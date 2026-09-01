@@ -3,8 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { buildCfg, verifyCfg } from '../src/analysis/cfg.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { bundle } from '../src/bundler/bundle.ts';
 import { parse } from '../src/ast.ts';
+import { bundle } from '../src/bundler/bundle.ts';
 
 // crashcat as a corpus. It covers ground three.js structurally CANNOT:
 //   • real multi-module TYPESCRIPT (97 modules), so the whole TS pipeline runs end to end
@@ -26,8 +26,8 @@ describe.skipIf(!existsSync(ENTRY))('crashcat corpus (real multi-module TS with 
     it('bundles, minifies, and round-trips as valid JS', async () => {
         const r = await bundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output: { minify: true } });
         expect(r.chunks[0].moduleIds.length).toBeGreaterThan(50);
-        expect(r.code.length).toBeGreaterThan(100_000);
-        expect(() => parse(r.code, { ts: false, jsx: false })).not.toThrow();
+        expect(r.chunks[0].code.length).toBeGreaterThan(100_000);
+        expect(() => parse(r.chunks[0].code, { ts: false, jsx: false })).not.toThrow();
     }, 180000);
 
     it('every function builds a well-formed CFG', () => {

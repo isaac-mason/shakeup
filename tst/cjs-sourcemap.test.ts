@@ -31,7 +31,7 @@ const resolve = (code: string, map: { mappings: string; sources: (string | null)
 const build = async (files: Record<string, string>) => {
     const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files), output: { sourcemap: true } });
     expect(r.errors).toEqual([]);
-    return { code: r.code, map: r.map! };
+    return { code: r.chunks[0].code, map: r.chunks[0].map! };
 };
 
 describe('sourcemaps survive CommonJS wrapping', () => {
@@ -107,8 +107,8 @@ describe('the emitted text and the sourcemap parts are one list', () => {
             output: { sourcemap: true, ...output },
         });
         expect(r.errors).toEqual([]);
-        const code = r.code.replace(/\n?\/\/# sourceMappingURL=[^\n]*\n?$/, '');
-        return { emitted: code.split('\n').length, mapped: r.map!.mappings.split(';').length };
+        const code = r.chunks[0].code.replace(/\n?\/\/# sourceMappingURL=[^\n]*\n?$/, '');
+        return { emitted: code.split('\n').length, mapped: r.chunks[0].map!.mappings.split(';').length };
     };
 
     it.each([

@@ -3,7 +3,7 @@ import { bundle, createMemoryFs } from '../src/index.ts';
 import { exportShape, runModule } from './exec-helpers.ts';
 
 const build = async (src: string, compress: boolean | 'dce' = true) =>
-    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress } } })).code;
+    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress } } })).chunks[0].code;
 
 const parity = async (src: string) => {
     const on = await build(src);

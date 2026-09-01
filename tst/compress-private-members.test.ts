@@ -12,7 +12,7 @@ const build = async (body: string): Promise<string> => {
         external: [],
         output: { minify: true, optimize: true },
     } as never);
-    return (r as { code: string }).code;
+    return r.chunks[0].code;
 };
 const run = (code: string): unknown => {
     const g: Record<string, unknown> = {};

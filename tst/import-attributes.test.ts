@@ -79,7 +79,7 @@ describe('import attributes have an effect, not just a parse', () => {
     const run = async (files: Record<string, string>, opts: Record<string, unknown> = {}) => {
         const r = await build(files, opts);
         expect(r.errors).toEqual([]);
-        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
     };
 
     describe('3a — a bundled dynamic import DROPS the clause', () => {
@@ -116,7 +116,7 @@ describe('import attributes have an effect, not just a parse', () => {
 
     describe('3b — an EXTERNAL keeps the clause', () => {
         const ext = async (src: string, opts: Record<string, unknown> = {}) =>
-            (await bundle({ entry: '/main.js', external: ['ext'], fs: createMemoryFs({ '/main.js': src }), ...opts })).code.split(
+            (await bundle({ entry: '/main.js', external: ['ext'], fs: createMemoryFs({ '/main.js': src }), ...opts })).chunks[0].code.split(
                 '\n',
             )[0];
 
@@ -294,7 +294,7 @@ describe('string export names resolve through a bundle', () => {
     const run = async (files: Record<string, string>, main: string) => {
         const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs({ ...files, '/main.js': main }) });
         expect(r.errors).toEqual([]);
-        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
     };
 
     it('a re-export under a string name is reachable', async () => {

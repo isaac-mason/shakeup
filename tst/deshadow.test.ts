@@ -25,7 +25,7 @@ const evalR = async (src: string, minify = false): Promise<unknown> => {
         output: minify ? { minify: true } : {},
     });
     expect(r.errors).toEqual([]);
-    return ((await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { r: unknown }).r;
+    return ((await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { r: unknown }).r;
 };
 
 describe('a nested binding never captures an import renamed onto its name', () => {

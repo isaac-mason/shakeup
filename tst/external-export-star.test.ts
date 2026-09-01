@@ -12,7 +12,7 @@ describe("an entry's external export-star survives tree-shaking", () => {
     const build = async (files: Record<string, string>, external: string[], treeshake?: false) => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external, treeshake });
         expect(r.errors).toEqual([]);
-        return r.code;
+        return r.chunks[0].code;
     };
 
     it('emits the star for an entry', async () => {

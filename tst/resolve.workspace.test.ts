@@ -78,7 +78,7 @@ describe('workspace: pnpm .pnpm-store layout (realpath canonicalization)', () =>
         const fs = createSymlinkFs(realFiles, links);
         const result = await bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.chunks[0].code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('liba->libb');
     });
 });
@@ -125,7 +125,7 @@ describe('workspace: pnpm dedup (one store file, two link paths -> one module)',
         const fs = createSymlinkFs(realFiles, links);
         const result = await bundle({ entry: '/repo/src/main.ts', fs });
         expect(result.errors).toEqual([]);
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.code)}`)) as Record<string, unknown>;
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(result.chunks[0].code)}`)) as Record<string, unknown>;
         expect(mod.value).toBe('a:libc|d:libc');
     });
 });

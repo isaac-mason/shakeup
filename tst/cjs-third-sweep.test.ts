@@ -33,8 +33,8 @@ describe('renderChunk return shapes', () => {
             { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
             { plugins: [plugin] },
         );
-        expect(r.code.startsWith('/*H*/\n')).toBe(true);
-        expect(r.code).not.toContain('[object Object]');
+        expect(r.chunks[0].code.startsWith('/*H*/\n')).toBe(true);
+        expect(r.chunks[0].code).not.toContain('[object Object]');
     });
 
     it('still accepts a plain string', async () => {
@@ -43,7 +43,7 @@ describe('renderChunk return shapes', () => {
             { '/d.cjs': 'module.exports = 7;', '/main.js': "import d from './d.cjs';\nexport const x = d;" },
             { plugins: [plugin] },
         );
-        expect(r.code.startsWith('/*H*/\n')).toBe(true);
+        expect(r.chunks[0].code.startsWith('/*H*/\n')).toBe(true);
     });
 });
 
@@ -61,8 +61,8 @@ describe('configurations verified correct, now pinned', () => {
         files['/d.cjs'] = 'module.exports = { k: 2 };';
         const second = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files), cache });
         expect(second.errors).toEqual([]);
-        expect((await import(`data:text/javascript,${encodeURIComponent(first.code)}`)).x).toBe(1);
-        expect((await import(`data:text/javascript,${encodeURIComponent(second.code)}`)).x).toBe(2);
+        expect((await import(`data:text/javascript,${encodeURIComponent(first.chunks[0].code)}`)).x).toBe(1);
+        expect((await import(`data:text/javascript,${encodeURIComponent(second.chunks[0].code)}`)).x).toBe(2);
     });
 
     it('a plugin-supplied virtual module can be required AND imported', async () => {
@@ -119,9 +119,9 @@ describe('configurations verified correct, now pinned', () => {
             },
         );
         const { decode } = await import('@jridgewell/sourcemap-codec');
-        const lines = r.code.split('\n');
+        const lines = r.chunks[0].code.split('\n');
         const li = lines.findIndex((l) => l.includes('function h()'));
-        const seg = (decode(r.map!.mappings)[li] ?? [])[0]!;
-        expect({ source: r.map!.sources[seg[1]!], line: seg[2]! + 1 }).toEqual({ source: '/d.cjs', line: 1 });
+        const seg = (decode(r.chunks[0].map!.mappings)[li] ?? [])[0]!;
+        expect({ source: r.chunks[0].map!.sources[seg[1]!], line: seg[2]! + 1 }).toEqual({ source: '/d.cjs', line: 1 });
     });
 });

@@ -56,8 +56,8 @@ describe('inferred purity does not survive a build', () => {
             fs: mutableFs(mk('globalThis.__hit = 1;')),
             external: [],
         }).rebuild();
-        expect(warm.code).toBe(cold.code);
-        expect(warm.code).toContain('__hit'); // the new side effect survives
+        expect(warm.chunks[0].code).toBe(cold.chunks[0].code);
+        expect(warm.chunks[0].code).toContain('__hit'); // the new side effect survives
     });
 });
 
@@ -73,12 +73,12 @@ describe('cross-module purity reaches treeshake', () => {
     };
 
     it('drops a discarded call to an imported pure function, and the now-unreferenced callee', async () => {
-        const { code } = await build('');
+        const { chunks: [{ code }] } = await build('');
         expect(code).not.toContain('eff');
     });
 
     it('keeps it when the imported callee has an effect', async () => {
-        const { code } = await build('globalThis.__hit = 1;');
+        const { chunks: [{ code }] } = await build('globalThis.__hit = 1;');
         expect(code).toContain('eff()');
     });
 });

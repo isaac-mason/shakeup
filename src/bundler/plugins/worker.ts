@@ -58,15 +58,15 @@ export function worker(options: WorkerOptions = {}): Plugin {
 
                 let wrapper: string;
                 if (inline) {
-                    wrapper = inlineWrapperModule(result.code);
+                    wrapper = inlineWrapperModule(result.chunks[0].code);
                 } else {
                     // Emit a sibling chunk + `new Worker(new URL(fileName, import.meta.url))`. The dev
                     // server has no output sink (emitFile throws), so fall back to an inline blob.
                     try {
-                        const fileName = this.emitFile({ type: 'asset', name: workerName(path), source: result.code });
+                        const fileName = this.emitFile({ type: 'asset', name: workerName(path), source: result.chunks[0].code });
                         wrapper = urlWrapperModule(fileName);
                     } catch {
-                        wrapper = inlineWrapperModule(result.code);
+                        wrapper = inlineWrapperModule(result.chunks[0].code);
                     }
                 }
                 cache.set(id, wrapper);

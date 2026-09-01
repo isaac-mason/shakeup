@@ -20,14 +20,14 @@ describe('cross-module cache dependencies', () => {
 
         const first = await ctx.rebuild();
         expect(first.errors).toEqual([]);
-        expect(first.code).toMatch(/=\s*1/); // donor body inlined
+        expect(first.chunks[0].code).toMatch(/=\s*1/); // donor body inlined
 
         // Edit ONLY the donor. Without the recorded edge the consumer is reused from cache with the
         // OLD body baked in — the bug this exists to prevent.
         files['/lib.js'] = '/* @inline */ export function k() { return 2; }';
         const second = await ctx.rebuild();
-        expect(second.code).toMatch(/=\s*2/);
-        expect(second.code).not.toMatch(/=\s*1/);
+        expect(second.chunks[0].code).toMatch(/=\s*2/);
+        expect(second.chunks[0].code).not.toMatch(/=\s*1/);
     });
 
     it('matches a cold build after a donor edit', async () => {
@@ -42,7 +42,7 @@ describe('cross-module cache dependencies', () => {
         const warm = await ctx.rebuild();
 
         const cold = await createBuildContext({ entry: '/entry.js', fs: mutableFs(mk('9')), external: [] }).rebuild();
-        expect(warm.code).toBe(cold.code); // byte-identical to building from scratch
+        expect(warm.chunks[0].code).toBe(cold.chunks[0].code); // byte-identical to building from scratch
     });
 
     it('does NOT invalidate when the donor is unchanged', async () => {
@@ -53,7 +53,7 @@ describe('cross-module cache dependencies', () => {
         const ctx = createBuildContext({ entry: '/entry.js', fs: mutableFs(files), external: [] });
         const a = await ctx.rebuild();
         const b = await ctx.rebuild();
-        expect(b.code).toBe(a.code);
+        expect(b.chunks[0].code).toBe(a.chunks[0].code);
         expect(b.parseStats?.parsed ?? 0).toBe(0); // nothing needlessly re-parsed
     });
 });

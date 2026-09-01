@@ -113,7 +113,7 @@ describe('the split keeps every binding on ONE name', () => {
         const { createMemoryFs } = await import('../src/bundler/fs.ts');
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), output: minify ? { minify: true } : {} });
         expect(r.errors).toEqual([]);
-        return r.code;
+        return r.chunks[0].code;
     };
 
     it.each([false, true])('evaluates to the same values (minify: %s)', async (minify) => {
@@ -145,12 +145,12 @@ describe('the split keeps every binding on ONE name', () => {
         expect(r.errors).toEqual([]);
         // Whatever the getter returns is the authority — the hoisted `var` and the assignment must
         // both use that same name, and it must NOT be the un-deconflicted `a`.
-        const getter = /get a\(\) \{ return ([A-Za-z$_][\w$]*); \}/.exec(r.code);
+        const getter = /get a\(\) \{ return ([A-Za-z$_][\w$]*); \}/.exec(r.chunks[0].code);
         expect(getter).not.toBeNull();
         const name = getter![1];
         expect(name).not.toBe('a');
-        expect(r.code).toMatch(new RegExp(`var ${name.replace('$', '\\$')}, `));
-        expect(r.code).toMatch(new RegExp(`${name.replace('$', '\\$')} = 1;`));
+        expect(r.chunks[0].code).toMatch(new RegExp(`var ${name.replace('$', '\\$')}, `));
+        expect(r.chunks[0].code).toMatch(new RegExp(`${name.replace('$', '\\$')} = 1;`));
     });
 
     it('every namespace getter reads a variable the chunk actually assigns', async () => {

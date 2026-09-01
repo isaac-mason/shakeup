@@ -69,7 +69,7 @@ describe('using declarations', () => {
         it('emits `await using` verbatim', async () => {
             const r = await build('export async function f() {\n  await using a = g();\n  return 1;\n}\nexport const x = 1;');
             expect(r.errors).toEqual([]);
-            expect(r.code).toMatch(/await using a = g\(\)/);
+            expect(r.chunks[0].code).toMatch(/await using a = g\(\)/);
         });
     });
 
@@ -100,7 +100,7 @@ describe('using declarations', () => {
         it('emits the for-of `using` head verbatim', async () => {
             const r = await build('export function f() {\n  for (using x of globalThis.xs) { x.t() }\n}\nexport const x = 1;');
             expect(r.errors).toEqual([]);
-            expect(r.code).toMatch(/for \(using x of/);
+            expect(r.chunks[0].code).toMatch(/for \(using x of/);
         });
     });
 
@@ -108,7 +108,7 @@ describe('using declarations', () => {
         it('emits `using` verbatim, as both oracles do', async () => {
             const r = await build('export function f() {\n  using a = g(), b = h();\n  return 1;\n}\nexport const x = 1;');
             expect(r.errors).toEqual([]);
-            expect(r.code).toMatch(/using a = g\(\), b = h\(\)/);
+            expect(r.chunks[0].code).toMatch(/using a = g\(\), b = h\(\)/);
         });
 
         it('survives minification', async () => {
@@ -116,7 +116,7 @@ describe('using declarations', () => {
                 output: { minify: true },
             });
             expect(r.errors).toEqual([]);
-            expect(r.code).toContain('using');
+            expect(r.chunks[0].code).toContain('using');
         });
 
         it('an UNUSED `using` binding is never dropped', async () => {
@@ -128,7 +128,7 @@ describe('using declarations', () => {
                 'export function f() {\n  using r = { [Symbol.dispose]() {} };\n  return 1;\n}\nexport const x = 1;',
             );
             expect(r.errors).toEqual([]);
-            expect(r.code).toMatch(/using r =/);
+            expect(r.chunks[0].code).toMatch(/using r =/);
         });
 
         it('the disposal actually runs', async () => {
@@ -136,7 +136,7 @@ describe('using declarations', () => {
                 'function f() {\n  using r = { [Symbol.dispose]() { globalThis.__usingDisposed = true } };\n  return 1;\n}\nconst v = f();\nexport const x = [v, globalThis.__usingDisposed ?? false];',
             );
             expect(r.errors).toEqual([]);
-            const ns = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+            const ns = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
             expect(ns.x).toEqual([1, true]);
         });
 
@@ -144,7 +144,7 @@ describe('using declarations', () => {
             // The bail must be scoped to `using` — the ordinary optimisation has to keep working.
             const r = await build('export function f() {\n  const c = g();\n  return 1;\n}\nexport const x = 1;');
             expect(r.errors).toEqual([]);
-            expect(r.code).not.toMatch(/const c =/);
+            expect(r.chunks[0].code).not.toMatch(/const c =/);
         });
     });
 });

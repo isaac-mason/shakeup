@@ -23,7 +23,7 @@ const dropsCall = async (lib: string): Promise<boolean> => {
         }),
     });
     expect(r.errors).toEqual([]);
-    return !/api\(/.test(r.code);
+    return !/api\(/.test(r.chunks[0].code);
 };
 
 describe('@__NO_SIDE_EFFECTS__', () => {
@@ -54,7 +54,7 @@ describe('@__NO_SIDE_EFFECTS__', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('boom(');
+        expect(r.chunks[0].code).toContain('boom(');
     });
 
     it('a module-local call is dropped too', async () => {
@@ -65,7 +65,7 @@ describe('@__NO_SIDE_EFFECTS__', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('api(');
+        expect(r.chunks[0].code).not.toContain('api(');
     });
 
     it('a CALLED annotated function is still emitted', async () => {
@@ -78,6 +78,6 @@ describe('@__NO_SIDE_EFFECTS__', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('api(');
+        expect(r.chunks[0].code).toContain('api(');
     });
 });

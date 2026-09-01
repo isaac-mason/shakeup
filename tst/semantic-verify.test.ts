@@ -51,7 +51,7 @@ describe('the maintained semantic matches the tree, end to end', () => {
                 let code: string;
                 try {
                     const r = await bundle({ entry, fs: diskFs, external, output: { minify: true, optimize: true } } as never);
-                    code = (r as { code: string }).code;
+                    code = r.chunks[0].code;
                 } finally {
                     setSemanticVerify(false);
                     setVerifyExtras(false);

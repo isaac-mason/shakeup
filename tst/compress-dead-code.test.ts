@@ -11,7 +11,7 @@ const build = async (src: string) => {
         output: { minify: { compress: true } },
     });
     expect(result.errors).toEqual([]);
-    return result.code;
+    return result.chunks[0].code;
 };
 
 describe('dead-code elimination (compress)', () => {

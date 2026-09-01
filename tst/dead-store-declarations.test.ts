@@ -18,7 +18,7 @@ const build = async (src: string) => {
         external: [],
         output: { minify: { compress: true } },
     });
-    return r.code;
+    return r.chunks[0].code;
 };
 
 describe('a bare declaration does not kill', () => {

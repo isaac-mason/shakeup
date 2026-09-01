@@ -35,7 +35,7 @@ const build = async (pure: string, minify: boolean, external: string[] = []) => 
         output: { minify },
     });
     expect(r.errors).toEqual([]);
-    return r.code;
+    return r.chunks[0].code;
 };
 
 describe('dead declarators are dropped', () => {
@@ -113,7 +113,7 @@ describe('a symbol declared more than once keeps EVERY declaration', () => {
     const evalOut = async (src: string): Promise<unknown> => {
         const r = await bundle({ entry: '/main.js', fs: createMemoryFs({ '/main.js': src }) });
         expect(r.errors).toEqual([]);
-        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { out: unknown };
+        const mod = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { out: unknown };
         return mod.out;
     };
 

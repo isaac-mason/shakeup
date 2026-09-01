@@ -22,7 +22,7 @@ const build = (src: string) => {
         fs: { read: (i) => files[i] ?? null, exists: (i) => i in files },
         external: [],
         output: { minify: { compress: true } },
-    }).then((r) => r.code);
+    }).then((r) => r.chunks[0].code);
 };
 
 describe('dead stores inside try-containing functions are eliminated', () => {

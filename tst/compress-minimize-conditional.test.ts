@@ -7,7 +7,7 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 const build = async (src: string, minify: boolean | { compress?: boolean; mangle?: boolean; whitespace?: boolean }) => {
     const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify } });
     expect(result.errors).toEqual([]);
-    return result.code;
+    return result.chunks[0].code;
 };
 
 /** Build the same source un-minified and compress-only, execute BOTH bundles, and assert every named
@@ -190,7 +190,7 @@ describe('a common assignment target hoists out of a conditional', () => {
             external: [],
             output: { minify: true, optimize: true },
         } as never);
-        return (r as { code: string }).code;
+        return r.chunks[0].code;
     };
     const run = (code: string, x: unknown): unknown => {
         const g: Record<string, unknown> = { x };

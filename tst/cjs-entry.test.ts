@@ -31,7 +31,7 @@ describe('CommonJS entry points', () => {
     it('a CommonJS entry exports its module.exports as default', async () => {
         // `cjs_entry`'s own assertion: `assert.equal(main, 'main')`.
         const r = await build({ '/main.js': "module.exports = 'main';" }, '/main.js');
-        expect(r.code).toContain('export default require_main();');
+        expect(r.chunks[0].code).toContain('export default require_main();');
         expect(await importChunk(r, 'main.js')).toBe('main');
     });
 

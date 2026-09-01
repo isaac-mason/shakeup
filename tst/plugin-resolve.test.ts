@@ -19,7 +19,7 @@ describe('plugin resolve/load contract (R1)', () => {
             resolveId: (spec) => (spec === 'virtual:config' ? { id: '\0virtual:config', moduleSideEffects: false } : null),
             load: (id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
+        const { chunks: [{ code }] } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
             virtual,
         ]);
         const mod = await run(code);
@@ -31,7 +31,7 @@ describe('plugin resolve/load contract (R1)', () => {
             name: 'externalize',
             resolveId: (spec) => (spec === 'lib-esque' ? { id: 'lib-esque', external: true } : null),
         };
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             { '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" },
             [externalize],
         );
@@ -43,7 +43,7 @@ describe('plugin resolve/load contract (R1)', () => {
             name: 'externalize-abs',
             resolveId: (spec) => (spec === 'abs-lib' ? { id: '/abs/abs-lib', external: 'absolute' } : null),
         };
-        const { code } = await build({ '/main.ts': "import { x } from 'abs-lib';\nexport const c = () => x();" }, [externalize]);
+        const { chunks: [{ code }] } = await build({ '/main.ts': "import { x } from 'abs-lib';\nexport const c = () => x();" }, [externalize]);
         expect(code).toContain("from 'abs-lib'");
     });
 
@@ -57,14 +57,14 @@ describe('plugin resolve/load contract (R1)', () => {
             resolveId: (spec, importer) =>
                 spec === './effect.ts' && importer !== null ? { id: '/effect.ts', moduleSideEffects: false } : null,
         };
-        const { code, shaken } = await build(files, [markPure]);
+        const { chunks: [{ code }], shaken } = await build(files, [markPure]);
         expect(code).not.toContain('__EFFECT_MARKER__');
         expect(shaken!.dropped.length).toBeGreaterThan(0);
         const mod = await run(code);
         expect(mod.out).toBe(1);
 
         const kept = await build(files, []);
-        expect(kept.code).toContain('__EFFECT_MARKER__');
+        expect(kept.chunks[0].code).toContain('__EFFECT_MARKER__');
     });
 
     it('external moduleSideEffects: false drops an unreferenced external import (B1)', async () => {
@@ -80,7 +80,7 @@ describe('plugin resolve/load contract (R1)', () => {
                       ? { id: 'sfx-lib', external: true }
                       : null,
         };
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             {
                 '/main.ts': ["import { a } from 'clean-lib';", "import { b } from 'sfx-lib';", 'export const out = 1;'].join(
                     '\n',
@@ -101,7 +101,7 @@ describe('plugin resolve/load contract (R1)', () => {
             name: 'no-shake',
             resolveId: (spec) => (spec === './lib.ts' ? { id: '/lib.ts', moduleSideEffects: 'no-treeshake' } : null),
         };
-        const { code } = await build(files, [noShake]);
+        const { chunks: [{ code }] } = await build(files, [noShake]);
         expect(code).toContain('DEAD_BUT_KEPT');
         expect(code).toContain('__NT__');
     });
@@ -193,7 +193,7 @@ describe('plugin resolve/load contract (R1)', () => {
                 sideEffects = this.getModuleInfo('\0d')?.moduleSideEffects;
             },
         };
-        const { code } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
+        const { chunks: [{ code }] } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
         const mod = await run(code);
         expect(mod.v).toBe(7);
         // The side-effect assignment is droppable (module marked false, only `d` is used).

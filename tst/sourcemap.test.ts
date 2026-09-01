@@ -209,13 +209,13 @@ describe('sourcemap — bundle() multi-module map', () => {
     it('each token traces to the correct module source at the right position', async () => {
         const r = await build(true);
         expect(r.errors).toEqual([]);
-        expect(r.map).toBeDefined();
+        expect(r.chunks[0].map).toBeDefined();
         const hit = (token: string, occ: number, wantSource: string) => {
-            const gp = posOf(r.code, nthIndex(r.code, token, occ));
-            const t = traceFull(r.map!.mappings, gp.line, gp.col);
+            const gp = posOf(r.chunks[0].code, nthIndex(r.chunks[0].code, token, occ));
+            const t = traceFull(r.chunks[0].map!.mappings, gp.line, gp.col);
             expect(t).not.toBeNull();
-            expect(r.map!.sources[t!.srcIdx]).toBe(wantSource);
-            const content = r.map!.sourcesContent![t!.srcIdx]!;
+            expect(r.chunks[0].map!.sources[t!.srcIdx]).toBe(wantSource);
+            const content = r.chunks[0].map!.sourcesContent![t!.srcIdx]!;
             const off = offOf(content, t!.srcLine, t!.srcCol);
             expect(content.slice(off, off + token.length)).toBe(token);
         };
@@ -226,18 +226,18 @@ describe('sourcemap — bundle() multi-module map', () => {
 
     it('sourcesContent holds each module verbatim; synthetic export line is unmapped', async () => {
         const r = await build(true);
-        expect(r.map!.sources).toEqual(['/math.ts', '/main.ts']);
-        expect(r.map!.sourcesContent).toEqual([
+        expect(r.chunks[0].map!.sources).toEqual(['/math.ts', '/main.ts']);
+        expect(r.chunks[0].map!.sourcesContent).toEqual([
             'export const add = (a: number, b: number): number => a + b;',
             "import { add } from './math';\nexport const r: number = add(2, 3);",
         ]);
-        const exportLineIdx = r.code.split('\n').findIndex((l) => l.startsWith('export {'));
-        expect(trace(r.map!.mappings, exportLineIdx, 0)).toBeNull();
+        const exportLineIdx = r.chunks[0].code.split('\n').findIndex((l) => l.startsWith('export {'));
+        expect(trace(r.chunks[0].map!.mappings, exportLineIdx, 0)).toBeNull();
     });
 
     it('no bundle map unless requested; enabling it only appends the sourceMappingURL comment', async () => {
-        expect((await build(false)).map).toBeUndefined();
-        const withMap = (await build(true)).code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
-        expect(withMap).toBe((await build(false)).code);
+        expect((await build(false)).chunks[0].map).toBeUndefined();
+        const withMap = (await build(true)).chunks[0].code.replace(/\n\/\/# sourceMappingURL=[^\n]*\n$/, '\n');
+        expect(withMap).toBe((await build(false)).chunks[0].code);
     });
 });

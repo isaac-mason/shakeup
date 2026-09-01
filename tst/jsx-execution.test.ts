@@ -32,7 +32,7 @@ async function ours(fixture: string): Promise<Record<string, unknown>> {
         spec === 'react/jsx-runtime' ? '/react/jsx-runtime.ts' : spec === 'react' ? '/react.ts' : null;
     const r = await bundle({ entry: '/main.tsx', fs: createMemoryFs(files), external: [], resolve });
     expect(r.errors, `our bundle errored: ${r.errors.join(', ')}`).toEqual([]);
-    return run(r.code);
+    return run(r.chunks[0].code);
 }
 
 async function esb(fixture: string): Promise<Record<string, unknown>> {

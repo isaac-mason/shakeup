@@ -3,7 +3,7 @@ import { bundle, createMemoryFs } from '../src/index.ts';
 import { exportShape, runModule } from './exec-helpers.ts';
 
 const build = async (src: string) =>
-    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress: false } } })).code;
+    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress: false } } })).chunks[0].code;
 
 const run = runModule;
 

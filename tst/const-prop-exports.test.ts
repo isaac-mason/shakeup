@@ -25,7 +25,7 @@ const run = async (
 ) => {
     const r = await build({ '/d.js': dep, '/main.js': main }, output);
     expect(r.errors).toEqual([]);
-    return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+    return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
 };
 
 describe('two-statement exports survive constant propagation', () => {
@@ -48,7 +48,7 @@ describe('two-statement exports survive constant propagation', () => {
         const dep = `${names.map((n, i) => `const ${n} = ${i};`).join('\n')}\nexport { ${names.join(', ')} };`;
         const r = await build({ '/d.js': dep, '/main.js': `export * from './d.js';` });
         expect(r.errors).toEqual([]);
-        const ns = (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as Record<string, unknown>;
+        const ns = (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as Record<string, unknown>;
         expect(names.filter((n) => ns[n] === undefined)).toEqual([]);
     });
 
@@ -57,7 +57,7 @@ describe('two-statement exports survive constant propagation', () => {
     it('still inlines a NON-exported constant', async () => {
         const r = await build({ '/main.js': 'const k = 41;\nexport const x = k + 1;' }, { minify: true, optimize: true });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toMatch(/\b41\b/); // folded to 42, so the operand is gone
+        expect(r.chunks[0].code).not.toMatch(/\b41\b/); // folded to 42, so the operand is gone
     });
 
     it('still eliminates a feature flag', async () => {
@@ -67,7 +67,7 @@ describe('two-statement exports survive constant propagation', () => {
             { minify: true, optimize: true },
         );
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('KEPT');
+        expect(r.chunks[0].code).not.toContain('KEPT');
     });
 
     it('still inlines reads of an EXPORTED constant, sparing only the specifier', async () => {
@@ -84,6 +84,6 @@ describe('two-statement exports survive constant propagation', () => {
             },
         );
         expect(r.errors).toEqual([]);
-        expect(r.code).toMatch(/__cpq\s*=\s*14/); // the local read folded, so it did inline there
+        expect(r.chunks[0].code).toMatch(/__cpq\s*=\s*14/); // the local read folded, so it did inline there
     });
 });

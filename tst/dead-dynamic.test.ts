@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
 import { linkGraph } from '../src/bundler/link.ts';
-import { buildGraph } from '../src/bundler/scan.ts';
 import type { Plugin } from '../src/bundler/plugin.ts';
+import { buildGraph } from '../src/bundler/scan.ts';
 import { treeshake } from '../src/bundler/treeshake.ts';
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
@@ -41,7 +41,7 @@ describe('dead pure dynamic-import elimination', () => {
             '/main.ts': 'export const f = () => { import("./lazy"); };\nexport const out = 1;',
             '/lazy.ts': 'export const marker = "LAZY_MARKER";',
         };
-        const { code, chunks } = await build(files, [markPure('./lazy', '/lazy.ts')]);
+        const { chunks: [{ code }], chunks } = await build(files, [markPure('./lazy', '/lazy.ts')]);
         expect(code).not.toContain('LAZY_MARKER');
         expect(code).toContain('Promise.resolve({})');
         expect(chunks).toHaveLength(1); // no separate lazy chunk
@@ -54,7 +54,7 @@ describe('dead pure dynamic-import elimination', () => {
             '/main.ts': 'export const f = () => { import("./lazy"); };\nexport const out = 1;',
             '/lazy.ts': 'globalThis.__LAZY_FX__ = 1;\nexport const marker = "LAZY_MARKER";',
         };
-        const { code, chunks } = await build(files); // no plugin → default (has side effects)
+        const { chunks: [{ code }], chunks } = await build(files); // no plugin → default (has side effects)
         expect(chunks).toHaveLength(2); // lazy still its own chunk
         expect(code).not.toContain('Promise.resolve({})');
     });
@@ -77,7 +77,7 @@ describe('dead pure dynamic-import elimination', () => {
             ].join('\n'),
             '/lazy.ts': 'export const marker = "LAZY_MARKER";',
         };
-        const { code } = await build(files, [markPure('./lazy', '/lazy.ts')]);
+        const { chunks: [{ code }] } = await build(files, [markPure('./lazy', '/lazy.ts')]);
         expect(code).toContain('LAZY_MARKER'); // static edge keeps it in the sync graph
     });
 });

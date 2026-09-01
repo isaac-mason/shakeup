@@ -7,7 +7,7 @@ const run = async (code: string): Promise<Record<string, unknown>> =>
 const build = async (src: string, minify: boolean | { compress?: boolean; mangle?: boolean; whitespace?: boolean }) => {
     const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify } });
     expect(result.errors).toEqual([]);
-    return result.code;
+    return result.chunks[0].code;
 };
 
 /** Build the same source un-minified and compress-only, execute BOTH bundles, and assert every
@@ -203,7 +203,7 @@ describe('an empty `else` is normalised away', () => {
             external: [],
             output: { minify: true, optimize: true },
         } as never);
-        const code = (r as { code: string }).code;
+        const code = r.chunks[0].code;
         expect(code).not.toContain('else');
         const g: Record<string, unknown> = { x: 1 };
         new Function('globalThis', code)(g);
@@ -220,7 +220,7 @@ describe('a right-nested logical re-associates to the left', () => {
             output: { minify: true, optimize: true },
         } as never);
         const g: Record<string, unknown> = { x };
-        new Function('globalThis', (r as { code: string }).code)(g);
+        new Function('globalThis', r.chunks[0].code)(g);
         return g.sink;
     };
 
@@ -232,7 +232,7 @@ describe('a right-nested logical re-associates to the left', () => {
             output: { minify: true, optimize: true },
         } as never);
         // `a && (a > 1 && (o = 1))` would print two extra characters.
-        expect((r as { code: string }).code).not.toMatch(/&&\(\w+>1&&/);
+        expect(r.chunks[0].code).not.toMatch(/&&\(\w+>1&&/);
     });
 
     it('preserves short-circuit order and result', async () => {

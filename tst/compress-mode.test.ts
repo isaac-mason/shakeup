@@ -7,7 +7,7 @@ import { bundle, createMemoryFs } from '../src/index.ts';
 // production build. Only the cosmetic tier is allowed to differ.
 
 const build = async (src: string, compress: false | true | 'dce') =>
-    (await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify: { compress } } })).code;
+    (await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify: { compress } } })).chunks[0].code;
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;

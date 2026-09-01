@@ -74,8 +74,8 @@ describe('the __esm error cache', () => {
                 "const out = [];\nfor (let i = 0; i < 2; i++) { try { require('./e.js') } catch (e) { out.push(e.message) } }\nmodule.exports = out;",
             '/main.js': "import d from './d.cjs';\nexport const x = d;",
         });
-        expect(r.code).toMatch(/__esm\(/);
-        expect((await import(`data:text/javascript,${encodeURIComponent(r.code)}`)).x).toEqual(['boom1', 'boom1']);
+        expect(r.chunks[0].code).toMatch(/__esm\(/);
+        expect((await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)).x).toEqual(['boom1', 'boom1']);
     });
 });
 
@@ -90,7 +90,7 @@ describe('fourth sweep — configurations verified correct', () => {
             plugins: [{ name: 'p', transform: null, resolveId: null, renderChunk: null } as never],
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('const x = 1;');
+        expect(r.chunks[0].code).toContain('const x = 1;');
     });
 
     it('mode-2 alongside an external star source', async () => {
@@ -102,7 +102,7 @@ describe('fourth sweep — configurations verified correct', () => {
             },
             { external: ['ext'] },
         );
-        expect(r.code).toBeTruthy();
+        expect(r.chunks[0].code).toBeTruthy();
     });
 
     it('a `.cjs` that is both an entry AND a dependency of another entry', async () => {
@@ -133,7 +133,7 @@ describe('fourth sweep — configurations verified correct', () => {
             },
         );
         // Ours is emitted LAST, which is the one a consumer honours.
-        expect(r.code.trimEnd().endsWith('//# sourceMappingURL=main.js.map')).toBe(true);
+        expect(r.chunks[0].code.trimEnd().endsWith('//# sourceMappingURL=main.js.map')).toBe(true);
     });
 });
 

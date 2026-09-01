@@ -16,7 +16,7 @@ const build = async (src: string, on: boolean) => {
             external: [],
             output: { minify: { compress: true } },
         });
-        return r.code;
+        return r.chunks[0].code;
     } finally {
         setCoalesceEnabled(false);
     }

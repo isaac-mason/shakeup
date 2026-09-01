@@ -65,8 +65,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(result.errors).toEqual([]);
         const mod = result.graph!.modules[result.graph!.byId.get('/main.ts')!];
         expect(mod.importRecords).toHaveLength(0);
-        expect(result.code).toContain('import(p)');
-        expect(result.code).toContain("import('./x' + y)");
+        expect(result.chunks[0].code).toContain('import(p)');
+        expect(result.chunks[0].code).toContain("import('./x' + y)");
     });
 
     it('static + dynamic same specifier ⇒ one record, static dominates', async () => {
@@ -179,7 +179,7 @@ describe('bundle: back-compat + stubs', () => {
         });
         expect(result.errors).toEqual([]);
         expect(result.chunks).toHaveLength(1);
-        expect(result.chunks[0].code).toBe(result.code);
+        expect(result.chunks[0].code).toBe(result.chunks[0].code);
         expect(result.chunks[0].isEntry).toBe(true);
         expect(result.chunks[0].name).toBe('main');
         expect(result.chunks[0].moduleIds).toContain('/main.ts');
@@ -196,6 +196,6 @@ describe('bundle: back-compat + stubs', () => {
         const without = await bundle({ input: '/main.ts', fs: createMemoryFs(files), external: [] });
         expect(withOpt.errors).toEqual([]);
         expect(without.errors).toEqual([]);
-        expect(withOpt.code).toBe(without.code);
+        expect(withOpt.chunks[0].code).toBe(without.chunks[0].code);
     });
 });

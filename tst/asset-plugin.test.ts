@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
-import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
 import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
-import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 import { asset } from '../src/bundler/plugins/asset.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 
 const FILES = {
     '/main.ts': "import u from './data.txt?url';\nexport const url = u;",
@@ -28,7 +28,7 @@ describe('asset plugin — ?url imports', () => {
         expect(emitted[0].source).toBe('hello asset');
 
         // the import resolves to that fileName.
-        expect(r.code).toContain(emitted[0].fileName);
+        expect(r.chunks[0].code).toContain(emitted[0].fileName);
     });
 
     it('DEV mode: url() maps the path to a served URL, NO emission', async () => {
@@ -40,7 +40,7 @@ describe('asset plugin — ?url imports', () => {
             plugins: [asset({ url: (p) => `/@project${p}` })],
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('/@project/data.txt');
+        expect(r.chunks[0].code).toContain('/@project/data.txt');
         expect((r.assets ?? []).some((a) => a.fileName.startsWith('assets/'))).toBe(false);
     });
 

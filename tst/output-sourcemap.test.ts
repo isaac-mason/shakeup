@@ -14,23 +14,23 @@ describe('output sourcemap variants', () => {
     it('inline → data-URL comment in code, NO .map asset', async () => {
         const r = await build({ sourcemap: 'inline' });
         expect(r.errors).toEqual([]);
-        expect(r.code).toMatch(/\/\/# sourceMappingURL=data:application\/json;/);
+        expect(r.chunks[0].code).toMatch(/\/\/# sourceMappingURL=data:application\/json;/);
         expect(r.assets ?? []).toHaveLength(0);
         // inline chunks carry their map object too.
-        expect(r.map).toBeDefined();
+        expect(r.chunks[0].map).toBeDefined();
     });
 
     it('hidden → .map asset present, NO sourceMappingURL comment', async () => {
         const r = await build({ sourcemap: 'hidden' });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('sourceMappingURL');
+        expect(r.chunks[0].code).not.toContain('sourceMappingURL');
         expect((r.assets ?? []).some((a) => a.fileName === 'main.js.map')).toBe(true);
     });
 
     it('true → .map asset AND sourceMappingURL=<name>.map comment', async () => {
         const r = await build({ sourcemap: true });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain('//# sourceMappingURL=main.js.map');
+        expect(r.chunks[0].code).toContain('//# sourceMappingURL=main.js.map');
         expect((r.assets ?? []).some((a) => a.fileName === 'main.js.map')).toBe(true);
     });
 
@@ -46,9 +46,9 @@ describe('output sourcemap variants', () => {
 describe('output sourcemap — sourcesContent & ignoreList', () => {
     it('sourcemapExcludeSources drops sourcesContent (keeps sources + mappings)', async () => {
         const r = await build({ sourcemap: true, sourcemapExcludeSources: true });
-        expect(r.map!.sources.length).toBeGreaterThan(0);
-        expect(r.map!.sourcesContent).toBeUndefined();
-        expect(r.map!.mappings.length).toBeGreaterThan(0);
+        expect(r.chunks[0].map!.sources.length).toBeGreaterThan(0);
+        expect(r.chunks[0].map!.sourcesContent).toBeUndefined();
+        expect(r.chunks[0].map!.mappings.length).toBeGreaterThan(0);
     });
 
     it('sourcemapIgnoreList RegExp populates x_google_ignoreList with the right indices', async () => {
@@ -62,14 +62,14 @@ describe('output sourcemap — sourcesContent & ignoreList', () => {
             output: { sourcemap: true, sourcemapIgnoreList: /node_modules/ },
         });
         expect(r.errors).toEqual([]);
-        const nmIdx = r.map!.sources.findIndex((s) => s?.includes('node_modules'));
+        const nmIdx = r.chunks[0].map!.sources.findIndex((s) => s?.includes('node_modules'));
         expect(nmIdx).toBeGreaterThanOrEqual(0);
-        expect(r.map!.x_google_ignoreList).toContain(nmIdx);
+        expect(r.chunks[0].map!.x_google_ignoreList).toContain(nmIdx);
     });
 
     it('sourcemapIgnoreList:false → field absent', async () => {
         const r = await build({ sourcemap: true, sourcemapIgnoreList: false });
-        expect(r.map!.x_google_ignoreList).toBeUndefined();
+        expect(r.chunks[0].map!.x_google_ignoreList).toBeUndefined();
     });
 });
 
@@ -82,8 +82,8 @@ describe('output sourcemap — banner line offset (the footgun)', async () => {
         // The banner occupies the first two generated lines (unmapped). Every mapped segment in
         // `withBanner` must be the SAME segment as `noBanner` shifted down by 2 lines — i.e. the
         // banner contributed unmapped generated lines and the source columns didn't drift.
-        const base = decode(noBanner.map!.mappings);
-        const shifted = decode(withBanner.map!.mappings);
+        const base = decode(noBanner.chunks[0].map!.mappings);
+        const shifted = decode(withBanner.chunks[0].map!.mappings);
         // First two lines of the banner build are unmapped.
         expect(shifted[0] ?? []).toHaveLength(0);
         expect(shifted[1] ?? []).toHaveLength(0);
@@ -95,8 +95,8 @@ describe('output sourcemap — banner line offset (the footgun)', async () => {
 
     it('the entry statement still traces to its original source line under a banner', async () => {
         const r = await build({ sourcemap: true, banner: '/* b1 */\n/* b2 */' });
-        const decoded = decode(r.map!.mappings);
-        const mainIdx = r.map!.sources.indexOf('/main.ts');
+        const decoded = decode(r.chunks[0].map!.mappings);
+        const mainIdx = r.chunks[0].map!.sources.indexOf('/main.ts');
         let found = false;
         for (const line of decoded) {
             for (const seg of line) {

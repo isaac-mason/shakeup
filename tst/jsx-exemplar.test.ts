@@ -61,7 +61,7 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
     });
 
     it('executes the JSX component against the shim', async () => {
-        const mod = await run((await built).code);
+        const mod = await run((await built).chunks[0].code);
         type Tree = { k: string; type: unknown; key?: unknown; props: Record<string, unknown> };
         const Panel = mod.Panel as (p: { rows: { id: number; label: string }[]; particle: { motion: number } }) => Tree;
         const tree = Panel({
@@ -92,7 +92,7 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
     });
 
     it('the enum lowering still works through the tsx graph (motion.ts unchanged)', async () => {
-        expect((await built).code).toContain('MotionType');
+        expect((await built).chunks[0].code).toContain('MotionType');
     });
 
     it('EXISTING exemplar output is unaffected by JSX machinery (no-tsx build stable)', async () => {
@@ -107,8 +107,8 @@ describe('G-JSX-3: exemplar .tsx module bundles + executes', () => {
         });
         const plain = await bundle({ entry: '/main.ts', fs: createMemoryFs(tsOnly), external: ['node:path'] });
         expect(withJsxOpts.errors).toEqual([]);
-        expect(withJsxOpts.code).toBe(plain.code);
-        expect(withJsxOpts.code).not.toContain('jsx-runtime');
-        expect(withJsxOpts.code).not.toMatch(/\bjsx\(/);
+        expect(withJsxOpts.chunks[0].code).toBe(plain.chunks[0].code);
+        expect(withJsxOpts.chunks[0].code).not.toContain('jsx-runtime');
+        expect(withJsxOpts.chunks[0].code).not.toMatch(/\bjsx\(/);
     });
 });

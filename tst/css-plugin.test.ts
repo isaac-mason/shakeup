@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
-import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
 import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
-import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 import { css } from '../src/bundler/plugins/css.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
+import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 
 const FILES = {
     '/main.ts': "import './styles.css';\nexport const x = 1;",
@@ -20,8 +20,8 @@ describe('css plugin — .css imports', () => {
             plugins: [css({ mode: 'empty' })],
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('color: red');
-        expect(r.code).not.toContain('createElement');
+        expect(r.chunks[0].code).not.toContain('color: red');
+        expect(r.chunks[0].code).not.toContain('createElement');
     });
 
     it('inject mode: emits a document-guarded <style> injector with the css text', async () => {
@@ -33,9 +33,9 @@ describe('css plugin — .css imports', () => {
             plugins: [css({ mode: 'inject' })],
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain("typeof document !== 'undefined'");
-        expect(r.code).toContain('.a { color: red; }');
-        expect(r.code).toContain('document.head.appendChild');
+        expect(r.chunks[0].code).toContain("typeof document !== 'undefined'");
+        expect(r.chunks[0].code).toContain('.a { color: red; }');
+        expect(r.chunks[0].code).toContain('document.head.appendChild');
     });
 
     it('dev server: a .css import evaluates cleanly (no DOM → no-op inject)', async () => {

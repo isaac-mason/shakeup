@@ -52,8 +52,8 @@ describe('erasure — the statement has no runtime meaning', () => {
         const r = await build("export type * from './types.ts';\nexport const x = 1;\n");
         expect(r.errors).toEqual([]);
         expect(r.chunks[0].moduleIds).toEqual(['/main.ts']);
-        expect(r.code).not.toMatch(/SIDE_EFFECT/);
-        expect(r.code).not.toMatch(/runtimeVal/);
+        expect(r.chunks[0].code).not.toMatch(/SIDE_EFFECT/);
+        expect(r.chunks[0].code).not.toMatch(/runtimeVal/);
     });
 
     it('but a VALUE `export *` still does all three', async () => {
@@ -61,14 +61,14 @@ describe('erasure — the statement has no runtime meaning', () => {
         const r = await build("export * from './types.ts';\nexport const x = 1;\n");
         expect(r.errors).toEqual([]);
         expect(r.chunks[0].moduleIds).toContain('/types.ts');
-        expect(r.code).toMatch(/SIDE_EFFECT/);
-        expect(r.code).toMatch(/runtimeVal/);
+        expect(r.chunks[0].code).toMatch(/SIDE_EFFECT/);
+        expect(r.chunks[0].code).toMatch(/runtimeVal/);
     });
 
     it('the type-only namespace form erases too', async () => {
         const r = await build("export type * as ns from './types.ts';\nexport const x = 1;\n");
         expect(r.errors).toEqual([]);
         expect(r.chunks[0].moduleIds).toEqual(['/main.ts']);
-        expect(r.code).not.toMatch(/SIDE_EFFECT/);
+        expect(r.chunks[0].code).not.toMatch(/SIDE_EFFECT/);
     });
 });

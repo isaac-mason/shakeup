@@ -818,16 +818,16 @@ describe('require() of an ES module that is also statically imported', () => {
         const r = await mixed('console.log("hi");\nexport const a = 1;');
         expect(r.warnings).toEqual([]);
         // The split: binding hoisted out so `main` can name it, body inside the closure.
-        expect(r.code).toMatch(/var a;\nvar init_esm = \/\* @__PURE__ \*\/ __esm\(\(\) => \{/);
-        expect(r.code).toMatch(/console\.log\("hi"\);/);
+        expect(r.chunks[0].code).toMatch(/var a;\nvar init_esm = \/\* @__PURE__ \*\/ __esm\(\(\) => \{/);
+        expect(r.chunks[0].code).toMatch(/console\.log\("hi"\);/);
         // ...and it runs at the require, not at the producer's slot.
-        expect(r.code).toMatch(/module\.exports = \(init_esm\(\), __toCommonJS\(esm_ns\)\)\.a;/);
+        expect(r.chunks[0].code).toMatch(/module\.exports = \(init_esm\(\), __toCommonJS\(esm_ns\)\)\.a;/);
     });
 
     it('is lazy when an initializer is impure', async () => {
         const r = await mixed('export const a = globalThis.f();');
         expect(r.warnings).toEqual([]);
-        expect(r.code).toMatch(/a = globalThis\.f\(\);/);
+        expect(r.chunks[0].code).toMatch(/a = globalThis\.f\(\);/);
     });
 
     it('a require-ONLY target is lazy and never warns', async () => {
@@ -842,9 +842,9 @@ describe('require() of an ES module that is also statically imported', () => {
             external: [],
         });
         expect(r.warnings).toEqual([]);
-        expect(r.code).toMatch(/var init_esm = \/\* @__PURE__ \*\/ __esm\(/);
+        expect(r.chunks[0].code).toMatch(/var init_esm = \/\* @__PURE__ \*\/ __esm\(/);
         // Called once per require site; `__esm`'s `fn = 0` makes the second call a no-op.
-        expect(r.code.match(/init_esm\(\)/g)).toHaveLength(2);
+        expect(r.chunks[0].code.match(/init_esm\(\)/g)).toHaveLength(2);
     });
 });
 

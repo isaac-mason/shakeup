@@ -16,7 +16,7 @@ const build = async (src: string, extra: Record<string, string> = {}) => {
         // references without exposing new dead code), and 'dce' — the default — skips cosmetic passes.
         output: { minify: { compress: true } },
     });
-    return r.code;
+    return r.chunks[0].code;
 };
 
 describe('alias inline — substitution', () => {

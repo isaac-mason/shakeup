@@ -20,7 +20,7 @@ describe('plugin pipeline', () => {
             resolveId: (spec) => (spec === 'virtual:config' ? '\0virtual:config' : null),
             load: (id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { code } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
+        const { chunks: [{ code }] } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
             virtual,
         ]);
         const mod = await run(code);
@@ -39,7 +39,7 @@ describe('plugin pipeline', () => {
                 return at < 0 ? null : [{ start: at, end: at + 4, text: 'PATCHED' }];
             },
         };
-        const { code } = await build({ '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' }, [
+        const { chunks: [{ code }] } = await build({ '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' }, [
             replacer,
             patcher,
         ]);
@@ -71,7 +71,7 @@ describe('plugin pipeline', () => {
     });
 
     it('json plugin: import a .json file, tree-shaking friendly', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             {
                 '/main.ts': "import cfg from './config.json';\nexport const name = cfg.name;",
                 '/config.json': '{ "name": "puddle", "unused": [1, 2, 3] }',
@@ -87,7 +87,7 @@ describe('plugin pipeline', () => {
             name: 'externalize-lodash',
             resolveId: (spec) => (spec === 'lodash-esque' ? false : null),
         };
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             { '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" },
             [externalize],
         );
@@ -109,7 +109,7 @@ describe('plugin pipeline', () => {
                 order.push('end');
             },
         };
-        const { code } = await build({ '/main.ts': 'export const x = 1;' }, [banner]);
+        const { chunks: [{ code }] } = await build({ '/main.ts': 'export const x = 1;' }, [banner]);
         expect(code.startsWith('/* built by shakeup */')).toBe(true);
         expect(order).toEqual(['start', 'render', 'end']);
     });

@@ -16,7 +16,7 @@ const build = async (src: string): Promise<string> => {
         external: [],
         output: { minify: true, optimize: true },
     } as never);
-    return (r as { code: string }).code;
+    return r.chunks[0].code;
 };
 const run = (code: string, input: unknown): Record<string, unknown> => {
     const g: Record<string, unknown> = { input };

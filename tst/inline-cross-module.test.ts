@@ -3,7 +3,7 @@ import { bundle, createMemoryFs } from '../src/index.ts';
 import { exportShape, runModule } from './exec-helpers.ts';
 
 const build = async (files: Record<string, string>) =>
-    (await bundle({ input: '/main.js', fs: createMemoryFs(files), external: [], output: { minify: { compress: false } } })).code;
+    (await bundle({ input: '/main.js', fs: createMemoryFs(files), external: [], output: { minify: { compress: false } } })).chunks[0].code;
 
 /** The inlined build must compute what the same graph computes with the directive stripped. */
 const parity = async (files: Record<string, string>) => {

@@ -248,11 +248,11 @@ describe('output naming — banner/footer/intro/outro', () => {
             external: [],
             output: { banner: '/* B */', footer: '/* F */', intro: 'const I = 0;', outro: 'const O = 0;' },
         });
-        const lines = r.code.split('\n');
+        const lines = r.chunks[0].code.split('\n');
         expect(lines[0]).toBe('/* B */');
         expect(lines[1]).toBe('const I = 0;');
-        expect(r.code).toContain('const O = 0;');
-        expect(r.code.trimEnd().endsWith('/* F */')).toBe(true);
+        expect(r.chunks[0].code).toContain('const O = 0;');
+        expect(r.chunks[0].code.trimEnd().endsWith('/* F */')).toBe(true);
     });
 
     it('function-form banner receives a PreRenderedChunk', async () => {
@@ -268,20 +268,38 @@ describe('output naming — banner/footer/intro/outro', () => {
                 },
             },
         });
-        expect(r.code.split('\n')[0]).toBe('// entry=true name=main');
+        expect(r.chunks[0].code.split('\n')[0]).toBe('// entry=true name=main');
         expect((received as { type: string }).type).toBe('chunk');
     });
 });
 
 describe('output — exports mode & stubs', () => {
     it("exports:'none' suppresses the entry export line", async () => {
+        // The entry must have NO exports. `exports:'none'` on a module that has them is a deliberate
+        // error (rollup's rule), and this test used to pass one that did: the build failed, produced
+        // zero chunks, and the assertion ran against the `''` that the deprecated `BundleResult.code`
+        // alias returned for a chunkless result. It asserted nothing for as long as it existed, and
+        // only surfaced when that alias was removed.
+        const r = await bundle({
+            input: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'globalThis.ran = true;' }),
+            external: [],
+            output: { exports: 'none' },
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).not.toContain('export {');
+    });
+
+    it("exports:'none' is an ERROR when the entry does have exports", async () => {
+        // The other half, which the vacuous version silently covered up.
         const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
             external: [],
             output: { exports: 'none' },
         });
-        expect(r.code).not.toContain('export {');
+        expect(r.errors.join('\n')).toContain('"none" was specified for "output.exports"');
+        expect(r.chunks).toEqual([]);
     });
 
     it('minify is accepted and produces whitespace-minified output', async () => {

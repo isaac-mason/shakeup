@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bundle, createMemoryFs } from '../src/index.ts';
 
 const build = async (src: string, minify: boolean | { compress?: boolean } = { compress: false }) =>
-    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify } })).code;
+    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify } })).chunks[0].code;
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;

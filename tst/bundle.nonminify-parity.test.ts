@@ -29,7 +29,7 @@ async function bundled(files: Record<string, string>, minify: boolean): Promise<
     const withShim = { ...files, '/react/jsx-runtime.ts': SHIM, '/react.ts': SHIM };
     const r = await bundle({ input: '/main.tsx', fs: createMemoryFs(withShim), external: [], resolve: REACT_ALIAS, output: { minify } });
     expect(r.errors, `bundle errored: ${r.errors.join(', ')}`).toEqual([]);
-    return run(r.code);
+    return run(r.chunks[0].code);
 }
 
 // Each case exports `result`; non-minify and minify must execute to the SAME value AND to `expected`.

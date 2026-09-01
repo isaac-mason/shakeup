@@ -28,7 +28,7 @@ async function build(main: string, opts: { pure?: boolean } = {}) {
 
 describe('G-JSX-5: shake interplay', () => {
     it('drops a dead `const x = <Foo/>` whose binding is unused', async () => {
-        const { code } = await build(`
+        const { chunks: [{ code }] } = await build(`
             function Foo() { return 'foo'; }
             const DEAD_UNUSED = <Foo className="marker-dead" />;
             export const kept = 1;
@@ -38,7 +38,7 @@ describe('G-JSX-5: shake interplay', () => {
     });
 
     it('keeps a used JSX value', async () => {
-        const { code } = await build(`
+        const { chunks: [{ code }] } = await build(`
             function Foo() { return 'foo'; }
             export const kept = <Foo className="marker-live" />;
         `);
@@ -49,7 +49,7 @@ describe('G-JSX-5: shake interplay', () => {
     });
 
     it('keeps a JSX statement with an EFFECTFUL attribute expression', async () => {
-        const { code } = await build(`
+        const { chunks: [{ code }] } = await build(`
             function Foo(p) { return p; }
             let log = [];
             function sink() { log.push('ran'); return 1; }
@@ -60,7 +60,7 @@ describe('G-JSX-5: shake interplay', () => {
     });
 
     it('a module whose JSX fully shakes away leaves no dangling runtime import', async () => {
-        const { code } = await build(`
+        const { chunks: [{ code }] } = await build(`
             function Foo() { return 'foo'; }
             const DEAD = <Foo />;
             export const kept = 99;
@@ -71,7 +71,7 @@ describe('G-JSX-5: shake interplay', () => {
     });
 
     it('pure:false defers to standard detection — which now PROVES this in-graph shim pure', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             `
             function Foo() { return 'foo'; }
             const DROPPED_BECAUSE_PROVABLY_PURE = <Foo className="marker-impure" />;
@@ -108,16 +108,16 @@ describe('G-JSX-5: shake interplay', () => {
         expect(r.errors).toEqual([]);
         // `jsx` mutates a module-level binding, so the analysis refuses to stamp it and the element
         // must survive — the guarantee the option exists for.
-        expect(r.code).toContain('marker-impure');
+        expect(r.chunks[0].code).toContain('marker-impure');
     });
 
     it('EXTERNAL runtime: fully-shaken JSX drops the injected import; live keeps it', async () => {
         const mk = (main: string) =>
             bundle({ entry: '/main.tsx', fs: createMemoryFs({ '/main.tsx': main }), external: ['react/jsx-runtime', 'react'] });
         const dead = await mk(`function Foo(){}\nconst DEAD = <Foo/>;\nexport const kept = 1;`);
-        expect(dead.code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
+        expect(dead.chunks[0].code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
         const live = await mk(`export const a = <div>{x}</div>;`);
-        expect(live.code).toMatch(/from ['"]react\/jsx-runtime['"]/);
+        expect(live.chunks[0].code).toMatch(/from ['"]react\/jsx-runtime['"]/);
     });
 
     it('EXTERNAL runtime: an authored `react` import survives even when JSX shakes away', async () => {
@@ -128,12 +128,12 @@ describe('G-JSX-5: shake interplay', () => {
             }),
             external: ['react/jsx-runtime', 'react'],
         });
-        expect(r.code).toMatch(/import \{ useState \} from 'react'/);
-        expect(r.code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
+        expect(r.chunks[0].code).toMatch(/import \{ useState \} from 'react'/);
+        expect(r.chunks[0].code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
     });
 
     it('executes: live JSX renders, dead JSX absent', async () => {
-        const { code } = await build(`
+        const { chunks: [{ code }] } = await build(`
             function Foo(p) { return p; }
             const DEAD = <Foo className="dead" />;
             export const live = <Foo className="live" />;

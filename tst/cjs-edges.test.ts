@@ -46,7 +46,7 @@ describe('§7.6 — require() of an external', () => {
             { external: ['ext'] },
         );
         expect(r.errors).toEqual([]);
-        expect(r.code).toContain("__require('ext')");
+        expect(r.chunks[0].code).toContain("__require('ext')");
     });
 
     it('a DYNAMIC require is still a build error — it has no specifier to defer', async () => {
@@ -215,7 +215,7 @@ describe('a CommonJS module that throws re-runs on the next require', () => {
     const build = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs(files) });
         expect(r.errors).toEqual([]);
-        return (await import(`data:text/javascript,${encodeURIComponent(r.code)}`)) as { x: unknown };
+        return (await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)) as { x: unknown };
     };
 
     it('matches Node: the failed run is not cached', async () => {

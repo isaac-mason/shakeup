@@ -13,7 +13,7 @@ const build = async (files: Record<string, string>, external: string[] = []) => 
 
 describe('bundle: executable output', () => {
     it('bundles + executes a multi-module TS package (types stripped, renames applied)', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import { add } from './math';",
                 "import { one } from './util';",
@@ -33,7 +33,7 @@ describe('bundle: executable output', () => {
     });
 
     it('re-export chains, star exports, and namespace imports execute', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import * as lib from './lib';",
                 "import { thing } from './barrel';",
@@ -48,7 +48,7 @@ describe('bundle: executable output', () => {
     });
 
     it('default exports (named + anonymous) execute', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import anon from './anon';",
                 "import named from './named';",
@@ -62,7 +62,7 @@ describe('bundle: executable output', () => {
     });
 
     it('enums lower and execute inside a bundle (no export keyword leakage)', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { Motion } from './motion';", 'export const kind = Motion[Motion.DYNAMIC];'].join('\n'),
             '/motion.ts': 'export enum Motion { STATIC = 0, DYNAMIC = 1 }',
         });
@@ -75,7 +75,7 @@ describe('bundle: executable output', () => {
         // `generateUid` mints REAL symbols (oxc's `generate_uid`), so the enum/namespace IIFE params
         // `_E`/`_N`/`_M` deconflict + mangle like any nested local instead of staying verbatim.
         // A namespace param joins the body's own scope, so it can't collide with the body vars.
-        const { code } = await bundle({
+        const { chunks: [{ code }] } = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': [
@@ -93,7 +93,7 @@ describe('bundle: executable output', () => {
     });
 
     it('import-equals aliases lower and execute', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { lib } from './lib';", 'import dbl = lib.util.double;', 'export const out = dbl(21);'].join(
                 '\n',
             ),
@@ -105,7 +105,7 @@ describe('bundle: executable output', () => {
     });
 
     it('external imports hoist and dedupe; externals stay imports', async () => {
-        const { code } = await build(
+        const { chunks: [{ code }] } = await build(
             {
                 '/main.ts': [
                     "import { platform } from 'node:process';",
@@ -123,7 +123,7 @@ describe('bundle: executable output', () => {
     });
 
     it('shorthand object properties survive renames', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': ["import { pack } from './a';", 'const value = 5;', 'export const packed = pack(value);'].join('\n'),
             '/a.ts': 'const value = 10;\nexport const pack = (v: number) => ({ value, v });',
         });
@@ -132,7 +132,7 @@ describe('bundle: executable output', () => {
     });
 
     it('type-only graphs produce runtime-clean output', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import type { Shape } from './types';",
                 "import { area } from './types';",
@@ -155,7 +155,7 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
         (await bundle({ entry: '/main.ts', fs: createMemoryFs({ '/main.ts': src }) })).errors;
 
     it('value namespaces lower and execute (flat)', async () => {
-        const { code } = await bundle({
+        const { chunks: [{ code }] } = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'namespace NS { export const v = 42; }\nexport const out = NS.v;' }),
         });
@@ -165,7 +165,7 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
     });
 
     it('nested value namespaces lower and execute (N.M.c)', async () => {
-        const { code } = await bundle({
+        const { chunks: [{ code }] } = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs({
                 '/main.ts': 'namespace A { export namespace B { export const c = 7; } }\nexport const out = A.B.c;',
@@ -211,7 +211,7 @@ describe('bundle: unsupported TS constructs fail loudly (not silent broken JS)',
 // normal path. Executable assertions, because the failure mode was a chunk that would not load.
 describe('bundle: two-statement re-export', () => {
     it('re-exports a named import and keeps its source module', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import { v } from './a';\nexport { v };",
             '/a.ts': 'export const v = 1;',
         });
@@ -219,7 +219,7 @@ describe('bundle: two-statement re-export', () => {
     });
 
     it('re-exports a named import under a new name', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import { v } from './a';\nexport { v as w };",
             '/a.ts': 'export const v = 1;',
         });
@@ -227,7 +227,7 @@ describe('bundle: two-statement re-export', () => {
     });
 
     it('re-exports a default import', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import d from './a';\nexport { d };",
             '/a.ts': 'export default 42;',
         });
@@ -235,7 +235,7 @@ describe('bundle: two-statement re-export', () => {
     });
 
     it('re-exports a namespace import', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import * as ns from './a';\nexport { ns };",
             '/a.ts': 'export const v = 1;\nexport const w = 2;',
         });
@@ -243,7 +243,7 @@ describe('bundle: two-statement re-export', () => {
     });
 
     it('still roots the binding when it is also used locally', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import { v } from './a';\nexport const doubled = v * 2;\nexport { v };",
             '/a.ts': 'export const v = 21;',
         });
@@ -259,7 +259,7 @@ describe('bundle: two-statement re-export', () => {
 // there the consumer's named import registered the target in time.
 describe('bundle: export * as ns', () => {
     it('materializes the namespace at an entry and keeps the target module', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "export * as ns from './a';",
             '/a.ts': 'export const v = 1;\nexport const w = 2;',
         });
@@ -267,7 +267,7 @@ describe('bundle: export * as ns', () => {
     });
 
     it('materializes it through a non-entry barrel too', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import { ns } from './barrel';\nexport const got = ns.v;",
             '/barrel.ts': "export * as ns from './a';",
             '/a.ts': 'export const v = 1;\nexport const w = 2;',
@@ -276,7 +276,7 @@ describe('bundle: export * as ns', () => {
     });
 
     it('handles a chain of namespace re-exports', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "export * as outer from './mid';",
             '/mid.ts': "export * as inner from './a';",
             '/a.ts': 'export const v = 7;',
@@ -292,7 +292,7 @@ describe('bundle: export * as ns', () => {
 // members are non-writable too, matching the spec's non-writable namespace properties.
 describe('bundle: namespace objects are live', () => {
     it('reads a mutated `let` export through the namespace', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import * as ns from './a';\nns.bump();\nexport const got = ns.v;",
             '/a.ts': 'export let v = 1;\nexport function bump(){ v = 2 }',
         });
@@ -300,7 +300,7 @@ describe('bundle: namespace objects are live', () => {
     });
 
     it('reports [object Module]', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import * as ns from './a';\nexport const tag = Object.prototype.toString.call(ns);",
             '/a.ts': 'export const v = 1;',
         });
@@ -316,7 +316,7 @@ describe('bundle: namespace objects are live', () => {
         // member is writable. That is the accepted cost of dropping the freeze; assigning to a
         // namespace member is already a programming error, and freezing blocks the `__reExport`
         // chain that `export * from 'cjs'` needs.
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': [
                 "import * as ns from './a';",
                 'let accessorThrew = false;',
@@ -334,7 +334,7 @@ describe('bundle: namespace objects are live', () => {
     });
 
     it('keeps immutable members as plain values, not accessors', async () => {
-        const { code } = await build({
+        const { chunks: [{ code }] } = await build({
             '/main.ts': "import * as ns from './a';\nexport const out = ns;",
             '/a.ts': 'export const c = 1;\nexport function f(){}\nexport let mut = 2;\nexport function bump(){ mut = 3 }',
         });

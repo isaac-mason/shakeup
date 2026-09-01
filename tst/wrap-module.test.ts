@@ -83,7 +83,7 @@ describe('CommonJS wrapper parameters follow rolldown', () => {
             fs: createMemoryFs({ '/main.mjs': importer, '/c.cjs': src }),
         });
         expect(r.errors).toEqual([]);
-        return r.code;
+        return r.chunks[0].code;
     };
 
     it('binds neither when the module references neither', async () => {
@@ -102,7 +102,7 @@ describe('CommonJS wrapper parameters follow rolldown', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).toMatch(/__commonJS\(\(\)\s*=>/);
+        expect(r.chunks[0].code).toMatch(/__commonJS\(\(\)\s*=>/);
     });
 
     it('binds `exports` alone when only exports is referenced', async () => {

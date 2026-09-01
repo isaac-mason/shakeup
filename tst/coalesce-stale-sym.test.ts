@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
 import { setCoalesceEnabled, setSemanticVerify } from '../src/passes/compress/index.ts';
 
@@ -38,7 +38,7 @@ describe.skipIf(!existsSync(ENTRY))('coalesceVariableNames no longer leaves stal
                 external: ['math', 'math/shapes', 'three'],
                 output: { minify: true, optimize: true },
             } as never);
-            expect((r as { code: string }).code.length).toBeGreaterThan(0);
+            expect(r.chunks[0].code.length).toBeGreaterThan(0);
         } finally {
             setCoalesceEnabled(false);
         }

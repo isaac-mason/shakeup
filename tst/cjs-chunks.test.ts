@@ -337,7 +337,7 @@ describe('a statically imported module evaluates at its import, not at its slot'
             '/y.js': "import d from './d.cjs';\nexport const yd = d;",
             '/main.js': "import { xd } from './x.js';\nimport { yd } from './y.js';\nexport const x = [xd, yd, xd === yd];",
         });
-        expect(r.code.match(/var import_d = /g)).toHaveLength(1);
+        expect(r.chunks[0].code.match(/var import_d = /g)).toHaveLength(1);
         const entryChunk = r.chunks.find((c) => c.isEntry)!;
         const { ns, dispose } = await runChunks(r.chunks, entryChunk.fileName);
         try {

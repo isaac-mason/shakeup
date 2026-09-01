@@ -129,8 +129,6 @@ export type OutputAsset = { fileName: string; source: string | Uint8Array };
 
 /** `map` is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
-    /** @deprecated single-chunk convenience alias for the ENTRY chunk's `code`. */
-    code: string;
     /** The chunk graph. Length ≥ 1 (0 on error). */
     chunks: OutputChunk[];
     /** Emitted non-chunk files — `.map` sidecars plus plugin `ctx.emitFile` assets. */
@@ -146,8 +144,6 @@ export type BundleResult = {
     renderStats?: RenderStats;
     /** Per-pass wall-clock (graph/link/treeshake/chunk/render), by total ms (success builds only). */
     timings?: Timer.TimerReport;
-    /** @deprecated alias for the entry chunk's `map`. */
-    map?: SourceMap;
 };
 
 /** Rewrite `require("./x")` to the target's wrapper call. The wrapper returns `module.exports`, so
@@ -363,7 +359,6 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         atLink: Linked | null,
         atShake: TreeshakeResult | null,
     ): BundleResult => ({
-        code: '',
         chunks: [],
         errors,
         warnings,
@@ -621,11 +616,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             );
     }
 
-    // Order: entry chunks first (in entry order), preserving discovery order otherwise. The
-    // `code`/`map` aliases point at the FIRST entry chunk (back-compat).
-    const entryFirst = outputChunks[0];
+    // Order: entry chunks first (in entry order), preserving discovery order otherwise.
     return {
-        code: entryFirst?.code ?? '',
         chunks: outputChunks,
         assets,
         errors: [],
@@ -636,7 +628,6 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         parseStats: graph.parseStats,
         renderStats,
         timings: Timer.report(timer),
-        map: entryFirst?.map,
     };
 }
 

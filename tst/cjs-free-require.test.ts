@@ -101,8 +101,8 @@ describe('free `require` references are substituted', () => {
             }),
         });
         expect(r.errors).toEqual([]);
-        expect(r.code).not.toContain('__require');
-        expect((await import(`data:text/javascript,${encodeURIComponent(r.code)}`)).x).toBe(6);
+        expect(r.chunks[0].code).not.toContain('__require');
+        expect((await import(`data:text/javascript,${encodeURIComponent(r.chunks[0].code)}`)).x).toBe(6);
     });
 
     it('a DYNAMIC require is still a loud build error, not a runtime throw', async () => {
@@ -129,7 +129,7 @@ describe('free `require` references are substituted', () => {
 
     it('a bundle with no free `require` carries no shim', async () => {
         const r = await bundle({ entry: '/main.js', external: [], fs: createMemoryFs({ '/main.js': 'export const x = 1;' }) });
-        expect(r.code).not.toContain('__require');
-        expect(r.code).not.toContain('node:module');
+        expect(r.chunks[0].code).not.toContain('__require');
+        expect(r.chunks[0].code).not.toContain('node:module');
     });
 });

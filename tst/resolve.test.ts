@@ -200,7 +200,7 @@ describe('nodeResolve: end-to-end bundle + execute', () => {
         const fs = createMemoryFs(files);
         const result = await bundle({ entry: APP, fs });
         expect(result.errors).toEqual([]);
-        return run(result.code);
+        return run(result.chunks[0].code);
     };
 
     it('bundles several packages through the plugin and executes them', async () => {

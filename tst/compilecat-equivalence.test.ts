@@ -352,7 +352,7 @@ describe('behavioural equivalence (compilecat corpus)', () => {
                 output: { minify: { compress: true } },
             });
             expect(built.errors).toEqual([]);
-            expect(evaluate(built.code, c.call)).toEqual(evaluate(src, c.call));
+            expect(evaluate(built.chunks[0].code, c.call)).toEqual(evaluate(src, c.call));
         });
     }
 });

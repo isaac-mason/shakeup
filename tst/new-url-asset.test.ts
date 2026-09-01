@@ -22,9 +22,9 @@ describe('new URL(…, import.meta.url) asset scanning', () => {
         expect(asset!.fileName).toMatch(/^assets\/logo-[0-9a-f]{8}\.png$/);
         expect(asset!.source).toBe(PNG);
         // The `new URL(...)` stays, but its specifier now points at the emitted asset.
-        expect(result.code).toContain('import.meta.url');
-        expect(result.code).toContain(asset!.fileName);
-        expect(result.code).not.toContain('./logo.png');
+        expect(result.chunks[0].code).toContain('import.meta.url');
+        expect(result.chunks[0].code).toContain(asset!.fileName);
+        expect(result.chunks[0].code).not.toContain('./logo.png');
     });
 
     it('dedups repeated references to the same asset into one emit', async () => {
@@ -43,7 +43,7 @@ describe('new URL(…, import.meta.url) asset scanning', () => {
             '/main.ts': 'export const u = new URL("https://cdn.example.com/x.png", import.meta.url);',
         });
         expect(result.assets ?? []).toHaveLength(0);
-        expect(result.code).toContain('https://cdn.example.com/x.png');
+        expect(result.chunks[0].code).toContain('https://cdn.example.com/x.png');
     });
 
     it('leaves a non-literal specifier untouched', async () => {

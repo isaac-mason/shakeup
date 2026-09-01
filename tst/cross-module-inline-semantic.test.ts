@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { setSemanticVerify } from '../src/analysis/ref-facts.ts';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
-import { setSemanticVerify } from '../src/analysis/ref-facts.ts';
 
 // Coverage for the CROSS-MODULE `@inline` path (`bundle.ts`'s `inlineCrossModule`), which neither
 // corpus exercises — crashcat and three.core.js both run exactly one `analyze` per module, so the
@@ -24,7 +24,7 @@ describe('cross-module @inline keeps the semantic in step', () => {
         let code: string;
         try {
             const r = await bundle({ entry: '/e.ts', fs, external: [], output: { minify: true, optimize: true } } as never);
-            code = (r as { code: string }).code;
+            code = r.chunks[0].code;
         } finally {
             setSemanticVerify(false);
         }
