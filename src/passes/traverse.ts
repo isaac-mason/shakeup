@@ -401,7 +401,12 @@ function conflict(node: Node, phase: string, ctx: Ctx, first: number, second: nu
 
 function fireEnter(node: Node, ctx: Ctx): void {
     const t = node.type;
-    const hooks = ctx.enterByType[t] ?? hooksOf(ctx.visitors, ctx.enterByType, t, 'enter');
+    // `undefined` means NOT YET COMPUTED; `null` means computed and this type has no hooks. `??`
+    // conflated the two, so every node of a hook-less type re-ran `hooksOf` — a loop over every
+    // visitor — on EVERY visit. Measured on crashcat: 299,561 rebuilds of one visitor set's exit
+    // table where ~151 (one per node type) is the whole point of caching it.
+    const cachedEnter = ctx.enterByType[t];
+    const hooks = cachedEnter !== undefined ? cachedEnter : hooksOf(ctx.visitors, ctx.enterByType, t, 'enter');
     if (hooks === null) return;
     if (HOOK_CONFLICT_CHECK) {
         let mutated = -1;
@@ -419,7 +424,8 @@ function fireEnter(node: Node, ctx: Ctx): void {
 }
 function fireExit(node: Node, ctx: Ctx): void {
     const t = node.type;
-    const hooks = ctx.exitByType[t] ?? hooksOf(ctx.visitors, ctx.exitByType, t, 'exit');
+    const cachedExit = ctx.exitByType[t];
+    const hooks = cachedExit !== undefined ? cachedExit : hooksOf(ctx.visitors, ctx.exitByType, t, 'exit');
     if (hooks === null) return;
     if (HOOK_CONFLICT_CHECK) {
         let mutated = -1;
