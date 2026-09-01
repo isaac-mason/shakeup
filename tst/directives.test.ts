@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { anyInSource, DIRECTIVE, directiveSpans, opts, scanDirectives } from '../src/passes/optimize/directives.ts';
 import { Gate } from '../src/passes/optimize/gate.ts';
 

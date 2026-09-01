@@ -6,7 +6,8 @@
     "sideEffects": false,
     "exports": {
         ".": "./src/index.ts",
-        "./node": "./src/node/index.ts",
+        "./ast": "./src/ast.ts",
+        "./node": "./src/node.ts",
         "./client": "./client.d.ts"
     },
     "scripts": {

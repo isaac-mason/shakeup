@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { flowInlineVariables } from '../src/passes/optimize/flow-inline.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';
 

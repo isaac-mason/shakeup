@@ -23,13 +23,15 @@ const SRC = fileURLToPath(new URL('../src', import.meta.url));
 /** The language toolchain: everything oxc would own. */
 const TOOLCHAIN = ['ast', 'parser', 'analysis', 'passes', 'print', 'mangle', 'util'];
 
-/** Toolchain code sitting at the top level rather than in one of those directories. Empty by design:
- *  `src/` is `index.ts` plus directories, and the third test below keeps it that way. Kept as a real
- *  hook rather than deleted, so a future top-level module has an obvious place to be declared. */
-const TOOLCHAIN_FILES: string[] = [];
+/** Toolchain code at the top level. `ast.ts` is the `shakeup/ast` ENTRY — it publishes the toolchain
+ *  and nothing else, so it is held to the same rule as the directories it re-exports: an import of
+ *  the bundler from here would mean the published toolchain drags a bundler in behind it. */
+const TOOLCHAIN_FILES = ['ast.ts'];
 
-/** Above both halves: the two `exports` entries, which re-export across the boundary by design. */
-const ENTRIES = ['index.ts', 'node'];
+/** The bundler-side entries. `src/*.ts` is one file per `package.json` export — `.` → `index.ts`,
+ *  `./ast` → `ast.ts`, `./node` → `node.ts` — so top-level files are entry points by construction and
+ *  directories are implementation. The last test keeps that true. */
+const ENTRIES = ['index.ts', 'node.ts'];
 
 /** The bundler: everything rolldown would own. Since the split it is one directory, so the check is
  *  a single name — plus the package entry, which re-exports both halves, so reaching the bundler

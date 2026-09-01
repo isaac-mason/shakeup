@@ -4,7 +4,7 @@ import { buildCfg, verifyCfg } from '../src/analysis/cfg.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
 import { bundle } from '../src/bundler/bundle.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 // crashcat as a corpus. It covers ground three.js structurally CANNOT:
 //   • real multi-module TYPESCRIPT (97 modules), so the whole TS pipeline runs end to end

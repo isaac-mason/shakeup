@@ -3,7 +3,7 @@ import { buildCfg } from '../src/analysis/cfg.ts';
 import { computeReachingUses } from '../src/analysis/reaching-uses.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 // Maybe-reaching (upward-exposed) uses — Closure `MaybeReachingVariableUse`. The key questions for its
 // consumer (`FlowSensitiveInlineVariables`) are counting: how many uses does a definition's value

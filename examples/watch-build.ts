@@ -4,7 +4,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { watch } from '../src/node/index.ts';
+import { watch } from '../src/node.ts';
 
 // A throwaway project to build. In a real script this is just your repo's src.
 const root = mkdtempSync(join(tmpdir(), 'shakeup-watch-'));

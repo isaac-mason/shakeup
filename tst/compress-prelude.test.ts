@@ -4,7 +4,7 @@ import { tallyRefs } from '../src/analysis/movement.ts';
 import { walkRefIdents } from '../src/analysis/refs.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walkChildren } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { computePrelude } from '../src/passes/compress/prelude.ts';
 
 // The compress prelude replaces FOUR independent full-program pre-passes with one walk. It is only

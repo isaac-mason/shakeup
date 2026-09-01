@@ -2,7 +2,8 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { devTransform, parse } from '../src/index.ts';
+import { devTransform } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SELF_SRC = resolve(__dirname, '..', 'src');

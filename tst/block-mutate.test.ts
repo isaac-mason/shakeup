@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { N, type Node } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { mutateForBlockInline } from '../src/passes/optimize/block-mutate.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../src/print/printer.ts';

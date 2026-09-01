@@ -3,7 +3,7 @@ import { buildCfg } from '../src/analysis/cfg.ts';
 import { BOTTOM, computeReachingDefs, TOP } from '../src/analysis/reaching-defs.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 // Must-be-reaching definitions (Closure `MustBeReachingVariableDef`). The properties worth pinning are
 // the three a structural walk cannot get right by construction: a single definition dominating a use,

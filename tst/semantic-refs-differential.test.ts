@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { computePrelude } from '../src/passes/compress/prelude.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 // Phase A gate. `analyze` now maintains the reference facts (`refs`/`uses`/`shorthand`/`exported`)
 // that `computePrelude` used to derive from two separate whole-program walks. The two must agree

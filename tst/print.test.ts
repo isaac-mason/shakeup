@@ -1,7 +1,7 @@
 import esbuild from 'esbuild';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
 import { tsStrip } from '../src/passes/strip-ts.ts';
 import { traverse } from '../src/passes/traverse.ts';

@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { makeJsxLower } from '../src/passes/lower-jsx.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
 import { tsStrip } from '../src/passes/strip-ts.ts';

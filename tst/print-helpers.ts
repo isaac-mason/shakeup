@@ -1,4 +1,4 @@
-import { N, type Node } from '../src/index.ts';
+import { N, type Node } from '../src/ast.ts';
 
 export const isNode = (x: unknown): x is Node =>
     typeof x === 'object' && x !== null && typeof (x as Node).type === 'number' && 'data' in (x as Node);

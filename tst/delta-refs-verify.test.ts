@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { runCompress, setDeltaMode } from '../src/passes/compress/index.ts';
 
 // The compress loop maintains reference counts INCREMENTALLY (oxc `PassChanges`/`flush_pass_changes`):

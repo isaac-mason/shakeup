@@ -5,7 +5,7 @@ import { computeLiveVars } from '../src/analysis/live-vars.ts';
 import { computeLiveness } from '../src/analysis/liveness.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, walk } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 // THE EXPERIMENT. Two independent implementations of the same analysis:
 //   • `analysis/liveness.ts`      — structural recursion, control flow fused into the analysis

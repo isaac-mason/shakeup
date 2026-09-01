@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 import { printModule } from '../src/print/print-js.ts';
 import { createPrinter, finishPrinter, printerPart } from '../src/print/printer.ts';
 import { buildLineTable, decodeMappings, encodeMappings } from '../src/util/sourcemap.ts';

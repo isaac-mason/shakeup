@@ -24,7 +24,7 @@ describe.skipIf(!existsSync(ENTRY))('output.optimize gates the directive tier', 
     }, 180000);
 
     it('both settings produce valid, parseable JS', async () => {
-        const { parse } = await import('../src/index.ts');
+        const { parse } = await import('../src/ast.ts');
         for (const opt of [true, false]) {
             const code = await build(opt);
             expect(() => parse(code, { ts: false, jsx: false })).not.toThrow();

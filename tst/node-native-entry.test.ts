@@ -30,12 +30,22 @@ describe('the published entry loads under plain node', () => {
         expect(loadUnderNode(entry('../src/index.ts'))).toMatch(/^OK \d+$/);
     });
 
-    it('exports a substantial surface, so a silently-empty module cannot pass', () => {
+    it('actually exports something, so a silently-empty module cannot pass', () => {
+        // Was `> 100`, calibrated to the 148-export `export *` surface. The entry is curated now and
+        // exports 16 values on purpose, so this is back to what it was always for: proving the module
+        // evaluated rather than resolving to nothing. The EXACT list is pinned by
+        // `tst/public-api.test.ts`, which is the stronger guard.
         const n = Number(loadUnderNode(entry('../src/index.ts')).slice(3));
-        expect(n).toBeGreaterThan(100);
+        expect(n).toBeGreaterThan(5);
     });
 
     it('the node subentry loads too', () => {
-        expect(loadUnderNode(entry('../src/node/index.ts'))).toMatch(/^OK \d+$/);
+        expect(loadUnderNode(entry('../src/node.ts'))).toMatch(/^OK \d+$/);
+    });
+
+    it('the toolchain entry (shakeup/ast) loads too', () => {
+        // A second `exports` entry is a second thing that can be broken by an extensionless specifier
+        // or an un-strippable construct, and it reaches a different half of the tree.
+        expect(loadUnderNode(entry('../src/ast.ts'))).toMatch(/^OK \d+$/);
     });
 });

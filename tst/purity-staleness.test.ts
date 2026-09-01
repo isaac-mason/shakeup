@@ -3,7 +3,7 @@ import { createBuildContext } from '../src/bundler/bundle.ts';
 import { isPureExpr, markInferredPure, resetInferredPure } from '../src/analysis/effects.ts';
 import type { Fs } from '../src/bundler/fs.ts';
 import { N, walk } from '../src/ast/index.ts';
-import { parse } from '../src/index.ts';
+import { parse } from '../src/ast.ts';
 
 function mutableFs(files: Record<string, string>): Fs {
     return { read: (id) => files[id] ?? null, exists: (id) => id in files };
