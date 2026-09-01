@@ -8,12 +8,12 @@ import {
     type LabelIdentifier,
     N,
     type Node,
-    node,
     type NodeOf,
     type NodeType,
+    node,
     OP,
-    peekNextId,
     type Program,
+    peekNextId,
     VAR_KIND,
 } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration.ts';
@@ -2741,6 +2741,17 @@ function parseExport(state: ParserState): Node {
         state.sawEsmExport = true;
         return create.ExportDefaultDeclaration(start, state.tokStart, 0, decl);
     }
+    // `export type ...` — the lookahead has to run BEFORE the `*` branch, because `export type * from`
+    // is type-only re-export syntax (TS 5.0) and the `type` keyword sits in front of the star. Only
+    // `{` and `*` may follow: `export type Foo = …` is a type ALIAS declaration, not a modifier, and
+    // must fall through to the declaration path with the token restored.
+    let flags = 0;
+    if (state.tsMode && isK(state, K.TYPE)) {
+        const s0 = saveState(state);
+        nextToken(state);
+        if (isP(state, P.LBRACE) || isP(state, P.STAR)) flags |= FL.TYPE_ONLY;
+        else restoreState(state, s0);
+    }
     if (isP(state, P.STAR)) {
         nextToken(state);
         let exported: Ref = null;
@@ -2763,18 +2774,11 @@ function parseExport(state: ParserState): Node {
         return create.ExportAllDeclaration(
             start,
             state.tokStart,
-            0,
+            flags,
             source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
             exported,
             attrs,
         );
-    }
-    let flags = 0;
-    if (state.tsMode && isK(state, K.TYPE)) {
-        const s = saveState(state);
-        nextToken(state);
-        if (isP(state, P.LBRACE)) flags |= FL.TYPE_ONLY;
-        else restoreState(state, s);
     }
     if (isP(state, P.LBRACE)) {
         nextToken(state);

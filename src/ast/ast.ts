@@ -244,7 +244,14 @@ export const DEFS = [
     }),
     def('ExportSpecifier', { local: child, exported: child, exportKind: scalar<'value' | 'type'>() }),
     def('ExportDefaultDeclaration', { declaration: child }),
-    def('ExportAllDeclaration', { source: child, exported: nullable(child), attributes: list(child) }),
+    // `exportKind` mirrors `ExportNamedDeclaration`: TypeScript 5.0's `export type * from './m'`
+    // is a type-only re-export and must erase, so the kind has to survive parsing.
+    def('ExportAllDeclaration', {
+        source: child,
+        exported: nullable(child),
+        attributes: list(child),
+        exportKind: scalar<'value' | 'type'>(),
+    }),
     def('TSTypeAnnotation', { typeAnnotation: child }),
     def('TSAnyKeyword', null),
     def('TSStringKeyword', null),

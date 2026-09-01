@@ -7,8 +7,9 @@
 // and 22 pass files build nodes through it, which is why it lives beside `ast/index.ts`
 // rather than under `parser/` (oxc's `oxc_ast::AstBuilder`, shared by parser, transformer
 // and minifier alike).
-import { type Accessibility, N, type Node, node } from './ast.ts';
+
 import { enumeration } from '../util/enumeration.ts';
+import { type Accessibility, N, type Node, node } from './ast.ts';
 
 export const FL = {
     NAMED: 1 << 0,
@@ -562,11 +563,17 @@ export const ExportDefaultDeclaration = (s: number, e: number, _f: number, decla
 export const ExportAllDeclaration = (
     s: number,
     e: number,
-    _f: number,
+    f: number,
     source: Node,
     exported: Node | null,
     attributes: Node[] | null = null,
-): Node => node(N.ExportAllDeclaration, s, e, '', { source, exported: exported ?? null, attributes: attributes ?? [] });
+): Node =>
+    node(N.ExportAllDeclaration, s, e, '', {
+        source,
+        exported: exported ?? null,
+        attributes: attributes ?? [],
+        exportKind: (f & FL.TYPE_ONLY) !== 0 ? 'type' : 'value',
+    });
 export const TSTypeAnnotation = (s: number, e: number, _f: number, typeAnnotation: Node): Node =>
     node(N.TSTypeAnnotation, s, e, '', { typeAnnotation });
 export const TSTypeReference = (s: number, e: number, _f: number, typeName: Node, typeArguments: Node | null): Node =>

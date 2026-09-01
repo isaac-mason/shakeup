@@ -28,6 +28,10 @@ function isErasedStmt(n: Node): boolean {
         case N.ImportDeclaration:
             return d.importKind === 'type';
         case N.ExportNamedDeclaration:
+        // `export type * from './m'` erases exactly like `export type { … } from './m'` — both are
+        // type-only re-exports with no runtime effect. Without this the specifier survives into the
+        // output and the module is fetched at runtime for nothing.
+        case N.ExportAllDeclaration:
             return d.exportKind === 'type';
         default:
             return false;
@@ -351,6 +355,16 @@ export const tsStrip: Visitor = {
         },
         [N.ImportDeclaration]: (n, ctx) => {
             if (stripImport(n, ctx)) ctx.remove();
+        },
+        [N.ExportAllDeclaration]: (n, ctx) => {
+            // `export type * from './m'` (TS 5.0) erases whole, exactly as TypeScript emits nothing
+            // for it. Without this hook the statement survives, scan records a real dependency, and
+            // the target module is BUNDLED — its side effects run and its runtime exports are
+            // re-exported, from a statement that is supposed to have no runtime meaning at all.
+            //
+            // `export * as ns` binds a namespace symbol; the type-only spelling binds none, so there
+            // is nothing to evict here (unlike the named-export hook below).
+            if ((n.data as { exportKind: string }).exportKind === 'type') ctx.remove();
         },
         [N.ExportNamedDeclaration]: (n, ctx) => {
             if (stripExport(n)) {
