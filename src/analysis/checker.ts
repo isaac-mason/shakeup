@@ -25,18 +25,96 @@ export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
     checkRedeclarations(sem, errors);
     const stack: Node[] = [program];
     const scopes: number[] = [ownScopeOf(program)];
+    const jumps: JumpCtx[] = [TOP_JUMP];
     while (stack.length > 0) {
         const node = stack.pop() as Node;
-        const inherited = scopes.pop() as number;
+        const inheritedScope = scopes.pop() as number;
+        const inheritedJump = jumps.pop() as JumpCtx;
         const own = ownScopeOf(node);
-        const scope = own === 0 ? inherited : own;
-        checkNode(sem, node, scope, errors);
+        const scope = own === 0 ? inheritedScope : own;
+        checkNode(sem, node, scope, inheritedJump, errors);
+        const jump = descendJump(node, inheritedJump, errors);
         walkChildren(node, (child) => {
             stack.push(child);
             scopes.push(scope);
+            jumps.push(jump);
         });
     }
     return errors;
+}
+
+/**
+ * What a `break` or `continue` may target at this point in the tree.
+ *
+ * oxc walks UP from the jump statement (`ctx.ancestry().ancestor_kinds()`); this carries the same
+ * information DOWN, because the walk here is already top-down and a parent map would cost an entry per
+ * node. Same answers, and the context object is only reallocated at the handful of nodes that change
+ * it — a loop, a switch, a label, or a function boundary.
+ *
+ * `labels` maps a label name to whether it names an ITERATION statement, which is the distinction
+ * between `break a` (any label) and `continue a` (loops only).
+ */
+type JumpCtx = { breakable: boolean; continuable: boolean; labels: ReadonlyMap<string, boolean> };
+const NO_LABELS: ReadonlyMap<string, boolean> = new Map();
+const TOP_JUMP: JumpCtx = { breakable: false, continuable: false, labels: NO_LABELS };
+
+const ITERATION = new Set<number>([N.WhileStatement, N.DoWhileStatement, N.ForStatement, N.ForInStatement, N.ForOfStatement]);
+
+/** The label of `a: b: while (1) {}` names an iteration statement, through any number of labels. */
+function labelsIteration(body: Node): boolean {
+    let b = body;
+    while (b.type === N.LabeledStatement) b = (b.data as { body: Node }).body;
+    return ITERATION.has(b.type);
+}
+
+/** The context this node's CHILDREN see. */
+function descendJump(node: Node, ctx: JumpCtx, errors: CheckError[]): JumpCtx {
+    // A function body starts fresh: a jump may not cross the boundary, which is why
+    // `while(1){ (function(){ break; }); }` is an error. A class static block is the same.
+    if (
+        node.type === N.FunctionDeclaration ||
+        node.type === N.FunctionExpression ||
+        node.type === N.ArrowFunctionExpression ||
+        node.type === N.StaticBlock
+    )
+        return TOP_JUMP;
+    if (ITERATION.has(node.type)) return { breakable: true, continuable: true, labels: ctx.labels };
+    if (node.type === N.SwitchStatement) return { breakable: true, continuable: ctx.continuable, labels: ctx.labels };
+    if (node.type === N.LabeledStatement) {
+        const d = node.data as { label: Node; body: Node };
+        const name = d.label.name;
+        if (ctx.labels.has(name)) errors.push({ pos: d.label.start, msg: `Label \`${name}\` has already been declared` });
+        const labels = new Map(ctx.labels);
+        labels.set(name, labelsIteration(d.body));
+        return { breakable: ctx.breakable, continuable: ctx.continuable, labels };
+    }
+    return ctx;
+}
+
+/** oxc's `check_break_statement` / `check_continue_statement` (`checker/javascript.rs:782,825`). */
+function checkJump(node: Node, ctx: JumpCtx, errors: CheckError[]): void {
+    const isBreak = node.type === N.BreakStatement;
+    const label = (node.data as { label: Node | null }).label;
+    if (label === null) {
+        // A bare `break` needs a loop OR a switch; a bare `continue` needs a loop.
+        if (isBreak ? !ctx.breakable : !ctx.continuable)
+            errors.push({
+                pos: node.start,
+                msg: isBreak ? 'Illegal break statement' : 'Illegal continue statement: no surrounding iteration statement',
+            });
+        return;
+    }
+    const iter = ctx.labels.get(label.name);
+    if (iter === undefined) {
+        errors.push({ pos: label.start, msg: 'Use of undefined label' });
+        return;
+    }
+    // `break` reaches any label; `continue` only one that names a loop.
+    if (!isBreak && !iter)
+        errors.push({
+            pos: label.start,
+            msg: 'A `continue` statement can only jump to a label of an enclosing `for`, `while` or `do while` statement.',
+        });
 }
 
 /** Bindings that are LEXICAL: redeclaring one, or redeclaring anything as one, is an error.
@@ -79,8 +157,12 @@ function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
  *  off inside every function body. */
 const ownScopeOf = (node: Node): number => (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
 
-function checkNode(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+function checkNode(sem: Semantic, node: Node, scope: number, jump: JumpCtx, errors: CheckError[]): void {
     switch (node.type) {
+        case N.BreakStatement:
+        case N.ContinueStatement:
+            checkJump(node, jump, errors);
+            return;
         case N.UnaryExpression:
             checkUnaryExpression(sem, node, scope, errors);
             return;

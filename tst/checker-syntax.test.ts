@@ -208,3 +208,58 @@ describe('redeclaration', () => {
         expect(check('try{}catch(e){ function e(){} }')).toEqual([]);
     });
 });
+
+describe('break, continue and labels', () => {
+    // oxc walks UP from the jump (`ctx.ancestry()`); this carries the same information DOWN, because
+    // the walk is already top-down and a parent map would cost an entry per node. Same answers,
+    // verified case by case against `oxc-parser`.
+    it('a bare break needs a loop or a switch', () => {
+        expect(check('break;')).toEqual(['Illegal break statement']);
+        expect(check('while(1){ break; }')).toEqual([]);
+        expect(check('switch(x){case 1: break;}')).toEqual([]);
+    });
+
+    it('a bare continue needs a LOOP — a switch is not enough', () => {
+        expect(check('continue;')).toEqual(['Illegal continue statement: no surrounding iteration statement']);
+        expect(check('while(1){ continue; }')).toEqual([]);
+        expect(check('switch(x){case 1: continue;}')).toEqual(['Illegal continue statement: no surrounding iteration statement']);
+    });
+
+    it('a jump may not cross a function boundary', () => {
+        expect(check('while(1){ (function(){ break; }); }')).toEqual(['Illegal break statement']);
+        expect(check('class C { static { break; } }')).toEqual(['Illegal break statement']);
+    });
+
+    // A DELIBERATE DIVERGENCE, and the direction is "stricter than oxc". oxc's ancestry match lists
+    // `AstKind::Function` and `AstKind::StaticBlock` but NOT `ArrowFunctionExpression`, so it accepts
+    // this; node rejects it and so does the spec — an arrow is a function boundary like any other.
+    // Same call as `static accessor prototype`: the language outranks oxc when they disagree.
+    // `pnpm checkerdiff` stays at 0 because no shipped code contains a syntax error.
+    it('including an ARROW, where oxc has a gap', () => {
+        expect(check('while(1){ (()=>{ break; }); }')).toEqual(['Illegal break statement']);
+        expect(() => new Function('while(1){ (()=>{ break; }); }')).toThrow();
+    });
+
+    it('a label lets break reach any statement, continue only a loop', () => {
+        expect(check('a: while(1){ break a; }')).toEqual([]);
+        expect(check('a: while(1){ continue a; }')).toEqual([]);
+        expect(check('a: { break a; }')).toEqual([]);
+        expect(check('a: { continue a; }')).toEqual([
+            'A `continue` statement can only jump to a label of an enclosing `for`, `while` or `do while` statement.',
+        ]);
+    });
+
+    it('and a label must exist, in this function', () => {
+        expect(check('a: while(1){ break b; }')).toEqual(['Use of undefined label']);
+        expect(check('a: while(1){ (function(){ b: while(1){ break b; } }); }')).toEqual([]);
+    });
+
+    it('a label may not be declared twice', () => {
+        expect(check('a: a: while(1){}')).toEqual(['Label `a` has already been declared']);
+        expect(check('a: while(1){ b: while(1){} }')).toEqual([]);
+    });
+
+    it('a label naming a loop through other labels is still continuable', () => {
+        expect(check('a: b: while(1){ continue a; }')).toEqual([]);
+    });
+});
