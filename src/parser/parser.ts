@@ -2289,6 +2289,18 @@ function parseClassMember(state: ParserState): Node {
         else if (async) raise(state, ParseErrorCode.ConstructorAsync);
         else if (kind === 1 || kind === 2) raise(state, ParseErrorCode.ConstructorAccessor);
     }
+    // The mirror of `namedConstructor`: a STATIC element named `prototype`, which would shadow the
+    // one the class already has. Same three gates for the same reasons — a computed key is not
+    // statically known (`static ["prototype"]` is legal), and a private name is a different
+    // namespace (`static #prototype` is legal). oxc checks it at both its property and method sites
+    // (`js/class.rs:727,829`) and exempts an ambient declaration, which is why `declare` passes.
+    if (
+        (flags & (FL.STATIC | FL.COMPUTED)) === FL.STATIC &&
+        (key.type === N.IdentifierName || key.type === N.StringLiteral) &&
+        !inCtx(state, CTX.Ambient) &&
+        nameIs(state, key, 'prototype')
+    )
+        raise(state, ParseErrorCode.StaticPrototype);
 
     if (state.tsMode && isP(state, P.QUESTION)) {
         flags |= FL.OPTIONAL;
