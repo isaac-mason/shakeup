@@ -1811,6 +1811,15 @@ function parseBindingElement(state: ParserState): Node {
     return target;
 }
 
+/** The current token is the comma after a rest parameter; only what follows it picks the message. */
+function raiseRestParamNotLast(state: ParserState): void {
+    const saved = saveState(state);
+    nextToken(state);
+    const trailing = isP(state, P.RPAREN);
+    restoreState(state, saved);
+    raise(state, trailing ? ParseErrorCode.RestParameterTrailingComma : ParseErrorCode.RestParameterLast);
+}
+
 function parseParams(state: ParserState): Node[] {
     expectP(state, P.LPAREN, "'('");
     const from = state.sp;
@@ -1835,7 +1844,9 @@ function parseParams(state: ParserState): Node[] {
                 } else break;
             }
         }
+        let isRest = false;
         if (isP(state, P.DOTDOTDOT)) {
+            isRest = true;
             nextToken(state);
             const arg = parseBindingTarget(state);
             let typeAnn: Ref = null;
@@ -1862,6 +1873,13 @@ function parseParams(state: ParserState): Node[] {
             }
             push(state, create.FormalParameter(start, state.tokStart, flags, pattern, typeAnn, init));
         }
+        // A rest parameter ends the list: neither another parameter nor even a trailing comma may
+        // follow it. One check here covers every function form — declarations, expressions, methods,
+        // arrows, async generators — because they all parse parameters through here, which is why
+        // test262 counts this as hundreds of separate failures. oxc raises the same two in its PARSER
+        // (`js/function.rs:118-131`); the neighbouring duplicate-parameter and strict-body rules are
+        // `ctx.strict_mode()` checks in oxc_semantic and are deliberately NOT done here.
+        if (isRest && isP(state, P.COMMA) && !inCtx(state, CTX.Ambient)) raiseRestParamNotLast(state);
         if (!eatP(state, P.COMMA)) break;
     }
     expectP(state, P.RPAREN, "')'");
