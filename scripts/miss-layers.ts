@@ -31,6 +31,8 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseSync } from 'oxc-parser';
+import { checkSyntax } from '../src/analysis/checker.ts';
+import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parseWithDiagnostics } from '../src/parser/parser.ts';
 
 const ROOT = 'llm/libs/test262/test';
@@ -108,6 +110,7 @@ const areaOf = (p: string) =>
         .join('/');
 
 let total = 0;
+let ported = 0;
 for (const p of files) {
     const code = readFileSync(p, 'utf8');
     const meta = parseMeta(code);
@@ -151,6 +154,20 @@ for (const p of files) {
             rel,
         );
     } else if (!oxcOk(true)) {
+        // Does OUR checker already catch it? Splits the CHECKER bucket into ported and not, so the
+        // rule-porting work has a number to move.
+        try {
+            const prog = parseWithDiagnostics(src, {
+                ts: false,
+                jsx: false,
+                kind: sourceType === 'module' ? 'module' : 'unambiguous',
+            }).program;
+            const sem = createSemantic();
+            analyze(sem, prog, sourceType === 'module');
+            if (checkSyntax(sem, prog).length > 0) ported++;
+        } catch {
+            // a checker crash must not change the layer verdict
+        }
         bump(
             'CHECKER (oxc_semantic/checker)',
             firstError(src, sourceType, true) ?? firstError(strictSrc, sourceType, true) ?? '?',
@@ -161,7 +178,8 @@ for (const p of files) {
     }
 }
 
-console.log(`\nshakeup false-accepts, classified by the oxc layer that rejects them: ${total}\n`);
+console.log(`\nshakeup false-accepts, classified by the oxc layer that rejects them: ${total}`);
+console.log(`  of the CHECKER bucket, our checker already catches: ${ported}\n`);
 for (const [name, b] of [...buckets].sort((a, c) => c[1].n - a[1].n)) {
     console.log(`${String(b.n).padStart(5)}  ${name}`);
     for (const [msg, m] of [...b.msgs].sort((a, c) => c[1].n - a[1].n).slice(0, 12)) {
