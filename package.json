@@ -21,6 +21,7 @@
         "parserdiff": "tsx scripts/parser-diff.ts",
         "parsercorpus": "tsx scripts/parser-corpus.ts",
         "parserfuzz": "tsx scripts/parser-fuzz.ts",
+        "tsmodediff": "tsx scripts/ts-mode-diff.ts",
         "rollupsuite": "tsx scripts/rollup-suite.ts",
         "test262": "tsx scripts/test262.ts",
         "unchanged": "tsx scripts/output-unchanged.ts",
