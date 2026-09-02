@@ -3,6 +3,7 @@
 // Shared state substrate lives in state.ts; token identities in token.ts.
 import { ParseErrorCode } from './errors.ts';
 import {
+    F_BAD_ESCAPE,
     F_ESCAPED,
     F_NL,
     P,
@@ -696,6 +697,39 @@ function scanNumber(state: ParserState): void {
     endNumber(state, pos, bigint);
 }
 
+const isHexDigit = (c: number): boolean =>
+    (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+
+/** Is the escape starting at `pos` (just past the backslash) one the language defines?
+ *
+ *  Only the forms a TEMPLATE can get wrong are checked — `\x` and `\u` need their digits, and the
+ *  legacy octal / `\8` / `\9` escapes that a string may still carry in sloppy code are never legal
+ *  in a template. Everything else, including `\n` and an unknown-but-harmless `\q`, is fine.
+ *  Returning true at end-of-input leaves the unterminated-template error to say so instead. */
+function templateEscapeOk(src: string, srcLen: number, pos: number): boolean {
+    if (pos >= srcLen) return true;
+    const c = src.charCodeAt(pos);
+    if (c === 120) {
+        return isHexDigit(src.charCodeAt(pos + 1)) && isHexDigit(src.charCodeAt(pos + 2));
+    }
+    if (c === 117) {
+        if (src.charCodeAt(pos + 1) === 123) {
+            let i = pos + 2;
+            while (i < srcLen && isHexDigit(src.charCodeAt(i))) i++;
+            return i > pos + 2 && src.charCodeAt(i) === 125;
+        }
+        return (
+            isHexDigit(src.charCodeAt(pos + 1)) &&
+            isHexDigit(src.charCodeAt(pos + 2)) &&
+            isHexDigit(src.charCodeAt(pos + 3)) &&
+            isHexDigit(src.charCodeAt(pos + 4))
+        );
+    }
+    // `\0` is the NUL escape and stays legal, but only when no digit follows it.
+    if (c === 48) return !(src.charCodeAt(pos + 1) >= 48 && src.charCodeAt(pos + 1) <= 57);
+    return !(c >= 49 && c <= 57);
+}
+
 function scanTemplatePart(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
@@ -717,6 +751,7 @@ function scanTemplatePart(state: ParserState): void {
             return;
         }
         if (c === 92) {
+            if (!templateEscapeOk(src, srcLen, pos + 1)) state.tokFlags |= F_BAD_ESCAPE;
             pos += 2;
         } else {
             pos++;

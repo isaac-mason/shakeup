@@ -33,6 +33,11 @@ export const F_NL = 1;
  *  `tokFlags` is already assigned once per token — checking for an escaped identifier therefore
  *  costs nothing on the hot path. */
 export const F_ESCAPED = 2;
+/** The template part just scanned contains an escape the language does not define — `\x` without
+ *  two hex digits, a legacy octal, `\8`. It is NOT an error by itself: a TAGGED template may carry
+ *  one (its cooked value is simply `undefined`), and only an untagged one rejects it. The lexer
+ *  records it and `parseTemplate` decides, because only the caller knows about the tag. */
+export const F_BAD_ESCAPE = 4;
 
 /**
  * Grammar context, as one word. Bit positions mirror oxc's `Context`

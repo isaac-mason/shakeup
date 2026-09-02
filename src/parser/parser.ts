@@ -36,6 +36,7 @@ import {
 } from './lexer.ts';
 import {
     CTX,
+    F_BAD_ESCAPE,
     F_ESCAPED,
     F_NL,
     K,
@@ -1000,7 +1001,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, null);
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
             if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
-            const quasi = parseTemplate(state);
+            const quasi = parseTemplate(state, true);
             expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi);
         } else if (state.tsMode && isP(state, P.BANG) && (state.tokFlags & F_NL) === 0) {
             nextToken(state);
@@ -1014,7 +1015,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, t);
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
                 if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
-                const quasi = parseTemplate(state);
+                const quasi = parseTemplate(state, true);
                 expr = create.TaggedTemplateExpression(expr.start, quasi.end, 0, expr, quasi);
             } else {
                 // bare instantiation expression `f<number>`: keep the type args as a
@@ -1038,15 +1039,24 @@ function parsePrivate(state: ParserState): Node {
     return id;
 }
 
-function parseTemplate(state: ParserState): Node {
+/** `tagged` decides whether an undefined escape is an error. A tag receives the RAW strings and a
+ *  `cooked` of `undefined`, so `tag`\x`` is legal; an untagged template has only the cooked value,
+ *  so there is nothing for `` `\x` `` to mean. Only the caller knows which it is, which is why the
+ *  lexer records `F_BAD_ESCAPE` per part and the decision happens here. */
+function parseTemplate(state: ParserState, tagged: boolean): Node {
     const start = state.tokStart;
+    const badEscape = (pos: number) => {
+        if (!tagged && (state.tokFlags & F_BAD_ESCAPE) !== 0) raiseAt(state, pos, ParseErrorCode.BadTemplateEscape);
+    };
     if (state.tok === T_TEMPLATE_FULL) {
+        badEscape(start);
         const q = leaf(state, N.TemplateElement, start + 1, state.tokEnd - 1);
         nextToken(state);
         return create.TemplateLiteral(start, q.end + 1, 0, [q], []);
     }
     const qFrom = state.sp;
     const eFrom: Node[] = [];
+    badEscape(start);
     push(state, leaf(state, N.TemplateElement, start + 1, state.tokEnd - 2));
     nextToken(state);
     for (;;) {
@@ -1056,6 +1066,7 @@ function parseTemplate(state: ParserState): Node {
             break;
         }
         reScanTemplateContinue(state);
+        badEscape(state.tokStart);
         if (state.tok === T_TEMPLATE_FULL) {
             push(state, leaf(state, N.TemplateElement, state.tokStart + 1, state.tokEnd - 1));
             nextToken(state);
@@ -1280,7 +1291,7 @@ function parsePrimary(state: ParserState): Node {
         }
         case T_TEMPLATE_FULL:
         case T_TEMPLATE_HEAD:
-            return parseTemplate(state);
+            return parseTemplate(state, false);
         case T_PRIVATE:
             return parsePrivate(state);
         case T_IDENT:
