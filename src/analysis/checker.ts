@@ -24,24 +24,26 @@ export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
     const errors: CheckError[] = [];
     checkRedeclarations(sem, errors);
     const stack: Node[] = [program];
-    const scopes: number[] = [ownScopeOf(program)];
-    const jumps: JumpCtx[] = [TOP_JUMP];
-    const privates: ReadonlySet<string>[] = [NO_PRIVATES];
+    // ONE context object per stack entry, not three parallel arrays. Almost no node changes any of
+    // scope, jump target or visible private names, so the same object is pushed for every child and a
+    // new one allocated only where something actually differs. That halves the pushes per node from
+    // four to two, on a walk that runs over every node of every module.
+    const ctxs: Ctx[] = [{ scope: ownScopeOf(program), jump: TOP_JUMP, privates: NO_PRIVATES }];
     while (stack.length > 0) {
         const node = stack.pop() as Node;
-        const inheritedScope = scopes.pop() as number;
-        const inheritedJump = jumps.pop() as JumpCtx;
-        const inheritedPrivates = privates.pop() as ReadonlySet<string>;
+        const inherited = ctxs.pop() as Ctx;
         const own = ownScopeOf(node);
-        const scope = own === 0 ? inheritedScope : own;
-        checkNode(sem, node, scope, inheritedJump, inheritedPrivates, errors);
-        const jump = descendJump(node, inheritedJump, errors);
-        const priv = descendPrivates(node, inheritedPrivates, errors);
+        const scope = own === 0 ? inherited.scope : own;
+        checkNode(sem, node, scope, inherited.jump, inherited.privates, errors);
+        const jump = descendJump(node, inherited.jump, errors);
+        const priv = descendPrivates(node, inherited.privates, errors);
+        const ctx =
+            scope === inherited.scope && jump === inherited.jump && priv === inherited.privates
+                ? inherited
+                : { scope, jump, privates: priv };
         walkChildren(node, (child) => {
             stack.push(child);
-            scopes.push(scope);
-            jumps.push(jump);
-            privates.push(priv);
+            ctxs.push(ctx);
         });
     }
     return errors;
@@ -59,6 +61,10 @@ export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
  * between `break a` (any label) and `continue a` (loops only).
  */
 type JumpCtx = { breakable: boolean; continuable: boolean; labels: ReadonlyMap<string, boolean> };
+
+/** Everything carried down the walk, in one object so the stack holds one entry per node rather than
+ *  one per context dimension. */
+type Ctx = { scope: number; jump: JumpCtx; privates: ReadonlySet<string> };
 const NO_LABELS: ReadonlyMap<string, boolean> = new Map();
 const TOP_JUMP: JumpCtx = { breakable: false, continuable: false, labels: NO_LABELS };
 
