@@ -126,6 +126,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         pureAt: -1,
         nseAt: [],
         comments: [],
+        goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
         tokHash: 0,
         tokCooked: '',
         tsMode: options.ts,
@@ -151,7 +152,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         stk: new Array(1 << 8).fill(null),
         sp: 0,
         notArrow: null,
-        ctx: options.kind !== 'commonjs' ? CTX.Await : 0,
+        ctx: options.kind === 'module' ? CTX.Await : 0,
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
@@ -675,6 +676,36 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
     }
 }
 
+/** oxc `Kind::is_after_await_or_yield` (`lexer/kind.rs:315`). */
+const startsAwaitOperand = (tok: number): boolean =>
+    !isBinaryOp(tok) && (isLiteralTok(tok) || tok === T_IDENT || isKeyword(tok));
+
+function isUnambiguousAwait(state: ParserState): boolean {
+    const pos = state.pos;
+    const tok = state.tok;
+    const tokStart = state.tokStart;
+    const tokEnd = state.tokEnd;
+    const tokFlags = state.tokFlags;
+    const tokHash = state.tokHash;
+    const errorCount = state.errors.length;
+    const fatal = state.fatal;
+    nextToken(state);
+    const next = state.tok;
+    const newline = (state.tokFlags & F_NL) !== 0;
+    state.pos = pos;
+    state.tok = tok;
+    state.tokStart = tokStart;
+    state.tokEnd = tokEnd;
+    state.tokFlags = tokFlags;
+    state.tokHash = tokHash;
+    state.errors.length = errorCount;
+    state.fatal = fatal;
+    // A line break makes it ASI-ambiguous; `of` and `using` have their own for-head and
+    // declaration readings.
+    if (newline || next === K.OF || next === K.USING) return false;
+    return startsAwaitOperand(next);
+}
+
 function parseUnary(state: ParserState): Node {
     const start = state.tokStart;
     if (isPunct(state.tok)) {
@@ -710,10 +741,21 @@ function parseUnary(state: ParserState): Node {
                 return create.UnaryExpression(start, arg.end, op, arg);
             }
             case K.AWAIT: {
-                // Only an operator where `await` is in scope. Elsewhere it is an ordinary
-                // identifier (`await` is contextual), so fall out of the switch and let the normal
-                // expression path handle it — oxc `js/expression.rs:89`.
-                if (!inCtx(state, CTX.Await)) break;
+                // An operator where `await` is in scope. Where it is NOT — a script, or a file whose
+                // goal is not yet known — it is an ordinary identifier UNLESS the next token settles
+                // it: `await x` can only be the operator, while `await;`, `await = 1`,
+                // `await instanceof F` and `await (x)` can only be the identifier. A top-level
+                // unambiguous `await` that IS the operator makes the file a module, which is how
+                // `import y from 'm'; await x;` and `var await = 1; await;` both parse without a
+                // second pass. oxc `is_unambiguous_await` (`js/expression.rs:1685`).
+                // Only where the goal is genuinely undeclared, and only at the MODULE top level: a
+                // declared script must reject `await x`, and a class static block reserves `await`
+                // outright even though it is not a function scope (`newTargetDepth` is what a static
+                // block bumps). oxc accepts the static-block case; node rejects it, and node is right.
+                if (!inCtx(state, CTX.Await)) {
+                    if (!state.goalUnknown || state.fnDepth !== 0 || state.newTargetDepth !== 0) break;
+                    if (!isUnambiguousAwait(state)) break;
+                }
                 if (state.fnDepth === 0) state.sawTopLevelAwait = true;
                 nextToken(state);
                 const arg = parseUnary(state);

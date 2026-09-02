@@ -73,6 +73,12 @@ export type ParserState = {
      *  joined to the tree by OFFSET rather than attached to nodes. Same species as {@link nseAt}:
      *  append-only, lex-time, truncated on rewind. */
     comments: number[];
+    /** A top-level `await` was consumed as an IDENTIFIER. Only meaningful for the `unambiguous` goal,
+     *  where the module kind is not yet known — oxc's `encountered_await_identifier`
+     *  (`ParserState`, `state.rs:32`). */
+    /** The module goal is not declared, so `await` may turn out to be either an operator or an
+     *  identifier and the next token decides per occurrence. Never true once a goal is declared. */
+    goalUnknown: boolean;
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;
