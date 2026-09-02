@@ -779,6 +779,32 @@ function parsePostfixChain(state: ParserState): Node {
     return parseMemberChain(state, parsePrimary(state), true);
 }
 
+/** oxc's `is_import_expression_or_member_access_on_import_expression` (`js/expression.rs:26`) — the
+ *  callee of a `new` may REACH a dynamic import through member accesses, a tagged template or a
+ *  non-null assertion, and `new import('m').then` is an error just as `new import('m')` is. */
+function reachesImportExpression(node: Node): boolean {
+    let expr = node;
+    for (;;) {
+        switch (expr.type) {
+            case N.ImportExpression:
+                return true;
+            case N.StaticMemberExpression:
+            case N.ComputedMemberExpression:
+            case N.PrivateFieldExpression:
+                expr = expr.data.object;
+                break;
+            case N.TaggedTemplateExpression:
+                expr = expr.data.tag;
+                break;
+            case N.TSNonNullExpression:
+                expr = expr.data.expression;
+                break;
+            default:
+                return false;
+        }
+    }
+}
+
 function parseNew(state: ParserState): Node {
     const start = state.tokStart;
     nextToken(state);
@@ -792,6 +818,9 @@ function parseNew(state: ParserState): Node {
         return parseMemberChain(state, create.NewTarget(start, state.tokStart, 0), true);
     }
     let callee: Node;
+    // `new import('m')` is an error but `new (import('m'))` is not, so the test is on the token that
+    // OPENS the callee, not on the parsed shape alone — oxc's `is_import` (`js/expression.rs:1009`).
+    const calleeIsBareImport = isK(state, K.IMPORT);
     if (isK(state, K.NEW)) {
         callee = parseNew(state);
     } else {
@@ -814,6 +843,7 @@ function parseNew(state: ParserState): Node {
         args = parseArgs(state);
         end = state.tokStart;
     }
+    if (calleeIsBareImport && reachesImportExpression(callee)) raise(state, ParseErrorCode.NewDynamicImport);
     const nw = create.NewExpression(start, end, pure, callee, args, typeArgs);
     return parseMemberChain(state, nw, true);
 }
