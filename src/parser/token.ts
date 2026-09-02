@@ -30,13 +30,14 @@ export const TK = enumeration(
     // literal & structural classes
     'EOF',
     'IDENT',
-    'PRIVATE',
-    'NUM',
-    'BIGINT',
-    'STR',
+    'PRIVATE_IDENTIFIER',
+    'NUMERIC_LITERAL',
+    'BIGINT_LITERAL',
+    'STRING_LITERAL',
     'TEMPLATE_FULL',
     'TEMPLATE_HEAD',
-    'REGEX',
+    'REGEXP_LITERAL',
+    'JSX_TEXT',
     // punctuators
     'LPAREN',
     'RPAREN',
@@ -159,6 +160,26 @@ export const TK = enumeration(
     'IMPLEMENTS',
     'UNIQUE',
     'ACCESSOR',
+    'PUBLIC',
+    'PROTECTED',
+    'PRIVATE',
+    'USING',
+    'ANY',
+    'BOOLEAN',
+    'NEVER',
+    'NUMBER',
+    'STRING',
+    'SYMBOL',
+    'OBJECT',
+    'BIGINT',
+    'UNDEFINED',
+    'UNKNOWN',
+    'OUT',
+    'SOURCE',
+    'DEFER',
+    'ASSERT',
+    'CONSTRUCTOR',
+    'GLOBAL',
 );
 export type TK = (typeof TK)[keyof typeof TK];
 type TokName = keyof typeof TK;
@@ -251,6 +272,26 @@ const CONTEXTUAL: readonly TokName[] = [
     'YIELD',
     'AWAIT',
     'LET',
+    'PUBLIC',
+    'PROTECTED',
+    'PRIVATE',
+    'USING',
+    'ANY',
+    'BOOLEAN',
+    'NEVER',
+    'NUMBER',
+    'STRING',
+    'SYMBOL',
+    'OBJECT',
+    'BIGINT',
+    'UNDEFINED',
+    'UNKNOWN',
+    'OUT',
+    'SOURCE',
+    'DEFER',
+    'ASSERT',
+    'CONSTRUCTOR',
+    'GLOBAL',
 ];
 
 // --- build the packed table + operator-text table (indexed by kind) ----------
@@ -258,7 +299,7 @@ const idOf = (name: TokName): number => TK[name] as unknown as number;
 const firstPunct = idOf('LPAREN');
 const lastPunct = idOf('PIPEPIPEEQ');
 const firstKeyword = idOf('BREAK');
-const lastKeyword = idOf('ACCESSOR');
+const lastKeyword = idOf('GLOBAL');
 
 const packed: number[] = [];
 const OP_TEXT: string[] = [];

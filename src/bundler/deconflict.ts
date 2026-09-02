@@ -221,29 +221,36 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         };
         /** Per scope: names read inside it that resolve OUTSIDE it, so a local of that name captures. */
         const captured = new Map<number, Set<string>>();
-        const visit = (n: Node, scope: number): void => {
+        // Explicit stack, not recursion: this descends one frame per AST level, and a deeply nested
+        // program (300 blocks is enough) overflowed the call stack. The budget also shrank whenever a
+        // node type was added, because `walkChildren` is generated from the schema and a bigger
+        // generated function means a bigger frame — a nesting limit that moves when the AST grows.
+        const nodes: Node[] = [mod.program];
+        const scopes: number[] = [0];
+        while (nodes.length > 0) {
+            const n = nodes.pop() as Node;
+            const scope = scopes.pop() as number;
             const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
             const cur = own === 0 ? scope : own;
             if (n.type === N.IdentifierReference && n.sym !== 0) {
                 const rec = sem.symbols[n.sym];
                 if (rec !== undefined && rec.scope !== cur) {
                     const name = outerName(mod.idx, n.sym);
-                    if (name === null) {
-                        walkChildren(n, (c) => visit(c, cur));
-                        return;
-                    }
                     // Mark every scope between the READ and the DECLARATION: a binding anywhere on
                     // that chain would capture the reference.
-                    for (let s = cur; s !== 0 && s !== rec.scope; s = sem.scopes[s].parent) {
-                        let set = captured.get(s);
-                        if (set === undefined) captured.set(s, (set = new Set()));
-                        set.add(name);
-                    }
+                    if (name !== null)
+                        for (let s = cur; s !== 0 && s !== rec.scope; s = sem.scopes[s].parent) {
+                            let set = captured.get(s);
+                            if (set === undefined) captured.set(s, (set = new Set()));
+                            set.add(name);
+                        }
                 }
             }
-            walkChildren(n, (c) => visit(c, cur));
-        };
-        visit(mod.program, 0);
+            walkChildren(n, (c) => {
+                nodes.push(c);
+                scopes.push(cur);
+            });
+        }
         if (captured.size === 0) continue;
         for (let sym = 1; sym < sem.symbols.length; sym++) {
             const rec = sem.symbols[sym];

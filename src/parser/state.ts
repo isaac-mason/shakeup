@@ -11,13 +11,14 @@ import { TOK } from './token.ts';
 // `T_PUNCT`/`T_KW` are gone — use `isPunct(state.tok)` / `isKeyword(state.tok)`.
 export const T_EOF = TOK.EOF;
 export const T_IDENT = TOK.IDENT;
-export const T_NUM = TOK.NUM;
-export const T_BIGINT = TOK.BIGINT;
-export const T_STR = TOK.STR;
+export const T_NUM = TOK.NUMERIC_LITERAL;
+export const T_BIGINT = TOK.BIGINT_LITERAL;
+export const T_STR = TOK.STRING_LITERAL;
 export const T_TEMPLATE_FULL = TOK.TEMPLATE_FULL;
 export const T_TEMPLATE_HEAD = TOK.TEMPLATE_HEAD;
-export const T_REGEX = TOK.REGEX;
-export const T_PRIVATE = TOK.PRIVATE;
+export const T_REGEX = TOK.REGEXP_LITERAL;
+export const T_JSX_TEXT = TOK.JSX_TEXT;
+export const T_PRIVATE = TOK.PRIVATE_IDENTIFIER;
 
 // Punctuator and keyword identities are the packed token constants from token.ts.
 // A punctuator's packed value can never equal a keyword's (disjoint kind bytes),
@@ -32,6 +33,20 @@ export const F_NL = 1;
  *  `tokFlags` is already assigned once per token — checking for an escaped identifier therefore
  *  costs nothing on the hot path. */
 export const F_ESCAPED = 2;
+
+/**
+ * Grammar context, as one word. Bit positions mirror oxc's `Context`
+ * (`oxc_parser/src/context.rs`) so the two read side by side. Bits 0, 3 and 8 — `In`, `Return`,
+ * `NewTarget` — are absent because we model those as a parameter and two depth counters.
+ */
+export const CTX = {
+    Yield: 1 << 1,
+    Await: 1 << 2,
+    Decorator: 1 << 4,
+    DisallowConditionalTypes: 1 << 5,
+    Ambient: 1 << 6,
+    TopLevel: 1 << 7,
+} as const;
 
 /** Parse errors and offsets. */
 export type ParseError = { pos: number; msg: string; code: ParseErrorCode };
@@ -80,27 +95,6 @@ export type ParserState = {
      *  Never cleared: the flag is what makes it live, so the ordinary identifier path writes
      *  nothing here. */
     tokCooked: string;
-    /** Is the statement about to be parsed directly in the PROGRAM body? `import` and `export`
-     *  declarations are legal only there — not in a block, a function, or a single-statement `if`
-     *  body. esbuild threads the same fact as `parseStmtOpts.isModuleScope` and calls
-     *  `p.lexer.Unexpected()` when it is false (`js_parser.go:7211,7338,7380`).
-     *
-     *  Set by the Program loop before each statement and cleared by `parseStatement` on entry, so
-     *  every nested call sees `false` without a parameter having to be threaded through the dozen
-     *  places that parse a nested statement. */
-    moduleScope: boolean;
-    awaitOk: boolean;
-    /** Is `yield` the OPERATOR here, rather than a plain identifier? The exact mirror of
-     *  {@link awaitOk}, and oxc treats them as one pair — `Context::has_yield`, REPLACED on entering
-     *  a function body by that function's generator-ness and restored on exit.
-     *
-     *  Replacement rather than inheritance is what makes `function* g(){ function h(){ yield 1 } }`
-     *  an error: the inner non-generator resets it. An arrow replaces it too — an arrow body is
-     *  `[~Yield]`, so `function* g(){ (() => yield 1) }` is an error as well.
-     *
-     *  When false, `yield` parses as an ordinary identifier rather than erroring, which is what
-     *  keeps `var yield = 1`, `yield => 1` and `f(a = yield)` legal outside a generator. */
-    yieldOk: boolean;
     /** Module contained a `return` outside any function body. rolldown's
      *  `EcmaModuleAstUsage::TopLevelReturn` — tier 2 of the CommonJS kind rule, since only a CJS
      *  body (wrapped in a function) can legally contain one. Free to record here: the goal gate
@@ -148,18 +142,10 @@ export type ParserState = {
      * most once. oxc's `ParserState::not_parenthesized_arrow` (`js/arrow.rs:354`). Lazily created:
      * most parses never speculate. */
     notArrow: Set<number> | null;
-    /** Inside a `declare` (ambient) declaration, where an initializer is not merely optional but
-     *  FORBIDDEN — so the missing-initializer early errors must not fire. oxc's `Context::Ambient`
-     *  (`context.rs:49`). Set around the inner statement because `declare` is applied to the parsed
-     *  node afterwards, by which point the errors would already have been raised. */
-    ambient: boolean;
+    ctx: number;
     /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
      * parseNew reads it to reject an optional chain as a `new` callee. */
     chainSawOptional: boolean;
-    /** True while parsing the `extends` type of a conditional type (or an `infer` constraint),
-     * where a trailing `? … : …` binds to the OUTER conditional rather than starting a new one.
-     * Public `parseType` clears it; nested bracketed types re-enter through `parseType`. */
-    noCondType: boolean;
     /** Set true when the parser builds any JSX node — a per-module "uses JSX" flag computed for
      * free during parse (esbuild's `p.jsxRuntimeImports` model), so consumers don't re-walk the AST
      * just to detect JSX. */

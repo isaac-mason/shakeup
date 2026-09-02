@@ -11,6 +11,7 @@ import {
     T_BIGINT,
     T_EOF,
     T_IDENT,
+    T_JSX_TEXT,
     T_NUM,
     T_PRIVATE,
     T_REGEX,
@@ -100,10 +101,10 @@ export function buildLineStarts(src: string): Uint32Array {
     return Uint32Array.from(starts);
 }
 
-export const C_WS = 1,
-    C_NL = 2,
-    C_ID = 3,
-    C_DIG = 4;
+export const C_WS = 1;
+export const C_NL = 2;
+export const C_ID = 3;
+export const C_DIG = 4;
 export const CHAR = new Uint8Array(128);
 CHAR[9] = C_WS;
 CHAR[11] = C_WS;
@@ -328,6 +329,29 @@ function keywordCode(state: ParserState, s: number, e: number): number {
     }
 }
 
+/** Unicode `Zs`, plus the BOM. `\u00a0` and `\ufeff` alone left every other space class — em quad,
+ *  ogham, ideographic, … — lexed as an identifier character. */
+const isUnicodeSpace = (c: number): boolean =>
+    c === 0xa0 || c === 0xfeff || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x202f || c === 0x205f || c === 0x3000;
+
+/**
+ * A block comment spanning a line break counts as a newline for ASI, and `\r`, `\u2028` and
+ * `\u2029` are line terminators too. Only reached when the comment holds no `\n` at all, which makes
+ * it a single-line comment and so bounds the scan.
+ */
+function hasRareLineBreak(src: string, from: number, to: number): boolean {
+    for (let i = from; i < to; i++) {
+        const c = src.charCodeAt(i);
+        if (c === 13 || c === 0x2028 || c === 0x2029) return true;
+    }
+    return false;
+}
+
+const isHtmlComment = (src: string, pos: number, c: number, lineStart: boolean): boolean =>
+    c === 60
+        ? src.charCodeAt(pos + 1) === 33 && src.charCodeAt(pos + 2) === 45 && src.charCodeAt(pos + 3) === 45
+        : lineStart && src.charCodeAt(pos + 1) === 45 && src.charCodeAt(pos + 2) === 62;
+
 export function nextToken(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
@@ -351,10 +375,24 @@ export function nextToken(state: ParserState): void {
             if (c === 47) {
                 const c1 = src.charCodeAt(pos + 1);
                 if (c1 === 47) {
-                    // Line comment: native scan to the newline, stop AT it so the outer
-                    // loop records the C_NL (sets `nl`) next iteration.
+                    // Line comment: native scan to the newline, stop AT it so the outer loop records
+                    // the C_NL (sets `nl`) next iteration.
+                    //
+                    // `\r`, U+2028 and U+2029 END a line comment too. Scanning for `\n` alone
+                    // swallowed the rest of the FILE after `//c\rvar a = 1;` and reported no error at
+                    // all — a silent miscompile, not a rejection. The `\n` search still bounds the
+                    // loop, so a comment ending the ordinary way costs one extra pass over its body.
                     const nlPos = src.indexOf('\n', pos + 2);
-                    pos = nlPos < 0 ? srcLen : nlPos;
+                    const limit = nlPos < 0 ? srcLen : nlPos;
+                    let end = limit;
+                    for (let i = pos + 2; i < limit; i++) {
+                        const ch = src.charCodeAt(i);
+                        if (ch === 13 || ch === 0x2028 || ch === 0x2029) {
+                            end = i;
+                            break;
+                        }
+                    }
+                    pos = end;
                     continue;
                 }
                 if (c1 === 42) {
@@ -367,6 +405,7 @@ export function nextToken(state: ParserState): void {
                     const close = end < 0 ? srcLen : end + 2;
                     const nlIn = src.indexOf('\n', pos + 2);
                     if (nlIn !== -1 && nlIn < close) nl = F_NL;
+                    else if (hasRareLineBreak(src, pos + 2, close)) nl = F_NL;
                     // `/*@__PURE__*​/` / `/*#__PURE__*​/` annotation probe. Ordered to stay off the hot
                     // path: virtually every comment fails on the FIRST character comparison, and the
                     // string compare only runs for one that actually opens with `@`/`#`.
@@ -385,6 +424,14 @@ export function nextToken(state: ParserState): void {
                     continue;
                 }
             }
+            // Annex B.1.1 HTML-like comments. `<!--` opens one anywhere; `-->` only where it is the
+            // first token on its line. Both are Script-only — in a real module goal they stay
+            // ordinary punctuation and the parser rejects them. oxc `lexer/punctuation.rs:21-80`.
+            if ((c === 60 || c === 45) && state.allowTopReturn && isHtmlComment(src, pos, c, nl !== 0 || pos === 0)) {
+                const nlPos = src.indexOf('\n', pos);
+                pos = nlPos < 0 ? srcLen : nlPos;
+                continue;
+            }
             break;
         }
         if (c === 0x2028 || c === 0x2029) {
@@ -392,7 +439,7 @@ export function nextToken(state: ParserState): void {
             pos++;
             continue;
         }
-        if (c === 0xa0 || c === 0xfeff) {
+        if (isUnicodeSpace(c)) {
             pos++;
             continue;
         }
@@ -464,7 +511,7 @@ export function nextToken(state: ParserState): void {
             // span lines. Without this an unterminated string swallowed the rest of the file.
             if (cc === 10 || cc === 13) break;
             if (cc === 92) {
-                pos += 2; // skip the escaped char (line table is built deferred, not here)
+                pos += src.charCodeAt(pos + 1) === 13 && src.charCodeAt(pos + 2) === 10 ? 3 : 2;
             } else {
                 pos++;
             }
@@ -485,7 +532,11 @@ export function nextToken(state: ParserState): void {
     }
     if (c === 35) {
         if (state.tokStart === 0 && src.charCodeAt(1) === 33) {
-            while (pos < srcLen && src.charCodeAt(pos) !== 10) pos++;
+            while (pos < srcLen) {
+                const h = src.charCodeAt(pos);
+                if (h === 10 || h === 13 || h === 0x2028 || h === 0x2029) break;
+                pos++;
+            }
             state.pos = pos;
             nextToken(state);
             return;
@@ -525,30 +576,111 @@ export function nextToken(state: ParserState): void {
     scanPunct(state, c);
 }
 
+const isDecimalDigit = (c: number): boolean => c >= 48 && c <= 57;
+const radixDigitOk = (c: number, radix: number): boolean =>
+    radix === 16
+        ? isDecimalDigit(c) || ((c | 32) >= 97 && (c | 32) <= 102)
+        : radix === 8
+          ? c >= 48 && c <= 55
+          : c === 48 || c === 49;
+
+/**
+ * A numeric literal must not run straight into an identifier or another digit: `0.toString()` and
+ * `1_a` are syntax errors, not a number followed by something. oxc's `check_after_numeric_literal`
+ * (`lexer/numeric.rs:208`), which is the single most load-bearing rule in its numeric scanner and the
+ * one shakeup had no analogue of — the old loop swallowed every ASCII identifier character INTO the
+ * number token, the exact inverse.
+ */
+function endNumber(state: ParserState, pos: number, bigint: boolean): void {
+    const c = state.src.charCodeAt(pos);
+    if (c < 128 && (CHAR[c] === C_DIG || CHAR[c] === C_ID)) {
+        state.pos = pos;
+        raise(state, ParseErrorCode.InvalidNumberEnd);
+        return;
+    }
+    state.pos = pos;
+    state.tok = bigint ? T_BIGINT : T_NUM;
+    state.tokEnd = pos;
+}
+
+/** `raise` jumps the lexer to EOF, so every rejection must return immediately after it. */
+function badNumber(state: ParserState, pos: number): void {
+    state.pos = pos;
+    raise(state, ParseErrorCode.UnexpectedChar, pos < state.srcLen ? state.src[pos] : '');
+}
+
+/** A `_` separator must sit BETWEEN digits — never leading (`1._5`) and never trailing (`1_`). */
+function readDigits(state: ParserState, from: number): number {
+    const src = state.src,
+        srcLen = state.srcLen;
+    let pos = from;
+    let seenDigit = false;
+    while (pos < srcLen) {
+        const c = src.charCodeAt(pos);
+        if (isDecimalDigit(c)) {
+            pos++;
+            seenDigit = true;
+        } else if (c === 95 && seenDigit && isDecimalDigit(src.charCodeAt(pos + 1))) pos += 2;
+        else break;
+    }
+    return pos;
+}
+
 function scanNumber(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
-    let pos = state.pos;
-    let c = src.charCodeAt(pos);
-    pos++;
-    if (c === 48 && pos < srcLen) {
-        const x = src.charCodeAt(pos) | 32;
-        if (x === 120 || x === 111 || x === 98) pos++;
-    }
-    while (pos < srcLen) {
-        c = src.charCodeAt(pos);
-        if (c < 128 && (CHAR[c] === C_DIG || CHAR[c] === C_ID)) {
-            if ((c | 32) === 101 && pos + 1 < srcLen) {
-                const nx = src.charCodeAt(pos + 1);
-                if (nx === 43 || nx === 45) pos++;
+    const start = state.pos;
+    let pos = start;
+    const first = src.charCodeAt(pos);
+    let leadingZero = false;
+
+    if (first === 48 && pos + 1 < srcLen) {
+        const radix = (src.charCodeAt(pos + 1) | 32) === 120 ? 16 : (src.charCodeAt(pos + 1) | 32) === 111 ? 8 : (src.charCodeAt(pos + 1) | 32) === 98 ? 2 : 0;
+        if (radix !== 0) {
+            pos += 2;
+            if (!radixDigitOk(src.charCodeAt(pos), radix)) return badNumber(state, pos);
+            while (pos < srcLen) {
+                const c = src.charCodeAt(pos);
+                if (radixDigitOk(c, radix)) pos++;
+                else if (c === 95) {
+                    if (!radixDigitOk(src.charCodeAt(pos + 1), radix)) return badNumber(state, pos + 1);
+                    pos += 2;
+                } else break;
             }
+            return endNumber(state, src.charCodeAt(pos) === 110 ? pos + 1 : pos, src.charCodeAt(pos) === 110);
+        }
+        // Legacy octal / non-octal decimal: `.` and an exponent are legal only once an 8 or 9 has
+        // turned the run into a decimal, and a BigInt suffix never is. oxc `numeric.rs:99-127`.
+        if (isDecimalDigit(src.charCodeAt(pos + 1))) {
+            let decimal = false;
             pos++;
-        } else if (c === 46) pos++;
-        else break;
+            while (pos < srcLen && isDecimalDigit(src.charCodeAt(pos))) {
+                if (src.charCodeAt(pos) > 55) decimal = true;
+                pos++;
+            }
+            if (!decimal) return endNumber(state, pos, false);
+            leadingZero = true;
+        } else pos++; // a lone `0`: the integer part is exactly that, so `0_1` is not a number
+    } else pos = readDigits(state, pos);
+
+    let bigint = false;
+    if (!leadingZero && src.charCodeAt(pos) === 110) {
+        pos++;
+        bigint = true;
+    } else {
+        if (src.charCodeAt(pos) === 46) {
+            pos = readDigits(state, pos + 1);
+        }
+        const e = src.charCodeAt(pos) | 32;
+        if (e === 101) {
+            let p = pos + 1;
+            const sign = src.charCodeAt(p);
+            if (sign === 43 || sign === 45) p++;
+            if (!isDecimalDigit(src.charCodeAt(p))) return badNumber(state, p);
+            pos = readDigits(state, p);
+        }
     }
-    state.pos = pos;
-    state.tok = src.charCodeAt(pos - 1) === 110 ? T_BIGINT : T_NUM;
-    state.tokEnd = pos;
+    endNumber(state, pos, bigint);
 }
 
 function scanTemplatePart(state: ParserState): void {
@@ -582,6 +714,115 @@ function scanTemplatePart(state: ParserState): void {
     state.pos = pos;
     state.tok = T_TEMPLATE_FULL;
     state.tokEnd = pos;
+}
+
+const isJSXIdentPart = (c: number): boolean =>
+    c < 128 ? CHAR[c] === C_ID || CHAR[c] === C_DIG || c === 45 : c !== 0x2028 && c !== 0x2029;
+
+export function nextJSXChild(state: ParserState): void {
+    const src = state.src,
+        srcLen = state.srcLen;
+    const start = state.pos;
+    state.tokStart = start;
+    state.tokFlags = 0;
+    if (start >= srcLen) {
+        state.tok = T_EOF;
+        state.tokEnd = start;
+        return;
+    }
+    const c = src.charCodeAt(start);
+    if (c === 60 || c === 123) {
+        state.pos = start + 1;
+        state.tok = c === 60 ? P.LT : P.LBRACE;
+        state.tokEnd = state.pos;
+        return;
+    }
+    let pos = start;
+    while (pos < srcLen) {
+        const t = src.charCodeAt(pos);
+        if (t === 60 || t === 123) break;
+        pos++;
+    }
+    state.pos = pos;
+    state.tok = T_JSX_TEXT;
+    state.tokEnd = pos;
+}
+
+export function reScanJSXIdentifier(state: ParserState): void {
+    const src = state.src,
+        srcLen = state.srcLen;
+    let pos = state.tokEnd;
+    while (pos < srcLen && isJSXIdentPart(src.charCodeAt(pos))) pos++;
+    if (pos === state.tokEnd) return;
+    state.pos = pos;
+    state.tokEnd = pos;
+    state.tok = T_IDENT;
+    state.tokHash = hashRange(state, state.tokStart, pos);
+}
+
+/**
+ * A JSX attribute value. JSX strings are raw — no escape processing, and newlines are legal — so the
+ * ordinary string scanner would reject `a="x\ny"` and latch `fatal` before the parser could look.
+ * Trivia is skipped by `nextToken`, then a quoted value is re-scanned raw and any error it raised is
+ * rolled back.
+ */
+export function nextJSXAttributeValue(state: ParserState): void {
+    const from = state.pos;
+    const errors = state.errors.length;
+    const fatal = state.fatal;
+    nextToken(state);
+    if (state.errors.length === errors) return;
+    const quoteAt = skipTriviaFrom(state, from);
+    const quote = state.src.charCodeAt(quoteAt);
+    if (quote !== 34 && quote !== 39) return;
+    state.errors.length = errors;
+    state.fatal = fatal;
+    state.tokStart = quoteAt;
+    scanJSXAttributeString(state);
+}
+
+/** Only reached when the ordinary scan already failed, so it never costs the common path. */
+function skipTriviaFrom(state: ParserState, from: number): number {
+    const src = state.src,
+        srcLen = state.srcLen;
+    let pos = from;
+    while (pos < srcLen) {
+        const c = src.charCodeAt(pos);
+        if (c < 128 && (CHAR[c] === C_WS || CHAR[c] === C_NL)) {
+            pos++;
+            continue;
+        }
+        if (c === 47 && src.charCodeAt(pos + 1) === 47) {
+            const nl = src.indexOf('\n', pos + 2);
+            pos = nl < 0 ? srcLen : nl + 1;
+            continue;
+        }
+        if (c === 47 && src.charCodeAt(pos + 1) === 42) {
+            const close = src.indexOf('*/', pos + 2);
+            pos = close < 0 ? srcLen : close + 2;
+            continue;
+        }
+        break;
+    }
+    return pos;
+}
+
+function scanJSXAttributeString(state: ParserState): void {
+    const src = state.src,
+        srcLen = state.srcLen;
+    const quote = src.charCodeAt(state.tokStart);
+    let pos = state.tokStart + 1;
+    while (pos < srcLen && src.charCodeAt(pos) !== quote) pos++;
+    if (pos >= srcLen) {
+        state.pos = srcLen;
+        raise(state, ParseErrorCode.UnterminatedString);
+        state.tok = T_STR;
+        state.tokEnd = srcLen;
+        return;
+    }
+    state.pos = pos + 1;
+    state.tok = T_STR;
+    state.tokEnd = state.pos;
 }
 
 export function reScanTemplateContinue(state: ParserState): void {

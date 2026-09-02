@@ -158,6 +158,8 @@ export const ESTREE_NAME = {
     JSXSpreadChild: 'JSXSpreadChild',
     JSXIdentifier: 'JSXIdentifier',
     JSXText: 'JSXText',
+    Decorator: 'Decorator',
+    TSTypePredicate: 'TSTypePredicate',
 } satisfies Record<TypeName, ESTreeTypeName | null>;
 
 /** ESTree type name per numeric type id. */

@@ -35,9 +35,9 @@ describe('errors.ts', () => {
     });
 
     it('unexpected-token messages name the offending token', () => {
-        const e = first('1 + @', false);
+        const e = first('1 + %', false);
         expect(e.code).toBe(ParseErrorCode.UnexpectedInExpression);
-        expect(e.msg).toBe("unexpected token '@' in expression");
+        expect(e.msg).toBe("unexpected token '%' in expression");
     });
 });
 

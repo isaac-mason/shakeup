@@ -26,6 +26,7 @@ export const FL = {
     DELEGATE: 1 << 9,
     AWAIT: 1 << 9,
     SHORTHAND: 1 << 9,
+    ASSERTS: 1 << 9,
     EXPR_BODY: 1 << 10,
     DEFINITE: 1 << 10,
     CONST_ENUM: 1 << 10,
@@ -219,10 +220,13 @@ export const FunctionDeclaration = (
         declare: (flags & FL.DECLARE) !== 0,
         scopeId: 0,
     });
+export const Decorator = (s: number, e: number, _flags: number, expression: Node): Node =>
+    node(N.Decorator, s, e, '', { expression });
 export const ClassExpression = (
     s: number,
     e: number,
     _flags: number,
+    decorators: Node[],
     id: Node | null,
     tp: Node | null,
     sc: Node | null,
@@ -231,6 +235,7 @@ export const ClassExpression = (
     body: Node[] | null,
 ): Node =>
     node(N.ClassExpression, s, e, '', {
+        decorators,
         id: id ?? null,
         typeParameters: tp ?? null,
         superClass: sc ?? null,
@@ -242,6 +247,7 @@ export const ClassDeclaration = (
     s: number,
     e: number,
     flags: number,
+    decorators: Node[],
     id: Node | null,
     tp: Node | null,
     sc: Node | null,
@@ -250,6 +256,7 @@ export const ClassDeclaration = (
     body: Node[] | null,
 ): Node =>
     node(N.ClassDeclaration, s, e, '', {
+        decorators,
         id: id ?? null,
         typeParameters: tp ?? null,
         superClass: sc ?? null,
@@ -277,8 +284,9 @@ export const VariableDeclarator = (s: number, e: number, flags: number, id: Node
     });
 export const ForOfStatement = (s: number, e: number, flags: number, left: Node, right: Node, body: Node): Node =>
     node(N.ForOfStatement, s, e, '', { left, right, body, await: (flags & FL.AWAIT) !== 0, scopeId: 0 });
-export const MethodDefinition = (s: number, e: number, flags: number, key: Node, value: Node): Node =>
+export const MethodDefinition = (s: number, e: number, flags: number, decorators: Node[], key: Node, value: Node): Node =>
     node(N.MethodDefinition, s, e, '', {
+        decorators,
         key,
         value,
         kind: METHOD_KIND[(flags >> FL.KIND_SHIFT) & 3],
@@ -288,8 +296,17 @@ export const MethodDefinition = (s: number, e: number, flags: number, key: Node,
         abstract: (flags & FL.ABSTRACT) !== 0,
         accessibility: accessibilityOf(flags),
     });
-export const PropertyDefinition = (s: number, e: number, flags: number, key: Node, ta: Node | null, value: Node | null): Node =>
+export const PropertyDefinition = (
+    s: number,
+    e: number,
+    flags: number,
+    decorators: Node[],
+    key: Node,
+    ta: Node | null,
+    value: Node | null,
+): Node =>
     node(N.PropertyDefinition, s, e, '', {
+        decorators,
         key,
         typeAnnotation: ta ?? null,
         value: value ?? null,
@@ -656,9 +673,22 @@ export const TSImportType = (
     e: number,
     _f: number,
     source: Node,
+    options: Node | null,
     qualifier: Node | null,
     typeArguments: Node | null,
-): Node => node(N.TSImportType, s, e, '', { source, qualifier: qualifier ?? null, typeArguments: typeArguments ?? null });
+): Node =>
+    node(N.TSImportType, s, e, '', {
+        source,
+        options: options ?? null,
+        qualifier: qualifier ?? null,
+        typeArguments: typeArguments ?? null,
+    });
+export const TSTypePredicate = (s: number, e: number, flags: number, parameterName: Node, typeAnnotation: Node | null): Node =>
+    node(N.TSTypePredicate, s, e, '', {
+        parameterName,
+        asserts: (flags & FL.ASSERTS) !== 0,
+        typeAnnotation: typeAnnotation ?? null,
+    });
 export const TSClassImplements = (s: number, e: number, _f: number, expression: Node, typeArguments: Node | null): Node =>
     node(N.TSClassImplements, s, e, '', { expression, typeArguments: typeArguments ?? null });
 export const TSInterfaceHeritage = (s: number, e: number, _f: number, expression: Node, typeArguments: Node | null): Node =>

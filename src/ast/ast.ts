@@ -124,6 +124,7 @@ export const DEFS = [
         scopeId: scalar<number>(),
     }),
     def('ClassExpression', {
+        decorators: list(child),
         id: nullable(child),
         typeParameters: nullable(child),
         superClass: nullable(child),
@@ -177,6 +178,7 @@ export const DEFS = [
         scopeId: scalar<number>(),
     }),
     def('ClassDeclaration', {
+        decorators: list(child),
         id: nullable(child),
         typeParameters: nullable(child),
         superClass: nullable(child),
@@ -188,6 +190,7 @@ export const DEFS = [
         scopeId: scalar<number>(),
     }),
     def('MethodDefinition', {
+        decorators: list(child),
         key: child,
         value: child,
         kind: scalar<'method' | 'get' | 'set' | 'constructor'>(),
@@ -198,6 +201,7 @@ export const DEFS = [
         accessibility: scalar<Accessibility>(),
     }),
     def('PropertyDefinition', {
+        decorators: list(child),
         key: child,
         typeAnnotation: nullable(child),
         value: nullable(child),
@@ -325,7 +329,7 @@ export const DEFS = [
     }),
     def('TSLiteralType', { literal: child }),
     def('TSTemplateLiteralType', { quasis: list(child), types: list(child) }),
-    def('TSImportType', { source: child, qualifier: nullable(child), typeArguments: nullable(child) }),
+    def('TSImportType', { source: child, options: nullable(child), qualifier: nullable(child), typeArguments: nullable(child) }),
     def('TSInterfaceDeclaration', {
         id: child,
         typeParameters: nullable(child),
@@ -379,6 +383,8 @@ export const DEFS = [
     // list of key/value pairs hanging off the declaration, where the key is an identifier OR a
     // string literal.
     def('ImportAttribute', { key: child, value: child }),
+    def('Decorator', { expression: child }),
+    def('TSTypePredicate', { parameterName: child, asserts: boolean, typeAnnotation: nullable(child) }),
 ] as const;
 
 type Defs = typeof DEFS;
@@ -596,35 +602,36 @@ export const walkChildren = new Function('n', 'cb', buildChildrenBody()) as (
 // Field-iteration mirrors buildWalkers in passes/traverse.ts: same schema, the read-only variant.
 // The oracle in ast.test (`walk drift vs CHILD_FIELDS`) pins this generated order to the schema.
 function buildWalkBody(): string {
-    let s = 'if(enter(n)===false)return;const d=n.data;if(d===null)return;switch(n.type){';
+    let s = 'const S=[n];while(S.length>0){const m=S.pop();if(enter(m)===false)continue;const d=m.data;if(d===null)continue;switch(m.type){';
     for (let t = 1; t < TYPE_COUNT; t++) {
         const fields = FIELDS[t];
         if (fields === undefined || fields.length === 0) continue;
         s += `case ${t}:{`;
-        for (const f of fields) {
+        // Children are pushed in REVERSE so `pop()` yields them in source order: a stack reverses,
+        // and pre-order has to be preserved exactly — every pass downstream depends on it.
+        for (let i = fields.length - 1; i >= 0; i--) {
+            const f = fields[i];
             const key = JSON.stringify(f.name);
             s += f.list
-                ? `{const a=d[${key}];if(a!=null){for(let i=0;i<a.length;i++){const c=a[i];if(c!=null)W(c,enter,W);}}}`
-                : `{const c=d[${key}];if(c!=null)W(c,enter,W);}`;
+                ? `{const a=d[${key}];if(a!=null){for(let i=a.length-1;i>=0;i--){const c=a[i];if(c!=null)S.push(c);}}}`
+                : `{const c=d[${key}];if(c!=null)S.push(c);}`;
         }
         s += 'break;}';
     }
-    return `${s}}`;
+    return `${s}}}`;
 }
-// `impl(n, enter, impl)`: the self-ref makes internal recursion a direct impl→impl call (no wrapper
-// hop), matching the old hand-switch's per-node cost. `enter` runs before `n.type` is read, so an
-// in-place `set()` retype during enter makes recursion follow the NEW type (the mutation traversal).
-const walkImpl = new Function('n', 'enter', 'W', buildWalkBody()) as (
-    n: Node,
-    enter: (n: Node) => boolean | void,
-    W: unknown,
-) => void;
+// An EXPLICIT stack, not recursion. The recursive form cost one frame per AST level and overflowed
+// at ~374 levels of nesting, where the parser itself reaches ~1,249 — so a valid deeply-nested
+// program failed to build. Worse, the ceiling moved whenever a node type was added, because a bigger
+// generated function means a bigger frame. `enter` still runs before `m.type` is read, so an
+// in-place `set()` retype during enter still makes the descent follow the NEW type.
+const walkImpl = new Function('n', 'enter', buildWalkBody()) as (n: Node, enter: (n: Node) => boolean | void) => void;
 
 /** Depth-first pre-order walk. `enter` may return false to skip the subtree. When `enter` mutates a
  *  node in place (via {@link set}), recursion follows the NEW type — `enter` runs before `n.type` is
  *  read — so this doubles as the mutation traversal (no separate mutating walk needed). */
 export function walk(n: Node, enter: (n: Node) => boolean | void): void {
-    walkImpl(n, enter, walkImpl);
+    walkImpl(n, enter);
 }
 
 export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null): Node | null {

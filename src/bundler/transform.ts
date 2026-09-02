@@ -219,6 +219,7 @@ function defaultConstDecl(decl: Node, dflt: string, s: number, e: number): Node 
     } else if (decl.type === N.ClassDeclaration) {
         const d = decl.data;
         init = node(N.ClassExpression, decl.start, decl.end, '', {
+            decorators: d.decorators,
             id: d.id,
             typeParameters: d.typeParameters,
             superClass: d.superClass,
@@ -417,6 +418,11 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
         }
         case N.TaggedTemplateExpression:
             if (n.data.tag.type === N.IdentifierReference) ctx.calleeIdents.add(n.data.tag);
+            return;
+        case N.Decorator:
+            // Parsed for AST fidelity, but nothing lowers them and no browser runs them — emitting
+            // them unchanged would be a silent miscompile.
+            ctx.unsupported.push({ pos: n.start, msg: 'decorators are not supported' });
             return;
         case N.TSModuleDeclaration:
             if (!n.data.declare)

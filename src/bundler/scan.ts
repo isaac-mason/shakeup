@@ -87,6 +87,10 @@ export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
  * oxc typescript/namespace.rs, esbuild tsParseNamespace) — then this walk goes away entirely. */
 export function collectUnsupported(program: Node, id: string, errors: string[]): void {
     walk(program, (n) => {
+        if (n.type === N.Decorator) {
+            errors.push(`${id}:${n.start}: decorators are not supported`);
+            return false;
+        }
         if (n.type === N.TSModuleDeclaration && !n.data.declare) {
             errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
             return false;

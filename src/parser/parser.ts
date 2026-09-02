@@ -19,21 +19,23 @@ import {
 import { enumeration } from '../util/enumeration.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
-    C_DIG,
-    C_ID,
+    CHAR,
     C_NL,
     C_WS,
-    CHAR,
     hashRange,
     intern,
     internString,
     keywordCodeOf,
+    nextJSXChild,
     nextToken,
+    reScanJSXIdentifier,
     reScanRegex,
     reScanTemplateContinue,
+    nextJSXAttributeValue,
     sliceFlat,
 } from './lexer.ts';
 import {
+    CTX,
     F_ESCAPED,
     F_NL,
     K,
@@ -45,6 +47,7 @@ import {
     T_BIGINT,
     T_EOF,
     T_IDENT,
+    T_JSX_TEXT,
     T_NUM,
     T_PRIVATE,
     T_REGEX,
@@ -124,7 +127,6 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         nseAt: [],
         tokHash: 0,
         tokCooked: '',
-        moduleScope: false,
         tsMode: options.ts,
         jsxMode: options.jsx,
         fnDepth: 0,
@@ -136,8 +138,6 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         allowTopNewTarget: options.kind !== 'module',
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
-        awaitOk: options.kind !== 'commonjs',
-        yieldOk: false,
         errors: [],
         // The id the first node of this parse will get. `nodeCount` is `program.id - baseId + 1`,
         // which only needs ids to be contiguous and monotonic — peeked here rather than captured on
@@ -150,7 +150,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         stk: new Array(1 << 8).fill(null),
         sp: 0,
         notArrow: null,
-        ambient: false,
+        ctx: options.kind !== 'commonjs' ? CTX.Await : 0,
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
@@ -162,12 +162,12 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         topLevelThis: [],
         sawImportSyntax: false,
         chainSawOptional: false,
-        noCondType: false,
     };
 }
 
 // `v` is a packed token constant (P.* / K.*); packed values are unique per kind,
 // so a whole-value compare is both the kind check and the identity check.
+const inCtx = (state: ParserState, bit: number): boolean => (state.ctx & bit) !== 0;
 const isP = (state: ParserState, v: number): boolean => state.tok === v;
 const isK = (state: ParserState, v: number): boolean => state.tok === v;
 
@@ -270,12 +270,12 @@ function parseIdent(state: ParserState, role: number): Identifier {
         if (kw !== 0 && !isContextual(kw)) raise(state, ParseErrorCode.EscapedKeyword);
     }
     if (role === R_BIND) {
-        if (state.yieldOk && isK(state, K.YIELD)) raise(state, ParseErrorCode.IdentifierInGenerator);
-        // `await` needs the extra guard because `awaitOk` is seeded TRUE at top level for the
+        if (inCtx(state, CTX.Yield) && isK(state, K.YIELD)) raise(state, ParseErrorCode.IdentifierInGenerator);
+        // `await` needs the extra guard because `CTX.Await` is seeded TRUE at top level for the
         // permissive `unambiguous` goal, where `var await = 1` is legal script. Inside a function
-        // body `awaitOk` can only mean `async`, and a declared module is strict either way —
+        // body `CTX.Await` can only mean `async`, and a declared module is strict either way —
         // `allowTopReturn` is the flag that is false for exactly the real-module goal.
-        else if (state.awaitOk && isK(state, K.AWAIT) && (state.fnDepth > 0 || !state.allowTopReturn))
+        else if (inCtx(state, CTX.Await) && isK(state, K.AWAIT) && (state.fnDepth > 0 || !state.allowTopReturn))
             raise(state, ParseErrorCode.IdentifierInAsync);
     }
     const id = ident(state, role, state.tokStart, state.tokEnd);
@@ -577,7 +577,7 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
     // Only where `yield` is in scope. Elsewhere it is an ordinary identifier — the same shape as
     // `await` above, and the same reason: `yield => 1` and `var yield = 1` are legal outside a
     // generator, and `function f(){ yield 1 }` then fails naturally as two adjacent identifiers.
-    if (isK(state, K.YIELD) && state.yieldOk) {
+    if (isK(state, K.YIELD) && inCtx(state, CTX.Yield)) {
         const start = state.tokStart;
         nextToken(state);
         let flags = 0;
@@ -710,7 +710,7 @@ function parseUnary(state: ParserState): Node {
                 // Only an operator where `await` is in scope. Elsewhere it is an ordinary
                 // identifier (`await` is contextual), so fall out of the switch and let the normal
                 // expression path handle it — oxc `js/expression.rs:89`.
-                if (!state.awaitOk) break;
+                if (!inCtx(state, CTX.Await)) break;
                 if (state.fnDepth === 0) state.sawTopLevelAwait = true;
                 nextToken(state);
                 const arg = parseUnary(state);
@@ -773,6 +773,8 @@ function parseNew(state: ParserState): Node {
 }
 
 function parseArgs(state: ParserState): Node[] {
+    const outerCtx = state.ctx;
+    state.ctx &= ~CTX.Decorator;
     nextToken(state);
     const from = state.sp;
     while (!isP(state, P.RPAREN) && (state.tok as number) !== T_EOF) {
@@ -785,6 +787,7 @@ function parseArgs(state: ParserState): Node[] {
         if (!eatP(state, P.COMMA)) break;
     }
     expectP(state, P.RPAREN, "')'");
+    state.ctx = outerCtx;
     return finishList(state, from);
 }
 
@@ -799,6 +802,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
     let sawOptional = false;
     const finish = (e: Node): Node => {
         state.chainSawOptional = sawOptional;
+        if (sawOptional && inCtx(state, CTX.Decorator)) raiseAt(state, e.start, ParseErrorCode.DecoratorOptionalChain);
         return sawOptional ? create.ChainExpression(e.start, e.end, 0, e) : e;
     };
     for (;;) {
@@ -832,7 +836,7 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
                 const prop = parseNameAsIdent(state, R_NAME);
                 expr = create.StaticMemberExpression(expr.start, prop.end, FL.OPTIONAL, expr, prop);
             }
-        } else if (isP(state, P.LBRACKET)) {
+        } else if (isP(state, P.LBRACKET) && !inCtx(state, CTX.Decorator)) {
             nextToken(state);
             const prop = parseExpression(state);
             expectP(state, P.RBRACKET, "']'");
@@ -913,295 +917,194 @@ function parseTemplate(state: ParserState): Node {
 
 /** Is `c` a valid start char of a JSX identifier (letter / `_` / `$`, or any
  * non-ASCII treated as ident). */
-function isJSXIdentStart(c: number): boolean {
-    return c < 128 ? CHAR[c] === C_ID : c !== 0x2028 && c !== 0x2029;
-}
-
-function scanJSXName(state: ParserState): [number, number] {
-    const src = state.src,
-        srcLen = state.srcLen;
-    const start = state.pos;
-    let pos = state.pos + 1;
-    while (pos < srcLen) {
-        const c = src.charCodeAt(pos);
-        if (c < 128) {
-            const cl = CHAR[c];
-            if (cl === C_ID || cl === C_DIG || c === 45) {
-                pos++;
-                continue;
-            }
-            break;
-        }
-        if (c === 0x2028 || c === 0x2029) break;
-        pos++;
+/** Consume `>` WITHOUT lexing past it: what follows is child text, not a token. */
+function eatJSXGt(state: ParserState): number {
+    if (!isP(state, P.GT)) {
+        raise(state, ParseErrorCode.ExpectedInJSX, "'>'");
+        return state.tokStart;
     }
-    state.pos = pos;
-    return [start, pos];
+    state.pos = state.tokEnd;
+    return state.tokEnd;
 }
 
-/** Skip whitespace/newlines inside a JSX tag interior. (Line starts are built deferred.) */
-function skipJSXTagWs(state: ParserState): void {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let pos = state.pos;
-    while (pos < srcLen) {
-        const c = src.charCodeAt(pos);
-        if (c < 128 ? CHAR[c] === C_WS || CHAR[c] === C_NL : c === 0x2028 || c === 0x2029 || c === 0xa0 || c === 0xfeff) {
-            pos++;
-            continue;
-        }
-        break;
-    }
-    state.pos = pos;
-}
-
-/** A JSXIdentifier leaf (data:null, raw name in the name slot). */
-function jsxIdent(state: ParserState, start: number, end: number): Node {
-    return node(N.JSXIdentifier, start, end, sliceFlat(state, start, end), null);
-}
-
-function parseJSXName(state: ParserState): Node {
-    const src = state.src,
-        srcLen = state.srcLen;
-    skipJSXTagWs(state);
-    if (!isJSXIdentStart(src.charCodeAt(state.pos))) {
+function parseJSXIdentifier(state: ParserState): Node {
+    if (!isNameLike(state)) {
         raise(state, ParseErrorCode.ExpectedJSXName);
         return makeMissingIdent(state, R_NAME);
     }
-    const [s0, e0] = scanJSXName(state);
-    const first = src.charCodeAt(s0);
-    if (state.pos < srcLen && src.charCodeAt(state.pos) === 58) {
-        state.pos++;
-        const [s1, e1] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1));
+    reScanJSXIdentifier(state);
+    const n = node(N.JSXIdentifier, state.tokStart, state.tokEnd, sliceFlat(state, state.tokStart, state.tokEnd), null);
+    nextToken(state);
+    return n;
+}
+
+/** `<a:b>`, `<A.B.C>`, `<this.X>`, or a plain `<div>`. */
+function parseJSXElementName(state: ParserState): Node {
+    const first = parseJSXIdentifier(state);
+    if (isP(state, P.COLON)) {
+        nextToken(state);
+        return create.JSXNamespacedName(first.start, state.tokStart, 0, first, parseJSXIdentifier(state));
     }
-    if (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
-        const isThis = e0 - s0 === 4 && src.startsWith('this', s0);
-        let obj: Node = isThis ? recordThis(state, create.ThisExpression(s0, e0, 0)) : ident(state, R_REF, s0, e0);
-        while (state.pos < srcLen && src.charCodeAt(state.pos) === 46) {
-            state.pos++;
-            const [ps, pe] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-            obj = create.JSXMemberExpression(s0, pe, 0, obj, jsxIdent(state, ps, pe));
-        }
+    if (isP(state, P.DOT)) {
+        const isThis = first.name === 'this';
+        let obj: Node = isThis
+            ? recordThis(state, create.ThisExpression(first.start, first.end, 0))
+            : ident(state, R_REF, first.start, first.end);
+        while (eatP(state, P.DOT)) obj = create.JSXMemberExpression(first.start, state.tokStart, 0, obj, parseJSXIdentifier(state));
         return obj;
     }
-    if (e0 - s0 === 4 && first === 116 && src.startsWith('this', s0)) return recordThis(state, create.ThisExpression(s0, e0, 0));
-    if (first >= 65 && first <= 90) return ident(state, R_REF, s0, e0);
-    return jsxIdent(state, s0, e0);
+    if (first.name === 'this') return recordThis(state, create.ThisExpression(first.start, first.end, 0));
+    const c = state.src.charCodeAt(first.start);
+    return c >= 65 && c <= 90 ? ident(state, R_REF, first.start, first.end) : first;
 }
 
-/** Parse a JSX attribute name: JSXIdentifier or JSXNamespacedName (`a:b`). Pos-driven. */
 function parseJSXAttributeName(state: ParserState): Node {
-    const src = state.src,
-        srcLen = state.srcLen;
-    const [s0, e0] = scanJSXName(state);
-    if (state.pos < srcLen && src.charCodeAt(state.pos) === 58) {
-        state.pos++;
-        const [s1, e1] = isJSXIdentStart(src.charCodeAt(state.pos)) ? scanJSXName(state) : [state.pos, state.pos];
-        return create.JSXNamespacedName(s0, e1, 0, jsxIdent(state, s0, e0), jsxIdent(state, s1, e1));
-    }
-    return jsxIdent(state, s0, e0);
+    const first = parseJSXIdentifier(state);
+    if (!isP(state, P.COLON)) return first;
+    nextToken(state);
+    return create.JSXNamespacedName(first.start, state.tokStart, 0, first, parseJSXIdentifier(state));
 }
 
+/** `{ … }` in child or attribute position; the current token is `{`. */
 function parseJSXBrace(state: ParserState, inChildren: boolean): Node {
-    const bracePos = state.pos;
-    state.pos = bracePos + 1;
+    const start = state.tokStart;
     nextToken(state);
-    let node: Node;
+    let inner: Node;
     if (isP(state, P.DOTDOTDOT)) {
         nextToken(state);
         const arg = parseAssign(state);
-        node = inChildren
-            ? create.JSXSpreadChild(bracePos, state.tokEnd, 0, arg)
-            : create.JSXExpressionContainer(bracePos, state.tokEnd, 0, arg);
+        inner = inChildren
+            ? create.JSXSpreadChild(start, state.tokEnd, 0, arg)
+            : create.JSXExpressionContainer(start, state.tokEnd, 0, arg);
     } else if (isP(state, P.RBRACE)) {
-        node = create.JSXExpressionContainer(
-            bracePos,
-            state.tokEnd,
-            0,
-            create.JSXEmptyExpression(bracePos + 1, state.tokStart, 0),
-        );
+        inner = create.JSXExpressionContainer(start, state.tokEnd, 0, create.JSXEmptyExpression(start + 1, state.tokStart, 0));
     } else {
-        const expr = parseExpression(state);
-        node = create.JSXExpressionContainer(bracePos, state.tokEnd, 0, expr);
+        inner = create.JSXExpressionContainer(start, state.tokEnd, 0, parseExpression(state));
     }
-    if (isP(state, P.RBRACE)) {
-        state.pos = state.tokEnd;
-    } else {
-        raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
-        state.pos = state.tokStart;
-    }
-    return node;
+    if (!isP(state, P.RBRACE)) raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
+    return inner;
 }
 
 function parseJSXSpreadAttribute(state: ParserState): Node {
-    const bracePos = state.pos;
-    state.pos = bracePos + 1;
+    const start = state.tokStart;
     nextToken(state);
     if (!eatP(state, P.DOTDOTDOT)) raise(state, ParseErrorCode.ExpectedJSXSpread);
     const arg = parseAssign(state);
-    const node = create.JSXSpreadAttribute(bracePos, state.tokEnd, 0, arg);
-    if (isP(state, P.RBRACE)) {
-        state.pos = state.tokEnd;
-    } else {
-        raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
-        state.pos = state.tokStart;
-    }
-    return node;
+    const n = create.JSXSpreadAttribute(start, state.tokEnd, 0, arg);
+    if (!isP(state, P.RBRACE)) raise(state, ParseErrorCode.ExpectedInJSX, "'}'");
+    nextToken(state);
+    return n;
 }
 
-/** Parse opening-tag attributes. Pos-driven; `pos` sits just past the name.
- * Leaves `pos` on `>` or `/`. */
 function parseJSXAttributes(state: ParserState): Node[] {
-    const src = state.src,
-        srcLen = state.srcLen;
     const from = state.sp;
-    for (;;) {
-        skipJSXTagWs(state);
-        const c = state.pos < srcLen ? src.charCodeAt(state.pos) : 0;
-        if (c === 62 || c === 47 || c === 0) break;
-        if (c === 123) {
+    while (!isP(state, P.GT) && !isP(state, P.SLASH) && (state.tok as number) !== T_EOF) {
+        if (isP(state, P.LBRACE)) {
             push(state, parseJSXSpreadAttribute(state));
             continue;
         }
-        if (!isJSXIdentStart(c)) {
+        if (!isNameLike(state)) {
             raise(state, ParseErrorCode.UnexpectedCharInJSXAttrs);
-            state.pos++;
+            nextToken(state);
             continue;
         }
         const name = parseJSXAttributeName(state);
-        const nameEnd = state.pos;
-        skipJSXTagWs(state);
         let value: Ref = null;
-        let end = nameEnd;
-        if (state.pos < srcLen && src.charCodeAt(state.pos) === 61) {
-            state.pos++;
-            skipJSXTagWs(state);
-            const vc = state.pos < srcLen ? src.charCodeAt(state.pos) : 0;
-            if (vc === 34 || vc === 39) {
-                const vs = state.pos;
-                state.pos++;
-                while (state.pos < srcLen && src.charCodeAt(state.pos) !== vc) {
-                    state.pos++;
-                }
-                state.pos++;
-                value = leafRaw(state, N.StringLiteral, vs, state.pos);
-                end = state.pos;
-            } else if (vc === 123) {
+        let end = state.tokStart;
+        if (isP(state, P.EQ)) {
+            nextJSXAttributeValue(state);
+            if ((state.tok as number) === T_STR) {
+                value = leafRaw(state, N.StringLiteral, state.tokStart, state.tokEnd);
+                end = state.tokEnd;
+                nextToken(state);
+            } else if (isP(state, P.LBRACE)) {
                 value = parseJSXBrace(state, false);
-                end = state.pos;
-            } else if (vc === 60) {
-                value = parseJSXNested(state);
-                end = state.pos;
-            } else {
-                raise(state, ParseErrorCode.ExpectedJSXAttrValue);
-            }
+                end = state.tokEnd;
+                nextToken(state);
+            } else if (isP(state, P.LT)) {
+                value = parseJSXElement(state);
+                end = value.end;
+                nextToken(state);
+            } else raise(state, ParseErrorCode.ExpectedJSXAttrValue);
         }
         push(state, create.JSXAttribute(name.start, end, 0, name, value));
     }
     return finishList(state, from);
 }
 
-/** Parse JSX children (pos-driven). On entry `pos` sits just after the opening
- * `>`; leaves `pos` on the closing-tag `<`. */
+/** Children of an element whose `>` has just been consumed. Leaves the token on the closing `<`. */
 function parseJSXChildren(state: ParserState): Node[] {
-    const src = state.src,
-        srcLen = state.srcLen;
     const from = state.sp;
     for (;;) {
-        const textStart = state.pos;
-        while (state.pos < srcLen) {
-            const c = src.charCodeAt(state.pos);
-            if (c === 60 || c === 123) break;
-            state.pos++;
+        nextJSXChild(state);
+        if ((state.tok as number) === T_JSX_TEXT) {
+            push(state, node(N.JSXText, state.tokStart, state.tokEnd, sliceFlat(state, state.tokStart, state.tokEnd), null));
+            continue;
         }
-        if (state.pos > textStart)
-            push(state, node(N.JSXText, textStart, state.pos, sliceFlat(state, textStart, state.pos), null));
-        if (state.pos >= srcLen) {
+        if ((state.tok as number) === T_EOF) {
             raise(state, ParseErrorCode.UnterminatedJSXElement);
             break;
         }
-        const c = src.charCodeAt(state.pos);
-        if (c === 123) {
+        if (isP(state, P.LBRACE)) {
             push(state, parseJSXBrace(state, true));
             continue;
         }
-        if (src.charCodeAt(state.pos + 1) === 47) break;
-        push(state, parseJSXNested(state));
+        if (state.src.charCodeAt(state.tokStart + 1) === 47) break;
+        push(state, parseJSXElement(state));
     }
     return from === state.sp ? [] : finishList(state, from);
 }
 
-/** Parse a nested JSX element/fragment in child or attribute-value position. `pos`
- * sits on `<`. Pure raw scan (no lexer sync — the outermost parseJSXRoot resyncs). */
-function parseJSXNested(state: ParserState): Node {
-    const src = state.src,
-        srcLen = state.srcLen;
-    const start = state.pos;
-    state.pos++;
-    skipJSXTagWs(state);
-    if (state.pos < srcLen && src.charCodeAt(state.pos) === 62) {
-        const openFrag = create.JSXOpeningFragment(start, state.pos + 1, 0);
-        state.pos++;
+/** An element or fragment whose `<` is the current token. Leaves the token AFTER the closing `>`. */
+function parseJSXElement(state: ParserState): Node {
+    const start = state.tokStart;
+    nextToken(state);
+    if (isP(state, P.GT)) {
+        const open = create.JSXOpeningFragment(start, eatJSXGt(state), 0);
         const children = parseJSXChildren(state);
-        const closeStart = state.pos;
-        state.pos += 2;
-        skipJSXTagWs(state);
-        expectRawChar(state, 62, "'>'");
-        const closeFrag = create.JSXClosingFragment(closeStart, state.pos, 0);
-        return create.JSXFragment(start, state.pos, 0, openFrag, children, closeFrag);
-    }
-    const name = parseJSXName(state);
-    let typeArgs: Ref = null;
-    if (state.tsMode && state.pos < srcLen && src.charCodeAt(state.pos) === 60) {
+        const closeStart = state.tokStart;
         nextToken(state);
+        expectP(state, P.SLASH, "'/'");
+        const end = eatJSXGt(state);
+        return create.JSXFragment(start, end, 0, open, children, create.JSXClosingFragment(closeStart, end, 0));
+    }
+    const name = parseJSXElementName(state);
+    let typeArgs: Ref = null;
+    if (state.tsMode && isP(state, P.LT)) {
         const ta = tryParseTypeArgsInType(state);
-        if (ta !== null) {
-            typeArgs = ta;
-            state.pos = state.tokStart;
-        } else state.pos = state.tokStart;
+        if (ta !== null) typeArgs = ta;
     }
     const attrs = parseJSXAttributes(state);
-    skipJSXTagWs(state);
-    if (state.pos < srcLen && src.charCodeAt(state.pos) === 47) {
-        state.pos++;
-        skipJSXTagWs(state);
-        expectRawChar(state, 62, "'>'");
-        const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs);
-        return create.JSXElement(start, state.pos, 0, open, [], null);
+    if (eatP(state, P.SLASH)) {
+        const end = eatJSXGt(state);
+        return create.JSXElement(start, end, 0, create.JSXOpeningElement(start, end, 0, name, typeArgs, attrs), [], null);
     }
-    expectRawChar(state, 62, "'>'");
-    const open = create.JSXOpeningElement(start, state.pos, 0, name, typeArgs, attrs);
+    const open = create.JSXOpeningElement(start, eatJSXGt(state), 0, name, typeArgs, attrs);
     const children = parseJSXChildren(state);
-    const closeStart = state.pos;
-    state.pos += 2;
-    const closeName = parseJSXName(state);
-    skipJSXTagWs(state);
-    expectRawChar(state, 62, "'>'");
-    const close = create.JSXClosingElement(closeStart, state.pos, 0, closeName);
-    return create.JSXElement(start, state.pos, 0, open, children, close);
+    const closeStart = state.tokStart;
+    nextToken(state);
+    expectP(state, P.SLASH, "'/'");
+    const closeName = parseJSXElementName(state);
+    const end = eatJSXGt(state);
+    return create.JSXElement(start, end, 0, open, children, create.JSXClosingElement(closeStart, end, 0, closeName));
 }
 
 function parseJSXRoot(state: ParserState): Node {
-    state.sawJSX = true; // per-module "uses JSX" flag, computed free during parse (esbuild model)
-    state.pos = state.tokStart;
-    const node = parseJSXNested(state);
+    state.sawJSX = true;
+    const n = parseJSXElement(state);
     nextToken(state);
-    return node;
-}
-
-/** Consume the exact raw char `ch` at `pos` (advancing past it); error otherwise. */
-function expectRawChar(state: ParserState, ch: number, what: string): void {
-    if (state.pos < state.srcLen && state.src.charCodeAt(state.pos) === ch) {
-        state.pos++;
-        return;
-    }
-    raise(state, ParseErrorCode.ExpectedInJSX, what);
+    return n;
 }
 
 function parsePrimary(state: ParserState): Node {
     const start = state.tokStart;
     switch (state.tok as number) {
+        case P.AT: {
+            const decorators = parseDecorators(state);
+            if (isK(state, K.CLASS)) return parseClass(state, true, 0, start, decorators);
+            raise(state, ParseErrorCode.DecoratorsUnsupported);
+            return parsePrimary(state);
+        }
         case T_NUM: {
             const n = leaf(state, N.NumericLiteral, start, state.tokEnd);
             nextToken(state);
@@ -1373,8 +1276,8 @@ function parseObjectMember(state: ParserState): Node {
     } else if ((state.tok as number) === T_STR) {
         key = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
-    } else if (state.tok === T_NUM) {
-        key = leaf(state, N.NumericLiteral, state.tokStart, state.tokEnd);
+    } else if (state.tok === T_NUM || (state.tok as number) === T_BIGINT) {
+        key = leaf(state, (state.tok as number) === T_BIGINT ? N.BigIntLiteral : N.NumericLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
     } else key = parseNameAsIdent(state, R_NAME);
 
@@ -1703,12 +1606,12 @@ function tryParseArrow(
  */
 function parseArrowParams(state: ParserState, flags: number): Node[] {
     if ((flags & FL.ASYNC) === 0) return parseParams(state);
-    const outerAwait = state.awaitOk;
-    state.awaitOk = true;
+    const outerCtx = state.ctx;
+    state.ctx |= CTX.Await;
     state.fnDepth++;
     const params = parseParams(state);
     state.fnDepth--;
-    state.awaitOk = outerAwait;
+    state.ctx = outerCtx;
     return params;
 }
 
@@ -1824,8 +1727,8 @@ function parseBindingTarget(state: ParserState): Node {
                 } else if ((state.tok as number) === T_STR) {
                     key = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
                     nextToken(state);
-                } else if (state.tok === T_NUM) {
-                    key = leaf(state, N.NumericLiteral, state.tokStart, state.tokEnd);
+                } else if (state.tok === T_NUM || (state.tok as number) === T_BIGINT) {
+                    key = leaf(state, (state.tok as number) === T_BIGINT ? N.BigIntLiteral : N.NumericLiteral, state.tokStart, state.tokEnd);
                     nextToken(state);
                 } else key = parseNameAsIdent(state, R_NAME);
                 let value: Node;
@@ -1863,7 +1766,6 @@ function parseBindingElement(state: ParserState): Node {
 }
 
 function parseParams(state: ParserState): Node[] {
-    const src = state.src;
     expectP(state, P.LPAREN, "'('");
     const from = state.sp;
     while (!isP(state, P.RPAREN) && (state.tok as number) !== T_EOF) {
@@ -1881,20 +1783,8 @@ function parseParams(state: ParserState): Node[] {
                     !nextIsParamNameEnd(state)
                 )
                     nextToken(state);
-                else if (
-                    state.tok === T_IDENT &&
-                    (src.startsWith('public', state.tokStart) ||
-                        src.startsWith('private', state.tokStart) ||
-                        src.startsWith('protected', state.tokStart)) &&
-                    state.tokEnd - state.tokStart <= 9 &&
-                    !nextIsParamNameEnd(state)
-                ) {
-                    const access = src.startsWith('public', state.tokStart)
-                        ? 1
-                        : src.startsWith('private', state.tokStart)
-                          ? 2
-                          : 3;
-                    flags |= access << FL.ACCESS_SHIFT;
+                else if (isAccessModifier(state) && !nextIsParamNameEnd(state)) {
+                    flags |= accessLevelOf(state.tok) << FL.ACCESS_SHIFT;
                     nextToken(state);
                 } else break;
             }
@@ -1965,15 +1855,12 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
         // yield() {} }` is not. Suppressing the flags only across the NAME is what separates them;
         // reading the same context for both rejected 3 valid test262 programs.
         const isFnExpr = !isDecl || isExpr;
-        const outerYield = state.yieldOk;
-        const outerAwait = state.awaitOk;
+        const outerCtx = state.ctx;
         if (isFnExpr) {
-            state.yieldOk = false;
-            state.awaitOk = false;
+            state.ctx &= ~(CTX.Yield | CTX.Await);
         }
         id = parseIdent(state, R_BIND);
-        state.yieldOk = outerYield;
-        state.awaitOk = outerAwait;
+        state.ctx = outerCtx;
     }
     let typeParams: Ref = null;
     if (state.tsMode && isP(state, P.LT)) {
@@ -1991,7 +1878,24 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
         : create.FunctionExpression(start, state.tokStart, flags, id, typeParams, params, returnType, body);
 }
 
-function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, startOverride = -1): Node {
+function parseDecorators(state: ParserState): Node[] {
+    if (!isP(state, P.AT)) return EMPTY_LIST;
+    const from = state.sp;
+    while (isP(state, P.AT)) push(state, parseDecorator(state));
+    return finishList(state, from);
+}
+
+function parseDecorator(state: ParserState): Node {
+    const start = state.tokStart;
+    nextToken(state);
+    const outerCtx = state.ctx;
+    state.ctx |= CTX.Decorator;
+    const expr = parseMemberChain(state, parsePrimary(state), true);
+    state.ctx = outerCtx;
+    return create.Decorator(start, expr.end, 0, expr);
+}
+
+function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, startOverride = -1, decorators: Node[] = EMPTY_LIST): Node {
     const start = startOverride >= 0 ? startOverride : state.tokStart;
     nextToken(state);
     let id: Ref = null;
@@ -2033,8 +1937,8 @@ function parseClass(state: ParserState, isExpr: boolean, extraFlags: number, sta
     const body = parseClassBody(state);
     state.thisDepth--;
     return isExpr
-        ? create.ClassExpression(start, state.tokStart, extraFlags, id, typeParams, superClass, superTypeArgs, impls, body)
-        : create.ClassDeclaration(start, state.tokStart, extraFlags, id, typeParams, superClass, superTypeArgs, impls, body);
+        ? create.ClassExpression(start, state.tokStart, extraFlags, decorators, id, typeParams, superClass, superTypeArgs, impls, body)
+        : create.ClassDeclaration(start, state.tokStart, extraFlags, decorators, id, typeParams, superClass, superTypeArgs, impls, body);
 }
 
 function parseClassBody(state: ParserState): Node[] {
@@ -2055,9 +1959,14 @@ function parseClassBody(state: ParserState): Node[] {
     return finishList(state, from);
 }
 
+const nameIs = (state: ParserState, key: Node, name: string): boolean => {
+    const from = key.type === N.StringLiteral ? key.start + 1 : key.start;
+    return key.end - key.start === name.length + (key.type === N.StringLiteral ? 2 : 0) && state.src.startsWith(name, from);
+};
+
 function parseClassMember(state: ParserState): Node {
-    const src = state.src;
     const start = state.tokStart;
+    const decorators = parseDecorators(state);
     let flags = 0;
     let async = false;
     let generator = false;
@@ -2069,10 +1978,10 @@ function parseClassMember(state: ParserState): Node {
                 // A class static block enables `new.target` but NOT `return` — hence bumping only
                 // the new.target depth (oxc `js/function.rs:285`, `js/statement.rs:710-713`).
                 state.newTargetDepth++;
-                const outerAwait = state.awaitOk; // a static block is not an async context
-                state.awaitOk = false;
+                const outerCtx = state.ctx; // a static block is not an async context
+                state.ctx &= ~CTX.Await;
                 const b = parseBlock(state);
-                state.awaitOk = outerAwait;
+                state.ctx = outerCtx;
                 state.newTargetDepth--;
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
                 return create.StaticBlock(start, state.tokStart, 0, body);
@@ -2080,9 +1989,8 @@ function parseClassMember(state: ParserState): Node {
             restoreState(state, s);
             flags |= FL.STATIC;
             nextToken(state);
-        } else if (state.tok === T_IDENT && !nextIsPropertyEnd(state) && isAccessModifier(state)) {
-            const access = src.startsWith('public', state.tokStart) ? 1 : src.startsWith('private', state.tokStart) ? 2 : 3;
-            flags |= access << FL.ACCESS_SHIFT;
+        } else if (isAccessModifier(state) && !nextIsPropertyEnd(state)) {
+            flags |= accessLevelOf(state.tok) << FL.ACCESS_SHIFT;
             nextToken(state);
         } else if (isK(state, K.READONLY) && !nextIsPropertyEnd(state)) {
             flags |= FL.READONLY;
@@ -2133,8 +2041,8 @@ function parseClassMember(state: ParserState): Node {
     } else if ((state.tok as number) === T_STR) {
         key = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
-    } else if (state.tok === T_NUM) {
-        key = leaf(state, N.NumericLiteral, state.tokStart, state.tokEnd);
+    } else if (state.tok === T_NUM || (state.tok as number) === T_BIGINT) {
+        key = leaf(state, (state.tok as number) === T_BIGINT ? N.BigIntLiteral : N.NumericLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
     } else if (state.tok === T_PRIVATE) key = parsePrivate(state);
     else key = parseNameAsIdent(state, R_NAME);
@@ -2145,13 +2053,12 @@ function parseClassMember(state: ParserState): Node {
     const namedConstructor =
         (flags & (FL.STATIC | FL.COMPUTED)) === 0 &&
         (key.type === N.IdentifierName || key.type === N.StringLiteral) &&
-        src.startsWith('constructor', key.type === N.StringLiteral ? key.start + 1 : key.start) &&
-        key.end - key.start === (key.type === N.StringLiteral ? 13 : 11);
+        nameIs(state, key, 'constructor');
     if (kind === 0 && namedConstructor) kind = 3;
     // Early errors on the constructor's FORM (oxc `diagnostics.rs:547,603` and the class checker).
     // The grammar happily parses each of these; only the name makes them illegal.
     // `#constructor` is reserved outright — static or not, method or field (`diagnostics.rs:534`).
-    if (key.type === N.PrivateIdentifier && key.end - key.start === 12 && src.startsWith('#constructor', key.start))
+    if (key.type === N.PrivateIdentifier && nameIs(state, key, '#constructor'))
         raise(state, ParseErrorCode.PrivateNameConstructor);
     if (namedConstructor) {
         if (generator) raise(state, ParseErrorCode.ConstructorGenerator);
@@ -2166,7 +2073,7 @@ function parseClassMember(state: ParserState): Node {
 
     if (kind !== 0 || async || generator || isP(state, P.LPAREN) || (state.tsMode && isP(state, P.LT))) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
-        return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), key, fn);
+        return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), decorators, key, fn);
     }
     if (state.tsMode && isP(state, P.BANG)) {
         flags |= FL.DEFINITE;
@@ -2180,18 +2087,13 @@ function parseClassMember(state: ParserState): Node {
         value = parseAssign(state);
     }
     consumeSemi(state);
-    return create.PropertyDefinition(start, state.tokStart, flags, key, typeAnn, value);
+    return create.PropertyDefinition(start, state.tokStart, flags, decorators, key, typeAnn, value);
 }
 
-function isAccessModifier(state: ParserState): boolean {
-    const src = state.src;
-    const len = state.tokEnd - state.tokStart;
-    return (
-        (len === 6 && src.startsWith('public', state.tokStart)) ||
-        (len === 7 && src.startsWith('private', state.tokStart)) ||
-        (len === 9 && src.startsWith('protected', state.tokStart))
-    );
-}
+const isAccessModifier = (state: ParserState): boolean =>
+    state.tok === K.PUBLIC || state.tok === K.PRIVATE || state.tok === K.PROTECTED;
+
+const accessLevelOf = (tok: number): number => (tok === K.PUBLIC ? 1 : tok === K.PRIVATE ? 2 : 3);
 
 /** Enter a function's scope for the duration of `parse`, whatever body FORM it has. An arrow with an
  *  EXPRESSION body (`async x => await y`) is still a function boundary: it scopes `await` and
@@ -2205,13 +2107,12 @@ function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T
     // while `function f(){ () => new.target }` is fine because `f` supplied it.
     if (!arrow) state.newTargetDepth++;
     if (!arrow) state.thisDepth++;
-    const outerAwait = state.awaitOk;
-    const outerYield = state.yieldOk;
-    state.awaitOk = isAsync; // REPLACED, not unioned — a non-async function inherits no `await`
-    state.yieldOk = isGenerator; // likewise: an arrow, or a plain function nested in a generator, has none
+    // REPLACED, not unioned: a non-async function inherits no `await`, and an arrow or a plain
+    // function nested in a generator inherits no `yield`.
+    const outerCtx = state.ctx;
+    state.ctx = (state.ctx & ~(CTX.Await | CTX.Yield)) | (isAsync ? CTX.Await : 0) | (isGenerator ? CTX.Yield : 0);
     const out = parse();
-    state.awaitOk = outerAwait;
-    state.yieldOk = outerYield;
+    state.ctx = outerCtx;
     if (!arrow) state.thisDepth--;
     if (!arrow) state.newTargetDepth--;
     state.fnDepth--;
@@ -2230,18 +2131,24 @@ function parseBlock(state: ParserState): Node {
     const from = state.sp;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         const mark = state.tokStart;
-        push(state, parseStatement(state));
+        push(state, parseStatement(state, false));
         if (noProgress(state, mark)) break;
     }
     expectP(state, P.RBRACE, "'}'");
     return create.BlockStatement(start, state.tokStart, 0, finishList(state, from));
 }
 
-function parseStatement(state: ParserState): Node {
+/** oxc `Kind::is_after_let` (`lexer/kind.rs:298`). */
+const isAfterLet = (tok: number): boolean =>
+    tok !== K.IN &&
+    tok !== K.INSTANCEOF &&
+    (tok === P.LBRACE || tok === P.LBRACKET || tok === T_IDENT || isKeyword(tok));
+
+function parseStatement(state: ParserState, single: boolean): Node {
     // Consume the module-scope flag: this statement may be an `import`/`export`, and every statement
     // it goes on to nest may not.
-    const atModuleScope = state.moduleScope;
-    state.moduleScope = false;
+    const atModuleScope = inCtx(state, CTX.TopLevel);
+    state.ctx &= ~CTX.TopLevel;
     const start = state.tokStart;
     if (isPunct(state.tok)) {
         switch (state.tok as number) {
@@ -2250,10 +2157,13 @@ function parseStatement(state: ParserState): Node {
             case P.SEMI:
                 nextToken(state);
                 return create.EmptyStatement(start, state.tokStart, 0);
-            case P.AT:
+            case P.AT: {
+                const decorators = parseDecorators(state);
+                if (isK(state, K.CLASS)) return parseClass(state, false, 0, start, decorators);
+                if (isK(state, K.EXPORT)) return parseExport(state, decorators);
                 raise(state, ParseErrorCode.DecoratorsUnsupported);
-                nextToken(state);
-                return parseStatement(state);
+                return parseStatement(state, false);
+            }
         }
     }
     // `using r = res()` — explicit resource management. `using` is NOT a reserved word, so it is an
@@ -2264,9 +2174,7 @@ function parseStatement(state: ParserState): Node {
     // which parses `using [a] = r()` as a MEMBER assignment, `using = 1` as an assignment and
     // `using\n a = r()` as two statements — each of those has to stay an expression here. Both
     // oracles PARSE AND BUNDLE `using`, emitting it verbatim, so there is nothing to lower.
-    const usingAt = (): boolean =>
-        state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart);
-    if (usingAt()) {
+    if (isK(state, K.USING)) {
         const save = saveState(state);
         nextToken(state);
         const isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
@@ -2280,7 +2188,7 @@ function parseStatement(state: ParserState): Node {
         const save = saveState(state);
         nextToken(state);
         let isDecl = false;
-        if (usingAt() && (state.tokFlags & F_NL) === 0) {
+        if (isK(state, K.USING) && (state.tokFlags & F_NL) === 0) {
             nextToken(state);
             isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
         }
@@ -2317,8 +2225,10 @@ function parseStatement(state: ParserState): Node {
                 return parseVarDecl(state, VAR_KIND.CONST, 0);
             }
             case K.LET: {
-                // `let` may be a declaration (`let x` / `let {…}` / `let […]`) or an identifier in
-                // expression position. One-token peek with allocation-free scalar rewind (no array).
+                // `let` is a declaration or an ordinary identifier, and WHERE it appears decides.
+                // A LexicalDeclaration is not a Statement, so `if (x) let\n{}` is `let` as an
+                // identifier plus ASI, not a destructuring declaration. oxc's `parse_let`
+                // (`js/declaration.rs:9-38`), ordered the same way.
                 const p = state.pos,
                     tk = state.tok,
                     ts0 = state.tokStart,
@@ -2326,15 +2236,20 @@ function parseStatement(state: ParserState): Node {
                     tf = state.tokFlags,
                     th = state.tokHash;
                 nextToken(state);
-                const isDecl = isIdentLike(state) || isP(state, P.LBRACE) || isP(state, P.LBRACKET);
+                const peeked = state.tok;
                 state.pos = p;
                 state.tok = tk;
                 state.tokStart = ts0;
                 state.tokEnd = te;
                 state.tokFlags = tf;
                 state.tokHash = th;
-                if (isDecl) return parseVarDecl(state, VAR_KIND.LET, 0);
-                break;
+                if (!single && isAfterLet(peeked)) return parseVarDecl(state, VAR_KIND.LET, 0);
+                if (isAssignOp(peeked) || isBinaryOp(peeked)) break;
+                if (peeked === P.DOT || peeked === P.QDOT || peeked === P.LPAREN) break;
+                // `let [` stays a declaration even here: it is ambiguous with `let[a] = b` member
+                // assignment, so the position rule cannot settle it.
+                if ((single && peeked !== P.LBRACKET) || peeked === P.SEMI) break;
+                return parseVarDecl(state, VAR_KIND.LET, 0);
             }
             case K.FUNCTION:
                 return parseFunction(state, false, true, false);
@@ -2364,9 +2279,9 @@ function parseStatement(state: ParserState): Node {
                 expectP(state, P.LPAREN, "'('");
                 const test = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
-                const cons = parseStatement(state);
+                const cons = parseStatement(state, true);
                 let alt: Ref = null;
-                if (eatK(state, K.ELSE)) alt = parseStatement(state);
+                if (eatK(state, K.ELSE)) alt = parseStatement(state, true);
                 return create.IfStatement(start, state.tokStart, 0, test, cons, alt);
             }
             case K.FOR:
@@ -2385,12 +2300,12 @@ function parseStatement(state: ParserState): Node {
                 expectP(state, P.LPAREN, "'('");
                 const test = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
-                const body = parseStatement(state);
+                const body = parseStatement(state, true);
                 return create.WhileStatement(start, body.end, 0, test, body);
             }
             case K.DO: {
                 nextToken(state);
-                const body = parseStatement(state);
+                const body = parseStatement(state, true);
                 if (!eatK(state, K.WHILE)) raise(state, ParseErrorCode.Expected, "'while'");
                 expectP(state, P.LPAREN, "'('");
                 const test = parseExpression(state);
@@ -2424,7 +2339,7 @@ function parseStatement(state: ParserState): Node {
                         !isK(state, K.DEFAULT) &&
                         (state.tok as number) !== T_EOF
                     )
-                        push(state, parseStatement(state));
+                        push(state, parseStatement(state, false));
                     const body = finishList(state, bodyFrom);
                     push(state, create.SwitchCase(cs, state.tokStart, 0, test, body));
                     if (noProgress(state, mark)) break;
@@ -2539,36 +2454,36 @@ function parseStatement(state: ParserState): Node {
                     ) {
                         // `declare const x;` has no initializer BY DESIGN — an ambient declaration
                         // may not have one. oxc exempts the same way (`Context::Ambient`).
-                        const outerAmbient = state.ambient;
-                        state.ambient = true;
-                        const inner = parseStatement(state);
-                        state.ambient = outerAmbient;
+                        const outerCtx = state.ctx;
+                        state.ctx |= CTX.Ambient;
+                        const inner = parseStatement(state, false);
+                        state.ctx = outerCtx;
                         applyDeclare(inner, start);
                         return inner;
                     }
                     // `declare global { ... }` — ambient global augmentation; `global` is a
                     // contextual identifier here. Model it as a declare TSModuleDeclaration so
                     // emit erases the whole block (isErasableStatement).
-                    if ((state.tok as number) === T_IDENT && state.src.slice(state.tokStart, state.tokEnd) === 'global') {
+                    if (isK(state, K.GLOBAL)) {
                         const gid = parseIdent(state, R_BIND);
                         if (isP(state, P.LBRACE)) {
                             nextToken(state);
                             // `declare global { const G: number }` is ambient too — it reaches here
                             // rather than through the keyword list above, so it needs the flag set
                             // separately or the missing-initializer errors fire inside it.
-                            const outerAmbient = state.ambient;
-                            state.ambient = true;
+                            const outerCtx = state.ctx;
+                            state.ctx |= CTX.Ambient;
                             const from = state.sp;
                             while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
                                 const mark = state.tokStart;
                                 // A TypeScript namespace/module body is a module scope of its own:
                                 // `namespace N { export const y = 1 }` is the whole point of one.
                                 // esbuild threads this as `parseStmtOpts.isNamespaceScope`.
-                                state.moduleScope = true;
-                                push(state, parseStatement(state));
+                                state.ctx |= CTX.TopLevel;
+                                push(state, parseStatement(state, false));
                                 if (noProgress(state, mark)) break;
                             }
-                            state.ambient = outerAmbient;
+                            state.ctx = outerCtx;
                             expectP(state, P.RBRACE, "'}'");
                             const mod = create.TSModuleDeclaration(start, state.tokStart, 0, gid, finishList(state, from));
                             applyDeclare(mod, start);
@@ -2606,8 +2521,8 @@ function parseStatement(state: ParserState): Node {
                                 // A TypeScript namespace/module body is a module scope of its own:
                                 // `namespace N { export const y = 1 }` is the whole point of one.
                                 // esbuild threads this as `parseStmtOpts.isNamespaceScope`.
-                                state.moduleScope = true;
-                                push(state, parseStatement(state));
+                                state.ctx |= CTX.TopLevel;
+                                push(state, parseStatement(state, false));
                                 if (noProgress(state, mark)) break;
                             }
                             expectP(state, P.RBRACE, "'}'");
@@ -2622,7 +2537,7 @@ function parseStatement(state: ParserState): Node {
     const expr = parseExpression(state);
     if (expr.type === N.IdentifierReference && isP(state, P.COLON)) {
         nextToken(state);
-        const body = parseStatement(state);
+        const body = parseStatement(state, true);
         const label = ident(state, R_LABEL, expr.start, expr.end);
         return create.LabeledStatement(start, body.end, 0, label, body);
     }
@@ -2643,7 +2558,7 @@ function parseStatement(state: ParserState): Node {
  * from the for-in/for-of head, where the iteration supplies the value and no initializer is legal.
  */
 function checkMissingInit(state: ParserState, kind: number, target: Node, init: Ref, pos: number): void {
-    if (init !== null || state.ambient) return;
+    if (init !== null || inCtx(state, CTX.Ambient)) return;
     const k = kind & VAR_KIND.KIND_MASK;
     if (target.type !== N.BindingIdentifier) raiseAt(state, pos, ParseErrorCode.MissingInitInDestructuring);
     else if (k === VAR_KIND.CONST) raiseAt(state, pos, ParseErrorCode.MissingInitInConst);
@@ -2689,27 +2604,47 @@ function parseFor(state: ParserState, start: number): Node {
         // below; and `await using` is distinct from the `for await` on line above, which has already
         // been consumed into `flags`.
         let usingKind = 0;
-        const atUsing = (): boolean =>
-            state.tok === T_IDENT && state.tokEnd - state.tokStart === 5 && state.src.startsWith('using', state.tokStart);
         // The binding may not be `of`: the spec keeps `for (using of xs)` meaning "iterate into the
         // variable `using`", so `using` followed by `of` is never a declaration. oxc agrees.
-        const bindingFollows = (): boolean => isIdentLike(state) && !isK(state, K.OF) && (state.tokFlags & F_NL) === 0;
-        const save = saveState(state);
-        if (atUsing()) {
+        const bindingFollows = (awaited: boolean): boolean => {
+            if (!isIdentLike(state) || (state.tokFlags & F_NL) !== 0) return false;
+            if (awaited || !isK(state, K.OF)) return true;
+            // `for (using of xs)` iterates into a variable named `using` — UNLESS what follows the
+            // `of` shows it was the binding all along: `for (using of = null;;)`.
+            const saved = saveState(state);
             nextToken(state);
-            if (bindingFollows()) usingKind = VAR_KIND.USING;
+            const isBinding = isP(state, P.EQ) || isP(state, P.SEMI) || isP(state, P.COLON);
+            restoreState(state, saved);
+            return isBinding;
+        };
+        const save = saveState(state);
+        if (isK(state, K.USING)) {
+            nextToken(state);
+            if (bindingFollows(false)) usingKind = VAR_KIND.USING;
         } else if (isK(state, K.AWAIT)) {
             nextToken(state);
-            if (atUsing()) {
+            if (isK(state, K.USING)) {
                 nextToken(state);
-                if (bindingFollows()) usingKind = VAR_KIND.AWAIT_USING;
+                if (bindingFollows(true)) usingKind = VAR_KIND.AWAIT_USING;
             }
         }
         restoreState(state, save);
         // The shared path below consumes ONE token as the keyword, so `await using` needs its
         // `await` dropped here first.
         if (usingKind === VAR_KIND.AWAIT_USING) nextToken(state);
-        if (usingKind !== 0 || (isKeyword(state.tok) && (state.tok === K.VAR || state.tok === K.LET || state.tok === K.CONST))) {
+        // `for (let;;)` and `for (let in {})` are `let` the IDENTIFIER, not a declaration — the same
+        // one-token test the statement path uses (oxc `js/statement.rs:405-420`).
+        let letIsDecl = true;
+        if (isK(state, K.LET)) {
+            const saved = saveState(state);
+            nextToken(state);
+            letIsDecl = isAfterLet(state.tok);
+            restoreState(state, saved);
+        }
+        if (
+            usingKind !== 0 ||
+            (isKeyword(state.tok) && (state.tok === K.VAR || state.tok === K.CONST || (state.tok === K.LET && letIsDecl)))
+        ) {
             const kind =
                 usingKind !== 0
                     ? usingKind
@@ -2728,7 +2663,7 @@ function parseFor(state: ParserState, start: number): Node {
                 const decl = create.VariableDeclaration(ds, state.tokStart, kind, [dtor]);
                 const right = isOf ? parseAssign(state) : parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
-                const body = parseStatement(state);
+                const body = parseStatement(state, true);
                 return isOf
                     ? create.ForOfStatement(start, body.end, flags, decl, right, body)
                     : create.ForInStatement(start, body.end, 0, decl, right, body);
@@ -2775,7 +2710,7 @@ function parseFor(state: ParserState, start: number): Node {
                 nextToken(state);
                 const right = isOf ? parseAssign(state) : parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
-                const body = parseStatement(state);
+                const body = parseStatement(state, true);
                 return isOf
                     ? create.ForOfStatement(start, body.end, flags, init, right, body)
                     : create.ForInStatement(start, body.end, 0, init, right, body);
@@ -2789,7 +2724,7 @@ function parseFor(state: ParserState, start: number): Node {
     let update: Ref = null;
     if (!isP(state, P.RPAREN)) update = parseExpression(state);
     expectP(state, P.RPAREN, "')'");
-    const body = parseStatement(state);
+    const body = parseStatement(state, true);
     return create.ForStatement(start, body.end, 0, init, test, update, body);
 }
 
@@ -2913,10 +2848,9 @@ function parseImport(state: ParserState): Node {
     // the ones it REJECTS: `import source * as w`, `import defer d`, `import defer { a }`, and a
     // bare `import defer '…'` — `source` takes only a default binding, `defer` only a namespace.
     let phase: 'source' | 'defer' | null = null;
-    if (state.tok === T_IDENT && !isK(state, K.FROM)) {
-        const isSource = state.src.startsWith('source', state.tokStart) && state.tokEnd - state.tokStart === 6;
-        const isDefer = state.src.startsWith('defer', state.tokStart) && state.tokEnd - state.tokStart === 5;
-        if (isSource || isDefer) {
+    if (isK(state, K.SOURCE) || isK(state, K.DEFER)) {
+        const isSource = isK(state, K.SOURCE);
+        {
             const save = saveState(state);
             nextToken(state);
             if (isK(state, K.FROM) || isP(state, P.EQ)) restoreState(state, save);
@@ -2995,7 +2929,7 @@ function parseImportAttributes(state: ParserState): Node[] | null {
     // `assert` is not reserved, so guard on it being followed by `{` — otherwise `assert` could be
     // the start of the next statement entirely (`import 'x'\nassert(y)`).
     const isAssert =
-        !isWith && state.tok === T_IDENT && state.src.startsWith('assert', state.tokStart) && state.tokEnd - state.tokStart === 6;
+        !isWith && isK(state, K.ASSERT);
     if (!isWith && !isAssert) return null;
     if (isAssert) {
         const save = saveState(state);
@@ -3086,16 +3020,20 @@ function asyncFunctionFollows(state: ParserState): boolean {
     return yes;
 }
 
-function parseExport(state: ParserState): Node {
+function parseExport(state: ParserState, decorators: Node[] = EMPTY_LIST): Node {
     const start = state.tokStart;
     nextToken(state);
+    // `export @dec class C {}` as well as `@dec export class C {}`; oxc accepts both
+    // (`js/module.rs:479,685`).
+    if (isP(state, P.AT)) decorators = parseDecorators(state);
     if (eatK(state, K.DEFAULT)) {
+        if (isP(state, P.AT)) decorators = parseDecorators(state);
         let decl: Node;
         if (isK(state, K.FUNCTION)) decl = parseFunction(state, false, true, false);
         else if (isK(state, K.ASYNC) && asyncFunctionFollows(state)) {
             nextToken(state);
             decl = parseFunction(state, true, true, false);
-        } else if (isK(state, K.CLASS)) decl = parseClass(state, false, 0);
+        } else if (isK(state, K.CLASS)) decl = parseClass(state, false, 0, -1, decorators);
         else {
             decl = parseAssign(state);
             consumeSemi(state);
@@ -3122,7 +3060,7 @@ function parseExport(state: ParserState): Node {
             if ((state.tok as number) === T_STR) {
                 exported = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
                 nextToken(state);
-            } else exported = parseIdent(state, R_NAME);
+            } else exported = parseNameAsIdent(state, R_NAME);
         }
         if (!eatK(state, K.FROM)) raise(state, ParseErrorCode.Expected, "'from'");
         let source: Ref = null;
@@ -3179,8 +3117,8 @@ function parseExport(state: ParserState): Node {
     }
     // The DECLARATION an `export` prefixes is still at module scope — `export import X = o.Y` is a
     // TypeScript import-equals, and `parseStatement` cleared the flag on the way in here.
-    state.moduleScope = true;
-    const decl = parseStatement(state);
+    state.ctx |= CTX.TopLevel;
+    const decl = parseStatement(state, false);
     state.sawEsmExport = true;
     return create.ExportNamedDeclaration(start, state.tokStart, flags, decl, [], null);
 }
@@ -3256,39 +3194,40 @@ function parseEnum(state: ParserState, start: number, extraFlags: number): Node 
     return create.TSEnumDeclaration(start, state.tokStart, extraFlags, id, finishList(state, from));
 }
 
-function parseTypeAnn(state: ParserState): Node {
-    const start = state.tokStart;
-    expectP(state, P.COLON, "':'");
-    if (isK(state, K.ASSERTS)) {
-        nextToken(state);
-        if (isIdentLike(state) || isK(state, K.THIS)) nextToken(state);
-        if (eatK(state, K.IS)) parseType(state);
-        return create.TSTypeAnnotation(start, state.tokStart, 0, create.keyword(start, state.tokStart, N.TSAnyKeyword));
-    }
-    // Type predicate `x is T` / `this is T`: detect the `is` with an allocation-free scalar
-    // rewind (fires on every ident-led annotation, e.g. `: Foo`), and only when the annotation
-    // actually starts with an ident/`this` — object/tuple/paren types skip the peek entirely.
+const predicateName = (state: ParserState): Node =>
+    isK(state, K.THIS) ? create.keyword(state.tokStart, state.tokEnd, N.TSThisType) : parseNameAsIdent(state, R_NAME);
+
+/** `x is T` / `this is T`. Only legal where a RETURN type is expected. */
+function parseTypeOrPredicate(state: ParserState): Node {
     if (isIdentLike(state) || isK(state, K.THIS)) {
-        const p = state.pos,
-            tk = state.tok,
-            ts0 = state.tokStart,
-            te = state.tokEnd,
-            tf = state.tokFlags,
-            th = state.tokHash;
-        nextToken(state);
+        const pos = state.pos,
+            tok = state.tok,
+            tokStart = state.tokStart,
+            tokEnd = state.tokEnd,
+            tokFlags = state.tokFlags,
+            tokHash = state.tokHash;
+        const start = state.tokStart;
+        const name = predicateName(state);
+        if (isK(state, K.THIS)) nextToken(state);
         if (isK(state, K.IS)) {
             nextToken(state);
             const ty = parseType(state);
-            return create.TSTypeAnnotation(start, state.tokStart, 0, ty);
+            return create.TSTypePredicate(start, ty.end, 0, name, create.TSTypeAnnotation(ty.start, ty.end, 0, ty));
         }
-        state.pos = p;
-        state.tok = tk;
-        state.tokStart = ts0;
-        state.tokEnd = te;
-        state.tokFlags = tf;
-        state.tokHash = th;
+        state.pos = pos;
+        state.tok = tok;
+        state.tokStart = tokStart;
+        state.tokEnd = tokEnd;
+        state.tokFlags = tokFlags;
+        state.tokHash = tokHash;
     }
-    const ty = parseType(state);
+    return parseType(state);
+}
+
+function parseTypeAnn(state: ParserState): Node {
+    const start = state.tokStart;
+    expectP(state, P.COLON, "':'");
+    const ty = parseTypeOrPredicate(state);
     return create.TSTypeAnnotation(start, ty.end, 0, ty);
 }
 
@@ -3296,41 +3235,61 @@ function parseTypeAnn(state: ParserState): Node {
  * conditional). Nested bracketed types (`(T)`, `{…}`, `T[…]`, `<…>`) route back through this,
  * so disallow-conditional state never leaks across a bracket boundary — matching oxc/TS. */
 function parseType(state: ParserState): Node {
-    const saved = state.noCondType;
-    state.noCondType = false;
+    const outerCtx = state.ctx;
+    state.ctx &= ~CTX.DisallowConditionalTypes;
     const t = parseTypeInner(state);
-    state.noCondType = saved;
+    state.ctx = outerCtx;
     return t;
 }
 
 function parseTypeInner(state: ParserState): Node {
+    // `asserts x` / `asserts x is T` is a type in its own right, legal wherever a type may start.
+    if (isK(state, K.ASSERTS)) {
+        const start = state.tokStart;
+        nextToken(state);
+        const name = predicateName(state);
+        if (isK(state, K.THIS)) nextToken(state);
+        let ann: Ref = null;
+        if (eatK(state, K.IS)) {
+            const ty = parseType(state);
+            ann = create.TSTypeAnnotation(ty.start, ty.end, 0, ty);
+        }
+        return create.TSTypePredicate(start, state.tokStart, FL.ASSERTS, name, ann);
+    }
     if (isP(state, P.LPAREN) && fnTypeAhead(state)) return parseFnType(state, 0, null);
     if (isP(state, P.LT)) {
         const tp = tryParseTypeParams(state);
         if (tp !== null) return parseFnType(state, 0, tp);
     }
-    if (isK(state, K.NEW)) {
+    if (isK(state, K.NEW)) return parseConstructorType(state, state.tokStart, 0);
+    if (isK(state, K.ABSTRACT)) {
+        const saved = saveState(state);
         const start = state.tokStart;
         nextToken(state);
-        let tp: Ref = null;
-        if (isP(state, P.LT)) {
-            const t = tryParseTypeParams(state);
-            if (t !== null) tp = t;
-        }
-        const params = parseParams(state);
-        expectP(state, P.ARROW, "'=>'");
-        const ret = parseType(state);
-        const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret);
-        return create.TSConstructorType(start, state.tokStart, 0, tp, params, ann);
+        if (isK(state, K.NEW)) return parseConstructorType(state, start, FL.ABSTRACT);
+        restoreState(state, saved);
     }
     return parseConditionalTypeOrHigher(state);
+}
+
+function parseConstructorType(state: ParserState, start: number, flags: number): Node {
+    nextToken(state);
+    let tp: Ref = null;
+    if (isP(state, P.LT)) {
+        const t = tryParseTypeParams(state);
+        if (t !== null) tp = t;
+    }
+    const params = parseParams(state);
+    expectP(state, P.ARROW, "'=>'");
+    const ret = parseTypeOrPredicate(state);
+    return create.TSConstructorType(start, state.tokStart, flags, tp, params, create.TSTypeAnnotation(ret.start, ret.end, 0, ret));
 }
 
 function parseFnType(state: ParserState, abstractFlag: number, typeParams: Ref): Node {
     const start = state.tokStart;
     const params = parseParams(state);
     expectP(state, P.ARROW, "'=>'");
-    const ret = parseType(state);
+    const ret = parseTypeOrPredicate(state);
     const ann = create.TSTypeAnnotation(ret.start, ret.end, 0, ret);
     return create.TSFunctionType(start, state.tokStart, abstractFlag, typeParams, params, ann);
 }
@@ -3361,13 +3320,13 @@ function fnTypeAhead(state: ParserState): boolean {
 
 function parseConditionalTypeOrHigher(state: ParserState): Node {
     const checkType = parseUnionType(state);
-    // A conditional's extends-type is parsed with conditionals disallowed (`noCondType`), so a
+    // A conditional's extends-type is parsed with conditionals disallowed (`CTX.DisallowConditionalTypes`), so a
     // trailing `? … : …` there binds to THIS conditional, not a nested one.
-    if (state.noCondType || !isK(state, K.EXTENDS)) return checkType;
+    if (inCtx(state, CTX.DisallowConditionalTypes) || !isK(state, K.EXTENDS)) return checkType;
     nextToken(state);
-    state.noCondType = true;
+    state.ctx |= CTX.DisallowConditionalTypes;
     const extendsType = parseTypeInner(state);
-    state.noCondType = false;
+    state.ctx &= ~CTX.DisallowConditionalTypes;
     expectP(state, P.QUESTION, "'?'");
     const trueType = parseType(state);
     expectP(state, P.COLON, "':'");
@@ -3423,12 +3382,12 @@ function parseTypeOperator(state: ParserState): Node {
         let constraint: Ref = null;
         if (isK(state, K.EXTENDS)) {
             const s = saveState(state);
-            const inDisallow = state.noCondType;
+            const outerCtx = state.ctx;
             nextToken(state);
-            state.noCondType = true;
+            state.ctx |= CTX.DisallowConditionalTypes;
             const c = parseTypeInner(state);
-            state.noCondType = inDisallow;
-            if (inDisallow || !isP(state, P.QUESTION)) constraint = c;
+            state.ctx = outerCtx;
+            if (inCtx(state, CTX.DisallowConditionalTypes) || !isP(state, P.QUESTION)) constraint = c;
             else restoreState(state, s);
         }
         const tp = create.TSTypeParameter(name.start, state.tokStart, 0, name, constraint, null);
@@ -3451,6 +3410,44 @@ function parseTypePostfixAndCond(state: ParserState, t: Node): Node {
             }
         } else return t;
     }
+}
+
+function parseImportType(state: ParserState, start: number): Node {
+    nextToken(state);
+    expectP(state, P.LPAREN, "'('");
+    let source: Ref = null;
+    if ((state.tok as number) === T_STR) {
+        source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+        nextToken(state);
+    }
+    let options: Ref = null;
+    if (eatP(state, P.COMMA) && !isP(state, P.RPAREN)) options = parseAssign(state);
+    expectP(state, P.RPAREN, "')'");
+    let qualifier: Ref = null;
+    if (isP(state, P.DOT)) {
+        nextToken(state);
+        let q: Node = parseNameAsIdent(state, R_NAME);
+        while (isP(state, P.DOT)) {
+            nextToken(state);
+            const r = parseNameAsIdent(state, R_NAME);
+            q = create.TSQualifiedName(q.start, r.end, 0, q, r);
+        }
+        qualifier = q;
+    }
+    let targs: Ref = null;
+    if (isP(state, P.LT)) {
+        const t = tryParseTypeArgsInType(state);
+        if (t !== null) targs = t;
+    }
+    return create.TSImportType(
+        start,
+        state.tokStart,
+        0,
+        source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
+        options,
+        qualifier,
+        targs,
+    );
 }
 
 function parsePrimaryType(state: ParserState): Node {
@@ -3557,6 +3554,8 @@ function parsePrimaryType(state: ParserState): Node {
         if (isK(state, K.THIS)) {
             expr = create.ThisExpression(state.tokStart, state.tokEnd, 0);
             nextToken(state);
+        } else if (isK(state, K.IMPORT)) {
+            expr = parseImportType(state, state.tokStart);
         } else {
             expr = parseIdent(state, R_REF);
         }
@@ -3572,40 +3571,7 @@ function parsePrimaryType(state: ParserState): Node {
         }
         return create.TSTypeQuery(start, state.tokStart, 0, expr, targs);
     }
-    if (isK(state, K.IMPORT)) {
-        nextToken(state);
-        expectP(state, P.LPAREN, "'('");
-        let source: Ref = null;
-        if ((state.tok as number) === T_STR) {
-            source = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
-            nextToken(state);
-        }
-        expectP(state, P.RPAREN, "')'");
-        let qualifier: Ref = null;
-        if (isP(state, P.DOT)) {
-            nextToken(state);
-            let q: Node = parseNameAsIdent(state, R_NAME);
-            while (isP(state, P.DOT)) {
-                nextToken(state);
-                const r = parseNameAsIdent(state, R_NAME);
-                q = create.TSQualifiedName(q.start, r.end, 0, q, r);
-            }
-            qualifier = q;
-        }
-        let targs: Ref = null;
-        if (isP(state, P.LT)) {
-            const t = tryParseTypeArgsInType(state);
-            if (t !== null) targs = t;
-        }
-        return create.TSImportType(
-            start,
-            state.tokStart,
-            0,
-            source ?? leaf(state, N.StringLiteral, state.tokStart, state.tokStart),
-            qualifier,
-            targs,
-        );
-    }
+    if (isK(state, K.IMPORT)) return parseImportType(state, start);
     if (isK(state, K.THIS)) {
         nextToken(state);
         return create.keyword(start, state.tokStart, N.TSThisType);
@@ -3636,35 +3602,34 @@ function parsePrimaryType(state: ParserState): Node {
 }
 
 function tsKeywordType(state: ParserState): KeywordType | 0 {
-    const src = state.src;
-    const len = state.tokEnd - state.tokStart;
-    const st = state.tokStart;
-    switch (len) {
-        case 3:
-            if (src.startsWith('any', st)) return N.TSAnyKeyword;
-            break;
-        case 4:
-            if (src.startsWith('void', st)) return N.TSVoidKeyword;
-            break;
-        case 5:
-            if (src.startsWith('never', st)) return N.TSNeverKeyword;
-            break;
-        case 6:
-            if (src.startsWith('number', st)) return N.TSNumberKeyword;
-            if (src.startsWith('string', st)) return N.TSStringKeyword;
-            if (src.startsWith('symbol', st)) return N.TSSymbolKeyword;
-            if (src.startsWith('object', st)) return N.TSObjectKeyword;
-            if (src.startsWith('bigint', st)) return N.TSBigIntKeyword;
-            break;
-        case 7:
-            if (src.startsWith('boolean', st)) return N.TSBooleanKeyword;
-            if (src.startsWith('unknown', st)) return N.TSUnknownKeyword;
-            break;
-        case 9:
-            if (src.startsWith('undefined', st)) return N.TSUndefinedKeyword;
+    switch (state.tok) {
+        case K.ANY:
+            return N.TSAnyKeyword;
+        case K.VOID:
+            return N.TSVoidKeyword;
+        case K.NEVER:
+            return N.TSNeverKeyword;
+        case K.NUMBER:
+            return N.TSNumberKeyword;
+        case K.STRING:
+            return N.TSStringKeyword;
+        case K.SYMBOL:
+            return N.TSSymbolKeyword;
+        case K.OBJECT:
+            return N.TSObjectKeyword;
+        case K.BIGINT:
+            return N.TSBigIntKeyword;
+        case K.BOOLEAN:
+            return N.TSBooleanKeyword;
+        case K.UNKNOWN:
+            return N.TSUnknownKeyword;
+        case K.UNDEFINED:
+            return N.TSUndefinedKeyword;
+        case K.NULL:
+            return N.TSNullKeyword;
+        default:
+            return 0;
     }
-    if (isK(state, K.NULL)) return N.TSNullKeyword;
-    return 0;
 }
 
 function parseTemplateLiteralType(state: ParserState): Node {
@@ -3847,8 +3812,8 @@ function parseTypeMember(state: ParserState): Node {
     if ((state.tok as number) === T_STR) {
         key = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
-    } else if (state.tok === T_NUM) {
-        key = leaf(state, N.NumericLiteral, state.tokStart, state.tokEnd);
+    } else if (state.tok === T_NUM || (state.tok as number) === T_BIGINT) {
+        key = leaf(state, (state.tok as number) === T_BIGINT ? N.BigIntLiteral : N.NumericLiteral, state.tokStart, state.tokEnd);
         nextToken(state);
     } else key = parseNameAsIdent(state, R_NAME);
     if (isP(state, P.QUESTION)) {
@@ -3896,7 +3861,6 @@ const isGtLike = (state: ParserState): boolean =>
         state.tok === P.USHREQ);
 
 function tryParseTypeParams(state: ParserState): Node | null {
-    const src = state.src;
     const s = saveState(state);
     const startPos = state.tokStart;
     nextToken(state);
@@ -3910,9 +3874,7 @@ function tryParseTypeParams(state: ParserState): Node | null {
                     flags |= 1;
                     nextToken(state);
                 } else if (
-                    state.tok === T_IDENT &&
-                    state.tokEnd - state.tokStart === 3 &&
-                    src.startsWith('out', state.tokStart) &&
+                    isK(state, K.OUT) &&
                     !nextIsTypeParamEnd(state)
                 ) {
                     flags |= 2;
@@ -4048,8 +4010,8 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         lastPos = state.pos;
         // THE module scope: only a statement parsed directly here may be an `import`/`export`
         // declaration. `parseStatement` clears the flag on entry, so everything it nests is out.
-        state.moduleScope = true;
-        push(state, parseStatement(state));
+        state.ctx |= CTX.TopLevel;
+        push(state, parseStatement(state, false));
     }
     const body = finishList(state, from);
     const program = create.Program(0, state.srcLen, 0, body) as Program;

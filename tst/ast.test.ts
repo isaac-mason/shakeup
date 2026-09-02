@@ -170,6 +170,8 @@ const ID_SNAPSHOT: Record<string, number> = {
     TSImportEqualsDeclaration: 150,
     TSExternalModuleReference: 151,
     ImportAttribute: 152,
+    Decorator: 153,
+    TSTypePredicate: 154,
 };
 
 describe('DEFS-derived numeric ids match the frozen pre-migration snapshot', () => {
@@ -224,6 +226,7 @@ describe('DataOf<X> is structurally identical to the old *Data shapes', () => {
     type OldImportSpecifier = { local: Node; imported: Node; importKind: 'value' | 'type' };
     type OldArrayExpression = { elements: (Node | null)[] };
     type OldMethodDefinition = {
+        decorators: Node[];
         key: Node;
         value: Node;
         kind: 'method' | 'get' | 'set' | 'constructor';

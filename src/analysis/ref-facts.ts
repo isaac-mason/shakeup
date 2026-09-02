@@ -35,6 +35,15 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
     // `{ x }` / `{ x = 1 }` — the value is a reference that cannot be substituted by span, because
     // rewriting it in place would change the property NAME with it. Orthogonal to direction: a
     // shorthand appears both as a read (`const o = { x }`) and as a write (`({ x } = o)`).
+    const VISIT = 0;
+    const TARGET = 1;
+    const nodes: (Node | null)[] = [root];
+    const modes: number[] = [VISIT];
+    const push = (n: Node | null, mode: number): void => {
+        nodes.push(n);
+        modes.push(mode);
+    };
+
     const shorthandProp = (data: { shorthand: boolean; value: Node }, base: number): boolean => {
         if (!data.shorthand) return false;
         const v = data.value;
@@ -44,104 +53,116 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
         }
         if (v.type === N.AssignmentPattern) {
             const l = v.data.left;
+            push(v.data.right, VISIT);
             if (l.type === N.IdentifierReference) hit(l, base | REF.SHORTHAND);
-            else target(l);
-            visit(v.data.right);
+            else push(l, TARGET);
             return true;
         }
         return false;
     };
 
-    /** An assignment TARGET: the identifiers it binds are WRITES. A member target is the exception —
-     *  `a.b = 1` sets a property, so `a` itself is READ, which is why those arms hand back to `visit`. */
-    const target = (n: Node | null): void => {
-        if (n === null) return;
-        switch (n.type) {
-            case N.IdentifierReference:
-                hit(n, REF.WRITE);
-                return;
-            case N.ArrayExpression:
-                for (const el of n.data.elements) if (el !== null) target(el);
-                return;
-            case N.ObjectExpression:
-                for (const p of n.data.properties) target(p);
-                return;
-            case N.ObjectProperty:
-                if (n.data.computed) visit(n.data.key);
-                if (shorthandProp(n.data, REF.WRITE)) return;
-                target(n.data.value);
-                return;
-            case N.SpreadElement:
-            case N.RestElement:
-                target(n.data.argument);
-                return;
-            case N.AssignmentExpression:
-            case N.AssignmentPattern:
-                target(n.data.left);
-                visit(n.data.right);
-                return;
-            case N.StaticMemberExpression:
-            case N.ComputedMemberExpression:
-                visit(n);
-                return;
-            default:
-                visit(n);
-        }
-    };
+    // ONE explicit stack for what were two mutually-recursive closures. `target` and `visit` are the
+    // two MODES a node can be entered in — an assignment target binds WRITEs, everything else READs —
+    // so the mode rides alongside the node rather than being encoded in which function is on the
+    // stack. Recursion here cost a frame per AST level and was the last thing capping how deeply
+    // nested a program the bundler could handle.
+    //
+    // Children are pushed in REVERSE of the order the recursive form visited them, so `pop()` still
+    // yields that order.
+    while (nodes.length > 0) {
+        const n = nodes.pop() as Node | null;
+        const mode = modes.pop() as number;
+        if (n === null) continue;
 
-    const visit = (n: Node | null): void => {
-        if (n === null) return;
+        if (mode === TARGET) {
+            switch (n.type) {
+                case N.IdentifierReference:
+                    hit(n, REF.WRITE);
+                    continue;
+                case N.ArrayExpression: {
+                    const els = n.data.elements;
+                    for (let i = els.length - 1; i >= 0; i--) if (els[i] !== null) push(els[i], TARGET);
+                    continue;
+                }
+                case N.ObjectExpression: {
+                    const props = n.data.properties;
+                    for (let i = props.length - 1; i >= 0; i--) push(props[i], TARGET);
+                    continue;
+                }
+                case N.ObjectProperty:
+                    if (!shorthandProp(n.data, REF.WRITE)) push(n.data.value, TARGET);
+                    if (n.data.computed) push(n.data.key, VISIT);
+                    continue;
+                case N.SpreadElement:
+                case N.RestElement:
+                    push(n.data.argument, TARGET);
+                    continue;
+                case N.AssignmentExpression:
+                case N.AssignmentPattern:
+                    push(n.data.right, VISIT);
+                    push(n.data.left, TARGET);
+                    continue;
+                default:
+                    // Member targets included: `a.b = 1` sets a property, so `a` itself is READ.
+                    push(n, VISIT);
+                    continue;
+            }
+        }
+
         switch (n.type) {
             case N.IdentifierReference:
                 hit(n, REF.READ);
-                return;
+                continue;
             case N.BindingIdentifier:
-                return; // a declaration is not a reference
+                continue; // a declaration is not a reference
             case N.AssignmentExpression: {
                 const { operator, left, right } = n.data;
+                push(right, VISIT);
                 // `x += 1` READS x as well as writing it; `x = 1` only writes.
                 if (operator !== '=' && left.type === N.IdentifierReference) hit(left, REF.READ | REF.WRITE);
-                else target(left);
-                visit(right);
-                return;
+                else push(left, TARGET);
+                continue;
             }
             case N.UpdateExpression: {
                 const arg = n.data.argument;
                 if (arg.type === N.IdentifierReference) hit(arg, REF.READ | REF.WRITE);
-                else visit(arg);
-                return;
+                else push(arg, VISIT);
+                continue;
             }
             case N.ForInStatement:
-            case N.ForOfStatement: {
+            case N.ForOfStatement:
+                push(n.data.body, VISIT);
+                push(n.data.right, VISIT);
                 // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
-                if (n.data.left.type === N.VariableDeclaration) visit(n.data.left);
-                else target(n.data.left);
-                visit(n.data.right);
-                visit(n.data.body);
-                return;
-            }
+                push(n.data.left, n.data.left.type === N.VariableDeclaration ? VISIT : TARGET);
+                continue;
             case N.ObjectProperty:
-                if (n.data.computed) visit(n.data.key);
-                if (shorthandProp(n.data, REF.READ)) return;
-                visit(n.data.value);
-                return;
+                if (!shorthandProp(n.data, REF.READ)) push(n.data.value, VISIT);
+                if (n.data.computed) push(n.data.key, VISIT);
+                continue;
             case N.ExportSpecifier: {
                 // `export { b }` — the specifier's `local` IS a reference, and substituting it would
                 // rewrite the PUBLIC export name.
                 const local = n.data.local;
                 if (local.type === N.IdentifierReference) {
                     hit(local, REF.READ | REF.EXPORTED);
-                    return;
+                    continue;
                 }
                 break;
             }
             default:
                 break;
         }
-        walkChildren(n, visit);
-    };
-
-    visit(root);
+        const from = nodes.length;
+        walkChildren(n, (child) => {
+            push(child, VISIT);
+        });
+        for (let i = from, j = nodes.length - 1; i < j; i++, j--) {
+            const t = nodes[i];
+            nodes[i] = nodes[j];
+            nodes[j] = t;
+        }
+    }
 }
 
 /** Recompute the four reference facts for `program` from scratch. Ground truth. */
