@@ -1743,6 +1743,9 @@ function parseBindingTarget(state: ParserState): Node {
                 nextToken(state);
                 const arg = parseBindingTarget(state);
                 push(state, create.RestElement(s, arg.end, 0, arg, null));
+                if (isP(state, P.COMMA) && !inCtx(state, CTX.Ambient)) {
+                    raiseRestNotLast(state, P.RBRACKET, ParseErrorCode.RestElementLast);
+                }
             } else push(state, parseBindingElement(state));
             if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
@@ -1760,7 +1763,11 @@ function parseBindingTarget(state: ParserState): Node {
                 const s = state.tokStart;
                 nextToken(state);
                 const arg = parseBindingTarget(state);
+                if (arg.type !== N.BindingIdentifier) raise(state, ParseErrorCode.InvalidBindingRestTarget);
                 push(state, create.RestElement(s, arg.end, 0, arg, null));
+                if (isP(state, P.COMMA) && !inCtx(state, CTX.Ambient)) {
+                    raiseRestNotLast(state, P.RBRACE, ParseErrorCode.RestElementLast);
+                }
             } else {
                 const s = state.tokStart;
                 let flags = 0;
@@ -1811,13 +1818,13 @@ function parseBindingElement(state: ParserState): Node {
     return target;
 }
 
-/** The current token is the comma after a rest parameter; only what follows it picks the message. */
-function raiseRestParamNotLast(state: ParserState): void {
+/** The current token is the comma after a rest element; only what follows it picks the message. */
+function raiseRestNotLast(state: ParserState, close: number, notLast: ParseErrorCode): void {
     const saved = saveState(state);
     nextToken(state);
-    const trailing = isP(state, P.RPAREN);
+    const trailing = isP(state, close);
     restoreState(state, saved);
-    raise(state, trailing ? ParseErrorCode.RestParameterTrailingComma : ParseErrorCode.RestParameterLast);
+    raise(state, trailing ? ParseErrorCode.RestTrailingComma : notLast);
 }
 
 function parseParams(state: ParserState): Node[] {
@@ -1879,7 +1886,7 @@ function parseParams(state: ParserState): Node[] {
         // test262 counts this as hundreds of separate failures. oxc raises the same two in its PARSER
         // (`js/function.rs:118-131`); the neighbouring duplicate-parameter and strict-body rules are
         // `ctx.strict_mode()` checks in oxc_semantic and are deliberately NOT done here.
-        if (isRest && isP(state, P.COMMA) && !inCtx(state, CTX.Ambient)) raiseRestParamNotLast(state);
+        if (isRest && isP(state, P.COMMA) && !inCtx(state, CTX.Ambient)) raiseRestNotLast(state, P.RPAREN, ParseErrorCode.RestParameterLast);
         if (!eatP(state, P.COMMA)) break;
     }
     expectP(state, P.RPAREN, "')'");
