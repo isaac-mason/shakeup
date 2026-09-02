@@ -59,6 +59,10 @@ const NS_TYPE = 1;
 /** One lexical scope. `parent` is a scope id (0 = none); `node` is the scope-owning AST node. */
 export type ScopeRec = { parent: number; flags: number; node: Node | null };
 
+/** A name bound twice in one scope. `prevFlags`/`flags` are the two `SYM` sets, which decide whether
+ *  it is legal: `var` may shadow `var` or a function, but anything LEXICAL may not. */
+export type Redeclaration = { name: string; pos: number; scope: number; prevFlags: number; flags: number };
+
 /** One binding. `scope` is the owning scope id; `decl` is the declaring Ident; `nameId` is an interned name. */
 export type SymbolRec = { scope: number; decl: Node | null; flags: number; nameId: number };
 
@@ -75,6 +79,11 @@ export type Semantic = {
     // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
 
     unresolved: Node[];
+    /** Binding collisions, recorded as they happen for the CHECKER to judge — not judged here,
+     *  because whether one is an error can depend on strict mode, and a `"use strict"` directive is
+     *  only seen when the function BODY is visited, after its parameters have already been bound.
+     *  Empty in the common case; a collision is rare. */
+    redeclarations: Redeclaration[];
 
     names: Map<string, number>;
     bindings: Map<number, number>;
@@ -294,6 +303,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         exported: new Set(),
         symbolInit: new Map(),
         unresolved: [],
+        redeclarations: [],
         names: new Map(),
         bindings: new Map(),
     };
@@ -366,12 +376,48 @@ function declare(state: AnalyseState, identNode: Node, flags: number, ns: number
     const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
     if (existing !== undefined) {
+        // Record it BEFORE the flags merge, which would otherwise erase which side was which. Only
+        // for value bindings: the TYPE namespace legitimately merges (interface + interface, enum +
+        // enum, namespace + namespace are all declaration merging, not redeclaration).
+        if (ns === NS_VALUE)
+            state.sem.redeclarations.push({
+                name: identNode.name,
+                pos: identNode.start,
+                scope: targetScope,
+                prevFlags: state.sem.symbols[existing].flags,
+                flags,
+            });
         state.sem.symbols[existing].flags |= flags;
         identNode.sym = existing;
         // A REDECLARATION still contributes a declaring scope — oxc folds these in via
         // `symbol_redeclarations` (`oxc_mangler/src/lib.rs:667`).
         recordDecl(state.sem, existing, identNode.id, state.scope);
         return existing;
+    }
+    // A catch PARAMETER and the catch block's own lexical declarations share a namespace for the
+    // redeclaration rule, though they are separate scopes: `catch(e){ let e; }` is an error while
+    // `catch(e){ var e; }` and `catch(e){ { let e; } }` are both fine. Checking "is my parent the
+    // catch scope" identifies exactly the catch's direct body, because a nested block's parent is
+    // that block. Gated on the flags first, so an ordinary `var` never pays for the lookup.
+    if (ns === NS_VALUE && (flags & (SYM.LET | SYM.CONST | SYM.CLASS | SYM.FUNCTION)) !== 0) {
+        // KNOWN GAP: `catch(e){ function e(){} }` is an error oxc reports and this misses. A function
+        // declaration hoists to the enclosing function scope, AND `declareInScope` has already moved
+        // `state.scope` into the function's own scope by the time `declare` runs, so neither scope
+        // here is the catch body. Catching it needs the appearance scope threaded through, which is
+        // not worth the contortion for a shape this rare — and missing it is the SAFE direction, an
+        // error not reported rather than valid code rejected.
+        const parent = state.sem.scopes[state.scope].parent;
+        if (parent !== 0 && scopeKind(state.sem.scopes[parent].flags) === SCOPE.CATCH) {
+            const outerSym = state.sem.bindings.get(bindingKey(parent, NS_VALUE, nameId));
+            if (outerSym !== undefined)
+                state.sem.redeclarations.push({
+                    name: identNode.name,
+                    pos: identNode.start,
+                    scope: state.scope,
+                    prevFlags: state.sem.symbols[outerSym].flags,
+                    flags,
+                });
+        }
     }
     const id = state.sem.symbols.length;
     state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId });
@@ -445,6 +491,7 @@ function resetSem(out: Semantic): void {
     out.scopes.length = 1;
     out.symbols.length = 1;
     out.unresolved.length = 0;
+    out.redeclarations.length = 0;
     out.names.clear();
     out.bindings.clear();
     // Capacity KEPT: clear in place rather than reallocating. `refs` is reset to `undefined` (absent),

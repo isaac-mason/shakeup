@@ -52,6 +52,7 @@ const files: string[] = [];
 let scanned = 0;
 let bothClean = 0;
 let backlog = 0;
+let matched = 0;
 const falsePositives: { file: string; msg: string }[] = [];
 
 for (const file of files) {
@@ -84,12 +85,16 @@ for (const file of files) {
     analyze(sem, program, isModule);
     const ours = checkSyntax(sem, program).map((e) => e.msg);
     for (const m of ours) if (!theirs.includes(m)) falsePositives.push({ file, msg: m });
-    if (ours.length === 0 && theirs.length > 0) backlog++;
-    else if (ours.length === 0) bothClean++;
+    if (ours.length > 0) matched++;
+    else if (theirs.length > 0) backlog++;
+    else bothClean++;
 }
 
 console.log(`\nscanned ${scanned} files under ${ROOT} (both parsers accept them syntactically)`);
-console.log(`  both clean: ${bothClean}\n`);
+console.log(`  both clean: ${bothClean}`);
+// Real shipped code is overwhelmingly valid, so this is normally 0. It is here so "we found nothing"
+// is stated rather than inferred from the other two adding up.
+console.log(`  shakeup reported something: ${matched}\n`);
 console.log(`SHAKEUP REJECTS, oxc accepts  ← the harmful direction: ${falsePositives.length} findings`);
 for (const f of falsePositives.slice(0, 10)) console.log(`     ${f.msg}\n        ${f.file}`);
 console.log(`\noxc rejects, shakeup accepts  ← rules not yet ported: ${backlog} files`);

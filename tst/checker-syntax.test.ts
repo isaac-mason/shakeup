@@ -155,3 +155,56 @@ describe('a `use strict` directive needs a simple parameter list', () => {
         expect(check('function f(a = 1) { return 1; }')).toEqual([]);
     });
 });
+
+describe('redeclaration', () => {
+    // The pair matrix was taken from oxc by RUNNING it, not from the spec, and it collapses to one
+    // rule: an error iff either side is LEXICAL (`let`, `const`, `class`, `import`). `var`, a
+    // function, a parameter and a catch binding may all collide with each other freely.
+    const DECL: Record<string, string> = {
+        var: 'var x;',
+        let: 'let x;',
+        const: 'const x = 1;',
+        fn: 'function x(){}',
+        cls: 'class x {}',
+    };
+    const LEXICAL = new Set(['let', 'const', 'cls']);
+
+    for (const a of Object.keys(DECL)) {
+        for (const b of Object.keys(DECL)) {
+            const shouldError = LEXICAL.has(a) || LEXICAL.has(b);
+            it(`${a} + ${b} ${shouldError ? 'collides' : 'is fine'}`, () => {
+                const got = check(`${DECL[a]} ${DECL[b]}`);
+                expect(got).toEqual(shouldError ? ['Identifier `x` has already been declared'] : []);
+            });
+        }
+    }
+
+    it('a nested scope shadows rather than collides', () => {
+        expect(check('let x; { let x; }')).toEqual([]);
+    });
+
+    it('duplicate parameters are legal sloppy and an error in strict', () => {
+        expect(check('function f(a,a){}')).toEqual([]);
+        expect(check('"use strict"; function f(a,a){}')).toEqual(['Identifier `a` has already been declared']);
+    });
+
+    it('a parameter collides with a lexical in the body, but not a var', () => {
+        expect(check('function f(a){ let a; }')).toEqual(['Identifier `a` has already been declared']);
+        expect(check('function f(a){ var a; }')).toEqual([]);
+    });
+
+    it('a catch parameter collides with the block’s own lexicals only', () => {
+        expect(check('try{}catch(e){ let e; }')).toEqual(['Identifier `e` has already been declared']);
+        expect(check('try{}catch([e]){ let e; }')).toEqual(['Identifier `e` has already been declared']);
+        expect(check('try{}catch(e){ var e; }')).toEqual([]);
+        expect(check('try{}catch(e){ { let e; } }')).toEqual([]);
+    });
+
+    // KNOWN GAP, recorded so it is not mistaken for a passing case: oxc reports this and we do not.
+    // A function declaration hoists out of the catch block AND `declareInScope` has already entered
+    // the function's own scope by the time the binding is made, so neither scope identifies the catch
+    // body. Missing it is the SAFE direction — an error not reported, never valid code rejected.
+    it('but a function declaration in a catch block is a known gap', () => {
+        expect(check('try{}catch(e){ function e(){} }')).toEqual([]);
+    });
+});

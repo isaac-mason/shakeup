@@ -1,5 +1,5 @@
 import { N, type Node, walkChildren } from '../ast/index.ts';
-import { isStrictScope, type Semantic } from './semantic.ts';
+import { isStrictScope, type Semantic, SYM } from './semantic.ts';
 
 /** One early error, in the parser's diagnostic shape so both sinks read alike. */
 export type CheckError = { pos: number; msg: string };
@@ -22,6 +22,7 @@ export type CheckError = { pos: number; msg: string };
  */
 export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
     const errors: CheckError[] = [];
+    checkRedeclarations(sem, errors);
     const stack: Node[] = [program];
     const scopes: number[] = [ownScopeOf(program)];
     while (stack.length > 0) {
@@ -36,6 +37,37 @@ export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
         });
     }
     return errors;
+}
+
+/** Bindings that are LEXICAL: redeclaring one, or redeclaring anything as one, is an error.
+ *  `var`, `function`, a parameter and a catch binding may all collide with each other freely — the
+ *  matrix was taken from oxc rather than from the spec, and every pair agrees. */
+const LEXICAL = SYM.LET | SYM.CONST | SYM.CLASS | SYM.IMPORT;
+/** TS declaration MERGING, which is not redeclaration: an enum or namespace may legally be declared
+ *  many times and combined.
+ *
+ *  `SYM.TYPE` is deliberately NOT here. A class carries `CLASS | TYPE`, because a class is both a
+ *  value and a type — including `TYPE` in this mask silently exempted every class collision, which is
+ *  half the rule. A binding that is ONLY a type (an interface, a type alias) is handled separately
+ *  below: it merges, but it never collides with a value binding in the first place. */
+const MERGEABLE = SYM.ENUM | SYM.NAMESPACE;
+/** A pure TYPE binding — an interface or type alias, which may be declared repeatedly. */
+const isTypeOnly = (flags: number): boolean => flags === SYM.TYPE;
+
+/** oxc raises this from `SemanticBuilder` as bindings are made (`builder.rs`) as well as from its
+ *  checker; we do the same split — `declare()` records the collision, this decides. */
+function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
+    for (const r of sem.redeclarations) {
+        const both = r.prevFlags | r.flags;
+        if ((both & MERGEABLE) !== 0 || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
+        const lexical = (both & LEXICAL) !== 0;
+        // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
+        // under a directive only reached after the parameters have been bound, which is why this
+        // judgement waits until now rather than happening in `declare()`.
+        const dupParam = (r.prevFlags & SYM.PARAM) !== 0 && (r.flags & SYM.PARAM) !== 0 && isStrictScope(sem, r.scope);
+        if (!lexical && !dupParam) continue;
+        errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
+    }
 }
 
 /** The scope a node OWNS, or 0 for one that owns none.
