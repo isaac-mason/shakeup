@@ -160,6 +160,7 @@ export const ESTREE_NAME = {
     JSXText: 'JSXText',
     Decorator: 'Decorator',
     TSTypePredicate: 'TSTypePredicate',
+    WithStatement: 'WithStatement',
 } satisfies Record<TypeName, ESTreeTypeName | null>;
 
 /** ESTree type name per numeric type id. */

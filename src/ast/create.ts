@@ -542,6 +542,8 @@ export const ForInStatement = (s: number, e: number, _f: number, left: Node, rig
     node(N.ForInStatement, s, e, '', { left, right, body, scopeId: 0 });
 export const WhileStatement = (s: number, e: number, _f: number, test: Node, body: Node): Node =>
     node(N.WhileStatement, s, e, '', { test, body });
+export const WithStatement = (s: number, e: number, _f: number, object: Node, body: Node): Node =>
+    node(N.WithStatement, s, e, '', { object, body });
 export const DoWhileStatement = (s: number, e: number, _f: number, body: Node, test: Node): Node =>
     node(N.DoWhileStatement, s, e, '', { body, test });
 export const SwitchStatement = (s: number, e: number, _f: number, discriminant: Node, cases: Node[]): Node =>

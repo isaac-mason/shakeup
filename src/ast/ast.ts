@@ -385,6 +385,7 @@ export const DEFS = [
     def('ImportAttribute', { key: child, value: child }),
     def('Decorator', { expression: child }),
     def('TSTypePredicate', { parameterName: child, asserts: boolean, typeAnnotation: nullable(child) }),
+    def('WithStatement', { object: child, body: child }),
 ] as const;
 
 type Defs = typeof DEFS;

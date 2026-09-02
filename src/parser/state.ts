@@ -79,6 +79,10 @@ export type ParserState = {
     /** The module goal is not declared, so `await` may turn out to be either an operator or an
      *  identifier and the next token decides per occurrence. Never true once a goal is declared. */
     goalUnknown: boolean;
+    /** Source contains a construct that PARSES but cannot be emitted into an ES module — a `with`
+     *  statement or a decorator. A cheap gate so the diagnosing walk runs only for a module that
+     *  could produce one; the TS gate beside it cannot cover these, because both are plain JS. */
+    sawUnbundlable: boolean;
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;

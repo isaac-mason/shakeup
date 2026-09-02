@@ -424,6 +424,15 @@ function runnerVisit(n: Node, ctx: RunnerCtx): boolean | void {
             // them unchanged would be a silent miscompile.
             ctx.unsupported.push({ pos: n.start, msg: 'decorators are not supported' });
             return;
+        case N.WithStatement:
+            // The output is an ES module and so always strict, where a `with` body cannot run.
+            // esbuild refuses to build one for the same reason; rolldown emits a bundle that dies at
+            // load. Refusing here — not at the parser — keeps the AST faithful.
+            ctx.unsupported.push({
+                pos: n.start,
+                msg: '`with` statements cannot be bundled: the output is an ES module, which is always strict mode',
+            });
+            return;
         case N.TSModuleDeclaration:
             if (!n.data.declare)
                 ctx.unsupported.push({ pos: n.start, msg: 'value namespaces are not supported (use ES modules)' });

@@ -127,6 +127,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         nseAt: [],
         comments: [],
         goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
+        sawUnbundlable: false,
         tokHash: 0,
         tokCooked: '',
         tsMode: options.ts,
@@ -1931,6 +1932,7 @@ function parseDecorators(state: ParserState): Node[] {
 }
 
 function parseDecorator(state: ParserState): Node {
+    state.sawUnbundlable = true;
     const start = state.tokStart;
     nextToken(state);
     const outerCtx = state.ctx;
@@ -2337,9 +2339,24 @@ function parseStatement(state: ParserState, single: boolean): Node {
             // reasoning, while rolldown builds it and emits a bundle that dies at load with
             // `Strict mode code may not include a with statement`. Only the message was wrong; it
             // used to surface as a bare `unexpected token 'with' in expression`.
-            case K.WITH:
-                raise(state, ParseErrorCode.WithStatement);
-                return create.EmptyStatement(start, state.tokStart, 0);
+            case K.WITH: {
+                // PARSED, not refused. The reason `with` cannot be bundled — ESM output is always
+                // strict, and a `with` body cannot run in strict code — is a property of the OUTPUT,
+                // not of the grammar, so it belongs at the transform (`collectUnsupported`) where
+                // decorators are refused for the same kind of reason. oxc parses it; esbuild refuses
+                // to BUILD it; rolldown builds it and emits a bundle that dies at load. Parsing it
+                // and refusing to build is both of the right halves.
+                //
+                // A module is strict, so `with` is a grammar error there — and only there.
+                nextToken(state);
+                expectP(state, P.LPAREN, "'('");
+                const object = parseExpression(state);
+                expectP(state, P.RPAREN, "')'");
+                const withBody = parseStatement(state, true);
+                if (!state.allowTopReturn) raise(state, ParseErrorCode.WithStatement);
+                state.sawUnbundlable = true;
+                return create.WithStatement(start, withBody.end, 0, object, withBody);
+            }
             case K.WHILE: {
                 nextToken(state);
                 expectP(state, P.LPAREN, "'('");
@@ -4025,6 +4042,8 @@ export type ParseResult = {
     /** Every comment, flat, stride 4: `[start, end, flags, attachedTo]`. Read it with the helpers in
      *  `parser/comments.ts`; classification is deferred, so retaining costs no scanning. */
     comments: Int32Array;
+    /** A `with` statement or a decorator: parses, but cannot be emitted into an ES module. */
+    hasUnbundlable: boolean;
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -4078,6 +4097,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         topLevelThis: state.topLevelThis,
         noSideEffectsAt: state.nseAt,
         comments: Int32Array.from(state.comments),
+        hasUnbundlable: state.sawUnbundlable,
     };
 }
 

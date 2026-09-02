@@ -97,7 +97,7 @@ const TEMPLATE: Record<number, string> = {
     // esbuild's diagnostic, adapted: "With statements cannot be used with the \"esm\" output format
     // due to strict mode". shakeup emits ESM only, so the format is not a variable — the reason is.
     [ParseErrorCode.WithStatement]:
-        '`with` statements cannot be bundled: the output is an ES module, which is always strict mode, and a `with` body cannot run in strict code',
+        '`with` statements are not allowed in a module, which is always strict mode',
     [ParseErrorCode.InvalidAssignmentTarget]: 'cannot assign to this expression',
     [ParseErrorCode.AssignmentNotSimple]: 'invalid left-hand side in assignment',
     [ParseErrorCode.DefaultValueOperator]: "only '=' operator can be used for specifying default value",

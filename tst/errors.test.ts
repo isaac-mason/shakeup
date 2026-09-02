@@ -280,14 +280,29 @@ describe('new.target continues into a member chain', () => {
 // `unexpected token 'with' in expression`, which reads like a parser limitation rather than a stated
 // decision.
 describe('`with` statements are refused with a reason', () => {
-    const msg = (src: string) => parse(src, { ts: false, jsx: false, kind: 'commonjs' }).errors[0]?.msg ?? '';
+    // The refusal moved from the PARSER to the build. `with` is valid sloppy-script grammar and oxc
+    // parses it, so rejecting it while parsing was a bundler policy applied in the wrong place — the
+    // same split decorators got. A module IS strict, so there it stays a grammar error.
+    const parseMsg = (src: string, kind: string) =>
+        parse(src, { ts: false, jsx: false, kind } as never).errors[0]?.msg ?? '';
 
     it.each([
         ['at the top level', 'with (o) { x }'],
         ['inside a function', 'function f() { with (o) { x } }'],
-    ])('names the reason %s', (_label, src) => {
-        expect(msg(src)).toMatch(/`with` statements cannot be bundled/);
-        expect(msg(src)).toMatch(/always strict mode/);
+    ])('parses in a script %s', (_label, src) => {
+        expect(parseMsg(src, 'commonjs')).toBe('');
+        expect(parseMsg(src, 'unambiguous')).toBe('');
+    });
+
+    it('is a grammar error in a module, which is always strict', () => {
+        expect(parseMsg('with (o) { x }', 'module')).toMatch(/not allowed in a module/);
+    });
+
+    it('is refused by the dev transform with the reason', async () => {
+        const { devTransform } = await import('../src/bundler/transform.ts');
+        const r = devTransform('t.js', 'with (o) { x }', {});
+        expect(r.errors.join('\n')).toMatch(/`with` statements cannot be bundled/);
+        expect(r.errors.join('\n')).toMatch(/always strict mode/);
     });
 
     it('reports it against the right file when bundling', async () => {

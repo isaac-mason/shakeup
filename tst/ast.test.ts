@@ -172,6 +172,7 @@ const ID_SNAPSHOT: Record<string, number> = {
     ImportAttribute: 152,
     Decorator: 153,
     TSTypePredicate: 154,
+    WithStatement: 155,
 };
 
 describe('DEFS-derived numeric ids match the frozen pre-migration snapshot', () => {

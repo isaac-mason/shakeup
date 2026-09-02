@@ -91,6 +91,12 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
             errors.push(`${id}:${n.start}: decorators are not supported`);
             return false;
         }
+        if (n.type === N.WithStatement) {
+            errors.push(
+                `${id}:${n.start}: \`with\` statements cannot be bundled: the output is an ES module, which is always strict mode`,
+            );
+            return false;
+        }
         if (n.type === N.TSModuleDeclaration && !n.data.declare) {
             errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
             return false;
@@ -1105,6 +1111,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasTopLevelReturn = false;
         let hasRequire = false;
         let hasTopLevelAwait = false;
+        let hasUnbundlable = false;
         let hasEsmExport = false;
         let hasEsmImport = false;
         let topLevelThis: Node[] = [];
@@ -1235,6 +1242,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
                 hasRequire = parsed.hasRequire;
                 hasTopLevelAwait = parsed.hasTopLevelAwait;
+                hasUnbundlable = parsed.hasUnbundlable;
                 hasEsmExport = parsed.hasEsmExport;
                 hasEsmImport = parsed.hasEsmImport;
                 topLevelThis = parsed.topLevelThis;
@@ -1343,7 +1351,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // `namespace`), so a `.js`/`.jsx` module skips the walk entirely.
                 // Only when the lowering left one of the two constructs this diagnoses behind — it walks every
                 // node otherwise, and on a clean TS corpus finds nothing (97 walks, 178,021 nodes, 0 errors).
-                if (isTs && sawUnloweredTs()) collectUnsupported(program, id, graph.errors);
+                // `hasUnbundlable` covers `with` and decorators, which the TS gate above cannot:
+                // both are plain JavaScript, so a `.js` module can carry them.
+                if ((isTs && sawUnloweredTs()) || hasUnbundlable) collectUnsupported(program, id, graph.errors);
                 // Compress (minify P4) runs here — after value lowering, BEFORE extractRecords — so it
                 // is upstream of every sym-id-keyed index; a fresh semantic after it stays consistent,
                 // and the (compress-aware) cache stores the already-compressed AST.
