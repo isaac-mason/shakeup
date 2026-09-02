@@ -154,9 +154,19 @@ describe('tsx generic-arrow vs JSX ambiguity (plan §3c)', () => {
         });
     }
 
-    it('tsx: bare `<T>() => x` (paren follows) is an arrow', () => {
-        expect(hasType('const g = <T>() => x;', true, N.ArrowFunctionExpression)).toBe(true);
-        expect(hasType('const g = <T>() => x;', true, N.JSXElement)).toBe(false);
+    // REVERSED 2026-09-02. This asserted the opposite — that a following `(` makes the bare form an
+    // arrow — on the plan's reading that esbuild behaves that way (`jsx-plan.md` §3c). It does not.
+    // Both references reject it, and so does tsc, which is the entire reason `<T,>` exists:
+    //     oxc      tsx: Unexpected token. Did you mean `{'>'}` …
+    //     esbuild  tsx: The character ">" is not valid inside a JSX element
+    // In `.tsx` a bare `<T>` opens a JSX element; only `extends`, `=` or `,` after the name can make
+    // it type parameters (oxc `js/arrow.rs:183-205`). `.ts` is unaffected — see the regression block
+    // below, where the same source is still a generic arrow.
+    it('tsx: bare `<T>() => x` is JSX, not an arrow — the `<T,>` workaround exists for this', () => {
+        const { errors } = parseJSX('const g = <T>() => x;', true);
+        expect(errors.length, 'an unclosed <T> tag must be an error').toBeGreaterThan(0);
+        expect(hasType('const g = <T>() => x;', true, N.JSXElement)).toBe(true);
+        expect(hasType('const g = <T>() => x;', true, N.ArrowFunctionExpression)).toBe(false);
     });
 
     it('tsx: bare `<T>hi</T>` (no paren) is JSX', () => {

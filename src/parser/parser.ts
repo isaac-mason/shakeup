@@ -559,7 +559,7 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
         }
         restoreState(state, s);
     }
-    if (state.tsMode && isP(state, P.LT)) {
+    if (state.tsMode && isP(state, P.LT) && classifyAngleArrowHead(state) !== TRI_FALSE) {
         const s = saveState(state);
         const start = state.tokStart;
         const tp = tryParseTypeParams(state);
@@ -1578,6 +1578,61 @@ function classifyArrowHeadWorker(state: ParserState): number {
     }
     if (third === P.COMMA || third === P.EQ || third === P.RPAREN) return TRI_MAYBE;
     return TRI_FALSE;
+}
+
+/**
+ * oxc's `LAngle` arm (`js/arrow.rs:176-207`): does `<` begin an arrow's TYPE PARAMETERS, or a JSX
+ * element?
+ *
+ * Outside JSX there is no contest — `<` can only be type parameters, so this is `Maybe` and the
+ * caller speculates. **Inside JSX the default flips**: `<T>` is a JSX element, and only `extends`,
+ * `=` or `,` after the name can make it an arrow. That is exactly why TypeScript makes you write
+ * `<T,>` in a `.tsx` file, and why `<T>(x: T) => x` is a generic arrow in `.ts` and an unclosed JSX
+ * tag in `.tsx`. We used to run `tryParseTypeParams` unconditionally and so read the `.tsx` form as
+ * an arrow.
+ */
+function classifyAngleArrowHead(state: ParserState): number {
+    const pos = state.pos;
+    const tok = state.tok;
+    const tokStart = state.tokStart;
+    const tokEnd = state.tokEnd;
+    const tokFlags = state.tokFlags;
+    const tokHash = state.tokHash;
+    const errorCount = state.errors.length;
+    const fatal = state.fatal;
+
+    const verdict = classifyAngleArrowHeadWorker(state);
+
+    state.pos = pos;
+    state.tok = tok;
+    state.tokStart = tokStart;
+    state.tokEnd = tokEnd;
+    state.tokFlags = tokFlags;
+    state.tokHash = tokHash;
+    state.errors.length = errorCount;
+    state.fatal = fatal;
+    return verdict;
+}
+
+function classifyAngleArrowHeadWorker(state: ParserState): number {
+    nextToken(state); // past `<`
+    const second = state.tok;
+    // `<` not followed by a name is never a type-parameter list.
+    if (!isBindingIdentTok(second) && second !== K.CONST) return TRI_FALSE;
+    if (!state.jsxMode) return TRI_MAYBE;
+
+    if (second === K.CONST) nextToken(state); // `<const T …>`
+    nextToken(state); // past the parameter name
+    const third = state.tok;
+    if (third === K.EXTENDS) {
+        nextToken(state);
+        const fourth = state.tok;
+        // `<T extends>` / `<T extends=` / `<T extends/` are malformed JSX, not constraints.
+        if (fourth === P.EQ || fourth === P.GT || fourth === P.SLASH) return TRI_FALSE;
+        return isBindingIdentTok(fourth) ? TRI_MAYBE : TRI_TRUE;
+    }
+    // `<T,>` — the disambiguating trailing comma — and `<T = U>` are arrows. Anything else is JSX.
+    return third === P.EQ || third === P.COMMA ? TRI_TRUE : TRI_FALSE;
 }
 
 function rememberNotArrow(state: ParserState, pos: number): void {
