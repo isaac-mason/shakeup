@@ -14,8 +14,9 @@
 // Every expectation here was checked against `oxc-parser` with `showSemanticErrors: true` before it
 // was written, not read off the Rust.
 import { describe, expect, it } from 'vitest';
-import { checkSyntax } from '../src/analysis/checker.ts';
+import { checkSyntax, SCOPE_OWNING } from '../src/analysis/checker.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
+import { DEFS, N } from '../src/ast/index.ts';
 import { parse } from '../src/parser/index.ts';
 
 const check = (src: string, isModule = false) => {
@@ -331,5 +332,17 @@ describe('duplicate class elements', () => {
 
     it('separate classes have separate namespaces', () => {
         expect(check('class C { #x; } class D { #x; }')).toEqual([]);
+    });
+});
+
+describe('the SCOPE_OWNING list stays in sync with the AST defs', () => {
+    // `ownScopeOf` checks the node TYPE before reading `.scopeId`, because reading an arbitrary
+    // `node.data` field is a MEGAMORPHIC access on a walk that visits every node. That makes the list
+    // a second source of truth, so it is derived from the defs here rather than trusted.
+    it('every def declaring scopeId is listed, and nothing else is', () => {
+        const fromDefs = DEFS.filter((d) => d.fields !== null && Object.hasOwn(d.fields, 'scopeId')).map(
+            (d) => (N as unknown as Record<string, number>)[d.name],
+        );
+        expect([...fromDefs].sort((a, b) => a - b)).toEqual([...SCOPE_OWNING].sort((a, b) => a - b));
     });
 });

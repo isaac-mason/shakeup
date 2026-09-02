@@ -242,6 +242,7 @@ export const ClassExpression = (
         superTypeArguments: sta ?? null,
         implements: impl ?? [],
         body: body ?? [],
+        scopeId: 0,
     });
 export const ClassDeclaration = (
     s: number,
@@ -483,6 +484,7 @@ export const TSModuleDeclaration = (s: number, e: number, flags: number, id: Nod
         body: body ?? [],
         declare: (flags & FL.DECLARE) !== 0,
         namespace: (flags & FL.NAMESPACE) !== 0,
+        scopeId: 0,
     });
 
 export const TSImportEqualsDeclaration = (s: number, e: number, flags: number, id: Node, moduleReference: Node): Node =>
@@ -559,7 +561,7 @@ export const SwitchCase = (s: number, e: number, _f: number, test: Node | null, 
 export const TryStatement = (s: number, e: number, _f: number, block: Node, handler: Node | null, finalizer: Node | null): Node =>
     node(N.TryStatement, s, e, '', { block, handler: handler ?? null, finalizer: finalizer ?? null });
 export const CatchClause = (s: number, e: number, _f: number, param: Node | null, body: Node): Node =>
-    node(N.CatchClause, s, e, '', { param: param ?? null, body });
+    node(N.CatchClause, s, e, '', { param: param ?? null, body, scopeId: 0 });
 export const ReturnStatement = (s: number, e: number, _f: number, argument: Node | null): Node =>
     node(N.ReturnStatement, s, e, '', { argument: argument ?? null });
 export const ThrowStatement = (s: number, e: number, _f: number, argument: Node): Node =>
@@ -570,7 +572,8 @@ export const ContinueStatement = (s: number, e: number, _f: number, label: Node 
     node(N.ContinueStatement, s, e, '', { label: label ?? null });
 export const LabeledStatement = (s: number, e: number, _f: number, label: Node, body: Node): Node =>
     node(N.LabeledStatement, s, e, '', { label, body });
-export const StaticBlock = (s: number, e: number, _f: number, body: Node[]): Node => node(N.StaticBlock, s, e, '', { body });
+export const StaticBlock = (s: number, e: number, _f: number, body: Node[]): Node =>
+    node(N.StaticBlock, s, e, '', { body, scopeId: 0 });
 export const ObjectPattern = (s: number, e: number, _f: number, properties: Node[]): Node =>
     node(N.ObjectPattern, s, e, '', { properties });
 export const ArrayPattern = (s: number, e: number, _f: number, elements: (Node | null)[]): Node =>

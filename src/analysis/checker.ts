@@ -203,14 +203,39 @@ function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
     }
 }
 
+/** Node types that carry a `scopeId` field. Reading `.scopeId` off an arbitrary `node.data` is a
+ *  MEGAMORPHIC property access — `data` has one shape per node type, and this walk visits every node —
+ *  so the type is checked first and the read only happens for the sixteen shapes that have the field.
+ *
+ *  Kept in sync with the defs by `tst/checker-syntax.test.ts`, which asserts the two agree rather than
+ *  trusting this list to be maintained by hand. */
+export const SCOPE_OWNING = new Set<number>([
+    N.Program,
+    N.FunctionDeclaration,
+    N.FunctionExpression,
+    N.ArrowFunctionExpression,
+    N.ClassDeclaration,
+    N.ClassExpression,
+    N.BlockStatement,
+    N.StaticBlock,
+    N.CatchClause,
+    N.ForStatement,
+    N.ForInStatement,
+    N.ForOfStatement,
+    N.SwitchStatement,
+    N.TSModuleDeclaration,
+    N.TSInterfaceDeclaration,
+    N.TSTypeAliasDeclaration,
+]);
+
 /** The scope a node OWNS, or 0 for one that owns none.
  *
- *  The field is declared on several node types that do not always get a scope — a function body's
+ *  The field is declared on several node types that do not always GET a scope — a function body's
  *  `BlockStatement` is the common case, since the function scope already covers it — and it defaults
  *  to `0`, which is the table's NULL SENTINEL rather than a real scope. Treating that 0 as a scope
  *  silently reparents every node under it to the sentinel, whose flags are empty: strictness looked
  *  off inside every function body. */
-const ownScopeOf = (node: Node): number => (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
+const ownScopeOf = (node: Node): number => (SCOPE_OWNING.has(node.type) ? ((node.data as { scopeId: number }).scopeId ?? 0) : 0);
 
 function checkNode(
     sem: Semantic,

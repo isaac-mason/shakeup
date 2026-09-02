@@ -1,6 +1,5 @@
 import { analyze, createSemantic, type Semantic, symbolOf } from '../analysis/semantic.ts';
 import { isTypeOnlyNode, N, type Node, node, type Program, set, walk } from '../ast/index.ts';
-import { type JSXOptions, resolveJSXOptions } from './resolve.ts';
 import { parse } from '../parser/index.ts';
 import { makeJsxLower } from '../passes/lower-jsx.ts';
 import { tsLower } from '../passes/lower-ts.ts';
@@ -9,6 +8,7 @@ import { traverse } from '../passes/traverse.ts';
 import { printModule } from '../print/print-js.ts';
 import { createPrinter, finishPrinter, printerPart } from '../print/printer.ts';
 import { buildLineTable, encodeMappings, joinParts, type Part, type SourceMap } from '../util/sourcemap.ts';
+import { type JSXOptions, resolveJSXOptions } from './resolve.ts';
 
 /** Source language; selects TS-strip + JSX-lower behavior. Inferred from the
  *  filename extension when omitted. */
@@ -211,7 +211,7 @@ function defaultConstDecl(decl: Node, dflt: string, s: number, e: number): Node 
             body: d.body,
             async: d.async,
             generator: d.generator,
-        
+
             // A function EXPRESSION built from a declaration owns its own scope slot; `analyze`
             // fills it. Must be present at construction so the hidden class is stable.
             scopeId: 0,
@@ -226,6 +226,8 @@ function defaultConstDecl(decl: Node, dflt: string, s: number, e: number): Node 
             superTypeArguments: d.superTypeArguments,
             implements: d.implements,
             body: d.body,
+            // Same reason as the function case above — present at construction, not added later.
+            scopeId: 0,
         });
     } else {
         init = decl;

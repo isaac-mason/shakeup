@@ -131,6 +131,7 @@ export const DEFS = [
         superTypeArguments: nullable(child),
         implements: list(child),
         body: list(child),
+        scopeId: scalar<number>(),
     }),
     def('YieldExpression', { argument: nullable(child), delegate: boolean }),
     def('AwaitExpression', { argument: child }),
@@ -160,7 +161,7 @@ export const DEFS = [
     def('SwitchStatement', { discriminant: child, cases: list(child), scopeId: scalar<number>() }),
     def('SwitchCase', { test: nullable(child), consequent: list(child) }),
     def('TryStatement', { block: child, handler: nullable(child), finalizer: nullable(child) }),
-    def('CatchClause', { param: nullable(child), body: child }),
+    def('CatchClause', { param: nullable(child), body: child, scopeId: scalar<number>() }),
     def('ReturnStatement', { argument: nullable(child) }),
     def('ThrowStatement', { argument: child }),
     def('BreakStatement', { label: nullable(child) }),
@@ -216,7 +217,7 @@ export const DEFS = [
         abstract: boolean,
         accessibility: scalar<Accessibility>(),
     }),
-    def('StaticBlock', { body: list(child) }),
+    def('StaticBlock', { body: list(child), scopeId: scalar<number>() }),
     def('ObjectPattern', { properties: list(child) }),
     def('ArrayPattern', { elements: list(nullable(child)) }),
     def('AssignmentPattern', { left: child, right: child }),
@@ -354,7 +355,7 @@ export const DEFS = [
     def('TSAsExpression', { expression: child, typeAnnotation: child }),
     def('TSSatisfiesExpression', { expression: child, typeAnnotation: child }),
     def('TSNonNullExpression', { expression: child }),
-    def('TSModuleDeclaration', { id: child, body: list(child), declare: boolean, namespace: boolean }),
+    def('TSModuleDeclaration', { id: child, body: list(child), declare: boolean, namespace: boolean, scopeId: scalar<number>() }),
     def('JSXElement', { openingElement: child, children: list(child), closingElement: nullable(child) }),
     def('JSXOpeningElement', { name: child, typeArguments: nullable(child), attributes: list(child) }),
     def('JSXClosingElement', { name: child }),
@@ -605,7 +606,8 @@ export const walkChildren = new Function('n', 'cb', buildChildrenBody()) as (
 // Field-iteration mirrors buildWalkers in passes/traverse.ts: same schema, the read-only variant.
 // The oracle in ast.test (`walk drift vs CHILD_FIELDS`) pins this generated order to the schema.
 function buildWalkBody(): string {
-    let s = 'const S=[n];while(S.length>0){const m=S.pop();if(enter(m)===false)continue;const d=m.data;if(d===null)continue;switch(m.type){';
+    let s =
+        'const S=[n];while(S.length>0){const m=S.pop();if(enter(m)===false)continue;const d=m.data;if(d===null)continue;switch(m.type){';
     for (let t = 1; t < TYPE_COUNT; t++) {
         const fields = FIELDS[t];
         if (fields === undefined || fields.length === 0) continue;
