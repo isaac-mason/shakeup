@@ -21,6 +21,12 @@
  * answer than measuring it — the same failure mode `oxcdiff` exists to prevent.
  *
  * The mode dispatch is `scripts/test262.ts`'s, so the denominator is that suite's false-accepts.
+ *
+ * Each message prints a sample path because **the message is where oxc's RECOVERY landed, not what
+ * the rule is**. "Expected `:` but found `}`" turned out to be an escaped reserved word used as a
+ * binding; "Expected `(` but found `;`" turned out to be `import.source`. Read a fixture before
+ * believing a bucket's label — the same lesson as the 909-miss "class" clusters that were one
+ * function-parameter rule.
  */
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -83,12 +89,14 @@ const firstError = (src: string, sourceType: 'module' | 'script', semantic: bool
     }
 };
 
-type Bucket = { n: number; msgs: Map<string, number> };
+type Bucket = { n: number; msgs: Map<string, { n: number; sample: string }> };
 const buckets = new Map<string, Bucket>();
-const bump = (key: string, msg: string) => {
-    const b = buckets.get(key) ?? { n: 0, msgs: new Map<string, number>() };
+const bump = (key: string, msg: string, file: string) => {
+    const b = buckets.get(key) ?? { n: 0, msgs: new Map<string, { n: number; sample: string }>() };
     b.n++;
-    b.msgs.set(msg, (b.msgs.get(msg) ?? 0) + 1);
+    const m = b.msgs.get(msg) ?? { n: 0, sample: file };
+    m.n++;
+    b.msgs.set(msg, m);
     buckets.set(key, b);
 };
 
@@ -135,26 +143,30 @@ for (const p of files) {
     const oxcOk = (semantic: boolean) =>
         oxcAccepts(src, sourceType, semantic) && (!bothModes || oxcAccepts(strictSrc, sourceType, semantic));
 
+    const rel = p.slice(ROOT.length + 1);
     if (!oxcOk(false)) {
         bump(
             'PARSER  (oxc_parser diagnostic)',
             firstError(src, sourceType, false) ?? firstError(strictSrc, sourceType, false) ?? '?',
+            rel,
         );
     } else if (!oxcOk(true)) {
         bump(
             'CHECKER (oxc_semantic/checker)',
             firstError(src, sourceType, true) ?? firstError(strictSrc, sourceType, true) ?? '?',
+            rel,
         );
     } else {
-        bump('NEITHER (a third layer, or oxc misses it too)', areaOf(p));
+        bump('NEITHER (a third layer, or oxc misses it too)', areaOf(p), rel);
     }
 }
 
 console.log(`\nshakeup false-accepts, classified by the oxc layer that rejects them: ${total}\n`);
 for (const [name, b] of [...buckets].sort((a, c) => c[1].n - a[1].n)) {
     console.log(`${String(b.n).padStart(5)}  ${name}`);
-    for (const [msg, n] of [...b.msgs].sort((a, c) => c[1] - a[1]).slice(0, 12)) {
-        console.log(`         ${String(n).padStart(4)}  ${msg}`);
+    for (const [msg, m] of [...b.msgs].sort((a, c) => c[1].n - a[1].n).slice(0, 12)) {
+        console.log(`         ${String(m.n).padStart(4)}  ${msg}`);
+        console.log(`               e.g. ${m.sample}`);
     }
     console.log('');
 }
