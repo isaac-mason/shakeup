@@ -2793,15 +2793,117 @@ function parseFor(state: ParserState, start: number): Node {
     return create.ForStatement(start, body.end, 0, init, test, update, body);
 }
 
+/**
+ * Is the `type` at the cursor a type-only MODIFIER, or a binding named `type`? oxc's
+ * `parse_import_or_export_kind` (`js/module.rs:1025-1047`), which we approximated as "anything but
+ * `from` or `=`" and got two shapes wrong:
+ *
+ *     import type, {A} from "m";      a DEFAULT import named `type`, plus named imports
+ *     import type from from "m";      a type-only default import named `from`
+ *
+ * The second is the reason a plain token test cannot decide it: after `type`, a `from` is either the
+ * clause keyword (`import type from "m"` — a default import named `type`) or the binding itself, and
+ * only the token after that tells them apart.
+ */
+/** oxc's `can_parse_module_export_name` (`js/module.rs:1060`). */
+const atModuleExportName = (state: ParserState): boolean => isNameLike(state) || (state.tok as number) === T_STR;
+
+/** A `ModuleExportName`: an identifier name, or an arbitrary string (`{ "a-b" as c }`). */
+function parseModuleExportName(state: ParserState): Node {
+    if ((state.tok as number) === T_STR) {
+        const n = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+        nextToken(state);
+        return n;
+    }
+    return parseNameAsIdent(state, R_NAME);
+}
+
+/**
+ * One `{ … }` specifier, resolving the `type` modifier against the `as` chain. oxc's
+ * `parse_import_or_export_specifier` (`js/module.rs:826-901`).
+ *
+ * `type` is contextual, so every prefix is ambiguous with a binding actually NAMED `type`, and the
+ * only way through is to count the `as`es:
+ *
+ *     { type A }          type-only import of A
+ *     { type as }         type-only import of `as`
+ *     { type as as }      import `type`, renamed to `as`      <- we rejected this
+ *     { type as as as }   type-only import of `as`, renamed to `as`
+ *     { type as B }       import `type`, renamed to B         <- we rejected this
+ *
+ * Returns the specifier's parts; the caller builds the import- or export-shaped node.
+ */
+function parseSpecifierParts(state: ParserState): { name: Node; property: Node | null; typeOnly: boolean } {
+    const wasType = state.tsMode && isK(state, K.TYPE);
+    let typeOnly = false;
+    let property: Node | null = null;
+    let canParseAs = true;
+    let name = parseModuleExportName(state);
+    const typeNameNode = name;
+
+    if (wasType && name.type !== N.StringLiteral) {
+        if (isK(state, K.AS)) {
+            const firstAs = parseNameAsIdent(state, R_NAME);
+            if (isK(state, K.AS)) {
+                const secondAs = parseNameAsIdent(state, R_NAME);
+                if (atModuleExportName(state)) {
+                    // `{ type as as X }` — type-only, importing `as` under the name X.
+                    typeOnly = true;
+                    property = firstAs;
+                    name = parseModuleExportName(state);
+                } else {
+                    // `{ type as as }` — no modifier: `type` itself, renamed to `as`.
+                    property = typeNameNode;
+                    name = secondAs;
+                }
+                canParseAs = false;
+            } else if (atModuleExportName(state)) {
+                // `{ type as B }` — no modifier: `type` renamed to B.
+                property = typeNameNode;
+                name = parseModuleExportName(state);
+                canParseAs = false;
+            } else {
+                // `{ type as }` — type-only import of `as`.
+                typeOnly = true;
+                name = firstAs;
+            }
+        } else if (atModuleExportName(state)) {
+            // `{ type A }` — the ordinary type-only form.
+            typeOnly = true;
+            name = parseModuleExportName(state);
+        }
+    }
+
+    if (canParseAs && eatK(state, K.AS)) {
+        property = name;
+        name = parseModuleExportName(state);
+    }
+    return { name, property, typeOnly };
+}
+
+function importTypeModifierFollows(state: ParserState): boolean {
+    const s = saveState(state);
+    nextToken(state); // past `type`
+    let modifier: boolean;
+    if (isP(state, P.LBRACE) || isP(state, P.STAR)) modifier = true;
+    // `,` `=` or a specifier string: `type` is the binding, not a modifier.
+    else if (!isIdentLike(state)) modifier = false;
+    else if (!isK(state, K.FROM)) modifier = true;
+    else {
+        nextToken(state); // past `from`
+        modifier = isK(state, K.FROM); // `import type from from "m"`
+    }
+    restoreState(state, s);
+    return modifier;
+}
+
 function parseImport(state: ParserState): Node {
     const start = state.tokStart;
     nextToken(state);
     let flags = 0;
-    if (state.tsMode && isK(state, K.TYPE)) {
-        const s = saveState(state);
+    if (state.tsMode && isK(state, K.TYPE) && importTypeModifierFollows(state)) {
+        flags |= FL.TYPE_ONLY;
         nextToken(state);
-        if (!isK(state, K.FROM) && !isP(state, P.EQ)) flags |= FL.TYPE_ONLY;
-        else restoreState(state, s);
     }
     // Import PHASE: `import source w from './m.wasm'` / `import defer * as ns from './m.js'`.
     //
@@ -2848,20 +2950,10 @@ function parseImport(state: ParserState): Node {
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
             const mark = state.tokStart;
             const ss = state.tokStart;
-            let specFlags = 0;
-            if (state.tsMode && isK(state, K.TYPE)) {
-                const st = saveState(state);
-                nextToken(state);
-                if (isNameLike(state) || (state.tok as number) === T_STR) specFlags |= FL.TYPE_ONLY;
-                else restoreState(state, st);
-            }
-            const imported =
-                (state.tok as number) === T_STR
-                    ? leaf(state, N.StringLiteral, state.tokStart, state.tokEnd)
-                    : parseNameAsIdent(state, R_NAME);
-            if ((state.tok as number) === T_STR) nextToken(state);
-            const local = eatK(state, K.AS) ? parseIdent(state, R_BIND) : ident(state, R_BIND, imported.start, imported.end);
-            push(state, create.ImportSpecifier(ss, state.tokStart, specFlags, local, imported));
+            const parts = parseSpecifierParts(state);
+            const imported = parts.property ?? parts.name;
+            const local = ident(state, R_BIND, parts.name.start, parts.name.end);
+            push(state, create.ImportSpecifier(ss, state.tokStart, parts.typeOnly ? FL.TYPE_ONLY : 0, local, imported));
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
@@ -3056,32 +3148,19 @@ function parseExport(state: ParserState): Node {
         while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
             const mark = state.tokStart;
             const ss = state.tokStart;
-            let specFlags = 0;
-            if (state.tsMode && isK(state, K.TYPE)) {
-                const st = saveState(state);
-                nextToken(state);
-                if (isNameLike(state)) specFlags |= FL.TYPE_ONLY;
-                else restoreState(state, st);
-            }
-            // Arbitrary module namespace names: `export { a as "x y" }`, `export { "a-b" as c }`,
-            // and `export { "a-b" }` where the same string is both sides.
+            // Same `type`/`as` resolution as the import side — `export { type as as }` is `type`
+            // re-exported under the name `as`, NOT a type-only export. Arbitrary module namespace
+            // names (`export { a as "x y" }`, `export { "a-b" as c }`, `export { "a-b" }`) come from
+            // `parseModuleExportName` on both halves.
             //
-            // Each leaf advances at the point it is built. The previous shape advanced once for the
-            // local and then AGAIN for a string-valued `exported` — but with no `as` those are the
-            // SAME node, so `export { "a-b" } from './m'` consumed a token too many and failed.
-            let local: Node;
-            if ((state.tok as number) === T_STR) {
-                local = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
-                nextToken(state);
-            } else local = parseNameAsIdent(state, R_REF);
-            let exported: Node;
-            if (eatK(state, K.AS)) {
-                if ((state.tok as number) === T_STR) {
-                    exported = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
-                    nextToken(state);
-                } else exported = parseNameAsIdent(state, R_NAME);
-            } else exported = local.type === N.StringLiteral ? local : ident(state, R_NAME, local.start, local.end);
-            push(state, create.ExportSpecifier(ss, state.tokStart, specFlags, local, exported));
+            // oxc maps this the mirror of imports: the LOCAL is the property name when there was an
+            // `as`, else the name itself (`js/module.rs:951-955`).
+            const parts = parseSpecifierParts(state);
+            const exported = parts.name;
+            const localSrc = parts.property ?? exported;
+            const local: Node =
+                localSrc.type === N.StringLiteral ? localSrc : ident(state, R_REF, localSrc.start, localSrc.end);
+            push(state, create.ExportSpecifier(ss, state.tokStart, parts.typeOnly ? FL.TYPE_ONLY : 0, local, exported));
             if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
             if (noProgress(state, mark)) break;
         }
