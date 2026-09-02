@@ -27,6 +27,8 @@ export const ParseErrorCode = enumeration(
     'ImportRequiresSpecifier',
     'ImportArguments',
     'DynamicImportSpread',
+    'LexicalDeclSingleStatement',
+    'ClassDeclSingleStatement',
     'TaggedOptionalChain',
     'DecoratorsUnsupported',
     'ParserStalled',
@@ -95,6 +97,9 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.ImportArguments]:
         'Dynamic imports can only accept a module specifier and an optional set of attributes as arguments',
     [ParseErrorCode.DynamicImportSpread]: 'Argument of dynamic import cannot be a spread element.',
+    [ParseErrorCode.LexicalDeclSingleStatement]:
+        'Lexical declaration cannot appear in a single-statement context',
+    [ParseErrorCode.ClassDeclSingleStatement]: 'Invalid class declaration',
     [ParseErrorCode.TaggedOptionalChain]: 'tagged template cannot be used with an optional chain',
     [ParseErrorCode.DecoratorsUnsupported]: 'decorators not supported',
     [ParseErrorCode.ParserStalled]: 'parser stalled',

@@ -2349,7 +2349,10 @@ function parseStatement(state: ParserState, single: boolean): Node {
         nextToken(state);
         const isDecl = isIdentLike(state) && (state.tokFlags & F_NL) === 0;
         restoreState(state, save);
-        if (isDecl) return parseVarDecl(state, VAR_KIND.USING, 0);
+        if (isDecl) {
+            if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
+            return parseVarDecl(state, VAR_KIND.USING, 0);
+        }
     }
     // `await using r = res()` — the async form, disposed with `[Symbol.asyncDispose]`. Same
     // contextual rules one token further in, and `await` must still be able to start an ordinary
@@ -2364,6 +2367,7 @@ function parseStatement(state: ParserState, single: boolean): Node {
         }
         restoreState(state, save);
         if (isDecl) {
+            if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
             nextToken(state); // consume `await`; `parseVarDecl` consumes `using`
             return parseVarDecl(state, VAR_KIND.AWAIT_USING, 0);
         }
@@ -2392,6 +2396,7 @@ function parseStatement(state: ParserState, single: boolean): Node {
                     state.tokFlags = tf;
                     state.tokHash = th;
                 }
+                if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
                 return parseVarDecl(state, VAR_KIND.CONST, 0);
             }
             case K.LET: {
@@ -2443,6 +2448,9 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 break;
             }
             case K.CLASS:
+                // A ClassDeclaration is not a Statement either, but it gets its OWN diagnostic in
+                // oxc (`js/class.rs:26` vs `js/statement.rs:294`), so the split is kept.
+                if (single) raise(state, ParseErrorCode.ClassDeclSingleStatement);
                 return parseClass(state, false, 0);
             case K.IF: {
                 nextToken(state);
