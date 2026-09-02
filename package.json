@@ -25,6 +25,7 @@
         "rollupsuite": "tsx scripts/rollup-suite.ts",
         "test262": "tsx scripts/test262.ts",
         "misslayers": "tsx scripts/miss-layers.ts",
+        "checkerdiff": "tsx scripts/checker-diff.ts",
         "unchanged": "tsx scripts/output-unchanged.ts",
         "evalorder": "tsx scripts/eval-order.ts"
     },

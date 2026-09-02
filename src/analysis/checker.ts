@@ -55,10 +55,94 @@ function checkNode(sem: Semantic, node: Node, scope: number, errors: CheckError[
         case N.NumericLiteral:
             checkNumericLiteral(sem, node, scope, errors);
             return;
+        case N.BindingIdentifier:
+            checkReservedWord(sem, node, scope, errors);
+            checkBindingIdentifier(sem, node, scope, errors);
+            return;
+        case N.IdentifierReference:
+        case N.LabelIdentifier:
+            checkReservedWord(sem, node, scope, errors);
+            return;
+        case N.AssignmentExpression:
+            checkAssignTarget(sem, (node.data as { left: Node }).left, scope, errors);
+            return;
+        case N.UpdateExpression:
+            checkAssignTarget(sem, (node.data as { argument: Node }).argument, scope, errors);
+            return;
+        case N.FunctionDeclaration:
+        case N.FunctionExpression:
+        case N.ArrowFunctionExpression:
+            checkUseStrictDirective(node, errors);
+            return;
         default:
             return;
     }
 }
+
+/** Reserved only in strict code — `oxc`'s `check_identifier` (`checker/javascript.rs:152`). Outside
+ *  strict mode every one of these is an ordinary identifier, which is why the rule cannot be a
+ *  keyword table in the lexer. `await` and `yield` in a MODULE or a generator are the parser's job and
+ *  are already handled there; this is the strict-mode half. */
+const STRICT_RESERVED = new Set([
+    'implements',
+    'interface',
+    'let',
+    'package',
+    'private',
+    'protected',
+    'public',
+    'static',
+    'yield',
+]);
+
+function checkReservedWord(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+    if (!STRICT_RESERVED.has(node.name) || !isStrictScope(sem, scope)) return;
+    errors.push({ pos: node.start, msg: `The keyword '${node.name}' is reserved` });
+}
+
+/** `oxc`'s `check_binding_identifier` (`:204`). Binding `eval` or `arguments` carries the SAME message
+ *  as assigning to one — oxc reuses `unexpected_identifier_assign` for both. */
+function checkBindingIdentifier(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+    if (node.name !== 'eval' && node.name !== 'arguments') return;
+    if (!isStrictScope(sem, scope)) return;
+    errors.push({ pos: node.start, msg: `Cannot assign to '${node.name}' in strict mode` });
+}
+
+/** The assignment half — `oxc`'s `check_identifier_reference` (`:275`). Handled from the ASSIGNMENT
+ *  node rather than the identifier, so no ancestor stack is needed to know the identifier is a target. */
+function checkAssignTarget(sem: Semantic, target: Node, scope: number, errors: CheckError[]): void {
+    if (target.type !== N.IdentifierReference) return;
+    if (target.name !== 'eval' && target.name !== 'arguments') return;
+    if (!isStrictScope(sem, scope)) return;
+    errors.push({ pos: target.start, msg: `Cannot assign to '${target.name}' in strict mode` });
+}
+
+/** `oxc`'s `check_directive` (`:494`). A `"use strict"` directive is illegal in a function whose
+ *  parameter list is not SIMPLE — any default, rest or destructuring pattern — because the parameters
+ *  would have to be evaluated under a strictness the directive only establishes afterwards. */
+function checkUseStrictDirective(node: Node, errors: CheckError[]): void {
+    const d = node.data as { params: Node[]; body: Node | null };
+    if (d.body === null || d.body.type !== N.BlockStatement) return;
+    if (d.params.every(isSimpleParam)) return;
+    for (const st of (d.body.data as { body: Node[] }).body) {
+        if (st.type !== N.ExpressionStatement) return;
+        const e = (st.data as { expression: Node }).expression;
+        if (e.type !== N.StringLiteral) return;
+        if (e.name === '"use strict"' || e.name === "'use strict'") {
+            errors.push({ pos: st.start, msg: "Illegal 'use strict' directive in function with non-simple parameter list" });
+            return;
+        }
+    }
+}
+
+/** A SIMPLE parameter is a bare binding identifier and nothing else. A default (`a = 1`) keeps a
+ *  `BindingIdentifier` pattern but carries an `init`, so the pattern type alone is not enough; a rest
+ *  element is a different node entirely. */
+const isSimpleParam = (p: Node): boolean => {
+    if (p.type !== N.FormalParameter) return false;
+    const d = p.data as { pattern: Node; init: Node | null };
+    return d.pattern.type === N.BindingIdentifier && d.init === null;
+};
 
 /** oxc's `check_unary_expression` (`checker/javascript.rs:1278`). */
 function checkUnaryExpression(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {

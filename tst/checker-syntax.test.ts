@@ -26,10 +26,7 @@ const check = (src: string, isModule = false) => {
 };
 
 describe('delete of a private field — an error in EVERY mode', () => {
-    it.each([
-        'class C { #x; m(o){ return delete o.#x; } }',
-        'class C { #x; m(o){ return delete (o?.#x); } }',
-    ])('%s', (src) => {
+    it.each(['class C { #x; m(o){ return delete o.#x; } }', 'class C { #x; m(o){ return delete (o?.#x); } }'])('%s', (src) => {
         expect(check(src)).toEqual(["The operand of a 'delete' operator cannot be a private identifier."]);
     });
 
@@ -103,5 +100,58 @@ describe('the walk itself', () => {
 
     it('finds every occurrence, not just the first', () => {
         expect(check('"use strict"; var a = 010, b = 011, c = 012;')).toHaveLength(3);
+    });
+});
+
+describe('strict-mode reserved words', () => {
+    // Ordinary identifiers outside strict code, which is why this cannot be a lexer keyword table.
+    it.each(['yield', 'static', 'implements', 'interface', 'package', 'private', 'protected', 'public'])(
+        '`%s` is reserved in strict code',
+        (kw) => {
+            expect(check(`"use strict"; var ${kw};`)).toEqual([`The keyword '${kw}' is reserved`]);
+            expect(check(`var ${kw};`)).toEqual([]);
+        },
+    );
+
+    it('applies to references and labels too, not just bindings', () => {
+        expect(check('"use strict"; static;')).toEqual(["The keyword 'static' is reserved"]);
+    });
+});
+
+describe('eval and arguments', () => {
+    it.each(['eval', 'arguments'])('cannot be assigned in strict code: %s', (name) => {
+        expect(check(`"use strict"; ${name} = 1;`)).toEqual([`Cannot assign to '${name}' in strict mode`]);
+        expect(check(`${name} = 1;`)).toEqual([]);
+    });
+
+    it('cannot be BOUND in strict code either — oxc reuses the same message', () => {
+        expect(check('"use strict"; var eval;')).toEqual(["Cannot assign to 'eval' in strict mode"]);
+    });
+
+    it('an update expression counts as an assignment', () => {
+        expect(check('"use strict"; eval++;')).toEqual(["Cannot assign to 'eval' in strict mode"]);
+    });
+});
+
+describe('a `use strict` directive needs a simple parameter list', () => {
+    // The parameters would have to be evaluated under a strictness the directive only establishes
+    // afterwards. A default keeps a `BindingIdentifier` pattern but carries an `init`, so the pattern
+    // type alone does not settle it — that distinction was a real bug in the first cut.
+    it.each(['a = 1', '[a]', '{a}', '...a', 'a, b = 1'])('non-simple: (%s)', (params) => {
+        expect(check(`function f(${params}) { "use strict"; }`)).toEqual([
+            "Illegal 'use strict' directive in function with non-simple parameter list",
+        ]);
+    });
+
+    it.each(['a', 'a, b', ''])('simple: (%s)', (params) => {
+        expect(check(`function f(${params}) { "use strict"; }`)).toEqual([]);
+    });
+
+    it('applies to arrows as well as functions', () => {
+        expect(check('(a = 1) => { "use strict"; };')).toHaveLength(1);
+    });
+
+    it('and only when the directive is actually there', () => {
+        expect(check('function f(a = 1) { return 1; }')).toEqual([]);
     });
 });
