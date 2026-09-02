@@ -26,18 +26,22 @@ export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
     const stack: Node[] = [program];
     const scopes: number[] = [ownScopeOf(program)];
     const jumps: JumpCtx[] = [TOP_JUMP];
+    const privates: ReadonlySet<string>[] = [NO_PRIVATES];
     while (stack.length > 0) {
         const node = stack.pop() as Node;
         const inheritedScope = scopes.pop() as number;
         const inheritedJump = jumps.pop() as JumpCtx;
+        const inheritedPrivates = privates.pop() as ReadonlySet<string>;
         const own = ownScopeOf(node);
         const scope = own === 0 ? inheritedScope : own;
-        checkNode(sem, node, scope, inheritedJump, errors);
+        checkNode(sem, node, scope, inheritedJump, inheritedPrivates, errors);
         const jump = descendJump(node, inheritedJump, errors);
+        const priv = descendPrivates(node, inheritedPrivates, errors);
         walkChildren(node, (child) => {
             stack.push(child);
             scopes.push(scope);
             jumps.push(jump);
+            privates.push(priv);
         });
     }
     return errors;
@@ -89,6 +93,51 @@ function descendJump(node: Node, ctx: JumpCtx, errors: CheckError[]): JumpCtx {
         return { breakable: ctx.breakable, continuable: ctx.continuable, labels };
     }
     return ctx;
+}
+
+const NO_PRIVATES: ReadonlySet<string> = new Set();
+
+/** Private names visible here — the UNION of every enclosing class, since a nested class may still
+ *  reference an outer class's `#field`. Collected before descending, because a method may reference a
+ *  private declared later in the same body.
+ *
+ *  A class is not a function boundary for this: `class C { #y; m(){ return o => o.#y; } }` is fine. */
+function descendPrivates(node: Node, inherited: ReadonlySet<string>, errors: CheckError[]): ReadonlySet<string> {
+    if (node.type !== N.ClassDeclaration && node.type !== N.ClassExpression) return inherited;
+    const elements = (node.data as { body: Node[] }).body;
+    const own = new Set(inherited);
+    // Private names share ONE namespace per class — unlike public members, where `m(){}` and
+    // `static m(){}` coexist. The single exemption is a getter/setter PAIR, and only when both have
+    // the same static-ness: `get #x(){} static get #x(){}` still collides. oxc reports it with the
+    // ordinary redeclaration message.
+    const seen = new Map<string, { kind: string; isStatic: boolean }>();
+    for (const el of elements) {
+        const d = el.data as { key?: Node; static?: boolean; kind?: string };
+        if (d.key === undefined || d.key.type !== N.PrivateIdentifier) continue;
+        own.add(d.key.name);
+        const kind = d.kind === 'get' || d.kind === 'set' ? d.kind : 'other';
+        const isStatic = d.static === true;
+        const prev = seen.get(d.key.name);
+        const pairs =
+            prev !== undefined && prev.kind !== 'other' && kind !== 'other' && prev.kind !== kind && prev.isStatic === isStatic;
+        if (prev !== undefined && !pairs)
+            errors.push({ pos: d.key.start, msg: `Identifier \`#${d.key.name}\` has already been declared` });
+        // A completed pair occupies the slot as `other`, so a third element on the same name collides.
+        seen.set(d.key.name, { kind: pairs ? 'other' : kind, isStatic });
+    }
+    return own;
+}
+
+/** oxc's `check_private_identifier_outside_class` (`:352`) and `check_private_identifier` (`:361`).
+ *  Two distinct messages: no enclosing class at all, versus a class that never declares the name. */
+function checkPrivateName(field: Node, privates: ReadonlySet<string>, inClass: boolean, errors: CheckError[]): void {
+    if (privates.has(field.name)) return;
+    errors.push({
+        pos: field.start,
+        msg: inClass
+            ? `Private field '#${field.name}' must be declared in an enclosing class`
+            : `Private identifier '#${field.name}' is not allowed outside class bodies`,
+    });
 }
 
 /** oxc's `check_break_statement` / `check_continue_statement` (`checker/javascript.rs:782,825`). */
@@ -157,8 +206,26 @@ function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
  *  off inside every function body. */
 const ownScopeOf = (node: Node): number => (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
 
-function checkNode(sem: Semantic, node: Node, scope: number, jump: JumpCtx, errors: CheckError[]): void {
+function checkNode(
+    sem: Semantic,
+    node: Node,
+    scope: number,
+    jump: JumpCtx,
+    privates: ReadonlySet<string>,
+    errors: CheckError[],
+): void {
     switch (node.type) {
+        case N.PrivateFieldExpression:
+            checkPrivateName((node.data as { field: Node }).field, privates, privates !== NO_PRIVATES, errors);
+            return;
+        case N.BinaryExpression: {
+            // `#x in o` — the ergonomic brand check. The private name is the LEFT operand here rather
+            // than a member access, so it needs its own arm; everything else about the rule is the same.
+            const b = node.data as { operator: string; left: Node };
+            if (b.operator === 'in' && b.left.type === N.PrivateIdentifier)
+                checkPrivateName(b.left, privates, privates !== NO_PRIVATES, errors);
+            return;
+        }
         case N.BreakStatement:
         case N.ContinueStatement:
             checkJump(node, jump, errors);

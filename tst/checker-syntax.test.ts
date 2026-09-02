@@ -263,3 +263,71 @@ describe('break, continue and labels', () => {
         expect(check('a: b: while(1){ continue a; }')).toEqual([]);
     });
 });
+
+describe('private names', () => {
+    // Visible private names are the UNION of every enclosing class, collected BEFORE descending so a
+    // method may reference a `#field` declared later in the same body. A class is not a function
+    // boundary for this — an arrow inside a method still sees them.
+    it('two distinct messages: no class at all, versus an undeclared name', () => {
+        expect(check('o.#x;')).toEqual(["Private identifier '#x' is not allowed outside class bodies"]);
+        expect(check('class C { m(o){ return o.#y; } }')).toEqual(["Private field '#y' must be declared in an enclosing class"]);
+    });
+
+    it.each([
+        'class C { #y; m(o){ return o.#y; } }',
+        'class C { m(o){ return o.#y; } #y; }',
+        'class C { #m(){} n(o){ return o.#m(); } }',
+        'class A { #p; m(){ class B { n(o){ return o.#p; } } } }',
+        'class C { #y; m(){ return function(o){ return o.#y; }; } }',
+        'class C { #y; m(){ return o => o.#y; } }',
+        'class C { #x; m(o){ return o?.#x; } }',
+    ])('resolves: %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('a sibling class does not share them', () => {
+        expect(check('class A { #p; } class B { m(o){ return o.#p; } }')).toEqual([
+            "Private field '#p' must be declared in an enclosing class",
+        ]);
+    });
+
+    it('the `#x in o` brand check is the same rule in a different position', () => {
+        expect(check('class C { #x; m(o){ return #x in o; } }')).toEqual([]);
+        expect(check('class C { m(o){ return #y in o; } }')).toEqual([
+            "Private field '#y' must be declared in an enclosing class",
+        ]);
+        expect(check('#x in o;')).toEqual(["Private identifier '#x' is not allowed outside class bodies"]);
+    });
+});
+
+describe('duplicate class elements', () => {
+    // Private names share ONE namespace per class, unlike public members where `m(){}` and
+    // `static m(){}` coexist happily.
+    it('public members may repeat; private ones may not', () => {
+        expect(check('class C { m(){} m(){} }')).toEqual([]);
+        expect(check('class C { #m(){} #m(){} }')).toEqual(['Identifier `#m` has already been declared']);
+        expect(check('class C { #x; #x(){} }')).toEqual(['Identifier `#x` has already been declared']);
+    });
+
+    it('static does NOT open a second slot for a private name', () => {
+        expect(check('class C { #x; static #x; }')).toEqual(['Identifier `#x` has already been declared']);
+    });
+
+    it('a getter/setter pair is the one exemption, and only when static-ness matches', () => {
+        expect(check('class C { get #x(){} set #x(v){} }')).toEqual([]);
+        expect(check('class C { static get #x(){} static set #x(v){} }')).toEqual([]);
+        expect(check('class C { get #x(){} static get #x(){} }')).toEqual(['Identifier `#x` has already been declared']);
+    });
+
+    // ANOTHER DELIBERATE DIVERGENCE, stricter than oxc — the third found today. A completed get/set
+    // pair fills the slot, so a THIRD accessor on the same name collides. oxc accepts it; node
+    // rejects it ("Identifier '#x' has already been declared"), and node is right.
+    it('a third accessor collides, where oxc has a gap', () => {
+        expect(check('class C { get #x(){} set #x(v){} get #x(){} }')).toEqual(['Identifier `#x` has already been declared']);
+        expect(() => new Function('class C { get #x(){} set #x(v){} get #x(){} }')).toThrow();
+    });
+
+    it('separate classes have separate namespaces', () => {
+        expect(check('class C { #x; } class D { #x; }')).toEqual([]);
+    });
+});
