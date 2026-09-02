@@ -234,7 +234,8 @@ describe('break, continue and labels', () => {
     // `AstKind::Function` and `AstKind::StaticBlock` but NOT `ArrowFunctionExpression`, so it accepts
     // this; node rejects it and so does the spec — an arrow is a function boundary like any other.
     // Same call as `static accessor prototype`: the language outranks oxc when they disagree.
-    // `pnpm checkerdiff` stays at 0 because no shipped code contains a syntax error.
+    // esbuild rejects it too (`Cannot use "break" here`), so node, rollup AND esbuild all agree — oxc is
+    // alone. `pnpm checkerdiff` stays at 0 because no shipped code contains a syntax error.
     it('including an ARROW, where oxc has a gap', () => {
         expect(check('while(1){ (()=>{ break; }); }')).toEqual(['Illegal break statement']);
         expect(() => new Function('while(1){ (()=>{ break; }); }')).toThrow();
@@ -321,7 +322,8 @@ describe('duplicate class elements', () => {
 
     // ANOTHER DELIBERATE DIVERGENCE, stricter than oxc — the third found today. A completed get/set
     // pair fills the slot, so a THIRD accessor on the same name collides. oxc accepts it; node
-    // rejects it ("Identifier '#x' has already been declared"), and node is right.
+    // rejects it, and so does esbuild ("The symbol \"#x\" has already been declared"). rollup builds it,
+    // so it is 2-2 among implementations with the RUNTIME on the strict side.
     it('a third accessor collides, where oxc has a gap', () => {
         expect(check('class C { get #x(){} set #x(v){} get #x(){} }')).toEqual(['Identifier `#x` has already been declared']);
         expect(() => new Function('class C { get #x(){} set #x(v){} get #x(){} }')).toThrow();

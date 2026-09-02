@@ -13,7 +13,9 @@
 // ONE DELIBERATE DIVERGENCE FROM oxc: `class C { static accessor prototype; }`.
 // oxc parses that as an `AccessorProperty` and applies the check only at its property-definition and
 // method-definition sites, so it ACCEPTS it. The spec's early error is on ClassElementName, which
-// covers auto-accessors too, so shakeup rejects. node cannot arbitrate — node 24 does not implement
+// covers auto-accessors too, so shakeup rejects. ESBUILD implements `accessor` and rejects this as
+// `Invalid field name "prototype"` — the most complete of the four implementations agrees with us.
+// node cannot arbitrate — node 24 does not implement
 // `accessor` at all — and test262 has no fixture, so no gate moves either way. Recorded here because
 // it is a choice, not an oversight: the same oracle hierarchy that made us follow test262 over node
 // for `new import('m').prop` puts the language above oxc when they disagree.
