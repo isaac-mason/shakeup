@@ -121,6 +121,9 @@ export type Module = {
     idx: number;
     id: string;
     source: string;
+    /** Retained comment spans, as parsed. Kept on the module because a comment's offsets index THIS
+     *  module's `source` — a chunk concatenates many modules, so the join has to stay per-module. */
+    comments: Int32Array;
     program: Program;
     nodeCount: number;
     semantic: Semantic;
@@ -240,6 +243,7 @@ export type CachedParse = {
     hasJSX: boolean;
     hasImportSyntax: boolean;
     /** Source-derived, so cacheable — unlike the {@link ExportsKind} computed from it. */
+    comments: Int32Array;
     hasTopLevelReturn: boolean;
     hasRequire: boolean;
     /** Module-level `await`. See {@link ParseState.sawTopLevelAwait}. */

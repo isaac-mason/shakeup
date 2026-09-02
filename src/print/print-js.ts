@@ -1,6 +1,17 @@
 import { N, type Node, TYPE_COUNT, TYPE_NAME } from '../ast/index.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
-import { dropTrailingSemi, mark, type Printer, parens, semi, softNewline, softSpace, space, write } from './printer.ts';
+import {
+    dropTrailingSemi,
+    mark,
+    parens,
+    type Printer,
+    printLeadingComments,
+    semi,
+    softNewline,
+    softSpace,
+    space,
+    write,
+} from './printer.ts';
 
 // Loose view of a node's payload — the printer reads fields positionally per arm.
 type D = Record<string, Node | (Node | null)[] | string | number | boolean | null>;
@@ -1024,6 +1035,7 @@ export function printStmt(p: Printer, n: Node): void {
                 const filter = decl === null ? null : { decl, live: p.live! };
                 if (emitsNothing(p, s)) continue;
                 if (emitted) softNewline(p);
+                printLeadingComments(p, s.start);
                 p.declFilter = filter;
                 printStmt(p, s);
                 p.declFilter = null;

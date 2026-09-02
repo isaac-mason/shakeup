@@ -85,6 +85,9 @@ export const setLowerSemanticMode = (m: LowerSemanticMode): void => {
  * in the output = broken JS; fail loudly instead. (`declare` namespaces erase fine.)
  * TODO(namespace-lowering): replace this rejection with actual value-namespace lowering (SOTA:
  * oxc typescript/namespace.rs, esbuild tsParseNamespace) — then this walk goes away entirely. */
+/** Shared empty span list, so a module with no comments allocates nothing. */
+const EMPTY_COMMENTS = new Int32Array(0);
+
 export function collectUnsupported(program: Node, id: string, errors: string[]): void {
     walk(program, (n) => {
         if (n.type === N.Decorator) {
@@ -1117,6 +1120,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasJSX: boolean;
         let hasImportSyntax: boolean;
         let hasTopLevelReturn = false;
+        let comments: Int32Array = EMPTY_COMMENTS;
         let hasRequire = false;
         let hasTopLevelAwait = false;
         let hasUnbundlable = false;
@@ -1226,6 +1230,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = hit.hasJSX;
                 hasImportSyntax = hit.hasImportSyntax;
                 hasTopLevelReturn = hit.hasTopLevelReturn;
+                comments = hit.comments;
                 hasRequire = hit.hasRequire;
                 hasTopLevelAwait = hit.hasTopLevelAwait;
                 hasEsmExport = hit.hasEsmExport;
@@ -1248,6 +1253,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = parsed.hasJSX;
                 hasImportSyntax = parsed.hasImportSyntax;
                 hasTopLevelReturn = parsed.hasTopLevelReturn;
+                comments = parsed.comments;
                 hasRequire = parsed.hasRequire;
                 hasTopLevelAwait = parsed.hasTopLevelAwait;
                 hasUnbundlable = parsed.hasUnbundlable;
@@ -1434,6 +1440,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasJSX,
             hasImportSyntax,
             hasTopLevelReturn,
+            comments,
             hasRequire,
             hasTopLevelAwait,
             hasEsmExport,
@@ -1502,6 +1509,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX: mod.hasJSX,
                 hasImportSyntax: mod.hasImportSyntax,
                 hasTopLevelReturn: mod.hasTopLevelReturn,
+                comments: mod.comments,
                 hasRequire: mod.hasRequire,
                 hasTopLevelAwait: mod.hasTopLevelAwait,
                 hasEsmExport: mod.hasEsmExport,

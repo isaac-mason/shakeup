@@ -13,6 +13,7 @@ import { basenameOf, dirnameOf, relativePath } from '../fs.ts';
 import type { Linked } from '../graph-types.ts';
 import {
     DEFAULT_HASH_SIZE,
+    effectiveComments,
     getHashPlaceholderGenerator,
     type HashPlaceholderGenerator,
     makeUnique,
@@ -296,7 +297,7 @@ export function renderChunks(
         // is the only place a mangler runs at all.
         if (compressMode === 'full' || chunkMangle) {
             const joined = wantMap ? joinParts(rc.parts) : null;
-            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle, compressMode === 'full');
+            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle, compressMode === 'full', effectiveComments(naming.comments, naming.minify));
             rc.code = done.code;
             // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
             // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.

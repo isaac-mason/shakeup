@@ -27,6 +27,7 @@ import { printModule } from '../../print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../print/printer.ts';
 import { isRequireCall } from '../scan.ts';
 import type { Mappings } from '../../util/sourcemap.ts';
+import { effectiveComments } from '../output-options.ts';
 import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
 import {
     clauseSep,
@@ -512,6 +513,11 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                         overrides,
                         initCalls,
                         srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
+                        // Per MODULE: a comment's offsets index this module's own source, and a chunk
+                        // concatenates many, so the join cannot be hoisted to the chunk.
+                        comments: mod.comments,
+                        src: mod.source,
+                        commentOpts: effectiveComments(naming.comments, deferMinify ? false : naming.minify),
                         sourceIdx: srcIdx,
                     },
                 );

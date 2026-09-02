@@ -21,6 +21,9 @@ export type ExportsMode = 'auto' | 'named' | 'default' | 'none';
 export type SourcemapIgnoreList = boolean | string | RegExp | ((source: string, mapPath: string) => boolean);
 
 export type OutputOptionsNaming = {
+    /** Which comment classes to preserve. `true` (the default, as in rolldown) keeps legal
+     *  (`@license`, `@preserve`, `/*!`) and JSDoc; `false` keeps neither. */
+    comments?: OutputCommentsOption;
     // placement
     dir?: string;
     file?: string;
@@ -76,6 +79,27 @@ export type ResolvedMinify = { whitespace: boolean; mangle: boolean; compress: C
 /** Resolve the `minify` option: `true` = all stages on; an object opts into each stage (default
  *  false per field); falsy = all off. Resolved once and threaded so whitespace/mangle/compress
  *  never drift apart. */
+/** `comments: true | false | { legal?, jsdoc? }`, defaulting to rolldown's `true`. `normal` is not
+ *  offered — rolldown does not print ordinary comments and neither do we, because an AST printer
+ *  cannot place them faithfully. */
+export function normalizeComments(c: OutputCommentsOption | undefined): { legal: boolean; jsdoc: boolean } {
+    if (c === false) return { legal: false, jsdoc: false };
+    if (c === undefined || c === true) return { legal: true, jsdoc: true };
+    return { legal: c.legal ?? true, jsdoc: c.jsdoc ?? true };
+}
+
+export type OutputCommentsOption = boolean | { legal?: boolean; jsdoc?: boolean };
+
+/** The comment classes a given print actually emits, given whether it is minifying.
+ *
+ *  rolldown's `minify_chunks.rs:33-40` verbatim: **JSDoc is dropped when whitespace is removed** and
+ *  legal is kept. Minified output is not read by humans, so the docs are dead weight — keeping them
+ *  cost 8.5% on a minified crashcat bundle — while a licence has to survive precisely because
+ *  everything around it is being stripped. */
+export function effectiveComments(c: { legal: boolean; jsdoc: boolean }, minify: boolean): { legal: boolean; jsdoc: boolean } {
+    return { legal: c.legal, jsdoc: c.jsdoc && !minify };
+}
+
 export function resolveMinify(minify: boolean | MinifyOptions | undefined): ResolvedMinify {
     if (minify === true) return { whitespace: true, mangle: true, compress: 'full' };
     if (minify !== null && typeof minify === 'object') {
@@ -107,6 +131,9 @@ export type NormalizedOutputNaming = {
     outro: AddonFn;
     exports: ExportsMode;
     sourcemap: boolean | 'inline' | 'hidden';
+    /** Which comment classes survive into the output. rolldown's defaults
+     *  (`rolldown_common/.../comments.rs:26`): legal and JSDoc on, normal comments never. */
+    comments: { legal: boolean; jsdoc: boolean };
     sourcemapExcludeSources: boolean;
     sourcemapIgnoreList: (source: string, mapPath: string) => boolean;
     minify: boolean;
@@ -330,6 +357,7 @@ export function normalizeOutputOptions(
         sourcemapExcludeSources: o.sourcemapExcludeSources ?? false,
         sourcemapIgnoreList: ignore,
         minify: resolveMinify(o.minify).whitespace, // printer whitespace/syntactic gate
+        comments: normalizeComments(o.comments),
     };
 }
 

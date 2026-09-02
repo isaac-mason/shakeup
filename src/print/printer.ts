@@ -1,4 +1,12 @@
 import { lineColOf, type Node } from '../ast/index.ts';
+import {
+    classifyComment,
+    CommentKind,
+    commentAttachedTo,
+    commentCount,
+    commentEnd,
+    commentStart,
+} from '../parser/comments.ts';
 import { addLine, addSegment, type Mappings, newMappings } from '../util/sourcemap.ts';
 
 /** Options controlling how the printer renders. Whitespace and syntactic-form
@@ -35,7 +43,17 @@ export type PrinterConfig = {
     /** Per-node text overrides (dynamic `import()` retargeting, asset URL rewrites). A node
      *  present here is emitted as its mapped text verbatim, skipping normal emission. */
     overrides?: Map<Node, string> | null;
+    /** Retained comment spans for THIS module, plus the source they index into. Both or neither:
+     *  the spans are meaningless without the text. Absent ⇒ no comments are printed. */
+    comments?: Int32Array;
+    src?: string;
+    /** Which comment classes to print. rolldown's defaults (`comments.rs:26`), minus `normal`,
+     *  which rolldown does not print either. */
+    commentOpts?: CommentPrintOptions;
 };
+
+/** Mirrors rolldown's `PrintCommentsOptions` (`rolldown_ecmascript/src/ecma_compiler.rs:159`). */
+export type CommentPrintOptions = { legal: boolean; jsdoc: boolean };
 
 /** Printer state. Mirrors the load-bearing fields of oxc's `Codegen`
  *  (`llm/libs/oxc/crates/oxc_codegen/src/lib.rs:87-148`), trimmed to what we emit. */
@@ -77,6 +95,12 @@ export type Printer = {
     line: number; // 0-based generated line
     col: number; // 0-based generated column (UTF-16 units)
     srcLines: Uint32Array | null;
+    /** Printable comments, keyed by the offset of the node they precede. Null ⇒ none to print. */
+    comments: Map<number, string[]> | null;
+    /** Sorted anchors of LEGAL comments, so one whose anchor was dropped can still be flushed. */
+    legalKeys: number[];
+    /** How far through {@link legalKeys} the orphan flush has got. */
+    legalAt: number;
     sourceIdx: number;
     /** A mandatory separator that has been requested but not yet committed — see {@link space}. */
     pendingSpace: boolean;
@@ -94,6 +118,45 @@ function wouldMerge(a: string, b: string): boolean {
     if (a === '/' && (b === '/' || b === '*')) return true; // would open a comment
     if (a === '<' && b === '!') return true; // `<!--` is a line comment in scripts
     return false;
+}
+
+/** Group the comments this printer may emit by the offset of the node they precede — oxc's
+ *  `build_comments` (`codegen/src/comment.rs:71`), which keys a map by `attached_to` and looks it up
+ *  from each node's own start.
+ *
+ *  Classification is deferred until here rather than done at lex time, which is `comments.ts`'s whole
+ *  design: the `@license` body sweep costs 13x what retaining the span does, so it runs once per
+ *  PRINTED module instead of once per parse, and only for the classes we might emit.
+ *
+ *  `legalKeys` is the sorted subset that must outlive its anchor. A licence whose statement is
+ *  tree-shaken still has to reach the output — oxc's `preserve_when_orphaned` (`comment.rs:17`). */
+function buildCommentIndex(cfg: PrinterConfig): {
+    comments: Map<number, string[]> | null;
+    legalKeys: number[];
+    legalAt: number;
+} {
+    const c = cfg.comments;
+    const src = cfg.src;
+    const want = cfg.commentOpts;
+    if (c === undefined || src === undefined || want === undefined || c.length === 0) {
+        return { comments: null, legalKeys: [], legalAt: 0 };
+    }
+    const map = new Map<number, string[]>();
+    const legalKeys: number[] = [];
+    for (let i = 0; i < commentCount(c); i++) {
+        const kind = classifyComment(src, c, i);
+        // A source-mapping comment is DROPPED, never re-emitted: the bundler appends its own, and two
+        // would collide. Normal comments are dropped because rolldown drops them.
+        const keep = (kind === CommentKind.Legal && want.legal) || (kind === CommentKind.Jsdoc && want.jsdoc);
+        if (!keep) continue;
+        const at = commentAttachedTo(c, i);
+        const text = src.slice(commentStart(c, i), commentEnd(c, i));
+        const bucket = map.get(at);
+        if (bucket === undefined) map.set(at, [text]);
+        else bucket.push(text);
+        if (kind === CommentKind.Legal && legalKeys[legalKeys.length - 1] !== at) legalKeys.push(at);
+    }
+    return { comments: map.size > 0 ? map : null, legalKeys, legalAt: 0 };
 }
 
 export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Printer {
@@ -116,6 +179,7 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         col: 0,
         srcLines: cfg.srcLines ?? null,
         sourceIdx: cfg.sourceIdx ?? 0,
+        ...buildCommentIndex(cfg),
         // Grown by doubling. A printer is created PER MODULE, so a large up-front reservation would be
         // wasted on the many small ones; a 380KB chunk costs ~7 doublings and ~760KB copied in total.
         buf: new Uint8Array(4096),
@@ -123,6 +187,36 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         pendingSpace: false,
         lastChar: '',
     };
+}
+
+/** Emit any comments anchored to `start`, plus any LEGAL comment anchored earlier whose own node was
+ *  dropped. oxc splits these across `print_leading_comments` and `print_orphan_comments_before`
+ *  (`codegen/src/comment.rs:160,262`); the orphan half is what makes a licence survive tree-shaking,
+ *  and without it the feature is wrong in exactly the case it exists for. */
+export function printLeadingComments(p: Printer, start: number): void {
+    if (p.comments === null) return;
+    while (p.legalAt < p.legalKeys.length && p.legalKeys[p.legalAt] < start) {
+        const at = p.legalKeys[p.legalAt++];
+        if (at === start) break;
+        const orphan = p.comments.get(at);
+        if (orphan !== undefined) {
+            p.comments.delete(at);
+            for (const text of orphan) writeComment(p, text);
+        }
+    }
+    const here = p.comments.get(start);
+    if (here === undefined) return;
+    p.comments.delete(start);
+    for (const text of here) writeComment(p, text);
+}
+
+/** A comment is emitted verbatim and always followed by a newline. Under `minify` that newline is the
+ *  only whitespace kept — a `//` comment without one would swallow the code after it. */
+function writeComment(p: Printer, text: string): void {
+    write(p, text);
+    write(p, '\n');
+    p.lastChar = '\n';
+    p.pendingSpace = false;
 }
 
 export function finishPrinter(p: Printer): string {

@@ -66,6 +66,10 @@ export function compressChunk(
     /** Run the cosmetic compress tier. False for `{ mangle: true, compress: false }`, which still
      *  needs this pass — mangling has nowhere else to run now that link-time mangling is gone. */
     compress: boolean,
+    /** Which comment classes to keep. The chunk arriving here ALREADY carries the comments the
+     *  module printer emitted, so re-printing must be told to keep them or minification silently
+     *  strips the licences it exists to preserve. */
+    comments: { legal: boolean; jsdoc: boolean },
 ): ChunkCompressResult {
     // The chunk is emitted JavaScript in module goal — never TS, never JSX by this stage.
     const parsed = parse(code, { ts: false, jsx: false, kind: 'module' });
@@ -90,6 +94,11 @@ export function compressChunk(
     // spent on bindings that do not survive. See `mangle/program.ts`.
     const names = mangle ? mangleProgram(parsed.program, mangleSemantic, new Set(RESERVED)) : null;
     const cfg: PrinterConfig = wantMap ? { srcLines: Uint32Array.from(buildLineTable(code)), sourceIdx: 0 } : {};
+    // One coordinate space here, unlike the per-module printer: the chunk is a single text, and
+    // `parsed.comments` indexes exactly it.
+    cfg.comments = parsed.comments;
+    cfg.src = code;
+    cfg.commentOpts = comments;
     if (names !== null) cfg.nameOf = (idNode: Node) => (idNode.sym === 0 ? idNode.name : (names.get(idNode.sym) ?? idNode.name));
     const printer = createPrinter(opts, cfg);
     printModule(printer, parsed.program);
