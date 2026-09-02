@@ -879,6 +879,10 @@ export function reScanTemplateContinue(state: ParserState): void {
     scanTemplatePart(state);
 }
 
+/** The four LineTerminator code points. `\n` alone is the bug that keeps recurring — the line-comment
+ *  scanner had it, and a regex literal had it too. */
+const isLineTerminator = (c: number): boolean => c === 10 || c === 13 || c === 0x2028 || c === 0x2029;
+
 export function reScanRegex(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
@@ -886,10 +890,17 @@ export function reScanRegex(state: ParserState): void {
     let inClass = false;
     while (pos < srcLen) {
         const c = src.charCodeAt(pos);
+        // A regex literal may not span a line: `RegularExpressionChar` excludes LineTerminator, and
+        // so does the `RegularExpressionNonTerminator` after a backslash — so `/a\⏎b/` is
+        // unterminated exactly as `/a⏎b/` is. All FOUR terminators count, which is the same bug the
+        // line-comment scanner had (`\r`, U+2028 and U+2029 were missed there too, and that one
+        // silently discarded the rest of the file).
         if (c === 92) {
+            if (isLineTerminator(src.charCodeAt(pos + 1))) break;
             pos += 2;
             continue;
         }
+        if (isLineTerminator(c)) break;
         if (c === 91) inClass = true;
         else if (c === 93) inClass = false;
         else if (c === 47 && !inClass) {
@@ -903,7 +914,7 @@ export function reScanRegex(state: ParserState): void {
             state.tok = T_REGEX;
             state.tokEnd = pos;
             return;
-        } else if (c === 10) break;
+        }
         pos++;
     }
     state.pos = pos;
