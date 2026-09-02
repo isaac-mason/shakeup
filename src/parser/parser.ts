@@ -129,6 +129,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         nseAt: [],
         comments: new Int32Array(256 * COMMENT_STRIDE),
         commentsLen: 0,
+        keepComments: options.comments !== false,
         goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
         sawUnbundlable: false,
         staticBlockDepth: 0,
@@ -4269,7 +4270,20 @@ export type ParseResult = {
  *  is the permissive default and is parser-input only — it never describes a finished AST. */
 export type ParseKind = 'module' | 'commonjs' | 'unambiguous';
 
-export type ParseOptions = { ts: boolean; jsx: boolean; kind?: ParseKind };
+export type ParseOptions = {
+    ts: boolean;
+    jsx: boolean;
+    kind?: ParseKind;
+    /** Retain comment spans. Default TRUE, because the bundler needs them: legal and JSDoc comments
+     *  are printed (`print-comments.test.ts`), and a dropped `@license` is a compliance problem.
+     *
+     *  A consumer that never prints comments should pass `false` — the DEV/transform path is exactly
+     *  that. This is the shape acorn (`onComment: null` by default) and meriyah use, and the reason
+     *  they use it: retaining is the single largest cost in the lexer's comment path, ~2.7us per
+     *  comment, and it is pure waste when nothing reads the result. oxc has no such option because a
+     *  `Vec<Comment>` of `Copy` structs is nearly free in Rust; in JS it is not. */
+    comments?: boolean;
+};
 
 /** Parse `source` into a standalone Program. Source, error sink, intern map and
  * line table are the parser's own state, reset at entry; nothing references

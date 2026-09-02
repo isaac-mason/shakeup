@@ -503,7 +503,9 @@ export function devTransform(filename: string, source: string, options: DevTrans
     const ts = lang === 'ts' || lang === 'tsx';
     const jsx = lang === 'jsx' || lang === 'tsx';
 
-    const { program, errors: parseErrors } = parse(source, { ts, jsx });
+    // The dev path never PRINTS comments — the runner rewrite emits `__shakeup.link(...)` calls, not
+    // annotated source — so retaining them is pure cost. The bundler keeps them (it prints licences).
+    const { program, errors: parseErrors } = parse(source, { ts, jsx, comments: false });
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
     if (errors.length > 0) return emptyResult(errors);
 

@@ -114,6 +114,7 @@ export const COMMENT_STRIDE = 4;
  *  `subarray` instead of a full copy. Both were measured — `perf-findings.md` §1b. The fourth slot
  *  is the anchor offset, back-filled by `nextToken` once the following token's start is known. */
 function pushComment(state: ParserState, start: number, end: number, flags: number): void {
+    if (!state.keepComments) return;
     const len = state.commentsLen;
     if (len + COMMENT_STRIDE > state.comments.length) {
         const grown = new Int32Array(state.comments.length * 2);

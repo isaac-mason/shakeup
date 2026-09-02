@@ -82,6 +82,8 @@ export type ParserState = {
      *  than a length so a failed probe rewinds with a scalar write — truncating a boxed array on
      *  every speculation cost 24% of parse time on a comment-dense file (`perf-findings.md` §1b). */
     commentsLen: number;
+    /** Is anything going to READ {@link comments}? False for the dev path, which never prints them. */
+    keepComments: boolean;
     /** A top-level `await` was consumed as an IDENTIFIER. Only meaningful for the `unambiguous` goal,
      *  where the module kind is not yet known — oxc's `encountered_await_identifier`
      *  (`ParserState`, `state.rs:32`). */

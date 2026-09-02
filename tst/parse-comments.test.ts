@@ -86,3 +86,30 @@ describe('deferred classification', () => {
         expect(kind('/**/ var x = 1;')).toBe(CommentKind.Normal);
     });
 });
+
+describe('retention is opt-out, for consumers that never print', () => {
+    // acorn (`onComment: null`) and meriyah both collect nothing unless asked, because retaining is
+    // the largest cost in the comment path — ~2.7us each — and pure waste when nothing reads it. oxc
+    // has no such option, but a `Vec<Comment>` of `Copy` structs is nearly free in Rust and a boxed
+    // push loop in JS is not. The DEFAULT is on, because the bundler prints licences.
+    it('`comments: false` retains nothing', () => {
+        const src = '/*! @license MIT */\n/** doc */\nconst a = 1; // trailing\n';
+        expect(commentCount(parse(src, { ts: false, jsx: false }).comments)).toBe(3);
+        expect(commentCount(parse(src, { ts: false, jsx: false, comments: false }).comments)).toBe(0);
+    });
+
+    it('and changes nothing else — same AST, same errors', () => {
+        const src = '/*! legal */\nexport function f(a) { /* inner */ return a; }\n';
+        const on = parse(src, { ts: false, jsx: false });
+        const off = parse(src, { ts: false, jsx: false, comments: false });
+        expect(off.nodeCount).toBe(on.nodeCount);
+        expect(off.errors).toEqual(on.errors);
+    });
+
+    it('the ASI newline signal still works without retention', () => {
+        // A comment spanning a line break counts as a newline for ASI, and that is computed whether
+        // or not the span is kept — so turning retention off must not change the parse.
+        const src = 'const a = 1 /*\n*/\nconst b = 2;\n';
+        expect(parse(src, { ts: false, jsx: false, comments: false }).errors).toEqual([]);
+    });
+});
