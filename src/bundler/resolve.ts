@@ -163,6 +163,10 @@ export type GraphOptions = CommonOptions & {
      *  a faster, directive-free build (e.g. dev), or to A/B the tier's effect. Part of the
      *  parse-cache key, like `compress`, since it changes the emitted AST. Default true. */
     optimize?: boolean;
+    /** Report early errors that need the semantic model — strict-mode rules, scope and symbol rules.
+     *  Default TRUE, matching rolldown, which runs oxc's checker on every module and FAILS the build
+     *  on any error (`pre_process_ecma_ast.rs:70`). Set `false` to bundle input you know is invalid. */
+    checkSyntaxErrors?: boolean;
 };
 
 /** Apply string→string `alias`: exact `key` or `key/…` prefix rewrites to the target. Runs

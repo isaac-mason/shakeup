@@ -1,5 +1,6 @@
 import { resolveNoSideEffects } from '../analysis/purity.ts';
 import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts.ts';
+import { checkSyntax } from '../analysis/checker.ts';
 import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic.ts';
 import { isJSXNode, N, type Node, type Program, walk } from '../ast/index.ts';
 import type { Fs, MaybePromise } from './fs.ts';
@@ -865,6 +866,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     const jsxOptions = resolveJSXOptions(options.jsx);
     const compress = options.compress ?? false; // minify P4 — a MODE ('full'|'dce'|false); part of the parse-cache key below
     const optimizeTier = options.optimize ?? true; // directive-gated hot-path opts; `false` ignores all directives
+    // Default ON, matching rolldown, which runs oxc's checker on every module and fails the build on
+    // it. `false` is the escape hatch for input you know is invalid and want bundled anyway.
+    const checkSyntaxErrors = options.checkSyntaxErrors ?? true;
     // The injected automatic JSX runtime is side-effect-free (conventionally pure), so an unused
     // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
     // jsx-runtime special-case (see pruneUnusedExternals).
@@ -1261,7 +1265,19 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasEsmImport = parsed.hasEsmImport;
                 topLevelThis = parsed.topLevelThis;
                 semantic = createSemantic();
-                analyze(semantic, program);
+                // An ES module is strict by definition. The GOAL alone is not enough to know: a plain
+                // `.js` in a typeless package parses as `unambiguous`, and only the parse reveals the
+                // ESM syntax that settles it. oxc never faces this because its caller declares the
+                // source type up front.
+                analyze(semantic, program, kind === 'module' || parsed.hasEsmExport || parsed.hasEsmImport);
+                // Early errors that need the semantic model — the checker layer. THIS call site, once
+                // per source module and nowhere else, mirrors rolldown: `pre_process_ecma_ast.rs:70`
+                // does `with_check_syntax_error(true)` at pre-process and returns `Err` on any error,
+                // so a program that fails here is one rolldown would refuse to build too. The later
+                // `analyze` calls in this file are post-lowering rebuilds over a tree the user did not
+                // write, and must NOT re-check it.
+                if (checkSyntaxErrors)
+                    for (const e of checkSyntax(semantic, program)) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
                 // AFTER `analyze` — the resolver reads `sym` off the binding identifiers, which is
                 // only assigned once the semantic has run. Done once here so the set rides the parse
                 // cache with everything else derived from the AST.
