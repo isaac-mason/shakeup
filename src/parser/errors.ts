@@ -29,6 +29,8 @@ export const ParseErrorCode = enumeration(
     'DynamicImportSpread',
     'LexicalDeclSingleStatement',
     'ClassDeclSingleStatement',
+    'AsyncFnSingleStatement',
+    'GeneratorSingleStatement',
     'TaggedOptionalChain',
     'DecoratorsUnsupported',
     'ParserStalled',
@@ -100,6 +102,9 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.LexicalDeclSingleStatement]:
         'Lexical declaration cannot appear in a single-statement context',
     [ParseErrorCode.ClassDeclSingleStatement]: 'Invalid class declaration',
+    [ParseErrorCode.AsyncFnSingleStatement]:
+        'Async functions can only be declared at the top level or inside a block',
+    [ParseErrorCode.GeneratorSingleStatement]: 'Generators can only be declared at the top level or inside a block',
     [ParseErrorCode.TaggedOptionalChain]: 'tagged template cannot be used with an optional chain',
     [ParseErrorCode.DecoratorsUnsupported]: 'decorators not supported',
     [ParseErrorCode.ParserStalled]: 'parser stalled',

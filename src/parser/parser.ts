@@ -1329,10 +1329,10 @@ function parsePrimary(state: ParserState): Node {
                 nextToken(state);
                 return create.NullLiteral(start, state.tokStart, 0);
             case K.FUNCTION:
-                return parseFunction(state, false, false, true);
+                return parseFunction(state, false, false, true, false);
             case K.ASYNC:
                 nextToken(state);
-                if (isK(state, K.FUNCTION)) return parseFunction(state, true, false, true);
+                if (isK(state, K.FUNCTION)) return parseFunction(state, true, false, true, false);
                 return ident(state, R_REF, start, start + 5);
             case K.CLASS:
                 return parseClass(state, true, 0);
@@ -2020,7 +2020,7 @@ function nextIsParamNameEnd(state: ParserState): boolean {
     return end;
 }
 
-function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isExpr: boolean): Node {
+function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isExpr: boolean, single: boolean): Node {
     const start = state.tokStart;
     nextToken(state);
     let flags = async ? FL.ASYNC : 0;
@@ -2030,6 +2030,14 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
     }
     const isAsync = (flags & FL.ASYNC) !== 0;
     const isGenerator = (flags & FL.GENERATOR) !== 0;
+    // A plain `function` in a statement-only position is Annex B and stays legal — oxc accepts it and
+    // leaves the strict-mode case to `check_function_declaration`. An async function or a generator
+    // has no such allowance, so those ARE parser errors. `async` wins the ordering when both apply,
+    // matching oxc (`if (x) async function* g(){}` reports the async one).
+    if (single) {
+        if (isAsync) raise(state, ParseErrorCode.AsyncFnSingleStatement);
+        else if (isGenerator) raise(state, ParseErrorCode.GeneratorSingleStatement);
+    }
     let id: Ref = null;
     // A DECLARATION's name is bound in the ENCLOSING context, so it is read before the function is
     // entered: `function* yield() {}` is legal at the top level and an error inside a generator.
@@ -2443,7 +2451,7 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 return parseVarDecl(state, VAR_KIND.LET, 0);
             }
             case K.FUNCTION:
-                return parseFunction(state, false, true, false);
+                return parseFunction(state, false, true, false, single);
             case K.ASYNC: {
                 // `async function` is a declaration; a bare `async` is an identifier expression.
                 // Peek for `function` (same line) with a scalar rewind instead of a saveState array.
@@ -2454,7 +2462,7 @@ function parseStatement(state: ParserState, single: boolean): Node {
                     tf = state.tokFlags,
                     th = state.tokHash;
                 nextToken(state);
-                if (isK(state, K.FUNCTION) && (state.tokFlags & F_NL) === 0) return parseFunction(state, true, true, false);
+                if (isK(state, K.FUNCTION) && (state.tokFlags & F_NL) === 0) return parseFunction(state, true, true, false, single);
                 state.pos = p;
                 state.tok = tk;
                 state.tokStart = ts0;
@@ -3238,10 +3246,10 @@ function parseExport(state: ParserState, decorators: Node[] = EMPTY_LIST): Node 
     if (eatK(state, K.DEFAULT)) {
         if (isP(state, P.AT)) decorators = parseDecorators(state);
         let decl: Node;
-        if (isK(state, K.FUNCTION)) decl = parseFunction(state, false, true, false);
+        if (isK(state, K.FUNCTION)) decl = parseFunction(state, false, true, false, false);
         else if (isK(state, K.ASYNC) && asyncFunctionFollows(state)) {
             nextToken(state);
-            decl = parseFunction(state, true, true, false);
+            decl = parseFunction(state, true, true, false, false);
         } else if (isK(state, K.CLASS)) decl = parseClass(state, false, 0, -1, decorators);
         else {
             decl = parseAssign(state);
