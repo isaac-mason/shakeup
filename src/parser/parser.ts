@@ -1468,17 +1468,31 @@ function nextIsPropertyEnd(state: ParserState): boolean {
 }
 
 function parseMethodTail(state: ParserState, start: number, flags: number): Node {
+    const isAsync = (flags & FL.ASYNC) !== 0;
+    const isGenerator = (flags & FL.GENERATOR) !== 0;
     let typeParams: Ref = null;
-    if (state.tsMode && isP(state, P.LT)) {
-        const t = tryParseTypeParams(state);
-        if (t !== null) typeParams = t;
-    }
-    const params = parseParams(state);
+    let params: Node[] = EMPTY_LIST;
     let returnType: Ref = null;
-    if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
-    else consumeSemi(state);
+    // A method has no name to place, but its PARAMETERS are the function's own just as a function
+    // declaration's are — `class C { *m(yield) {} }` is an error — so the head shares the body's
+    // scope here for the same reason it does in `parseFunction`.
+    inFunctionScope(
+        state,
+        isAsync,
+        () => {
+            if (state.tsMode && isP(state, P.LT)) {
+                const t = tryParseTypeParams(state);
+                if (t !== null) typeParams = t;
+            }
+            params = parseParams(state);
+            if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
+            if (isP(state, P.LBRACE)) body = parseBlock(state);
+            else consumeSemi(state);
+        },
+        false,
+        isGenerator,
+    );
     return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body);
 }
 
@@ -2014,34 +2028,42 @@ function parseFunction(state: ParserState, async: boolean, isDecl: boolean, isEx
         flags |= FL.GENERATOR;
         nextToken(state);
     }
+    const isAsync = (flags & FL.ASYNC) !== 0;
+    const isGenerator = (flags & FL.GENERATOR) !== 0;
     let id: Ref = null;
-    if (isIdentLike(state)) {
-        // The two forms bind their name in DIFFERENT contexts, and the grammar spells it out:
-        //   FunctionDeclaration : function BindingIdentifier[?Yield, ?Await] …
-        //   FunctionExpression  : function BindingIdentifier[~Yield, ~Await] …
-        // An expression's name lives in its own scope, outside the enclosing function, so
-        // `function* g() { (function yield() {}) }` is legal while `function* g() { function
-        // yield() {} }` is not. Suppressing the flags only across the NAME is what separates them;
-        // reading the same context for both rejected 3 valid test262 programs.
-        const isFnExpr = !isDecl || isExpr;
-        const outerCtx = state.ctx;
-        if (isFnExpr) {
-            state.ctx &= ~(CTX.Yield | CTX.Await);
-        }
-        id = parseIdent(state, R_BIND);
-        state.ctx = outerCtx;
-    }
+    // A DECLARATION's name is bound in the ENCLOSING context, so it is read before the function is
+    // entered: `function* yield() {}` is legal at the top level and an error inside a generator.
+    //   FunctionDeclaration / GeneratorDeclaration : function [*] BindingIdentifier[?Yield, ?Await]
+    if (isDecl && !isExpr && isIdentLike(state)) id = parseIdent(state, R_BIND);
     let typeParams: Ref = null;
-    if (state.tsMode && isP(state, P.LT)) {
-        const t = tryParseTypeParams(state);
-        if (t !== null) typeParams = t;
-    }
-    const params = parseParams(state);
+    let params: Node[] = EMPTY_LIST;
     let returnType: Ref = null;
-    if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     let body: Ref = null;
-    if (isP(state, P.LBRACE)) body = parseFunctionBody(state, (flags & FL.ASYNC) !== 0, (flags & FL.GENERATOR) !== 0);
-    else consumeSemi(state);
+    // Everything else — an EXPRESSION's name, the parameters, the body — is read inside the
+    // function's OWN context, which is what the grammar's parameter lists say:
+    //   GeneratorExpression      : function * BindingIdentifier[+Yield, ~Await]
+    //   AsyncFunctionExpression  : async function BindingIdentifier[~Yield, +Await]
+    //   UniqueFormalParameters[?Yield, ?Await]  — always the function's own
+    // so `(function* yield(){})` and `function* g(yield){}` are errors while
+    // `function* g() { (function yield(){}) }` and `function* g() { function inner(yield){} }` are
+    // not. Reading the enclosing context for an expression's name rejected 3 valid test262 programs.
+    inFunctionScope(
+        state,
+        isAsync,
+        () => {
+            if (id === null && isIdentLike(state)) id = parseIdent(state, R_BIND);
+            if (state.tsMode && isP(state, P.LT)) {
+                const t = tryParseTypeParams(state);
+                if (t !== null) typeParams = t;
+            }
+            params = parseParams(state);
+            if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
+            if (isP(state, P.LBRACE)) body = parseBlock(state);
+            else consumeSemi(state);
+        },
+        false,
+        isGenerator,
+    );
     return isDecl && !isExpr
         ? create.FunctionDeclaration(start, state.tokStart, flags, id, typeParams, params, returnType, body)
         : create.FunctionExpression(start, state.tokStart, flags, id, typeParams, params, returnType, body);
@@ -2287,12 +2309,6 @@ function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T
     if (!arrow) state.newTargetDepth--;
     state.fnDepth--;
     return out;
-}
-
-/** A FUNCTION body — tracked separately from {@link parseBlock} so top-level-only checks can fire.
- *  A plain `{ }` block at the top level is still top level; a function body is not. */
-function parseFunctionBody(state: ParserState, isAsync: boolean, isGenerator: boolean): Node {
-    return inFunctionScope(state, isAsync, () => parseBlock(state), false, isGenerator);
 }
 
 function parseBlock(state: ParserState): Node {
