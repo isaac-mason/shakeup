@@ -148,6 +148,11 @@ export type ParserState = {
      * most once. oxc's `ParserState::not_parenthesized_arrow` (`js/arrow.rs:354`). Lazily created:
      * most parses never speculate. */
     notArrow: Set<number> | null;
+    /** Inside a `declare` (ambient) declaration, where an initializer is not merely optional but
+     *  FORBIDDEN — so the missing-initializer early errors must not fire. oxc's `Context::Ambient`
+     *  (`context.rs:49`). Set around the inner statement because `declare` is applied to the parsed
+     *  node afterwards, by which point the errors would already have been raised. */
+    ambient: boolean;
     /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
      * parseNew reads it to reject an optional chain as a `new` callee. */
     chainSawOptional: boolean;

@@ -17,11 +17,12 @@ import { parse } from '../src/parser/index.ts';
 const root = process.argv[2] ?? 'node_modules';
 // Skipped files are reported, never silently dropped.
 //
-// KNOWN: a run over a populated `node_modules` DIES — `FATAL ERROR: Ineffective mark-compacts near
-// heap limit`. It is not accumulation and not a leak (both were measured and ruled out); a single
-// 347-byte input sends shakeup's parser into unbounded allocation. See `parser-perf-plan.md` and the
-// fixture at `llm/repro/parser-oom.js`. Until that is fixed, point this at a source tree
-// (`pnpm parsercorpus llm/libs/webpack`) rather than at `node_modules`.
+// HISTORICAL: this used to DIE on a populated `node_modules` — `FATAL ERROR: Ineffective mark-compacts
+// near heap limit` — because a single 347-byte input sent the parser into unbounded allocation. That
+// was fixed by the recovery progress guard; `llm/repro/parser-oom.js` now parses in ~2ms with one
+// error, and a full `node_modules` run completes. The warning that used to live here told people to
+// avoid the default corpus long after it worked, which hid the gate — re-measure before believing a
+// note like this one.
 const MAX_BYTES = Number(process.env.MAX_BYTES ?? 4_000_000);
 
 const files: string[] = [];

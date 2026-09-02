@@ -150,6 +150,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         stk: new Array(1 << 8).fill(null),
         sp: 0,
         notArrow: null,
+        ambient: false,
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
@@ -2536,7 +2537,12 @@ function parseStatement(state: ParserState): Node {
                             state.tok === K.ABSTRACT ||
                             state.tok === K.ASYNC)
                     ) {
+                        // `declare const x;` has no initializer BY DESIGN — an ambient declaration
+                        // may not have one. oxc exempts the same way (`Context::Ambient`).
+                        const outerAmbient = state.ambient;
+                        state.ambient = true;
                         const inner = parseStatement(state);
+                        state.ambient = outerAmbient;
                         applyDeclare(inner, start);
                         return inner;
                     }
@@ -2547,6 +2553,11 @@ function parseStatement(state: ParserState): Node {
                         const gid = parseIdent(state, R_BIND);
                         if (isP(state, P.LBRACE)) {
                             nextToken(state);
+                            // `declare global { const G: number }` is ambient too — it reaches here
+                            // rather than through the keyword list above, so it needs the flag set
+                            // separately or the missing-initializer errors fire inside it.
+                            const outerAmbient = state.ambient;
+                            state.ambient = true;
                             const from = state.sp;
                             while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
                                 const mark = state.tokStart;
@@ -2557,6 +2568,7 @@ function parseStatement(state: ParserState): Node {
                                 push(state, parseStatement(state));
                                 if (noProgress(state, mark)) break;
                             }
+                            state.ambient = outerAmbient;
                             expectP(state, P.RBRACE, "'}'");
                             const mod = create.TSModuleDeclaration(start, state.tokStart, 0, gid, finishList(state, from));
                             applyDeclare(mod, start);
@@ -2618,6 +2630,26 @@ function parseStatement(state: ParserState): Node {
     return create.ExpressionStatement(start, state.tokStart, 0, expr);
 }
 
+/**
+ * The three early errors a declarator with no initializer can trip. oxc's `check_missing_initializer`
+ * (`js/declaration.rs:166-181`), which groups them because they share the "no `=` followed" trigger
+ * and the same ambient exemption.
+ *
+ *     const x;      missing initializer in const declaration
+ *     const {a};    missing initializer in destructuring declaration  (any kind, incl. `var`)
+ *     using x;      using declarations must have an initializer
+ *
+ * All three are real syntax errors — node rejects every one — and we accepted all of them. NOT called
+ * from the for-in/for-of head, where the iteration supplies the value and no initializer is legal.
+ */
+function checkMissingInit(state: ParserState, kind: number, target: Node, init: Ref, pos: number): void {
+    if (init !== null || state.ambient) return;
+    const k = kind & VAR_KIND.KIND_MASK;
+    if (target.type !== N.BindingIdentifier) raiseAt(state, pos, ParseErrorCode.MissingInitInDestructuring);
+    else if (k === VAR_KIND.CONST) raiseAt(state, pos, ParseErrorCode.MissingInitInConst);
+    else if (k === VAR_KIND.USING || k === VAR_KIND.AWAIT_USING) raiseAt(state, pos, ParseErrorCode.MissingInitInUsing);
+}
+
 function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Node {
     const start = state.tokStart;
     nextToken(state);
@@ -2637,6 +2669,7 @@ function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Nod
             nextToken(state);
             init = parseAssign(state);
         }
+        checkMissingInit(state, kind, target, init, ds);
         push(state, create.VariableDeclarator(ds, state.tokStart, flags, target, typeAnn, init));
     } while (eatP(state, P.COMMA));
     consumeSemi(state);
@@ -2714,6 +2747,7 @@ function parseFor(state: ParserState, start: number): Node {
                     nextToken(state);
                     dinit = parseAssign(state, true);
                 }
+                checkMissingInit(state, kind, target, dinit, ds);
                 push(state, create.VariableDeclarator(ds, state.tokStart, dflags, target, typeAnn, dinit));
             }
             while (eatP(state, P.COMMA)) {
@@ -2726,6 +2760,7 @@ function parseFor(state: ParserState, start: number): Node {
                     nextToken(state);
                     dinit = parseAssign(state, true);
                 }
+                checkMissingInit(state, kind, t2, dinit, ds2);
                 push(state, create.VariableDeclarator(ds2, state.tokStart, 0, t2, typeAnn, dinit));
             }
             init = create.VariableDeclaration(ds, state.tokStart, kind, finishList(state, dFrom));
