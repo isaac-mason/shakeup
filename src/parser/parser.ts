@@ -149,7 +149,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         itCount: 0,
         stk: new Array(1 << 8).fill(null),
         sp: 0,
-        speculating: 0,
+        notArrow: null,
         sawJSX: false,
         sawTopLevelReturn: false,
         sawRequire: false,
@@ -309,7 +309,7 @@ function consumeSemi(state: ParserState): void {
 
 // No line-table field to save/restore: the line table is built once, deferred, so nothing
 // mutates it during (speculative) parsing.
-type LexState = [number, number, number, number, number, number, number, boolean];
+type LexState = [number, number, number, number, number, number, number, boolean, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -319,6 +319,12 @@ const saveState = (state: ParserState): LexState => [
     state.errors.length,
     state.tokHash,
     state.fatal,
+    // APPEND-ONLY collections filled as a side effect of lexing/parsing. A failed probe that ran
+    // over `/*@__NO_SIDE_EFFECTS__*/` recorded it, rewound, and the real parse recorded it again —
+    // so the annotation appeared twice. Harmless only because `resolveNoSideEffects` de-dupes with a
+    // Set; the same hole in `topLevelThis` would not be. Truncating is enough: both only ever grow.
+    state.nseAt.length,
+    state.topLevelThis.length,
 ];
 function restoreState(state: ParserState, s: LexState): void {
     state.pos = s[0];
@@ -331,6 +337,8 @@ function restoreState(state: ParserState, s: LexState): void {
     // Rewound with everything else: speculation raises errors deliberately, so a failed probe must
     // not leave the parse latched.
     state.fatal = s[7];
+    state.nseAt.length = s[8];
+    state.topLevelThis.length = s[9];
 }
 
 function push(state: ParserState, v: Ref): void {
@@ -506,8 +514,15 @@ function checkRestTarget(state: ParserState, arg: Node): void {
     raiseAt(state, arg.start, ParseErrorCode.InvalidRestTarget);
 }
 
-function parseAssign(state: ParserState, noIn = false): Node {
-    if (isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, state.tokStart, 0, null);
+function parseAssign(state: ParserState, noIn = false, allowReturnType = true): Node {
+    if (isP(state, P.LPAREN)) {
+        const tri = classifyArrowHead(state);
+        if (tri === TRI_TRUE) return parseArrow(state, state.tokStart, 0, null, allowReturnType);
+        if (tri === TRI_MAYBE) {
+            const arrow = tryParseArrow(state, state.tokStart, 0, null, allowReturnType);
+            if (arrow !== null) return arrow;
+        }
+    }
     // The grammar's restriction is `async [no LineTerminator here] ArrowFunction` — it sits BETWEEN
     // `async` and its parameters, which is the check below on the NEXT token. Testing `F_NL` on the
     // `async` token itself asked a different question ("was there a newline before `async`") and a
@@ -521,11 +536,25 @@ function parseAssign(state: ParserState, noIn = false): Node {
         const asyncStart = state.tokStart;
         nextToken(state);
         if ((state.tokFlags & F_NL) === 0) {
-            if (isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, asyncStart, FL.ASYNC, null);
+            if (isP(state, P.LPAREN)) {
+                const tri = classifyArrowHead(state);
+                if (tri === TRI_TRUE) return parseArrow(state, asyncStart, FL.ASYNC, null, allowReturnType);
+                if (tri === TRI_MAYBE) {
+                    const arrow = tryParseArrow(state, asyncStart, FL.ASYNC, null, allowReturnType);
+                    if (arrow !== null) return arrow;
+                }
+            }
             if (isIdentLike(state)) {
                 const idStart = state.tokStart;
                 const single = parseIdent(state, R_BIND);
-                if (isP(state, P.ARROW)) return parseArrowAfterSingleParam(state, asyncStart, single, FL.ASYNC, idStart);
+                if (isP(state, P.ARROW)) {
+                    // "It is a Syntax Error if ArrowParameters Contains AwaitExpression is true."
+                    // Checked on the identifier we already parsed, which is oxc's shape exactly
+                    // (`js/arrow.rs:44-47`) — the name is only reserved once `=>` proves this is an
+                    // async arrow, so it cannot be caught earlier in `parseIdent`.
+                    if (single.name === 'await') raiseAt(state, idStart, ParseErrorCode.IdentifierInAsync);
+                    return parseArrowAfterSingleParam(state, asyncStart, single, FL.ASYNC, idStart, allowReturnType);
+                }
             }
         }
         restoreState(state, s);
@@ -534,7 +563,14 @@ function parseAssign(state: ParserState, noIn = false): Node {
         const s = saveState(state);
         const start = state.tokStart;
         const tp = tryParseTypeParams(state);
-        if (tp !== null && isP(state, P.LPAREN) && arrowAheadFromParen(state)) return parseArrow(state, start, 0, tp);
+        if (tp !== null && isP(state, P.LPAREN)) {
+            const tri = classifyArrowHead(state);
+            if (tri === TRI_TRUE) return parseArrow(state, start, 0, tp, allowReturnType);
+            if (tri === TRI_MAYBE) {
+                const arrow = tryParseArrow(state, start, 0, tp, allowReturnType);
+                if (arrow !== null) return arrow;
+            }
+        }
         restoreState(state, s);
     }
     // Only where `yield` is in scope. Elsewhere it is an ordinary identifier — the same shape as
@@ -562,7 +598,7 @@ function parseAssign(state: ParserState, noIn = false): Node {
         return create.YieldExpression(start, arg ? arg.end : state.tokStart, flags, arg);
     }
 
-    const left = parseConditional(state, noIn);
+    const left = parseConditional(state, noIn, allowReturnType);
     // `ident => …`, decided AFTER parsing rather than by scanning source ahead of it — meriyah's
     // shape (`parseMemberOrUpdateExpression`: `if (parser.getToken() === 10) … parseArrowFromIdentifier`,
     // reclassifying the identifier it already parsed). We used to run `identArrowAhead`, a forward
@@ -578,7 +614,7 @@ function parseAssign(state: ParserState, noIn = false): Node {
     // `[no LineTerminator here]` is part of the production, so a newline before `=>` is not an arrow.
     if (isP(state, P.ARROW) && left.type === N.IdentifierReference && (state.tokFlags & F_NL) === 0) {
         const bind = node(N.BindingIdentifier, left.start, left.end, left.name, null) as Identifier;
-        return parseArrowAfterSingleParam(state, left.start, bind, 0);
+        return parseArrowAfterSingleParam(state, left.start, bind, 0, left.start, allowReturnType);
     }
     if (isAssignOp(state.tok)) {
         const op = opTextOf(state.tok);
@@ -592,13 +628,17 @@ function parseAssign(state: ParserState, noIn = false): Node {
     return left;
 }
 
-function parseConditional(state: ParserState, noIn: boolean): Node {
+function parseConditional(state: ParserState, noIn: boolean, allowReturnType: boolean): Node {
     const test = parseBinary(state, 0, noIn);
     if (!isP(state, P.QUESTION)) return test;
     nextToken(state);
-    const cons = parseAssign(state, false);
+    // The consequent is the one place a parsed return type is suspect — `x ? y => ({y}) : z => ({z})`
+    // would otherwise read `({y}) : z => ({z})` as an arrow returning `z`, swallowing the `:` that
+    // terminates the conditional. oxc passes `false` in exactly this position
+    // (`js/expression.rs:1458-1462`). The ALTERNATE inherits, because nothing new is ambiguous there.
+    const cons = parseAssign(state, false, false);
     expectP(state, P.COLON, "':'");
-    const alt = parseAssign(state, noIn);
+    const alt = parseAssign(state, noIn, allowReturnType);
     return create.ConditionalExpression(test.start, alt.end, 0, test, cons, alt);
 }
 
@@ -1396,89 +1436,244 @@ function parseMethodTail(state: ParserState, start: number, flags: number): Node
     return create.FunctionExpression(start, state.tokStart, flags, null, typeParams, params, returnType, body);
 }
 
-function arrowAheadFromParen(state: ParserState): boolean {
-    const src = state.src,
-        srcLen = state.srcLen;
-    let p = state.tokStart + 1;
-    let depth = 1;
-    while (p < srcLen && depth > 0) {
-        const c = src.charCodeAt(p);
-        if (c === 40 || c === 91 || c === 123) (depth += c === 40 ? 1 : 0), (depth += c === 91 || c === 123 ? 1 : 0);
-        else if (c === 41 || c === 93 || c === 125) depth--;
-        else if (c === 34 || c === 39 || c === 96) {
-            const q = c;
-            p++;
-            while (p < srcLen) {
-                const cc = src.charCodeAt(p);
-                if (cc === 92) {
-                    p += 2;
-                    continue;
-                }
-                if (cc === q) break;
-                p++;
-            }
-        } else if (c === 47) {
-            const c1 = src.charCodeAt(p + 1);
-            if (c1 === 47) {
-                while (p < srcLen && src.charCodeAt(p) !== 10) p++;
-                continue;
-            }
-            if (c1 === 42) {
-                p += 2;
-                while (p < srcLen && !(src.charCodeAt(p) === 42 && src.charCodeAt(p + 1) === 47)) p++;
-                p += 2;
-                continue;
-            }
-        }
-        p++;
-    }
-    for (;;) {
-        while (p < srcLen) {
-            const c = src.charCodeAt(p);
-            if (c < 128 && (CHAR[c] === C_WS || CHAR[c] === C_NL)) p++;
-            else break;
-        }
-        if (src.charCodeAt(p) === 47 && src.charCodeAt(p + 1) === 47) {
-            while (p < srcLen && src.charCodeAt(p) !== 10) p++;
-            continue;
-        }
-        if (src.charCodeAt(p) === 47 && src.charCodeAt(p + 1) === 42) {
-            p += 2;
-            while (p < srcLen && !(src.charCodeAt(p) === 42 && src.charCodeAt(p + 1) === 47)) p++;
-            p += 2;
-            continue;
-        }
-        break;
-    }
-    if (src.charCodeAt(p) === 61 && src.charCodeAt(p + 1) === 62) return true;
-    if (state.tsMode && src.charCodeAt(p) === 58) {
-        const s = saveState(state);
-        const ok = trySpeculativeArrow(state);
-        restoreState(state, s);
-        return ok;
-    }
-    return false;
+// Arrow disambiguation, ported from oxc's `is_parenthesized_arrow_function_expression`
+// (`oxc_parser/src/js/arrow.rs:58`).
+//
+// This replaces `arrowAheadFromParen`, which bracket-matched forward over raw CHARACTERS to find the
+// closing `)` and then looked for `=>` behind it. That scan hand-rolled string and comment skipping
+// but had no case for regex literals, so a `/` fell through and the brackets INSIDE the regex were
+// counted as structure: `(x = /[)]/) => x` — valid JS — matched the wrong paren and was rejected.
+// Six such shapes were failing. Classifying TOKENS instead of characters cannot have that class of
+// bug, because deciding what a `/` starts is the lexer's job and it already does it.
+//
+// The shape is oxc's: decide from the head in at most four tokens, and only speculate when the head
+// is genuinely ambiguous.
+const TRI_FALSE = 0;
+const TRI_TRUE = 1;
+const TRI_MAYBE = 2;
+
+/** oxc's `Kind::is_literal` (`lexer/kind.rs:310`). Templates are deliberately NOT in it. */
+function isLiteralTok(tok: number): boolean {
+    return (
+        tok === T_NUM ||
+        tok === T_BIGINT ||
+        tok === T_STR ||
+        tok === T_REGEX ||
+        tok === K.TRUE ||
+        tok === K.FALSE ||
+        tok === K.NULL
+    );
 }
 
-function trySpeculativeArrow(state: ParserState): boolean {
+/** What `isIdentLike` asks, against a saved token rather than the current one. */
+const isBindingIdentTok = (tok: number): boolean => tok === T_IDENT || isContextual(tok);
+
+/**
+ * oxc's `Kind::is_modifier_kind` (`lexer/kind.rs:429`), less `public`/`private`/`protected`/`out`,
+ * which we do not tokenise as keywords — they reach here as plain identifiers. The only thing that
+ * costs is error QUALITY on already-invalid code: oxc calls `(public x` an arrow so it can complain
+ * about the modifier, where we call it a parenthesized expression and complain differently. Both
+ * reject it.
+ */
+function isModifierTok(tok: number): boolean {
+    return (
+        tok === K.ABSTRACT ||
+        tok === K.ACCESSOR ||
+        tok === K.ASYNC ||
+        tok === K.CONST ||
+        tok === K.DECLARE ||
+        tok === K.IN ||
+        tok === K.OVERRIDE ||
+        tok === K.READONLY ||
+        tok === K.STATIC ||
+        tok === K.DEFAULT ||
+        tok === K.EXPORT
+    );
+}
+
+/**
+ * Does an arrow parameter list start at the current `(`? `TRI_TRUE` and `TRI_FALSE` are certain;
+ * `TRI_MAYBE` means the caller must speculate.
+ *
+ * Always rewinds — oxc's `lookahead` (`cursor.rs:338`) is likewise just checkpoint + predicate +
+ * rewind. What makes it cheap is not the rewind but the work skipped: at most four tokens are lexed,
+ * nothing is allocated, and no AST is built.
+ *
+ * oxc enters the same table from `(`, `async` and `<`; our three call sites strip `async` and any
+ * type parameters themselves, so they all arrive here at the `(`.
+ */
+function classifyArrowHead(state: ParserState): number {
+    // Saved as SCALARS rather than through `saveState`, which allocates an eight-element array. This
+    // runs on every paren-led expression, and the worker cannot do anything an array would be needed
+    // for: it only lexes. `raise` does not throw (it records, sets `fatal` and jumps to EOF), so the
+    // two error fields are restored the same way and nothing can escape before the restore.
+    const pos = state.pos;
+    const tok = state.tok;
+    const tokStart = state.tokStart;
+    const tokEnd = state.tokEnd;
+    const tokFlags = state.tokFlags;
+    const tokHash = state.tokHash;
+    const errorCount = state.errors.length;
+    const fatal = state.fatal;
+
+    const verdict = classifyArrowHeadWorker(state);
+
+    state.pos = pos;
+    state.tok = tok;
+    state.tokStart = tokStart;
+    state.tokEnd = tokEnd;
+    state.tokFlags = tokFlags;
+    state.tokHash = tokHash;
+    state.errors.length = errorCount;
+    state.fatal = fatal;
+    return verdict;
+}
+
+function classifyArrowHeadWorker(state: ParserState): number {
+    nextToken(state); // past `(`
+    const second = state.tok;
+
+    if (second === P.RPAREN) {
+        nextToken(state);
+        // `(): T => …` — the return type cannot be told from a conditional's `:` without parsing.
+        if (state.tsMode && isP(state, P.COLON)) return TRI_MAYBE;
+        // `() {` is not an arrow, but it is almost certainly what was meant, so parse it as one and
+        // let the error land on the missing `=>` instead of on the block.
+        return isP(state, P.ARROW) || isP(state, P.LBRACE) ? TRI_TRUE : TRI_FALSE;
+    }
+    // `([a])` / `({a})` — a destructuring parameter, or an ordinary parenthesized expression.
+    if (second === P.LBRACKET || second === P.LBRACE) return TRI_MAYBE;
+    if (second === P.DOTDOTDOT) {
+        nextToken(state);
+        // `T_IDENT` and not `isBindingIdentTok`, matching oxc's `Kind::Ident` exactly (`arrow.rs:122`).
+        // A contextual keyword after the dots — `(...async`, `(...yield`, `(...type` — is a valid
+        // binding, but oxc still routes it through `Maybe` rather than committing, so we do too.
+        if (state.tok === T_IDENT) return TRI_TRUE; // `(...rest` is a lambda
+        if (isLiteralTok(state.tok)) return TRI_FALSE; // `(...null` is not
+        return TRI_MAYBE;
+    }
+
+    nextToken(state);
+    const third = state.tok;
+
+    // `(xxx yyy` with xxx a modifier: not legal, but treating it as a lambda gives the better error.
+    // `(readonly as string)` is the exception — an `as` expression, not a parameter list.
+    // https://github.com/microsoft/TypeScript/issues/44466
+    if (isModifierTok(second) && second !== K.ASYNC && isBindingIdentTok(third)) {
+        return third === K.AS ? TRI_FALSE : TRI_TRUE;
+    }
+    // A `(` followed by anything that cannot begin a binding is not a parameter list. `this` is not a
+    // valid parameter either, but it is parsed as one so the complaint is semantic, not syntactic.
+    // This subsumes `(1 + a)`, `("s")` and every other literal-led parenthesized expression.
+    if (!isBindingIdentTok(second) && second !== K.THIS) return TRI_FALSE;
+
+    if (third === P.COLON) return TRI_TRUE; // `(a:` — a type-annotated parameter
+    if (third === P.QUESTION) {
+        // `(a?:`, `(a?,`, `(a?=`, `(a?)` are lambdas; `(a ? b : c)` is a conditional.
+        nextToken(state);
+        const fourth = state.tok;
+        return fourth === P.COLON || fourth === P.COMMA || fourth === P.EQ || fourth === P.RPAREN
+            ? TRI_TRUE
+            : TRI_FALSE;
+    }
+    if (third === P.COMMA || third === P.EQ || third === P.RPAREN) return TRI_MAYBE;
+    return TRI_FALSE;
+}
+
+function rememberNotArrow(state: ParserState, pos: number): void {
+    if (state.notArrow === null) state.notArrow = new Set();
+    state.notArrow.add(pos);
+}
+
+/**
+ * The `TRI_MAYBE` path: oxc's `parse_possible_parenthesized_arrow_function_expression`
+ * (`arrow.rs:349`). Parses the head for real and, when it works out, KEEPS it — the old code parsed
+ * the parameter list speculatively, threw it away, and parsed it again.
+ *
+ * `allowReturnType` is oxc's `allow_return_type_in_arrow_function`. It exists for
+ *
+ *     x ? y => ({ y }) : z => ({ z })
+ *
+ * where parsing the first arrow's body reaches `({ y })` and `({ y }) : z => ({ z })` is a perfectly
+ * good arrow with return type `z` — the wrong parse, because that `:` belongs to the conditional. In
+ * a conditional's consequent a return type is therefore inadmissible, UNLESS another `:` follows
+ * (`a ? (x): string => x : null`), which means the second colon is the conditional's and the first
+ * really was a return type.
+ */
+function tryParseArrow(
+    state: ParserState,
+    start: number,
+    flags: number,
+    typeParams: Ref,
+    allowReturnType: boolean,
+): Node | null {
+    const pos = state.tokStart;
+    if (state.notArrow !== null && state.notArrow.has(pos)) return null;
+    const s = saveState(state);
+
+    let params: Node[] | null = null;
+    let returnType: Ref = null;
     try {
-        state.speculating++;
-        parseParams(state);
-        if (isP(state, P.COLON)) parseTypeAnn(state);
-        const ok = isP(state, P.ARROW);
-        state.speculating--;
-        return ok;
+        params = parseArrowParams(state, flags);
+        if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     } catch {
-        state.speculating--;
-        return false;
+        params = null;
     }
+    if (params === null || state.fatal || !isP(state, P.ARROW)) {
+        rememberNotArrow(state, pos);
+        restoreState(state, s);
+        return null;
+    }
+    nextToken(state); // past `=>`
+    const arrow = parseArrowBody(state, start, flags, typeParams, params, returnType, allowReturnType);
+    // Checked AFTER the body, as oxc does: whether the trailing `:` exists is only known by then.
+    if (!allowReturnType && returnType !== null && !isP(state, P.COLON)) {
+        rememberNotArrow(state, pos);
+        restoreState(state, s);
+        return null;
+    }
+    return arrow;
 }
 
-function parseArrow(state: ParserState, start: number, flags: number, typeParams: Ref): Node {
+/** The certain (`TRI_TRUE`) path: the head is known to be a parameter list, so nothing is saved. */
+/**
+ * An async arrow's PARAMETERS are already inside its async context, so `await` is reserved there:
+ * `async (await) => 1` is a syntax error while `(await) => 1` is not. oxc unions the await context
+ * before `parse_formal_parameters` (`js/arrow.rs:261-262`). `fnDepth` rides along because
+ * `parseIdent`'s guard uses it to stay permissive for top-level script `var await = 1`.
+ *
+ * Shared by the certain and speculative paths — `async (await) => 1` classifies as `Maybe` (`(a)` is
+ * ambiguous), so putting this only in `parseArrow` would have missed the case it was written for.
+ */
+function parseArrowParams(state: ParserState, flags: number): Node[] {
+    if ((flags & FL.ASYNC) === 0) return parseParams(state);
+    const outerAwait = state.awaitOk;
+    state.awaitOk = true;
+    state.fnDepth++;
     const params = parseParams(state);
+    state.fnDepth--;
+    state.awaitOk = outerAwait;
+    return params;
+}
+
+function parseArrow(state: ParserState, start: number, flags: number, typeParams: Ref, allowReturnType: boolean): Node {
+    const params = parseArrowParams(state, flags);
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
     expectP(state, P.ARROW, "'=>'");
+    return parseArrowBody(state, start, flags, typeParams, params, returnType, allowReturnType);
+}
+
+/** Everything after the `=>`, shared by the certain and speculative paths. */
+function parseArrowBody(
+    state: ParserState,
+    start: number,
+    flags: number,
+    typeParams: Ref,
+    params: Node[],
+    returnType: Ref,
+    allowReturnType: boolean,
+): Node {
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
     const body: Node = inFunctionScope(
@@ -1487,7 +1682,9 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
         () => {
             if (isP(state, P.LBRACE)) return parseBlock(state);
             exprBody = true;
-            return parseAssign(state);
+            // The flag rides through the body: in `x ? y => (a) : z => (b)` the offending `:` is
+            // reached from INSIDE the first arrow's body, not from the conditional directly.
+            return parseAssign(state, false, allowReturnType);
         },
         true,
     );
@@ -1495,8 +1692,18 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
     return create.ArrowFunctionExpression(start, body.end, flags, typeParams, params, returnType, body);
 }
 
-function parseArrowAfterSingleParam(state: ParserState, start: number, id: Identifier, flags: number, identStart?: number): Node {
-    const param = create.FormalParameter(identStart ?? start, id.end, 0, id, null, null);
+function parseArrowAfterSingleParam(
+    state: ParserState,
+    start: number,
+    id: Identifier,
+    flags: number,
+    identStart: number,
+    allowReturnType: boolean,
+): Node {
+    // `identStart` is the parameter's own start, which differs from the arrow's only for `async x =>`
+    // — there `start` is the `async`. Passed explicitly rather than defaulted: both call sites know
+    // it, and an optional parameter on a hot path is arity the shape check has to carry.
+    const param = create.FormalParameter(identStart, id.end, 0, id, null, null);
     expectP(state, P.ARROW, "'=>'");
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
@@ -1506,7 +1713,7 @@ function parseArrowAfterSingleParam(state: ParserState, start: number, id: Ident
         () => {
             if (isP(state, P.LBRACE)) return parseBlock(state);
             exprBody = true;
-            return parseAssign(state);
+            return parseAssign(state, false, allowReturnType);
         },
         true,
     );
@@ -3526,7 +3733,6 @@ function tryParseTypeParams(state: ParserState): Node | null {
     nextToken(state);
     const from = state.sp;
     try {
-        state.speculating++;
         while (!isGtLike(state) && (state.tok as number) !== T_EOF) {
             const ts = state.tokStart;
             let flags = 0;
@@ -3560,10 +3766,8 @@ function tryParseTypeParams(state: ParserState): Node | null {
         }
         if (!isGtLike(state)) throw 0;
         expectGtInType(state);
-        state.speculating--;
         return create.TSTypeParameterDeclaration(startPos, state.tokStart, 0, finishList(state, from));
     } catch {
-        state.speculating--;
         state.sp = from;
         restoreState(state, s);
         return null;
@@ -3584,17 +3788,14 @@ function tryParseTypeArgsInType(state: ParserState): Node | null {
     nextToken(state);
     const from = state.sp;
     try {
-        state.speculating++;
         while (!isGtLike(state) && (state.tok as number) !== T_EOF) {
             push(state, parseType(state));
             if (!eatP(state, P.COMMA)) break;
         }
         if (!isGtLike(state)) throw 0;
         expectGtInType(state);
-        state.speculating--;
         return create.TSTypeParameterInstantiation(startPos, state.tokStart, 0, finishList(state, from));
     } catch {
-        state.speculating--;
         state.sp = from;
         restoreState(state, s);
         return null;

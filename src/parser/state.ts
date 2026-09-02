@@ -144,7 +144,10 @@ export type ParserState = {
     itCount: number;
     stk: (Node | null)[];
     sp: number;
-    speculating: number;
+    /** Offsets of `(` positions already proven NOT to start an arrow head, so a span is speculated at
+     * most once. oxc's `ParserState::not_parenthesized_arrow` (`js/arrow.rs:354`). Lazily created:
+     * most parses never speculate. */
+    notArrow: Set<number> | null;
     /** Set by parseMemberChain on exit: did this frame's top level contain an unparenthesized `?.`?
      * parseNew reads it to reject an optional chain as a `new` callee. */
     chainSawOptional: boolean;
