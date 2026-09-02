@@ -111,6 +111,12 @@ export const C_AFTER_NEWLINE = 4;
 export const C_WS = 1;
 export const C_NL = 2;
 export const C_ID = 3;
+/** ZWNJ (U+200C) and ZWJ (U+200D) are IdentifierPart but NOT IdentifierStart, so `a\u200Db` is an
+ *  identifier and `\u200Da` is not — escaped or literal, both oracles agree. They are the only two
+ *  code points this lexer distinguishes by POSITION: it otherwise treats every non-ASCII character
+ *  as an identifier character rather than carrying the Unicode ID_Start / ID_Continue tables, which
+ *  is deliberate (see `scanEscapedIdent`). Two named exceptions are not those tables. */
+const isJoinerControl = (c: number): boolean => c === 0x200c || c === 0x200d;
 export const C_DIG = 4;
 export const CHAR = new Uint8Array(128);
 CHAR[9] = C_WS;
@@ -247,6 +253,9 @@ function scanEscapedIdent(state: ParserState, nameStart: number, tok: number): v
                     raise(state, ParseErrorCode.InvalidEscapedIdentChar, String.fromCodePoint(cp));
                     return;
                 }
+            } else if (first && isJoinerControl(cp)) {
+                raise(state, ParseErrorCode.InvalidIdentStartChar, String.fromCodePoint(cp));
+                return;
             }
             name += String.fromCodePoint(cp);
             pos = next;
@@ -257,6 +266,10 @@ function scanEscapedIdent(state: ParserState, nameStart: number, tok: number): v
             const cl = CHAR[c];
             if (cl !== C_ID && (first || cl !== C_DIG)) break;
         } else if (c === 0x2028 || c === 0x2029) break;
+        else if (first && isJoinerControl(c)) {
+            raise(state, ParseErrorCode.InvalidIdentStartChar, src[pos]);
+            return;
+        }
         name += src[pos];
         pos++;
         first = false;
@@ -475,6 +488,17 @@ export function nextToken(state: ParserState): void {
     const c = src.charCodeAt(pos);
 
     if (c < 128 ? CHAR[c] === C_ID : true) {
+        // A joiner control cannot START an identifier, but it is not "unexpected" either — it is a
+        // valid identifier character in the wrong position, so it gets oxc's own message rather than
+        // the generic unexpected-character branch. Guarded on `c >= 128` first so an ASCII
+        // identifier — every identifier in practice — short-circuits on one integer compare.
+        if (c >= 128 && isJoinerControl(c)) {
+            raise(state, ParseErrorCode.InvalidIdentStartChar, src[pos]);
+            state.pos = pos + 1;
+            state.tok = T_IDENT;
+            state.tokEnd = pos + 1;
+            return;
+        }
         let h = c;
         pos++;
         while (pos < srcLen) {

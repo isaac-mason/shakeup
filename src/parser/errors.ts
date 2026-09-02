@@ -11,6 +11,7 @@ export const ParseErrorCode = enumeration(
     'Expected', // every `expected 'X'` — punctuator or keyword — funnels here
     'ExpectedInJSX',
     'UnexpectedChar',
+    'InvalidIdentStartChar',
     // Fixed messages.
     'ExpectedIdentifier',
     'ExpectedName',
@@ -85,6 +86,7 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.Expected]: 'expected %0',
     [ParseErrorCode.ExpectedInJSX]: 'expected %0 in JSX',
     [ParseErrorCode.UnexpectedChar]: "unexpected character '%0'",
+    [ParseErrorCode.InvalidIdentStartChar]: 'Invalid Character `%0`',
     [ParseErrorCode.ExpectedIdentifier]: 'expected identifier',
     [ParseErrorCode.ExpectedName]: 'expected name',
     [ParseErrorCode.ExpectedNumber]: 'expected number',
