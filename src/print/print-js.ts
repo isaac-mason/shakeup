@@ -541,7 +541,8 @@ function emitExpr(p: Printer, n: Node): void {
             return;
         }
         case N.ImportExpression: {
-            write(p, 'import(');
+            const phase = d.phase as 'source' | 'defer' | null;
+            write(p, phase === null ? 'import(' : `import.${phase}(`);
             printExpr(p, d.source as Node, Prec.Assign);
             const options = d.options as Node | null;
             if (options) {
@@ -866,6 +867,9 @@ function emitImportDeclaration(p: Printer, n: Node): void {
         return;
     }
     const specs = d.specifiers as Node[]; // tsStrip already removed type-only imports + specifiers
+    // The import PHASE was parsed and stored but never printed, so `import source w from 'm'` came
+    // out as `import w from 'm'` — a silent semantic change. A side-effect import cannot carry one.
+    const phase = d.phase as 'source' | 'defer' | null;
     if (specs.length === 0) {
         // Side-effect import: `import 'x';`
         write(p, 'import');
@@ -880,6 +884,10 @@ function emitImportDeclaration(p: Printer, n: Node): void {
     const named = specs.filter((s) => s.type === N.ImportSpecifier);
     write(p, 'import');
     space(p);
+    if (phase !== null) {
+        write(p, phase);
+        space(p);
+    }
     let wrote = false;
     if (def) {
         write(p, p.nameOf(data(def).local as Node));

@@ -23,6 +23,10 @@ export const ParseErrorCode = enumeration(
     'ExpectedRBraceInTemplate',
     'NewOptionalChain',
     'NewDynamicImport',
+    'InvalidImportProperty',
+    'ImportRequiresSpecifier',
+    'ImportArguments',
+    'DynamicImportSpread',
     'TaggedOptionalChain',
     'DecoratorsUnsupported',
     'ParserStalled',
@@ -85,6 +89,12 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.ExpectedRBraceInTemplate]: "expected '}' in template",
     [ParseErrorCode.NewOptionalChain]: 'optional chain is not allowed in a new expression',
     [ParseErrorCode.NewDynamicImport]: 'Cannot use new with dynamic import',
+    [ParseErrorCode.InvalidImportProperty]:
+        'The only valid property accesses on import are `import.meta`, `import.source()`, and `import.defer()`',
+    [ParseErrorCode.ImportRequiresSpecifier]: 'import() requires a specifier.',
+    [ParseErrorCode.ImportArguments]:
+        'Dynamic imports can only accept a module specifier and an optional set of attributes as arguments',
+    [ParseErrorCode.DynamicImportSpread]: 'Argument of dynamic import cannot be a spread element.',
     [ParseErrorCode.TaggedOptionalChain]: 'tagged template cannot be used with an optional chain',
     [ParseErrorCode.DecoratorsUnsupported]: 'decorators not supported',
     [ParseErrorCode.ParserStalled]: 'parser stalled',

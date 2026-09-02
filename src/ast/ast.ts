@@ -134,7 +134,9 @@ export const DEFS = [
     }),
     def('YieldExpression', { argument: nullable(child), delegate: boolean }),
     def('AwaitExpression', { argument: child }),
-    def('ImportExpression', { source: child, options: nullable(child) }),
+    /** `phase` mirrors `ImportDeclaration`'s: `import.source(x)` / `import.defer(x)` are the
+     *  expression half of the same proposal, and a scalar keeps the node-type ids frozen. */
+    def('ImportExpression', { source: child, options: nullable(child), phase: scalar<'source' | 'defer' | null>() }),
     def('ExpressionStatement', { expression: child }),
     def('VariableDeclaration', {
         declarations: list(child),

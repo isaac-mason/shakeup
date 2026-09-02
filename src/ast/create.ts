@@ -521,8 +521,14 @@ export const SequenceExpression = (s: number, e: number, _f: number, expressions
     node(N.SequenceExpression, s, e, '', { expressions });
 export const AwaitExpression = (s: number, e: number, _f: number, argument: Node): Node =>
     node(N.AwaitExpression, s, e, '', { argument });
-export const ImportExpression = (s: number, e: number, _f: number, source: Node, options: Node | null): Node =>
-    node(N.ImportExpression, s, e, '', { source, options: options ?? null });
+export const ImportExpression = (
+    s: number,
+    e: number,
+    _f: number,
+    source: Node,
+    options: Node | null,
+    phase: 'source' | 'defer' | null = null,
+): Node => node(N.ImportExpression, s, e, '', { source, options: options ?? null, phase });
 export const ExpressionStatement = (s: number, e: number, _f: number, expression: Node): Node =>
     node(N.ExpressionStatement, s, e, '', { expression });
 export const BlockStatement = (s: number, e: number, _f: number, body: Node[]): Node =>

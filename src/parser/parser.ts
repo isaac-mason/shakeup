@@ -779,6 +779,38 @@ function parsePostfixChain(state: ParserState): Node {
     return parseMemberChain(state, parsePrimary(state), true);
 }
 
+/** `import(...)`, and the phase forms `import.source(...)` / `import.defer(...)` which share it —
+ *  oxc's `parse_import_expression` (`js/module.rs:32`). A spread is refused per ARGUMENT rather than
+ *  once for the list, because `import(a, ...b)` is as invalid as `import(...a)`. */
+function parseImportCall(state: ParserState, start: number, phase: 'source' | 'defer' | null): Node {
+    expectP(state, P.LPAREN, "'('");
+    if (isP(state, P.RPAREN)) {
+        raise(state, ParseErrorCode.ImportRequiresSpecifier);
+        nextToken(state);
+        state.sawImportSyntax = true;
+        return create.ImportExpression(start, state.tokStart, 0, makeMissingIdent(state, R_REF), null, phase);
+    }
+    const source = parseImportArgument(state);
+    let options: Ref = null;
+    if (eatP(state, P.COMMA) && !isP(state, P.RPAREN)) options = parseImportArgument(state);
+    eatP(state, P.COMMA);
+    if (!eatP(state, P.RPAREN)) raise(state, ParseErrorCode.ImportArguments);
+    state.sawImportSyntax = true;
+    // A phase import PARSES but cannot be bundled, the same split `with` and decorators got — see
+    // `scan.ts`'s `errorImportPhase`, which covers the declaration form. Flagging it here routes the
+    // expression form into `collectUnsupported` rather than letting it lower to an EAGER import.
+    if (phase !== null) state.sawUnbundlable = true;
+    return create.ImportExpression(start, state.tokStart, 0, source, options, phase);
+}
+
+function parseImportArgument(state: ParserState): Node {
+    if (isP(state, P.DOTDOTDOT)) {
+        raise(state, ParseErrorCode.DynamicImportSpread);
+        nextToken(state);
+    }
+    return parseAssign(state);
+}
+
 /** oxc's `is_import_expression_or_member_access_on_import_expression` (`js/expression.rs:26`) — the
  *  callee of a `new` may REACH a dynamic import through member accesses, a tagged template or a
  *  non-null assertion, and `new import('m').then` is an error just as `new import('m')` is. */
@@ -1276,20 +1308,23 @@ function parsePrimary(state: ParserState): Node {
                 return parseClass(state, true, 0);
             case K.IMPORT: {
                 nextToken(state);
-                if (isP(state, P.DOT)) {
+                if (!isP(state, P.DOT)) return parseImportCall(state, start, null);
+                // oxc's `parse_import_meta_or_call` (`js/expression.rs:676`): `meta` is the only
+                // property; `source` and `defer` are the import-PHASE proposal and are not properties
+                // at all — each must be followed by a call, so they route into the same call parser.
+                nextToken(state);
+                if (isK(state, K.SOURCE)) {
                     nextToken(state);
-                    parseNameAsIdent(state, R_NAME);
-                    state.sawImportSyntax = true;
-                    return create.ImportMeta(start, state.tokStart, 0);
+                    return parseImportCall(state, start, 'source');
                 }
-                expectP(state, P.LPAREN, "'('");
-                const source = parseAssign(state);
-                let options: Ref = null;
-                if (eatP(state, P.COMMA) && !isP(state, P.RPAREN)) options = parseAssign(state);
-                eatP(state, P.COMMA);
-                expectP(state, P.RPAREN, "')'");
+                if (isK(state, K.DEFER)) {
+                    nextToken(state);
+                    return parseImportCall(state, start, 'defer');
+                }
+                const prop = parseNameAsIdent(state, R_NAME);
+                if (prop.name !== 'meta') raise(state, ParseErrorCode.InvalidImportProperty);
                 state.sawImportSyntax = true;
-                return create.ImportExpression(start, state.tokStart, 0, source, options);
+                return create.ImportMeta(start, state.tokStart, 0);
             }
             case K.NEW:
                 return parseNew(state);

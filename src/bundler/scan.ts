@@ -97,6 +97,14 @@ export function collectUnsupported(program: Node, id: string, errors: string[]):
             );
             return false;
         }
+        if (n.type === N.ImportExpression && n.data.phase !== null) {
+            const phase = n.data.phase as 'source' | 'defer';
+            errors.push(
+                `${id}:${n.start}: bundling with ${phase === 'source' ? 'source phase imports' : 'deferred imports'} is not supported ` +
+                    'unless they are external — the module has to be left unbundled.',
+            );
+            return false;
+        }
         if (n.type === N.TSModuleDeclaration && !n.data.declare) {
             errors.push(`${id}:${n.start}: value namespaces are not supported (use ES modules)`);
             return false;
