@@ -268,23 +268,53 @@ function parseIdent(state: ParserState, role: number): Identifier {
     // `parseIdent` and not `parseNameAsIdent` precisely because that is the split — a property key
     // or member name (`({ \u0069f: 1 })`, `x.\u0069f`) may be a reserved word and stays legal.
     // Contextual keywords (`async`, `let`, `of`) are not reserved, so they pass.
-    if ((state.tokFlags & F_ESCAPED) !== 0) {
-        const kw = keywordCodeOf(state.tokCooked);
-        if (kw !== 0 && !isContextual(kw)) raise(state, ParseErrorCode.EscapedKeyword);
-    }
-    if (role === R_BIND) {
-        if (inCtx(state, CTX.Yield) && isK(state, K.YIELD)) raise(state, ParseErrorCode.IdentifierInGenerator);
-        // `await` needs the extra guard because `CTX.Await` is seeded TRUE at top level for the
-        // permissive `unambiguous` goal, where `var await = 1` is legal script. Inside a function
-        // body `CTX.Await` can only mean `async`, and a declared module is strict either way —
-        // `allowTopReturn` is the flag that is false for exactly the real-module goal.
-        else if (inCtx(state, CTX.Await) && isK(state, K.AWAIT) && (state.fnDepth > 0 || !state.allowTopReturn))
-            raise(state, ParseErrorCode.IdentifierInAsync);
+    // An escaped spelling still NAMES the keyword, so `\u0079ield` is `yield` for every rule below —
+    // oxc gets this for free because its lexer gives the escaped token the keyword's own `Kind` and
+    // `advance` checks `token.escaped() && kind.is_any_keyword()` (`cursor.rs:100`). Ours lexes it as
+    // a plain identifier, so the cooked text is what the rules have to consult.
+    const escaped = (state.tokFlags & F_ESCAPED) !== 0 ? state.tokCooked : '';
+    const yieldHere = inCtx(state, CTX.Yield) && (isK(state, K.YIELD) || escaped === 'yield');
+    // `await` needs the extra guard because `CTX.Await` is seeded TRUE at top level for the
+    // permissive `unambiguous` goal, where `var await = 1` is legal script. Inside a function
+    // body `CTX.Await` can only mean `async`, and a declared module is strict either way —
+    // `allowTopReturn` is the flag that is false for exactly the real-module goal.
+    const awaitHere =
+        inCtx(state, CTX.Await) &&
+        (isK(state, K.AWAIT) || escaped === 'await') &&
+        (state.fnDepth > 0 || !state.allowTopReturn);
+    // BINDING a contextually-reserved word reports the context, not the escape — `var \u0061wait` in
+    // an async function is "cannot use `await` as an identifier", which is oxc's ordering too.
+    if (role === R_BIND && yieldHere) raise(state, ParseErrorCode.IdentifierInGenerator);
+    else if (role === R_BIND && awaitHere) raise(state, ParseErrorCode.IdentifierInAsync);
+    else if (escaped !== '') {
+        // An escaped identifier is not the keyword it spells, but it may not APPEAR where the keyword
+        // it spells is reserved: `var \u0069f = 1` and `var \u0074his = 1` are both errors. This is
+        // `parseIdent` and not `parseNameAsIdent` precisely because that is the split — a property key
+        // or member name (`({ \u0069f: 1 })`, `x.\u0069f`) may be a reserved word and stays legal.
+        // `async` / `let` / `of` are contextual and never reserved, so they pass; `yield` and `await`
+        // are contextual but DO become reserved, which is what the two flags above decide.
+        const kw = keywordCodeOf(escaped);
+        if ((kw !== 0 && !isContextual(kw)) || yieldHere || awaitHere) raise(state, ParseErrorCode.EscapedKeyword);
     }
     const id = ident(state, role, state.tokStart, state.tokEnd);
     nextToken(state);
     return id;
 }
+/** A shorthand property's name is BOTH a key and an identifier, so the reserved-word rules that
+ *  `parseNameAsIdent` deliberately skips for a key apply after all: `({ break: 1 })` is legal and
+ *  `({ break })` is not. oxc reaches the same place by a different route — it parses the shorthand
+ *  value as an `IdentifierReference` and its recovery then demands the `:` that would have made the
+ *  name a key — which is why the message here is "expected ':'" rather than a rule of its own. */
+function checkShorthandName(state: ParserState, key: Node): void {
+    if (key.type !== N.IdentifierName) return;
+    const kw = keywordCodeOf(key.name);
+    const reserved =
+        (kw !== 0 && !isContextual(kw)) ||
+        (key.name === 'yield' && inCtx(state, CTX.Yield)) ||
+        (key.name === 'await' && inCtx(state, CTX.Await) && (state.fnDepth > 0 || !state.allowTopReturn));
+    if (reserved) raise(state, ParseErrorCode.Expected, "':'");
+}
+
 /** Parse a name-or-keyword token as an identifier in the given role (property
  * keys, member names, specifier names — usually IdentifierName). */
 function parseNameAsIdent(state: ParserState, role: number): Identifier {
@@ -1405,6 +1435,7 @@ function parseObjectMember(state: ParserState): Node {
         const value = parseAssign(state);
         return create.ObjectProperty(start, value.end, flags, key, value);
     }
+    checkShorthandName(state, key);
     const shorthandRef = ident(state, R_REF, key.start, key.end);
     if (isP(state, P.EQ)) {
         nextToken(state);
@@ -1854,11 +1885,13 @@ function parseBindingTarget(state: ParserState): Node {
                     nextToken(state);
                     value = parseBindingElement(state);
                 } else if (isP(state, P.EQ)) {
+                    checkShorthandName(state, key);
                     nextToken(state);
                     const right = parseAssign(state);
                     value = create.AssignmentPattern(key.start, right.end, 0, ident(state, R_BIND, key.start, key.end), right);
                     flags |= FL.SHORTHAND;
                 } else {
+                    checkShorthandName(state, key);
                     value = ident(state, R_BIND, key.start, key.end);
                     flags |= FL.SHORTHAND;
                 }
