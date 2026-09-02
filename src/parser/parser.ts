@@ -125,6 +125,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokFlags: 0,
         pureAt: -1,
         nseAt: [],
+        comments: [],
         tokHash: 0,
         tokCooked: '',
         tsMode: options.ts,
@@ -310,7 +311,7 @@ function consumeSemi(state: ParserState): void {
 
 // No line-table field to save/restore: the line table is built once, deferred, so nothing
 // mutates it during (speculative) parsing.
-type LexState = [number, number, number, number, number, number, number, boolean, number, number];
+type LexState = [number, number, number, number, number, number, number, boolean, number, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -325,6 +326,7 @@ const saveState = (state: ParserState): LexState => [
     // so the annotation appeared twice. Harmless only because `resolveNoSideEffects` de-dupes with a
     // Set; the same hole in `topLevelThis` would not be. Truncating is enough: both only ever grow.
     state.nseAt.length,
+    state.comments.length,
     state.topLevelThis.length,
 ];
 function restoreState(state: ParserState, s: LexState): void {
@@ -339,6 +341,7 @@ function restoreState(state: ParserState, s: LexState): void {
     // not leave the parse latched.
     state.fatal = s[7];
     state.nseAt.length = s[8];
+    state.comments.length = s[10];
     state.topLevelThis.length = s[9];
 }
 
@@ -3977,6 +3980,9 @@ export type ParseResult = {
     /** Source positions of the token after each `/*@__NO_SIDE_EFFECTS__*​/`. Empty for the vast
      *  majority of files; resolved to function symbols by `resolveNoSideEffects`. */
     noSideEffectsAt: number[];
+    /** Every comment, flat, stride 4: `[start, end, flags, attachedTo]`. Read it with the helpers in
+     *  `parser/comments.ts`; classification is deferred, so retaining costs no scanning. */
+    comments: Int32Array;
     /** Did the module contain `import(...)` or `import.meta`?
      *
      *  `extractRecords` walks the whole program for dynamic-import edges and `new URL(…,
@@ -4029,6 +4035,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasEsmImport: state.sawEsmImport,
         topLevelThis: state.topLevelThis,
         noSideEffectsAt: state.nseAt,
+        comments: Int32Array.from(state.comments),
     };
 }
 

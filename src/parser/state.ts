@@ -68,6 +68,11 @@ export type ParserState = {
     /** Source positions of the token following each `/*@__NO_SIDE_EFFECTS__*​/` annotation. Resolved
      *  to the annotated function AFTER the parse — see `resolveNoSideEffects`. */
     nseAt: number[];
+    /** Every comment, flat, stride 4: `[start, end, flags, attachedTo]`. `attachedTo` is the start of
+     *  the token the comment precedes — oxc's model (`lexer/trivia_builder.rs`), where comments are
+     *  joined to the tree by OFFSET rather than attached to nodes. Same species as {@link nseAt}:
+     *  append-only, lex-time, truncated on rewind. */
+    comments: number[];
     tokHash: number;
     tsMode: boolean;
     jsxMode: boolean;
