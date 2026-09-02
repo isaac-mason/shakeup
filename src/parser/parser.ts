@@ -128,6 +128,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         comments: [],
         goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
         sawUnbundlable: false,
+        staticBlockDepth: 0,
         tokHash: 0,
         tokCooked: '',
         tsMode: options.ts,
@@ -254,6 +255,18 @@ function leafRaw(state: ParserState, flatType: number, start: number, end: numbe
     return node(flatType as NodeType, start, end, sliceFlat(state, start, end), null);
 }
 /** Parse an identifier token in the given role. `role` picks the leaf type. */
+/** Is `await` reserved as an identifier right here?
+ *
+ *  Two independent reasons, and neither implies the other. `CTX.Await` needs the extra guard because
+ *  it is seeded TRUE at top level for the permissive `unambiguous` goal, where `var await = 1` is
+ *  legal script — inside a function body it can only mean `async`, and a declared module is strict
+ *  either way, which is exactly what `allowTopReturn` distinguishes. A class STATIC BLOCK reserves
+ *  the word without being an async context at all, so it cannot ride on that bit. */
+function awaitReserved(state: ParserState): boolean {
+    if (state.staticBlockDepth > 0) return true;
+    return inCtx(state, CTX.Await) && (state.fnDepth > 0 || !state.allowTopReturn);
+}
+
 function parseIdent(state: ParserState, role: number): Identifier {
     if (!isIdentLike(state)) {
         raise(state, ParseErrorCode.ExpectedIdentifier);
@@ -274,18 +287,20 @@ function parseIdent(state: ParserState, role: number): Identifier {
     // a plain identifier, so the cooked text is what the rules have to consult.
     const escaped = (state.tokFlags & F_ESCAPED) !== 0 ? state.tokCooked : '';
     const yieldHere = inCtx(state, CTX.Yield) && (isK(state, K.YIELD) || escaped === 'yield');
-    // `await` needs the extra guard because `CTX.Await` is seeded TRUE at top level for the
-    // permissive `unambiguous` goal, where `var await = 1` is legal script. Inside a function
-    // body `CTX.Await` can only mean `async`, and a declared module is strict either way —
-    // `allowTopReturn` is the flag that is false for exactly the real-module goal.
-    const awaitHere =
-        inCtx(state, CTX.Await) &&
-        (isK(state, K.AWAIT) || escaped === 'await') &&
-        (state.fnDepth > 0 || !state.allowTopReturn);
-    // BINDING a contextually-reserved word reports the context, not the escape — `var \u0061wait` in
-    // an async function is "cannot use `await` as an identifier", which is oxc's ordering too.
-    if (role === R_BIND && yieldHere) raise(state, ParseErrorCode.IdentifierInGenerator);
-    else if (role === R_BIND && awaitHere) raise(state, ParseErrorCode.IdentifierInAsync);
+    const awaitHere = (isK(state, K.AWAIT) || escaped === 'await') && awaitReserved(state);
+    // Neither word can be a plain identifier where it is reserved, in ANY role: `void yield` inside a
+    // generator reaches here as a REFERENCE, because `parseUnary` takes its operand without going
+    // through the `yield` branch of `parseAssign`.
+    //
+    // Which MESSAGE, though, depends on the role. A binding reports the context (`var \u0061wait` in
+    // an async function is "cannot use `await` as an identifier"); an escaped reference reports the
+    // escape. Both are oxc's, checked against `oxc-parser` case by case. One divergence is accepted:
+    // oxc reports the CONTEXT for `function* g() { void \u0079ield; }` and the ESCAPE for
+    // `function* g() { \u0079ield; }`, a split that falls out of which recovery path its lexer took.
+    // Both spellings are rejected either way, so the wording is not worth modelling.
+    if (role !== R_BIND && escaped !== '' && (yieldHere || awaitHere)) raise(state, ParseErrorCode.EscapedKeyword);
+    else if (yieldHere) raise(state, ParseErrorCode.IdentifierInGenerator);
+    else if (awaitHere) raise(state, ParseErrorCode.IdentifierInAsync);
     else if (escaped !== '') {
         // An escaped identifier is not the keyword it spells, but it may not APPEAR where the keyword
         // it spells is reserved: `var \u0069f = 1` and `var \u0074his = 1` are both errors. This is
@@ -311,7 +326,7 @@ function checkShorthandName(state: ParserState, key: Node): void {
     const reserved =
         (kw !== 0 && !isContextual(kw)) ||
         (key.name === 'yield' && inCtx(state, CTX.Yield)) ||
-        (key.name === 'await' && inCtx(state, CTX.Await) && (state.fnDepth > 0 || !state.allowTopReturn));
+        (key.name === 'await' && awaitReserved(state));
     if (reserved) raise(state, ParseErrorCode.Expected, "':'");
 }
 
@@ -2178,10 +2193,19 @@ function parseClassMember(state: ParserState): Node {
                 // A class static block enables `new.target` but NOT `return` — hence bumping only
                 // the new.target depth (oxc `js/function.rs:285`, `js/statement.rs:710-713`).
                 state.newTargetDepth++;
-                const outerCtx = state.ctx; // a static block is not an async context
+                // A static block is not an async context — `CTX.Await` stays clear so `await x` does
+                // not parse as an AwaitExpression — but `await` IS reserved as an identifier there,
+                // which `staticBlockDepth` carries instead. oxc splits the same pair across two
+                // crates: its parser sets `[+Await]` (giving the identifier rule) and its checker
+                // raises `class_static_block_await` for the expression. Having no checker, shakeup
+                // keeps both in the parser, which is the call `parse-top-level-await.test.ts`
+                // already recorded for the expression half.
+                state.staticBlockDepth++;
+                const outerCtx = state.ctx;
                 state.ctx &= ~CTX.Await;
                 const b = parseBlock(state);
                 state.ctx = outerCtx;
+                state.staticBlockDepth--;
                 state.newTargetDepth--;
                 const body = (b as Extract<Node, { type: typeof N.BlockStatement }>).data.body;
                 return create.StaticBlock(start, state.tokStart, 0, body);
@@ -2308,11 +2332,17 @@ function inFunctionScope<T>(state: ParserState, isAsync: boolean, parse: () => T
     if (!arrow) state.newTargetDepth++;
     if (!arrow) state.thisDepth++;
     // REPLACED, not unioned: a non-async function inherits no `await`, and an arrow or a plain
-    // function nested in a generator inherits no `yield`.
+    // function nested in a generator inherits no `yield`. A class static block's reservation of
+    // `await` is replaced the same way and by EVERY function boundary including an arrow's — both
+    // oracles agree that `class C { static { function f(){ var await; } } }` is legal, and test262
+    // asserts it directly (`static-init-await-reference.js`).
     const outerCtx = state.ctx;
+    const outerStaticBlock = state.staticBlockDepth;
+    state.staticBlockDepth = 0;
     state.ctx = (state.ctx & ~(CTX.Await | CTX.Yield)) | (isAsync ? CTX.Await : 0) | (isGenerator ? CTX.Yield : 0);
     const out = parse();
     state.ctx = outerCtx;
+    state.staticBlockDepth = outerStaticBlock;
     if (!arrow) state.thisDepth--;
     if (!arrow) state.newTargetDepth--;
     state.fnDepth--;

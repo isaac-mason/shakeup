@@ -140,6 +140,10 @@ export type ParserState = {
      *  Arrows are excluded because they inherit `this` from the enclosing scope, so an arrow at the
      *  module top level still sees the module's `this`. */
     thisDepth: number;
+    /** Nesting depth of class STATIC BLOCKS. `await` is reserved as an identifier inside one, but a
+     *  static block is not an async context, so `CTX.Await` cannot carry it — the two rules differ
+     *  and oxc separates them across two crates (see `parseIdent`). */
+    staticBlockDepth: number;
     /** `this` expressions at the module top level. In CommonJS these mean `module.exports` (the body
      *  is called with it as the receiver); in an ES module they are `undefined`. Collected here
      *  because the predicate is a parse-time fact — oxc/rolldown likewise gather them during
