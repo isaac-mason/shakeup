@@ -29,7 +29,7 @@
 // side effects), any module-scope or exported binding, any binding with ≥1 use, function/class
 // declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
 import { isPureExpr } from '../../analysis/effects.ts';
-import { SCOPE, type Semantic } from '../../analysis/semantic.ts';
+import { SCOPE, scopeKind, type Semantic } from '../../analysis/semantic.ts';
 import { create, N, type Node } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -56,7 +56,7 @@ function inModuleScope(sem: Semantic, sym: number): boolean {
     if (rec === undefined) return true;
     const scope = sem.scopes[rec.scope];
     if (scope === undefined) return true;
-    return scope.flags === SCOPE.MODULE;
+    return scopeKind(scope.flags) === SCOPE.MODULE;
 }
 
 /** Per-declarator verdict. */

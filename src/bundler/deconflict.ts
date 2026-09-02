@@ -3,7 +3,7 @@
 // side-maps (`linked.finalNames`/`namespaceOf`/`externalLocals`) — NO AST mutation; the printer
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
-import { SCOPE, scopeOf } from '../analysis/semantic.ts';
+import { SCOPE, scopeKind, scopeOf } from '../analysis/semantic.ts';
 import { N, type Node, walkChildren } from '../ast/index.ts';
 import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types.ts';
 import { finalNameOf } from './link.ts';
@@ -258,7 +258,7 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
             if (decl === null || decl === undefined) continue;
             // Top-level symbols are the ones deconfliction already named; only NESTED bindings here.
             const flags = sem.scopes[rec.scope]?.flags;
-            if (flags === undefined || flags === SCOPE.MODULE) continue;
+            if (flags === undefined || scopeKind(flags) === SCOPE.MODULE) continue;
             const ref = packRef(mod.idx, sym);
             if (linked.finalNames.has(ref)) continue;
             if (captured.get(rec.scope)?.has(decl.name) === true) linked.finalNames.set(ref, claim(decl.name));

@@ -1,8 +1,41 @@
 import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration.ts';
 
-/** Scope kinds, stored in `ScopeRec.flags`. */
+/** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
 export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');
+/** Ten kinds fit in four bits, leaving the rest of `flags` for real flags — oxc's `ScopeFlags`,
+ *  which packs the kind and `StrictMode` into one word (`oxc_syntax/src/scope.rs`). */
+const SCOPE_KIND_MASK = 15;
+/** This scope, and everything nested in it, is strict-mode code.
+ *
+ *  It has to live on the SCOPE and not on the parser's `Context`, because strictness ACCUMULATES:
+ *  a `"use strict"` directive inside one function makes that function and its children strict while
+ *  its siblings stay sloppy. oxc's parser has no strict bit at all for exactly this reason — its only
+ *  `is_strict` is a property of the FILE — and every strict-mode early error lives in
+ *  `oxc_semantic`'s checker, gated on `ctx.strict_mode()` = `current_scope_flags().is_strict_mode()`. */
+export const SCOPE_STRICT = 1 << 4;
+
+/** The kind of a scope, with the flag bits masked off. */
+export const scopeKind = (flags: number): number => flags & SCOPE_KIND_MASK;
+/** Is this scope strict-mode code? oxc's `SemanticBuilder::strict_mode` (`builder.rs:529`). */
+export const isStrictScope = (sem: Semantic, scope: number): boolean =>
+    (sem.scopes[scope].flags & SCOPE_STRICT) !== 0;
+
+/** Does a statement list open with a `"use strict"` directive?
+ *
+ *  The RAW text decides, not the cooked value: `"use\u0020strict"` spells the same string and is NOT
+ *  a directive. `StringLiteral.name` holds the source slice including quotes, so comparing against
+ *  both quotings gets that for free. A prologue is the leading run of string-literal statements, so
+ *  the scan stops at the first statement that is not one. */
+function hasUseStrictDirective(body: readonly Node[]): boolean {
+    for (const st of body) {
+        if (st.type !== N.ExpressionStatement) return false;
+        const e = st.data.expression;
+        if (e.type !== N.StringLiteral) return false;
+        if (e.name === '"use strict"' || e.name === "'use strict'") return true;
+    }
+    return false;
+}
 
 /** Symbol-kind bit flags, OR-combined in `SymbolRec.flags` (a dual-namespace symbol carries both a value and a type bit). */
 export const SYM = {
@@ -291,7 +324,10 @@ type AnalyseState = {
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
     const id = state.sem.scopes.length;
-    state.sem.scopes.push({ parent: state.scope, flags, node });
+    // Strictness is INHERITED: once a scope is strict every scope inside it is, and nothing turns it
+    // back off. The seeds are the module goal, a class body, and a `"use strict"` prologue.
+    const inherited = state.sem.scopes[state.scope].flags & SCOPE_STRICT;
+    state.sem.scopes.push({ parent: state.scope, flags: flags | inherited, node });
     if (node !== null) (node.data as { scopeId: number }).scopeId = id;
     return id;
 }
@@ -359,7 +395,8 @@ function hoistTarget(state: AnalyseState): number {
     let s = state.scope;
     for (;;) {
         const f = state.sem.scopes[s].flags;
-        if (f === SCOPE.FUNCTION || f === SCOPE.MODULE || f === SCOPE.NAMESPACE) return s;
+        const k = scopeKind(f);
+        if (k === SCOPE.FUNCTION || k === SCOPE.MODULE || k === SCOPE.NAMESPACE) return s;
         s = state.sem.scopes[s].parent;
         if (s === 0) return state.scope;
     }
@@ -428,10 +465,13 @@ function resetSem(out: Semantic): void {
  * every binding. `resolveRef` is reused verbatim for the deferred step, so resolution is identical
  * to the two-pass. LIMIT: no TDZ or redeclaration diagnostics; labels not tracked.
  */
-export function analyze(out: Semantic, program: Node): void {
+export function analyze(out: Semantic, program: Node, sourceIsModule = false): void {
     resetSem(out);
     const state: AnalyseState = { sem: out, scope: 0, pendNode: [], pendScope: [], pendNs: [], pendFlags: [] };
-    const moduleScope = newScope(state, SCOPE.MODULE, program);
+    // An ES module is strict by definition; a script is strict only from a directive. oxc seeds the
+    // same way, from `source_type.is_module()` (`builder.rs`, `ScopeFlags::Top`).
+    const topStrict = sourceIsModule || hasUseStrictDirective((program.data as { body: Node[] }).body);
+    const moduleScope = newScope(state, SCOPE.MODULE | (topStrict ? SCOPE_STRICT : 0), program);
     state.scope = moduleScope;
     visit(state, program);
     const pn = state.pendNode;
@@ -494,7 +534,10 @@ function declareTypeParams(state: AnalyseState, node: Node | null): void {
 
 function declareInScope(state: AnalyseState, kind: number, node: Node, body: () => void): void {
     const prev = state.scope;
-    state.scope = newScope(state, kind, node);
+    // A class body is ALWAYS strict, however it is reached — the one seed that needs no directive and
+    // no module goal. It is also why `class C { m(yield) {} }` is an error where the same parameter in
+    // a plain sloppy function is not.
+    state.scope = newScope(state, kind | (kind === SCOPE.CLASS ? SCOPE_STRICT : 0), node);
     body();
     state.scope = prev;
 }
@@ -711,6 +754,10 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
         visit(state, body); // concise arrow body — an expression, no scope either way
         return;
     }
+    // A `"use strict"` prologue makes THIS function's scope strict, and so everything nested in it.
+    // Set on the scope already opened by `declareInScope`, because the parameters were declared into
+    // it before the body was reached and they are strict code too.
+    if (hasUseStrictDirective((body.data as { body: Node[] }).body)) state.sem.scopes[state.scope].flags |= SCOPE_STRICT;
     for (const s of body.data.body) visit(state, s);
 }
 
@@ -1005,7 +1052,7 @@ function visit(state: AnalyseState, node: Node | null): void {
 export function declareSyntheticImport(semantic: Semantic, identNode: Node): number {
     let ms = 1;
     for (let s = 1; s < semantic.scopes.length; s++) {
-        if (semantic.scopes[s].flags === SCOPE.MODULE) {
+        if (scopeKind(semantic.scopes[s].flags) === SCOPE.MODULE) {
             ms = s;
             break;
         }
