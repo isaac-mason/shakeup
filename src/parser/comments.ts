@@ -1,4 +1,4 @@
-import { C_AFTER_NEWLINE, C_BLOCK, C_HAS_NEWLINE } from './lexer.ts';
+import { C_AFTER_NEWLINE, C_BLOCK, C_HAS_NEWLINE, COMMENT_STRIDE } from './lexer.ts';
 
 /**
  * Comments are retained as spans and classified ON DEMAND.
@@ -9,7 +9,7 @@ import { C_AFTER_NEWLINE, C_BLOCK, C_HAS_NEWLINE } from './lexer.ts';
  * 13x more, to find one legal comment. So the cheap half is unconditional and the expensive half is
  * the consumer's to ask for.
  */
-export const COMMENT_STRIDE = 4;
+export { COMMENT_STRIDE };
 
 export const commentCount = (c: Int32Array): number => c.length / COMMENT_STRIDE;
 export const commentStart = (c: Int32Array, i: number): number => c[i * COMMENT_STRIDE];

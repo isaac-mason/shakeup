@@ -103,6 +103,31 @@ export function buildLineStarts(src: string): Uint32Array {
     return Uint32Array.from(starts);
 }
 
+/** Ints per comment record: start, end, flags, anchor. Defined here beside the flags rather than in
+ *  `comments.ts`, which reads them — the dependency runs comments -> lexer, not the reverse. */
+export const COMMENT_STRIDE = 4;
+
+/** Append one comment record, growing the buffer by doubling.
+ *
+ *  A typed array with an explicit count rather than a boxed `number[]`: the count makes a failed
+ *  speculation's rewind a scalar write instead of an array truncation, and the handoff a zero-copy
+ *  `subarray` instead of a full copy. Both were measured — `perf-findings.md` §1b. The fourth slot
+ *  is the anchor offset, back-filled by `nextToken` once the following token's start is known. */
+function pushComment(state: ParserState, start: number, end: number, flags: number): void {
+    const len = state.commentsLen;
+    if (len + COMMENT_STRIDE > state.comments.length) {
+        const grown = new Int32Array(state.comments.length * 2);
+        grown.set(state.comments);
+        state.comments = grown;
+    }
+    const c = state.comments;
+    c[len] = start;
+    c[len + 1] = end;
+    c[len + 2] = flags;
+    c[len + 3] = 0;
+    state.commentsLen = len + COMMENT_STRIDE;
+}
+
 /** Flags in the `comments` record's third slot. */
 export const C_BLOCK = 1;
 export const C_HAS_NEWLINE = 2;
@@ -376,7 +401,7 @@ export function nextToken(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
     let pos = state.pos;
-    const commentsAt = state.comments.length;
+    const commentsAt = state.commentsLen;
     let nl = 0;
     let sawPure = false;
     let sawNse = false;
@@ -413,7 +438,7 @@ export function nextToken(state: ParserState): void {
                             break;
                         }
                     }
-                    state.comments.push(pos, end, nl !== 0 || pos === 0 ? C_AFTER_NEWLINE : 0, 0);
+                    pushComment(state, pos, end, nl !== 0 || pos === 0 ? C_AFTER_NEWLINE : 0);
                     pos = end;
                     continue;
                 }
@@ -442,7 +467,12 @@ export function nextToken(state: ParserState): void {
                         // test above already rejects virtually every comment.
                         else if (src.startsWith('__NO_SIDE_EFFECTS__', a + 1)) sawNse = true;
                     }
-                    state.comments.push(pos, close, C_BLOCK | (spansLine ? C_HAS_NEWLINE : 0) | (nl !== 0 || pos === 0 ? C_AFTER_NEWLINE : 0), 0);
+                    pushComment(
+                        state,
+                        pos,
+                        close,
+                        C_BLOCK | (spansLine ? C_HAS_NEWLINE : 0) | (nl !== 0 || pos === 0 ? C_AFTER_NEWLINE : 0),
+                    );
                     pos = close;
                     continue;
                 }
@@ -471,8 +501,8 @@ export function nextToken(state: ParserState): void {
     // Every comment seen in THIS call precedes the token starting at `pos`. shakeup's skip loop runs
     // from one token to the next in a single pass, so the anchor is known immediately — oxc needs four
     // extra `TriviaBuilder` fields because its lexer re-enters token dispatch per comment and cannot.
-    if (state.comments.length !== commentsAt)
-        for (let i = commentsAt + 3; i < state.comments.length; i += 4) state.comments[i] = pos;
+    if (state.commentsLen !== commentsAt)
+        for (let i = commentsAt + 3; i < state.commentsLen; i += COMMENT_STRIDE) state.comments[i] = pos;
     if (sawPure) state.pureAt = pos;
     // A LIST, not a single slot: unlike `pureAt` (consumed by the node that starts exactly there),
     // these are resolved to functions after the parse, and several may be pending at once.

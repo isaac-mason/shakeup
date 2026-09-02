@@ -17,6 +17,7 @@ import {
     VAR_KIND,
 } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration.ts';
+import { COMMENT_STRIDE } from './comments.ts';
 import { ParseErrorCode } from './errors.ts';
 import {
     CHAR,
@@ -126,7 +127,8 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         tokFlags: 0,
         pureAt: -1,
         nseAt: [],
-        comments: [],
+        comments: new Int32Array(256 * COMMENT_STRIDE),
+        commentsLen: 0,
         goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
         sawUnbundlable: false,
         staticBlockDepth: 0,
@@ -374,7 +376,7 @@ const saveState = (state: ParserState): LexState => [
     // so the annotation appeared twice. Harmless only because `resolveNoSideEffects` de-dupes with a
     // Set; the same hole in `topLevelThis` would not be. Truncating is enough: both only ever grow.
     state.nseAt.length,
-    state.comments.length,
+    state.commentsLen,
     state.topLevelThis.length,
 ];
 function restoreState(state: ParserState, s: LexState): void {
@@ -389,7 +391,7 @@ function restoreState(state: ParserState, s: LexState): void {
     // not leave the parse latched.
     state.fatal = s[7];
     state.nseAt.length = s[8];
-    state.comments.length = s[10];
+    state.commentsLen = s[10];
     state.topLevelThis.length = s[9];
 }
 
@@ -4304,7 +4306,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         hasEsmImport: state.sawEsmImport,
         topLevelThis: state.topLevelThis,
         noSideEffectsAt: state.nseAt,
-        comments: Int32Array.from(state.comments),
+        comments: state.comments.subarray(0, state.commentsLen),
         hasUnbundlable: state.sawUnbundlable,
     };
 }

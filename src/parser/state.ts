@@ -77,7 +77,11 @@ export type ParserState = {
      *  the token the comment precedes — oxc's model (`lexer/trivia_builder.rs`), where comments are
      *  joined to the tree by OFFSET rather than attached to nodes. Same species as {@link nseAt}:
      *  append-only, lex-time, truncated on rewind. */
-    comments: number[];
+    comments: Int32Array;
+    /** Elements USED in {@link comments}; the buffer is larger and grows by doubling. A count rather
+     *  than a length so a failed probe rewinds with a scalar write — truncating a boxed array on
+     *  every speculation cost 24% of parse time on a comment-dense file (`perf-findings.md` §1b). */
+    commentsLen: number;
     /** A top-level `await` was consumed as an IDENTIFIER. Only meaningful for the `unambiguous` goal,
      *  where the module kind is not yet known — oxc's `encountered_await_identifier`
      *  (`ParserState`, `state.rs:32`). */
