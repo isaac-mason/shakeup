@@ -9,6 +9,7 @@ import {
     P,
     type ParserState,
     raise,
+    raiseAt,
     T_BIGINT,
     T_EOF,
     T_IDENT,
@@ -525,6 +526,10 @@ export function nextToken(state: ParserState): void {
             // span lines. Without this an unterminated string swallowed the rest of the file.
             if (cc === 10 || cc === 13) break;
             if (cc === 92) {
+                // A malformed `\x` / `\u` is an error in a string in EVERY mode — unlike the legacy
+                // octal and `\8` escapes beside it, which are legal sloppy and strict-mode-only
+                // errors, so they belong to the checker (ROADMAP §2b) rather than here.
+                if (!hexEscapeOk(src, srcLen, pos + 1)) raiseAt(state, pos, ParseErrorCode.InvalidEscape);
                 pos += src.charCodeAt(pos + 1) === 13 && src.charCodeAt(pos + 2) === 10 ? 3 : 2;
             } else {
                 pos++;
@@ -700,24 +705,19 @@ function scanNumber(state: ParserState): void {
 const isHexDigit = (c: number): boolean =>
     (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
 
-/** Is the escape starting at `pos` (just past the backslash) one the language defines?
+/** Is the `\x` / `\u` escape starting at `pos` (just past the backslash) well formed?
  *
- *  Only the forms a TEMPLATE can get wrong are checked — `\x` and `\u` need their digits, and the
- *  legacy octal / `\8` / `\9` escapes that a string may still carry in sloppy code are never legal
- *  in a template. Everything else, including `\n` and an unknown-but-harmless `\q`, is fine.
- *  Returning true at end-of-input leaves the unterminated-template error to say so instead. */
-function templateEscapeOk(src: string, srcLen: number, pos: number): boolean {
+ *  Shared by strings and templates, because the rule is the same in both: `\x` needs two hex digits,
+ *  `\uXXXX` needs four, and `\u{…}` needs at least one hex digit, a closing brace and a value that
+ *  is a real code point. A numeric separator is not a hex digit, so `\u{1F_639}` fails on the brace
+ *  test. Any other escape — `\n`, `\q` — is not this function's business.
+ *  Returning true at end-of-input leaves the unterminated-literal error to say so instead. */
+function hexEscapeOk(src: string, srcLen: number, pos: number): boolean {
     if (pos >= srcLen) return true;
     const c = src.charCodeAt(pos);
-    if (c === 120) {
-        return isHexDigit(src.charCodeAt(pos + 1)) && isHexDigit(src.charCodeAt(pos + 2));
-    }
-    if (c === 117) {
-        if (src.charCodeAt(pos + 1) === 123) {
-            let i = pos + 2;
-            while (i < srcLen && isHexDigit(src.charCodeAt(i))) i++;
-            return i > pos + 2 && src.charCodeAt(i) === 125;
-        }
+    if (c === 120) return isHexDigit(src.charCodeAt(pos + 1)) && isHexDigit(src.charCodeAt(pos + 2));
+    if (c !== 117) return true;
+    if (src.charCodeAt(pos + 1) !== 123) {
         return (
             isHexDigit(src.charCodeAt(pos + 1)) &&
             isHexDigit(src.charCodeAt(pos + 2)) &&
@@ -725,7 +725,24 @@ function templateEscapeOk(src: string, srcLen: number, pos: number): boolean {
             isHexDigit(src.charCodeAt(pos + 4))
         );
     }
-    // `\0` is the NUL escape and stays legal, but only when no digit follows it.
+    let i = pos + 2;
+    let value = 0;
+    while (i < srcLen && isHexDigit(src.charCodeAt(i))) {
+        // Cap rather than accumulate forever: anything past the maximum is out of range either way,
+        // and a long run of digits must not overflow into a value that looks valid again.
+        if (value <= 0x10ffff) value = value * 16 + Number.parseInt(src[i], 16);
+        i++;
+    }
+    return i > pos + 2 && src.charCodeAt(i) === 125 && value <= 0x10ffff;
+}
+
+/** A TEMPLATE additionally forbids the legacy octal and `\8` / `\9` escapes that a sloppy STRING may
+ *  still carry — `` `\01` `` is an error where `'\01'` is not (outside strict mode, which is the
+ *  checker's business). `\0` alone is the NUL escape and stays legal unless a digit follows. */
+function templateEscapeOk(src: string, srcLen: number, pos: number): boolean {
+    if (pos >= srcLen) return true;
+    if (!hexEscapeOk(src, srcLen, pos)) return false;
+    const c = src.charCodeAt(pos);
     if (c === 48) return !(src.charCodeAt(pos + 1) >= 48 && src.charCodeAt(pos + 1) <= 57);
     return !(c >= 49 && c <= 57);
 }
