@@ -145,11 +145,29 @@ describe('a `var` may not hoist THROUGH a scope that lexically binds the same na
         expect(check(src)).toEqual([]);
     });
 
-    it('KNOWN GAP: the mirror form `{ var x; let x; }`', () => {
-        // By the time the `let` is declared the `var` sits in the hoist target, indistinguishable from
-        // a legitimately shadowed `var x; { let x; }`. Same root cause as the block-function gap:
-        // `SymbolRec.scope` is the hoist TARGET, not where the binding was written.
-        expect(check('{ var x; let x; }')).toEqual([]);
+    it.each([
+        '{ var x; let x; }',
+        '{ var x; const x = 1; }',
+        '{ var x; class x {} }',
+        'switch(0){ case 1: var x; case 2: let x; }',
+    ])('and the mirror form too: %s', (src) => {
+        // Closed by `SymbolRec.at`, added for the block-function rule. The `var` hoists away to a
+        // different binding, so only the scope it was WRITTEN in separates this from the legal
+        // `var x; { let x; }`.
+        expect(check(src)).toEqual(['Identifier `x` has already been declared']);
+    });
+
+    it.each(['function f(){ { var x; } let x; }', 'class x {} var x;', 'var x; class x {}'])(
+        'and the plain same-scope collisions these resemble: %s',
+        (src) => {
+            // Not the new rule — the `var` and the lexical binding already share a scope here. Listed
+            // so the boundary is explicit: I first wrote these as ACCEPTED and oxc disagreed.
+            expect(check(src)).toEqual(['Identifier `x` has already been declared']);
+        },
+    );
+
+    it('but two sibling blocks are still separate', () => {
+        expect(check('{ var x; } { let x; }')).toEqual([]);
     });
 });
 
@@ -543,38 +561,56 @@ describe("a named function expression's own name may be shadowed by its body", (
     });
 });
 
-describe('a function declaration is lexical at MODULE top level', () => {
-    // Strict mode does NOT make a top-level declaration lexical — the module GOAL does. The same pair
-    // under `"use strict"` in a script is still legal.
+describe('a function declaration is lexical in a block, a switch, and at MODULE top level', () => {
+    // Strict mode does NOT make a top-level declaration lexical — the module GOAL does. Annex B B.3.3
+    // then excuses duplicate PLAIN functions in ONE block, sloppy only. Every line came from oxc.
+    //
+    // This needed `SymbolRec.at`, the scope a binding was WRITTEN in. Every block function hoists to
+    // the enclosing function scope, so two declarations in DIFFERENT blocks share a binding; without
+    // `at` the rule rejected `"use strict"; { function f(){} } { function f(){} }`, which is valid,
+    // and test262 caught it where a 28-case hand matrix had not.
     it.each(['function f(){} function f(){}', 'async function f(){} async function f(){}'])('rejects %s in a module', (src) => {
         expect(check(src, true)).toEqual(['Identifier `f` has already been declared']);
     });
 
     it.each([
-        'function f(){} function f(){}',
-        '"use strict"; function f(){} function f(){}',
-        'function g(){ function f(){} function f(){} }',
-        'class C { m(){ function f(){} function f(){} } }',
-    ])('accepts %s in a script', (src) => {
-        expect(check(src)).toEqual([]);
+        '{ async function f(){} async function f(){} }',
+        '{ function* f(){} function* f(){} }',
+        '{ async function* f(){} async function* f(){} }',
+        '{ function f(){} async function f(){} }',
+        '{ async function f(){} function f(){} }',
+        '"use strict"; { function f(){} function f(){} }',
+        'switch(0){ case 1: async function f(){} case 2: async function f(){} }',
+        '{ function f(){} var f; }',
+        '{ var f; function f(){} }',
+    ])('rejects %s — same block, no Annex B excuse', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
     });
 
     it.each([
-        // NOT ATTEMPTED: a function declared in a BLOCK is lexical, so every one of these is an error
-        // in oxc. This model hoists block functions to the enclosing FUNCTION scope, so two
-        // declarations in DIFFERENT blocks share a binding — implementing the rule rejected the valid
-        // `"use strict"; { function f(){} } { function f(){} }`. Doing it properly means binding a
-        // block function in its block, which moves the scope tree the mangler reads.
-        '{ async function f(){} async function f(){} }',
-        '{ function* f(){} function* f(){} }',
-        '"use strict"; { function f(){} function f(){} }',
-        '{ var f; function f(){} }',
-    ])('KNOWN GAP, accepted for now: %s', (src) => {
+        // DIFFERENT blocks are separate bindings, whatever the mode.
+        '{ function f(){} } { function f(){} }',
+        '"use strict"; { function f(){} } { function f(){} }',
+        '{ async function f(){} } { async function f(){} }',
+        '"use strict"; if (1) { function f(){} } if (2) { function f(){} }',
+        '"use strict"; function g(){ { function f(){} } { function f(){} } }',
+        // Annex B B.3.3: duplicate PLAIN functions in one block, sloppy only.
+        '{ function f(){} function f(){} }',
+        'switch(0){ case 1: function f(){} case 2: function f(){} }',
+        // Var-scoped positions stay var-scoped.
+        'function f(){} function f(){}',
+        '"use strict"; function f(){} function f(){}',
+        'function g(){ function f(){} function f(){} }',
+        'function g(){ function f(){} var f; }',
+        'function g(){ var f; function f(){} }',
+        'class C { m(){ function f(){} function f(){} } }',
+        // The Annex B ALIAS against a binding from an OUTER scope.
+        '(function(){ var f = 1; { function f(){} } })()',
+        'var f; { function f(){} }',
+        'let f = 1; { function f(){} }',
+        'let f; if (1) function f(){}',
+    ])('accepts %s', (src) => {
         expect(check(src)).toEqual([]);
-    });
-
-    it('and the valid different-block form must keep working', () => {
-        expect(check('"use strict"; { function f(){} } { function f(){} }')).toEqual([]);
     });
 });
 

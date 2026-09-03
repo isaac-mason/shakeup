@@ -124,7 +124,24 @@ export type Redeclaration = {
 };
 
 /** One binding. `scope` is the owning scope id; `decl` is the declaring Ident; `nameId` is an interned name. */
-export type SymbolRec = { scope: number; decl: Node | null; flags: number; nameId: number };
+export type SymbolRec = {
+    scope: number;
+    decl: Node | null;
+    flags: number;
+    nameId: number;
+    /**
+     * The scope this binding was WRITTEN in, which is NOT `scope` — that is the hoist TARGET.
+     *
+     * `{ var f; function f(){} }` and `(function(){ var f = 1; { function f(){} } })()` are
+     * indistinguishable without it: both put a `var` and a block function on the same binding in the
+     * same function scope, and only the first is an error. The same ambiguity blocked the whole
+     * block-scoped-function rule, which is ~122 test262 cases, so one number per symbol is cheap.
+     *
+     * For a function DECLARATION this is the scope the declaration appears in, not the function's own
+     * scope — `declareInScope` has already entered the latter by the time `declare` runs.
+     */
+    at: number;
+};
 
 /**
  * Scope/symbol tables over one module's AST; reusable across analyze() calls (warm
@@ -371,7 +388,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         refPairs: withReferenceScopes ? [] : null,
         declPairs: withReferenceScopes ? [] : null,
         scopes: [{ parent: 0, flags: 0, node: null }],
-        symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0 }],
+        symbols: [{ scope: 0, decl: null, flags: 0, nameId: 0, at: 0 }],
         refs: [],
         refsPool: [],
         uses: [],
@@ -509,6 +526,13 @@ function declare(
             });
     }
     const nameId = internName(state, identNode.name);
+    // A function or class DECLARATION is already inside its own scope by now (`declareInScope` entered
+    // it before the name is bound), so where it was WRITTEN is that scope's parent. Everything else is
+    // written where `state.scope` says.
+    const appearAt =
+        (flags & (SYM.FUNCTION | SYM.CLASS)) !== 0 && targetScope !== state.scope
+            ? state.sem.scopes[state.scope].parent
+            : state.scope;
     // A `var` may not hoist THROUGH a scope that lexically binds the same name:
     //
     //     { let x; var x; }                     ERROR
@@ -535,6 +559,23 @@ function declare(
                 break;
             }
         }
+    }
+    // The MIRROR of the walk above: a LEXICAL binding collides with a `var` written in the SAME scope,
+    // even though the `var` hoisted away to a different binding. `{ var x; let x; }` is an error while
+    // `var x; { let x; }` legitimately shadows — `at` is what separates them, and it was added for the
+    // block-function rule.
+    if (state.check && ns === NS_VALUE && (flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
+        const hoisted = state.sem.bindings.get(bindingKey(hoistTarget(state), NS_VALUE, nameId));
+        if (
+            hoisted !== undefined &&
+            (state.sem.symbols[hoisted].flags & SYM.VAR) !== 0 &&
+            state.sem.symbols[hoisted].at === appearAt &&
+            appearAt !== hoistTarget(state)
+        )
+            state.sem.errors.push({
+                pos: identNode.start,
+                msg: `Identifier \`${identNode.name}\` has already been declared`,
+            });
     }
     const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
@@ -586,24 +627,37 @@ function declare(
         const isBlockFn = (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
         // Module top level is the one lexical position this model CAN decide: both declarations bind
         // in the same scope, so a collision there is genuine.
+        // The MIRROR of `isBlockFn`: `{ function f(){} var f; }` is an error, and the `var` is second so
+        // the branch below never runs for it. The block function is lexical in its block, so anything
+        // else written in that same block collides with it. `appearAt !== targetScope` is what says
+        // "written in a nested scope" — inside one function body, `function f(){} var f;` is legal.
+        const prevBlockFn =
+            (prevFlags & SYM.FUNCTION) !== 0 && state.sem.symbols[existing].at === appearAt && appearAt !== targetScope;
         const lexicalFn =
-            (flags & SYM.FUNCTION) !== 0 && state.sem.isModule && scopeKind(state.sem.scopes[targetScope].flags) === SCOPE.MODULE;
+            isBlockFn ||
+            prevBlockFn ||
+            ((flags & SYM.FUNCTION) !== 0 &&
+                state.sem.isModule &&
+                scopeKind(state.sem.scopes[targetScope].flags) === SCOPE.MODULE);
         if (isBlockFn) {
-            // NOT ATTEMPTED, and the reason is structural rather than effort. A function declared in a
-            // block IS lexical — `{ async function f(){} async function f(){} }` is an error, and so is
-            // the plain pair under `"use strict"` — but this model hoists every block function to the
-            // enclosing FUNCTION scope, so two declarations in DIFFERENT blocks land on the same
-            // binding and look like a collision. Implementing the rule here rejected
-            // `"use strict"; { function f(){} } { function f(){} }`, which is valid, and test262 caught
-            // it as one false rejection in `Array/prototype/find/resizable-buffer-shrink-mid-iteration`.
+            // A function declared in a BLOCK is lexical, so a second declaration of the same name IN
+            // THE SAME BLOCK collides — unless Annex B B.3.3 excuses it, which needs both sides plain
+            // and sloppy code. Two declarations in DIFFERENT blocks are simply separate bindings.
             //
-            // Doing it properly means binding a block function in its BLOCK, which changes the scope
-            // tree the mangler reads — a separate piece of work with `unchanged` as its gate. Until
-            // then these ~142 test262 cases stay in the queue, missed rather than wrongly reported.
-            state.sem.symbols[existing].flags |= flags;
-            identNode.sym = existing;
-            recordDecl(state.sem, existing, identNode.id, state.scope);
-            return existing;
+            // This model hoists every block function to the enclosing FUNCTION scope, so both land on
+            // one binding either way; `at` — the scope each was WRITTEN in — is what separates them.
+            // Without it the rule rejected `"use strict"; { function f(){} } { function f(){} }`,
+            // which is valid.
+            const sameBlock = state.sem.symbols[existing].at === appearAt;
+            const bothPlain = (flags & SYM.FN_PLAIN) !== 0 && (prevFlags & SYM.FN_PLAIN) !== 0;
+            const annexBOk = bothPlain && !isStrictScope(state.sem, targetScope);
+            if (!sameBlock || annexBOk || annexB) {
+                // `annexB` is the `if`/`else` position, which B.3.4 excuses outright.
+                state.sem.symbols[existing].flags |= flags;
+                identNode.sym = existing;
+                recordDecl(state.sem, existing, identNode.id, state.scope);
+                return existing;
+            }
         }
         if (ns === NS_VALUE)
             state.sem.redeclarations.push({
@@ -647,7 +701,7 @@ function declare(
         }
     }
     const id = state.sem.symbols.length;
-    state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId });
+    state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId, at: appearAt });
     state.sem.bindings.set(key, id);
     identNode.sym = id;
     // `state.scope`, not `targetScope`: the APPEARANCE scope, per `declPairs`.
@@ -1587,7 +1641,7 @@ export function declareSyntheticImport(semantic: Semantic, identNode: Node): num
     }
 
     const id = semantic.symbols.length;
-    semantic.symbols.push({ scope: ms, decl: identNode, flags: SYM.IMPORT, nameId: 0 });
+    semantic.symbols.push({ scope: ms, decl: identNode, flags: SYM.IMPORT, nameId: 0, at: ms });
     identNode.sym = id;
     return id;
 }
@@ -1623,7 +1677,7 @@ export function attachScopeNode(semantic: Semantic, scope: number, node: Node): 
  *  leaves it and the chunk mangler (`src/mangle/`) renames it like any nested local. */
 export function declareLocal(semantic: Semantic, declNode: Node, scope: number, flags: number): number {
     const id = semantic.symbols.length;
-    semantic.symbols.push({ scope, decl: declNode, flags, nameId: 0 });
+    semantic.symbols.push({ scope, decl: declNode, flags, nameId: 0, at: scope });
     declNode.sym = id;
     return id;
 }
