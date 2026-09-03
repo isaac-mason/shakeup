@@ -565,6 +565,36 @@ function declare(
     // it was written in. Walking the full chain for functions rejected 80 valid test262 programs, all
     // of them in the `annexB/language/*-code/*skip-early-err*` families named for exactly this rule.
     //     { let f = 1; if (true) function f(){} }   ok      B.3.4 exempts the `if` position outright
+    // A `var` also collides with a block FUNCTION it hoists PAST, even though that function bound in
+    // the same hoist target rather than in its own block — `at` is what says where it was written:
+    //
+    //     { function f(){} { var f; } }        ERROR   the var passes through the function's block
+    //     { function f(){} { { var f; } } }    ERROR   however deep
+    //     { function f(){} } { var f; }        ok      SIBLING blocks; the path never crosses it
+    //     function f(){} { var f; }            ok      the function is var-scoped here, not lexical
+    //
+    // oxc rejects the last two as well, which is wrong — node accepts both, and per
+    // [[validate-fixtures-before-believing-failure]] node is the tiebreak when oxc looks inconsistent.
+    // So this is deliberately LESS strict than oxc on those two shapes.
+    if (state.check && (flags & SYM.VAR) !== 0) {
+        const atTarget = state.sem.bindings.get(key);
+        const fnAt = atTarget !== undefined ? state.sem.symbols[atTarget].at : 0;
+        if (
+            atTarget !== undefined &&
+            (state.sem.symbols[atTarget].flags & SYM.FUNCTION) !== 0 &&
+            fnAt !== targetScope &&
+            fnAt !== appearAt // the same-scope case is already reported through the collision path
+        ) {
+            for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
+                if (sc !== fnAt) continue;
+                state.sem.errors.push({
+                    pos: identNode.start,
+                    msg: `Identifier \`${identNode.name}\` has already been declared`,
+                });
+                break;
+            }
+        }
+    }
     const hoistsPast = (flags & SYM.VAR) !== 0;
     const blockFnHere = (flags & SYM.FUNCTION) !== 0 && !annexB;
     if ((hoistsPast || blockFnHere) && targetScope !== appearAt) {
@@ -696,10 +726,24 @@ function declare(
             // one binding either way; `at` — the scope each was WRITTEN in — is what separates them.
             // Without it the rule rejected `"use strict"; { function f(){} } { function f(){} }`,
             // which is valid.
-            const sameBlock = state.sem.symbols[existing].at === appearAt;
+            // The earlier binding conflicts if it was WRITTEN INSIDE this function's block, at ANY
+            // depth — not merely in the same scope:
+            //
+            //     { { var f; } function f(){} }        ERROR   the var hoisted out THROUGH our block
+            //     { { var f; } } { function f(){} }    ok      sibling blocks never cross
+            //     { function f(){} function f(){} }    ok      same block, both plain, sloppy: Annex B
+            //
+            // Annex B's excuse needs the SAME scope as well as both-plain, so it keeps its own test.
+            const prevAt = state.sem.symbols[existing].at;
+            let inside = false;
+            for (let sc = prevAt; sc !== 0; sc = state.sem.scopes[sc].parent) {
+                if (sc !== appearAt) continue;
+                inside = true;
+                break;
+            }
             const bothPlain = (flags & SYM.FN_PLAIN) !== 0 && (prevFlags & SYM.FN_PLAIN) !== 0;
-            const annexBOk = bothPlain && !isStrictScope(state.sem, targetScope);
-            if (!sameBlock || annexBOk || annexB) {
+            const annexBOk = prevAt === appearAt && bothPlain && !isStrictScope(state.sem, targetScope);
+            if (!inside || annexBOk || annexB) {
                 // `annexB` is the `if`/`else` position, which B.3.4 excuses outright.
                 state.sem.symbols[existing].flags |= flags;
                 identNode.sym = existing;

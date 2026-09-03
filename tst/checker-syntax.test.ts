@@ -154,6 +154,39 @@ describe('Annex B decides HOW FAR the block-function check reaches', () => {
     });
 });
 
+describe('a `var` and a block FUNCTION that hoist past each other', () => {
+    // Every expectation here is NODE's. oxc rejects three of the accepted shapes below — sibling
+    // blocks and a var-scoped `function f(){}` with `var f` in a nested block — which node accepts, so
+    // this rule is DELIBERATELY less strict than oxc. Both bindings land in the same hoist target
+    // either way; `at` is what says where each was written, and that decides whether the paths cross.
+    it.each([
+        '{ function f(){} { var f; } }',
+        '{ function f(){} { { var f; } } }',
+        'function g(){ { function f(){} { var f; } } }',
+        '{ { var f; } function f() {} }',
+        '{ { var f; } async function f() {} }',
+        '{ { var f; } function* f() {} }',
+        '{ { { var f; } } async function f(){} }',
+        '{ async function f(){} { var f; } }',
+    ])('rejects %s — the paths cross', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it.each([
+        // SIBLING blocks never cross, whichever order they come in.
+        '{ function f(){} } { var f; }',
+        '{ { var f; } } { async function f(){} }',
+        'function g(){ { function f(){} } { var f; } }',
+        'function g(){ { { function f(){} } { var f; } } }',
+        // A function at the top of a function body is VAR-scoped there, not lexical.
+        'function g(){ function f(){} { var f; } }',
+        'function f(){} var f;',
+        'function g(){ var f; function f(){} }',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+});
+
 describe('a `var` may not hoist THROUGH a scope that lexically binds the same name', () => {
     // The `var` lands in the hoist target while the `let` stays in the block, so the two never meet on
     // one binding and the ordinary redeclaration path cannot see them.
