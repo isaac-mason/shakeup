@@ -2,6 +2,12 @@ import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/i
 import { enumeration } from '../util/enumeration.ts';
 import {
     type CheckError,
+    CTX_FIELD_INIT,
+    CTX_NONE,
+    CTX_STATIC_BLOCK,
+    CTX_SUPER_BASE_CTOR,
+    CTX_SUPER_CALL,
+    CTX_SUPER_PROP,
     checkBindingIdent,
     checkEnter,
     checkRedeclarations,
@@ -11,9 +17,6 @@ import {
     NO_LABELS,
     NO_PRIVATES,
     paramsAreSimple,
-    SUPER_CALL_BASE_CTOR,
-    SUPER_CALL_NONE,
-    SUPER_CALL_OK,
 } from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
@@ -401,18 +404,16 @@ type AnalyseState = {
     /** The statement about to be visited is a function declaration in `if`/`else` position. */
     annexBIf: boolean;
 
-    // ── `super` context ──────────────────────────────────────────────────────────────────────────
-    /** One of the `SUPER_CALL_*` constants: whether `super()` is reachable, and if not, which of oxc's
-     *  two messages applies. */
-    superCall: number;
-    /** Whether `super.x` is legal here — true in any class element and in an object-literal method. */
-    superProp: boolean;
+    // ── positional context ───────────────────────────────────────────────────────────────────────
+    /** The `CTX_*` bits: what the enclosing class element makes legal here. ONE field, because `visit`
+     *  saves and restores it at every function, method, field initializer and static block, and its
+     *  frame size decides how deeply a program may nest (`tst/deep-nesting.test.ts`). */
+    posCtx: number;
     /** The class currently being visited has an `extends` clause, which its CONSTRUCTOR needs to know. */
     classDerived: boolean;
-    /** What the next function scope should inherit, set by the arms that know a `FunctionExpression`
-     *  is a method. The function itself cannot tell, exactly as with {@link AnalyseState.uniqueParams}. */
-    methodSuperCall: number;
-    methodSuperProp: boolean;
+    /** What the next function scope inherits, staged by the arms that know a `FunctionExpression` is a
+     *  method. The function itself cannot tell, exactly as with {@link AnalyseState.uniqueParams}. */
+    methodCtx: number;
 };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -652,11 +653,9 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
         privates: NO_PRIVATES,
         uniqueParams: false,
         annexBIf: false,
-        superCall: SUPER_CALL_NONE,
-        superProp: false,
+        posCtx: CTX_NONE,
         classDerived: false,
-        methodSuperCall: SUPER_CALL_NONE,
-        methodSuperProp: false,
+        methodCtx: CTX_NONE,
     };
     // An ES module is strict by definition; a script is strict only from a directive. oxc seeds the
     // same way, from `source_type.is_module()` (`builder.rs`, `ScopeFlags::Top`).
@@ -1020,11 +1019,11 @@ function visit(state: AnalyseState, node: Node | null): void {
                 state.uniqueParams = true;
                 // An object-literal METHOD may use `super.x` — `({ m(){ return super.x; } })` is legal
                 // while `({ m: function(){ return super.x; } })` is not. `super()` never is.
-                state.methodSuperProp = true;
+                state.methodCtx = CTX_SUPER_PROP;
             }
             visit(state, node.data.value);
             state.uniqueParams = false;
-            state.methodSuperProp = false;
+            state.methodCtx = CTX_NONE;
             return;
         }
         case N.AssignmentExpression: {
@@ -1048,25 +1047,24 @@ function visit(state: AnalyseState, node: Node | null): void {
             state.uniqueParams = true;
             // `super.x` is legal in every class element; `super()` only in a constructor, and the
             // message differs by whether the class has an `extends`.
-            state.methodSuperProp = true;
-            state.methodSuperCall =
-                node.data.kind === 'constructor' ? (state.classDerived ? SUPER_CALL_OK : SUPER_CALL_BASE_CTOR) : SUPER_CALL_NONE;
+            state.methodCtx =
+                CTX_SUPER_PROP |
+                (node.data.kind === 'constructor' ? (state.classDerived ? CTX_SUPER_CALL : CTX_SUPER_BASE_CTOR) : CTX_NONE);
             visit(state, node.data.value);
             state.uniqueParams = false;
-            state.methodSuperProp = false;
-            state.methodSuperCall = SUPER_CALL_NONE;
+            state.methodCtx = CTX_NONE;
             return;
         case N.PropertyDefinition: {
             if (node.data.computed) visit(state, node.data.key);
             // `class A { p = super.x; }` is legal. A field initializer is not a function scope, so
             // unlike a method this sets the context directly rather than staging it for one.
-            const outerProp = state.superProp;
-            const outerCall = state.superCall;
-            state.superProp = true;
-            state.superCall = SUPER_CALL_NONE;
+            // `class A { p = arguments; }` is an error — a field initializer has no `arguments` binding
+            // of its own — while the computed KEY above is deliberately outside this, because
+            // `class A { [arguments] = 1; }` is legal.
+            const outerCtx = state.posCtx;
+            state.posCtx = CTX_SUPER_PROP | CTX_FIELD_INIT;
             visit(state, node.data.value);
-            state.superProp = outerProp;
-            state.superCall = outerCall;
+            state.posCtx = outerCtx;
             visitType(state, node.data.typeAnnotation);
             return;
         }
@@ -1098,10 +1096,8 @@ function visit(state: AnalyseState, node: Node | null): void {
             const target = hoistTarget(state);
             const methodParams = state.uniqueParams;
             state.uniqueParams = false;
-            const methodSuperCall = state.methodSuperCall,
-                methodSuperProp = state.methodSuperProp;
-            state.methodSuperCall = SUPER_CALL_NONE;
-            state.methodSuperProp = false;
+            const methodCtx = state.methodCtx;
+            state.methodCtx = CTX_NONE;
             // Consumed here so it cannot reach a function nested inside this one's body.
             const annexBIf = state.annexBIf;
             state.annexBIf = false;
@@ -1111,42 +1107,34 @@ function visit(state: AnalyseState, node: Node | null): void {
                 if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, annexBIf);
                 // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
                 // setting it around the body alone rejected four valid test262 programs.
-                const outerCall = state.superCall;
-                const outerProp = state.superProp;
-                state.superCall = methodSuperCall;
-                state.superProp = methodSuperProp;
+                const outerCtx = state.posCtx;
+                state.posCtx = methodCtx;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
-                state.superCall = outerCall;
-                state.superProp = outerProp;
+                state.posCtx = outerCtx;
             });
             return;
         }
         case N.FunctionExpression: {
             const methodParams = state.uniqueParams;
             state.uniqueParams = false;
-            const methodSuperCall = state.methodSuperCall,
-                methodSuperProp = state.methodSuperProp;
-            state.methodSuperCall = SUPER_CALL_NONE;
-            state.methodSuperProp = false;
+            const methodCtx = state.methodCtx;
+            state.methodCtx = CTX_NONE;
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION | SYM.FN_EXPR_NAME, NS_VALUE, state.scope);
                 // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
                 // setting it around the body alone rejected four valid test262 programs.
-                const outerCall = state.superCall;
-                const outerProp = state.superProp;
-                state.superCall = methodSuperCall;
-                state.superProp = methodSuperProp;
+                const outerCtx = state.posCtx;
+                state.posCtx = methodCtx;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
-                state.superCall = outerCall;
-                state.superProp = outerProp;
+                state.posCtx = outerCtx;
             });
             return;
         }
@@ -1239,13 +1227,11 @@ function visit(state: AnalyseState, node: Node | null): void {
                 state.cont = false;
                 state.labels = NO_LABELS;
                 // `class A { static { super.x; } }` is legal; `super()` is not.
-                const outerProp = state.superProp;
-                const outerCall = state.superCall;
-                state.superProp = true;
-                state.superCall = SUPER_CALL_NONE;
+                // `arguments` is banned here too, with its OWN message rather than the field one.
+                const outerCtx = state.posCtx;
+                state.posCtx = CTX_SUPER_PROP | CTX_STATIC_BLOCK;
                 for (const s of node.data.body) visit(state, s);
-                state.superProp = outerProp;
-                state.superCall = outerCall;
+                state.posCtx = outerCtx;
                 state.brk = b;
                 state.cont = c;
                 state.labels = l;

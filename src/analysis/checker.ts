@@ -18,16 +18,28 @@ export type CheckCtx = {
     cont: boolean;
     labels: ReadonlyMap<string, boolean>;
     privates: ReadonlySet<string>;
-    superCall: number;
-    superProp: boolean;
+    posCtx: number;
 };
 
-/** `super()` is not reachable from here at all. */
-export const SUPER_CALL_NONE = 0;
-/** Inside the constructor of a DERIVED class, or an arrow nested in one — the only legal position. */
-export const SUPER_CALL_OK = 1;
-/** Inside the constructor of a class with no `extends`, which oxc reports differently. */
-export const SUPER_CALL_BASE_CTOR = 2;
+/**
+ * POSITIONAL context — what the enclosing class element makes legal — packed into one integer.
+ *
+ * One field rather than three booleans/enums because `visit` saves and restores this around every
+ * function, method, field initializer and static block, and its stack frame is load-bearing:
+ * `tst/deep-nesting.test.ts` pins a ceiling that moves whenever `visit` grows, and adding the `super`
+ * context as two separate fields already broke it once. One local per save site instead of three.
+ */
+export const CTX_NONE = 0;
+/** `super()` reachable — the constructor of a DERIVED class, or an arrow inside one. */
+export const CTX_SUPER_CALL = 1 << 0;
+/** Inside the constructor of a class with NO `extends`, which oxc reports differently. */
+export const CTX_SUPER_BASE_CTOR = 1 << 1;
+/** `super.x` reachable — any class element, or an object-literal method. */
+export const CTX_SUPER_PROP = 1 << 2;
+/** Inside a class field initializer, where `arguments` is forbidden. */
+export const CTX_FIELD_INIT = 1 << 3;
+/** Inside a class static block, where `arguments` is forbidden with a DIFFERENT message. */
+export const CTX_STATIC_BLOCK = 1 << 4;
 
 /**
  * Every rule that needs only the node and the current context, called once per node from the top of
@@ -68,11 +80,11 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             // of a class with no `extends` the complaint is about the class, everywhere else it is
             // about the position.
             if ((node.data as { callee: Node }).callee.type !== N.Super) return;
-            if (ctx.superCall === SUPER_CALL_OK) return;
+            if ((ctx.posCtx & CTX_SUPER_CALL) !== 0) return;
             errors.push({
                 pos: node.start,
                 msg:
-                    ctx.superCall === SUPER_CALL_BASE_CTOR
+                    (ctx.posCtx & CTX_SUPER_BASE_CTOR) !== 0
                         ? "'super' can only be referenced in a derived class."
                         : 'Super calls are not permitted outside constructors or in nested functions inside constructors.',
             });
@@ -84,7 +96,7 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             // non-derived class, which is why this is tracked separately from `super()`. An ordinary
             // function resets it, so `({ m: function(){ return super.x; } })` is an error while
             // `({ m(){ return super.x; } })` is not.
-            if ((node.data as { object: Node }).object.type !== N.Super || ctx.superProp) return;
+            if ((node.data as { object: Node }).object.type !== N.Super || (ctx.posCtx & CTX_SUPER_PROP) !== 0) return;
             errors.push({
                 pos: node.start,
                 msg: "'super' can only be referenced in members of derived classes or object literal expressions.",
@@ -104,6 +116,21 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             // reach it; both the jump's label and the labelled statement's own are checked here.
             const label = (node.data as { label: Node | null }).label;
             if (label !== null) checkReservedWord(ctx.sem, label, ctx.scope, errors);
+            return;
+        }
+        case N.IdentifierReference: {
+            // oxc's `check_identifier_reference` — `arguments` has no binding in a field initializer or
+            // a static block, so naming one there is an early error. An arrow INHERITS the ban (it has
+            // no `arguments` of its own either) while an ordinary function clears it, which is why
+            // `class A { p = function(){ return arguments; } }` is legal.
+            if (node.name !== 'arguments' || (ctx.posCtx & (CTX_FIELD_INIT | CTX_STATIC_BLOCK)) === 0) return;
+            errors.push({
+                pos: node.start,
+                msg:
+                    (ctx.posCtx & CTX_STATIC_BLOCK) !== 0
+                        ? "'arguments' is not allowed in static initialization block"
+                        : "'arguments' is not allowed in class field initializer",
+            });
             return;
         }
         case N.LabeledStatement:

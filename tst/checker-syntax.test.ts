@@ -386,6 +386,33 @@ describe("Annex B's block-scoped function alias is not a redeclaration", () => {
     });
 });
 
+describe('`arguments` is not bound in a class field initializer or a static block', () => {
+    it.each([
+        'class A { p = arguments; }',
+        'class A { p = () => arguments; }',
+        'class A { static p = arguments; }',
+        'class A { p = class { q = arguments; } }',
+        'function f(){ class A { p = arguments; } }',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(["'arguments' is not allowed in class field initializer"]);
+    });
+
+    it('a static block carries its own message', () => {
+        expect(check('class A { static { arguments; } }')).toEqual(["'arguments' is not allowed in static initialization block"]);
+    });
+
+    it.each([
+        // An ordinary function has its own `arguments`, so it CLEARS the ban; an arrow does not.
+        'class A { p = function(){ return arguments; }; }',
+        'class A { static { function f(){ return arguments; } } }',
+        'class A { m(){ return arguments; } }',
+        // A computed key is evaluated outside the initializer.
+        'class A { [arguments] = 1; }',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+});
+
 describe('`super()` — oxc reports two different messages, and the distinction is the class', () => {
     it.each([
         'class A extends B { constructor() { super(); } }',
