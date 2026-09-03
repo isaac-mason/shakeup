@@ -17,6 +17,10 @@ import {
     NO_LABELS,
     NO_PRIVATES,
     paramsAreSimple,
+    STMT_POS_IF,
+    STMT_POS_LABEL,
+    STMT_POS_LOOP,
+    STMT_POS_NONE,
 } from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
@@ -401,8 +405,9 @@ type AnalyseState = {
      *  because a method's `FunctionExpression` has no way to know it is one — `visit` reaches it
      *  through `MethodDefinition`/`ObjectProperty`, and only there is the distinction visible. */
     uniqueParams: boolean;
-    /** The statement about to be visited is a function declaration in `if`/`else` position. */
-    annexBIf: boolean;
+    /** Where the statement about to be visited sits, as a `STMT_POS_*` value. Set only when that
+     *  statement is a declaration, so it never has to be cleared on the common path. */
+    stmtPos: number;
 
     // ── positional context ───────────────────────────────────────────────────────────────────────
     /** The `CTX_*` bits: what the enclosing class element makes legal here. ONE field, because `visit`
@@ -652,7 +657,7 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
         labels: NO_LABELS,
         privates: NO_PRIVATES,
         uniqueParams: false,
-        annexBIf: false,
+        stmtPos: STMT_POS_NONE,
         posCtx: CTX_NONE,
         classDerived: false,
         methodCtx: CTX_NONE,
@@ -988,6 +993,10 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
     state.labels = l;
 }
 
+/** Is this statement a DECLARATION, i.e. one the statement-position rules have anything to say about?
+ *  Checked at the branch rather than in `visit` so the flag is only ever set where it matters. */
+const isDecl = (n: Node | null): boolean => n !== null && (n.type === N.FunctionDeclaration || n.type === N.ClassDeclaration);
+
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
     // oxc's `checker::check(kind, self)` in `SemanticBuilder::leave_node`. One branch per node when
@@ -1098,13 +1107,13 @@ function visit(state: AnalyseState, node: Node | null): void {
             state.uniqueParams = false;
             const methodCtx = state.methodCtx;
             state.methodCtx = CTX_NONE;
-            // Consumed here so it cannot reach a function nested inside this one's body.
-            const annexBIf = state.annexBIf;
-            state.annexBIf = false;
+            // Consumed here so it cannot reach a declaration nested inside this one's body.
+            const stmtPos = state.stmtPos;
+            state.stmtPos = STMT_POS_NONE;
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, annexBIf);
+                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, stmtPos === STMT_POS_IF);
                 // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
                 // setting it around the body alone rejected four valid test262 programs.
                 const outerCtx = state.posCtx;
@@ -1246,7 +1255,9 @@ function visit(state: AnalyseState, node: Node | null): void {
                 visit(state, node.data.init);
                 visit(state, node.data.test);
                 visit(state, node.data.update);
+                state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
                 visit(state, node.data.body);
+                state.stmtPos = STMT_POS_NONE;
                 state.brk = b;
                 state.cont = c;
             });
@@ -1262,7 +1273,9 @@ function visit(state: AnalyseState, node: Node | null): void {
                 if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
                 else collectTarget(state, node.data.left);
                 visit(state, node.data.right);
+                state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
                 visit(state, node.data.body);
+                state.stmtPos = STMT_POS_NONE;
                 state.brk = b;
                 state.cont = c;
             });
@@ -1275,7 +1288,12 @@ function visit(state: AnalyseState, node: Node | null): void {
                 c = state.cont;
             state.brk = true;
             state.cont = true;
-            descendVisit(state, node, visit);
+            visit(state, node.data.test);
+            // A loop body is the one single-statement position with no Annex B extension at all:
+            // `while (0) function f(){}` is an error even in sloppy code.
+            state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
+            visit(state, node.data.body);
+            state.stmtPos = STMT_POS_NONE;
             state.brk = b;
             state.cont = c;
             return;
@@ -1331,12 +1349,12 @@ function visit(state: AnalyseState, node: Node | null): void {
             // binding is aliased exactly like a block's. Only a DIRECT function-declaration branch
             // qualifies, so the flag is set per branch rather than for the whole subtree.
             const c = node.data.consequent;
-            state.annexBIf = c !== null && c.type === N.FunctionDeclaration;
+            state.stmtPos = isDecl(c) ? STMT_POS_IF : STMT_POS_NONE;
             visit(state, c);
             const a = node.data.alternate;
-            state.annexBIf = a !== null && a.type === N.FunctionDeclaration;
+            state.stmtPos = isDecl(a) ? STMT_POS_IF : STMT_POS_NONE;
             visit(state, a);
-            state.annexBIf = false;
+            state.stmtPos = STMT_POS_NONE;
             return;
         }
         case N.LabeledStatement: {
@@ -1351,7 +1369,9 @@ function visit(state: AnalyseState, node: Node | null): void {
             const labels = new Map(outer);
             labels.set(name, labelsIteration(node.data.body));
             state.labels = labels;
+            state.stmtPos = isDecl(node.data.body) ? STMT_POS_LABEL : STMT_POS_NONE;
             visit(state, node.data.body);
+            state.stmtPos = STMT_POS_NONE;
             state.labels = outer;
             return;
         }

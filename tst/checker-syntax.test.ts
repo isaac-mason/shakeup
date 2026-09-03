@@ -118,6 +118,45 @@ describe('strict-mode reserved words', () => {
     });
 });
 
+describe('a declaration in single-statement position', () => {
+    // Four positions, four different answers — taken from oxc one at a time. `if`/`else` and a label
+    // keep Annex B's sloppy allowance; a loop body has none.
+    it.each([
+        'if (1) function f(){}',
+        'if (1) ; else function f(){}',
+        'lbl: function f(){}',
+        'if (1) { function f(){} }',
+        'while (0) { function f(){} }',
+        'lbl: { function f(){} }',
+    ])('accepts %s in sloppy code', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        '"use strict"; if (1) function f(){}',
+        '"use strict"; lbl: function f(){}',
+        'while (0) function f(){}',
+        'for (;;) function f(){}',
+        'do function f(){} while(0);',
+        'for (x in o) function f(){}',
+        'for (x of o) function f(){}',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(['Invalid function declaration']);
+    });
+
+    it('the position does not leak into a declaration nested in a block', () => {
+        expect(check('"use strict"; if (1) { function f(){} }')).toEqual([]);
+    });
+
+    it("generators, async functions and classes are the PARSER's job, not this rule's", () => {
+        // Arms for these were written here and then deleted: the parser already rejects all three with
+        // oxc's exact messages, so they were unreachable.
+        for (const src of ['if (1) function* f(){}', 'if (1) async function f(){}', 'if (1) class C {}']) {
+            expect(parse(src, { ts: false, jsx: false }).errors.length).toBeGreaterThan(0);
+        }
+    });
+});
+
 describe('eval and arguments', () => {
     it.each(['eval', 'arguments'])('cannot be assigned in strict code: %s', (name) => {
         expect(check(`"use strict"; ${name} = 1;`)).toEqual([`Cannot assign to '${name}' in strict mode`]);
@@ -372,11 +411,18 @@ describe("Annex B's block-scoped function alias is not a redeclaration", () => {
     it.each([
         'let f; function f(){}',
         'function g(){ let f; function f(){} }',
-        'let f; while(0) function f(){}',
         'let f; lbl: function f(){}',
         '{ let f; let f; }',
     ])('still rejects %s', (src) => {
         expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it('a loop body reports BOTH the bad position and the collision, as oxc does', () => {
+        // oxc lists the same two, in its own order; ours come out sorted by source position.
+        expect(check('let f; while(0) function f(){}')).toEqual([
+            'Invalid function declaration',
+            'Identifier `f` has already been declared',
+        ]);
     });
 
     it('the `if` exemption does not reach a function nested inside the branch', () => {

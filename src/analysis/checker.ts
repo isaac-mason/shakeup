@@ -19,6 +19,7 @@ export type CheckCtx = {
     labels: ReadonlyMap<string, boolean>;
     privates: ReadonlySet<string>;
     posCtx: number;
+    stmtPos: number;
 };
 
 /**
@@ -40,6 +41,26 @@ export const CTX_SUPER_PROP = 1 << 2;
 export const CTX_FIELD_INIT = 1 << 3;
 /** Inside a class static block, where `arguments` is forbidden with a DIFFERENT message. */
 export const CTX_STATIC_BLOCK = 1 << 4;
+
+/**
+ * Where a declaration sits when it is NOT in a statement list — the four positions differ, verified
+ * against oxc one at a time rather than reasoned from "nested is nested".
+ *
+ *     if (1) function f(){}          ok sloppy (Annex B B.3.4), error strict
+ *     lbl: function f(){}            ok sloppy,                  error strict
+ *     while (0) function f(){}       ERROR always
+ *     if (1) async function f(){}    ERROR always, and its own message
+ *     if (1) function* f(){}         ERROR always, and its own message
+ *     if (1) class C {}              ERROR always
+ *
+ * `if`/`else` is kept apart from a label because only the former also exempts the Annex B binding
+ * alias from the redeclaration rule: `let f; if (1) function f(){}` is legal but
+ * `let f; lbl: function f(){}` is not.
+ */
+export const STMT_POS_NONE = 0;
+export const STMT_POS_IF = 1;
+export const STMT_POS_LABEL = 2;
+export const STMT_POS_LOOP = 3;
 
 /**
  * Every rule that needs only the node and the current context, called once per node from the top of
@@ -133,10 +154,22 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             });
             return;
         }
+        case N.FunctionDeclaration:
+            checkUseStrictDirective(node, errors);
+            // A plain function declaration in single-statement position is Annex B's, so it survives in
+            // an `if` branch or under a label — but only in sloppy code, and never in a loop body.
+            //
+            // The GENERATOR, ASYNC and CLASS forms are deliberately absent: the parser already rejects
+            // all three with oxc's exact messages ("Generators can only be declared at the top level or
+            // inside a block", and so on), so arms for them here would be unreachable. Checked, not
+            // assumed — they were written first and then deleted once the layer was confirmed.
+            if (ctx.stmtPos === STMT_POS_NONE) return;
+            if (ctx.stmtPos === STMT_POS_LOOP || isStrictScope(ctx.sem, ctx.scope))
+                errors.push({ pos: node.start, msg: 'Invalid function declaration' });
+            return;
         case N.LabeledStatement:
             checkReservedWord(ctx.sem, (node.data as { label: Node }).label, ctx.scope, errors);
             return;
-        case N.FunctionDeclaration:
         case N.FunctionExpression:
         case N.ArrowFunctionExpression:
             checkUseStrictDirective(node, errors);
