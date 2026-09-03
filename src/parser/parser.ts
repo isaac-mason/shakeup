@@ -255,6 +255,21 @@ function ident(state: ParserState, role: number, start: number, end: number): Id
     if (name.length === 7 && name === 'require') state.sawRequire = true;
     return node(role as NodeType, start, end, name, null) as Identifier;
 }
+/**
+ * An identifier leaf whose NAME is already known and interned.
+ *
+ * `ident` re-derives the name from the source range, and its escape-cooking branch only fires while
+ * the escaped token is still the CURRENT one. A shorthand property's value is built after its key has
+ * been consumed, so that branch is skipped and the RAW slice gets interned: `({ \u0061bc })` bound
+ * under `\u0061bc` while the key said `abc`. That is not merely a missed diagnostic — the body's
+ * `abc` then resolved to whatever was in scope outside, and
+ * `const abc = "OUTER"; ({ \u0061bc }) => abc` constant-folded to `"OUTER"` where node returns the
+ * parameter. Reusing the key's cooked name is also cheaper: no re-hash, no re-intern.
+ */
+function identNamed(state: ParserState, role: number, start: number, end: number, name: string): Identifier {
+    if (name.length === 7 && name === 'require') state.sawRequire = true;
+    return node(role as NodeType, start, end, name, null) as Identifier;
+}
 function leafRaw(state: ParserState, flatType: number, start: number, end: number): Node {
     return node(flatType as NodeType, start, end, sliceFlat(state, start, end), null);
 }
@@ -1465,7 +1480,7 @@ function parseObjectMember(state: ParserState): Node {
         return create.ObjectProperty(start, value.end, flags, key, value);
     }
     checkShorthandName(state, key);
-    const shorthandRef = ident(state, R_REF, key.start, key.end);
+    const shorthandRef = identNamed(state, R_REF, key.start, key.end, key.name);
     if (isP(state, P.EQ)) {
         nextToken(state);
         const right = parseAssign(state);
@@ -1931,11 +1946,14 @@ function parseBindingTarget(state: ParserState): Node {
                     checkShorthandName(state, key);
                     nextToken(state);
                     const right = parseAssign(state);
-                    value = create.AssignmentPattern(key.start, right.end, 0, ident(state, R_BIND, key.start, key.end), right);
+                    const bound = identNamed(state, R_BIND, key.start, key.end, key.name);
+                    value = create.AssignmentPattern(key.start, right.end, 0, bound, right);
                     flags |= FL.SHORTHAND;
                 } else {
                     checkShorthandName(state, key);
-                    value = ident(state, R_BIND, key.start, key.end);
+                    // Same as the expression path above: the key was cooked while its token was
+                    // current, and re-deriving here would intern the raw escaped slice instead.
+                    value = identNamed(state, R_BIND, key.start, key.end, key.name);
                     flags |= FL.SHORTHAND;
                 }
                 push(state, create.ObjectProperty(s, value.end, flags, key, value));

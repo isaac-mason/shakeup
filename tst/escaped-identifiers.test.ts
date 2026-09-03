@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { walkChildren } from '../src/ast/index.ts';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
 import { ParseErrorCode } from '../src/parser/errors.ts';
@@ -100,5 +101,50 @@ describe('escaped identifiers', () => {
     it('allows an escaped CONTEXTUAL keyword as an identifier', () => {
         // `async`, `let` and friends are not reserved, so nothing about the escape makes them so.
         expect(ok('var \\u0061sync = 1;')).toEqual([]);
+    });
+});
+
+// A SHORTHAND property's value is built after its key has been consumed, and `ident`'s escape-cooking
+// branch only fires while the escaped token is still the CURRENT one. So the value interned the RAW
+// source slice while the key held the cooked name: `({ abc })` bound under `abc`.
+//
+// That is not a missed diagnostic, it is a MISCOMPILE. The body's `abc` then resolved to whatever was
+// in scope outside the function, and constant propagation inlined it:
+//
+//     const abc = "OUTER"; export const f = ({ abc }) => abc;
+//     shakeup emitted   const f = ({ abc }) => "OUTER";
+//     node returns      "INNER"
+//
+// Found while chasing ~30 test262 cases that looked like a checker gap. Both the expression path and
+// the binding-pattern path had it; they are separate functions and each needed the fix.
+describe('an escaped shorthand property binds under its COOKED name', () => {
+    const nameOfShorthandValue = (src: string): string => {
+        const { program } = parse(src);
+        let found = '';
+        const walk = (n: { type: number; name: string; data: unknown }): void => {
+            if (n.name === 'abc' || n.name === '\\u0061bc') found ||= n.name;
+            walkChildren(n as never, walk as never);
+        };
+        walk(program as never);
+        return found;
+    };
+
+    it.each(['({ \\u0061bc }) => abc', '({ \\u0061bc = 1 }) => abc', 'const { \\u0061bc } = o;', 'const { \\u0061bc = 1 } = o;'])(
+        'cooks the binding in %s',
+        (src) => {
+            expect(nameOfShorthandValue(src)).toBe('abc');
+        },
+    );
+
+    it('the parameter is not confused with an outer binding of the cooked name', async () => {
+        const r = await bundle({
+            entry: '/e.js',
+            fs: createMemoryFs({ '/e.js': 'const abc = "OUTER";\nexport const f = ({ \\u0061bc }) => abc;\n' }),
+            external: [],
+            output: {},
+        } as never);
+        // The parameter must survive; folding it to "OUTER" is the bug this pins.
+        expect(r.chunks[0].code).toContain('=> abc');
+        expect(r.chunks[0].code).not.toContain('OUTER"');
     });
 });
