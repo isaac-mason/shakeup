@@ -127,10 +127,22 @@ export type ScopeRec = { parent: number; flags: number; node: Node | null };
 
 /** A name bound twice in one scope. `prevFlags`/`flags` are the two `SYM` sets, which decide whether
  *  it is legal: `var` may shadow `var` or a function, but anything LEXICAL may not. */
+/**
+ * ONE declaration of a name that is declared more than once — oxc's `Redeclaration`
+ * (`scoping.rs`), reached through `symbol_redeclarations(symbol_id)`.
+ *
+ * Per-DECLARATION, not per-collision-pair. `check_redeclared_function`
+ * (`checker/javascript.rs:740-751`) scans ALL previous declarations of a name to find the
+ * `async`/generator one that makes a set illegal, so it can point the error at it. Merged symbol
+ * flags cannot answer that: after `{ function f(){} async function f(){} }` the merged set has both
+ * FUNCTION and the absence of FN_PLAIN, with no way back to which declaration was which.
+ */
 export type Redeclaration = {
     name: string;
     pos: number;
     scope: number;
+    /** The scope this declaration was WRITTEN in — what oxc reads as `current_scope_flags()`. */
+    at: number;
     prevFlags: number;
     flags: number;
     /** Treat this collision as LEXICAL even though the flags say `FUNCTION`. A function declaration is
@@ -172,11 +184,16 @@ export type Semantic = {
     // node→symbol lives on the node (`node.sym`, oxc model); only scope-owning nodes still map here.
 
     unresolved: Node[];
-    /** Binding collisions, recorded as they happen for the CHECKER to judge — not judged here,
+    /** Every declaration of a name that is declared more than once, keyed by SYMBOL and in source
+     *  order, with the FIRST declaration included — oxc's `symbol_redeclarations`. Seeded with two
+     *  entries at the first collision, exactly as oxc's is ("it is created with its first two
+     *  declarations at once", `checker/javascript.rs:683`).
+     *
+     *  Binding collisions, recorded as they happen for the CHECKER to judge — not judged here,
      *  because whether one is an error can depend on strict mode, and a `"use strict"` directive is
      *  only seen when the function BODY is visited, after its parameters have already been bound.
      *  Empty in the common case; a collision is rare. */
-    redeclarations: Redeclaration[];
+    redeclarations: Map<number, Redeclaration[]>;
 
     names: Map<string, number>;
     bindings: Map<number, number>;
@@ -420,7 +437,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         exported: new Set(),
         symbolInit: new Map(),
         unresolved: [],
-        redeclarations: [],
+        redeclarations: new Map(),
         names: new Map(),
         bindings: new Map(),
         errors: [],
@@ -778,15 +795,7 @@ function declare(
                 return existing;
             }
         }
-        if (ns === NS_VALUE)
-            state.sem.redeclarations.push({
-                name: identNode.name,
-                pos: identNode.start,
-                scope: targetScope,
-                prevFlags,
-                flags,
-                lexicalFn,
-            });
+        if (ns === NS_VALUE) recordRedeclaration(state, existing, identNode, targetScope, appearAt, prevFlags, flags, lexicalFn);
         state.sem.symbols[existing].flags |= flags;
         identNode.sym = existing;
         // A REDECLARATION still contributes a declaring scope — oxc folds these in via
@@ -810,13 +819,16 @@ function declare(
         if (parent !== 0 && scopeKind(state.sem.scopes[parent].flags) === SCOPE.CATCH) {
             const outerSym = state.sem.bindings.get(bindingKey(parent, NS_VALUE, nameId));
             if (outerSym !== undefined)
-                state.sem.redeclarations.push({
-                    name: identNode.name,
-                    pos: identNode.start,
-                    scope: state.scope,
-                    prevFlags: state.sem.symbols[outerSym].flags,
+                recordRedeclaration(
+                    state,
+                    outerSym,
+                    identNode,
+                    state.scope,
+                    appearAt,
+                    state.sem.symbols[outerSym].flags,
                     flags,
-                });
+                    false,
+                );
         }
     }
     const id = state.sem.symbols.length;
@@ -826,6 +838,42 @@ function declare(
     // `state.scope`, not `targetScope`: the APPEARANCE scope, per `declPairs`.
     recordDecl(state.sem, id, identNode.id, state.scope);
     return id;
+}
+
+/**
+ * Append a declaration to its symbol's list, seeding the list with the FIRST declaration when this is
+ * the first collision — oxc's list "is created with its first two declarations at once".
+ *
+ * At that moment the existing symbol has exactly ONE declaration, so its merged flags ARE that
+ * declaration's flags and its `decl` node gives the position; both are recoverable only here, which is
+ * why the seed happens at the collision rather than on every declaration.
+ */
+function recordRedeclaration(
+    state: AnalyseState,
+    sym: number,
+    identNode: Node,
+    scope: number,
+    at: number,
+    prevFlags: number,
+    flags: number,
+    lexicalFn: boolean,
+): void {
+    let list = state.sem.redeclarations.get(sym);
+    if (list === undefined) {
+        const first = state.sem.symbols[sym];
+        list = [
+            {
+                name: identNode.name,
+                pos: first.decl !== null ? first.decl.start : identNode.start,
+                scope,
+                at: first.at,
+                prevFlags: 0,
+                flags: prevFlags,
+            },
+        ];
+        state.sem.redeclarations.set(sym, list);
+    }
+    list.push({ name: identNode.name, pos: identNode.start, scope, at, prevFlags, flags, lexicalFn });
 }
 
 function declareDualNs(state: AnalyseState, identNode: Node, flags: number, targetScope: number): number {
@@ -895,7 +943,7 @@ function resetSem(out: Semantic): void {
     out.scopes.length = 1;
     out.symbols.length = 1;
     out.unresolved.length = 0;
-    out.redeclarations.length = 0;
+    out.redeclarations.clear();
     out.errors.length = 0;
     out.names.clear();
     out.bindings.clear();

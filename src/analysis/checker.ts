@@ -326,32 +326,36 @@ const isTypeOnly = (flags: number): boolean => flags === SYM.TYPE;
 /** oxc raises this from `SemanticBuilder` as bindings are made (`builder.rs`) as well as from its
  *  checker; we do the same split — `declare()` records the collision, this decides. */
 export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
-    for (const r of sem.redeclarations) {
-        const both = r.prevFlags | r.flags;
-        if (isMergeable(both) || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
-        // A named function EXPRESSION's own name is bound in its own scope per the spec, so the body
-        // may shadow it — `(function n(){ let n = 1; })` is valid, as are the `const` and `class`
-        // forms. We bind it in the function scope, so the collision has to be excused here.
-        if (((r.prevFlags | r.flags) & SYM.FN_EXPR_NAME) !== 0) continue;
-        // `lexicalFn` is set by `declare()` for the positions where a function declaration is lexical
-        // rather than var-scoped — a block, a switch, or module top level. The flags alone cannot say.
-        const lexical = isLexical(both) || r.lexicalFn === true;
-        // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
-        // under a directive only reached after the parameters have been bound, which is why this
-        // judgement waits until now rather than happening in `declare()`.
-        // Duplicate PARAMETERS. Legal sloppy for a plain `function f(a, a) {}` — and, verified against
-        // oxc rather than assumed, also legal for `function* g(a, a)` and `async function h(a, a)`,
-        // which use FormalParameters rather than UniqueFormalParameters. They are an error under a
-        // directive only reached after the parameters were bound, and independently of mode wherever
-        // the grammar demands UniqueFormalParameters: arrows, methods and accessors, plus any function
-        // whose parameter list is not simple. `analyze` records that last set on the scope.
-        const dupParam =
-            (r.prevFlags & SYM.PARAM) !== 0 &&
-            (r.flags & SYM.PARAM) !== 0 &&
-            (isStrictScope(sem, r.scope) || hasUniqueParams(sem, r.scope));
-        if (!lexical && !dupParam) continue;
-        errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
-    }
+    // Entry 0 is the FIRST declaration and never collides with anything before it; each later
+    // entry is judged against the one before it, which is the pair oxc's `prev` names.
+    for (const list of sem.redeclarations.values())
+        for (let i = 1; i < list.length; i++) {
+            const r = list[i];
+            const both = r.prevFlags | r.flags;
+            if (isMergeable(both) || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
+            // A named function EXPRESSION's own name is bound in its own scope per the spec, so the body
+            // may shadow it — `(function n(){ let n = 1; })` is valid, as are the `const` and `class`
+            // forms. We bind it in the function scope, so the collision has to be excused here.
+            if (((r.prevFlags | r.flags) & SYM.FN_EXPR_NAME) !== 0) continue;
+            // `lexicalFn` is set by `declare()` for the positions where a function declaration is lexical
+            // rather than var-scoped — a block, a switch, or module top level. The flags alone cannot say.
+            const lexical = isLexical(both) || r.lexicalFn === true;
+            // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
+            // under a directive only reached after the parameters have been bound, which is why this
+            // judgement waits until now rather than happening in `declare()`.
+            // Duplicate PARAMETERS. Legal sloppy for a plain `function f(a, a) {}` — and, verified against
+            // oxc rather than assumed, also legal for `function* g(a, a)` and `async function h(a, a)`,
+            // which use FormalParameters rather than UniqueFormalParameters. They are an error under a
+            // directive only reached after the parameters were bound, and independently of mode wherever
+            // the grammar demands UniqueFormalParameters: arrows, methods and accessors, plus any function
+            // whose parameter list is not simple. `analyze` records that last set on the scope.
+            const dupParam =
+                (r.prevFlags & SYM.PARAM) !== 0 &&
+                (r.flags & SYM.PARAM) !== 0 &&
+                (isStrictScope(sem, r.scope) || hasUniqueParams(sem, r.scope));
+            if (!lexical && !dupParam) continue;
+            errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
+        }
 }
 
 /** Reserved only in strict code — `oxc`'s `check_identifier` (`checker/javascript.rs:152`). Outside
