@@ -238,6 +238,12 @@ export type Semantic = {
     refPairs: number[][] | null;
     declPairs: number[][] | null;
 
+    /** The source is TYPESCRIPT. Annex B's block-function alias is JavaScript-only — oxc gates its
+     *  hoist on `!source_type.is_typescript()` (`binder.rs:179`), so in a `.ts` file a block function
+     *  stays block-scoped and `{ function f(){} var f; }` is LEGAL. Confirmed with `tsc`, which
+     *  accepts it; we were rejecting it, which is the harmful direction in a TS-capable bundler. */
+    isTs: boolean;
+
     /** The source was analysed as an ES MODULE. Module top-level function declarations are LEXICAL
      *  where a script's are var-scoped, so `function f(){} function f(){}` is an error in one and not
      *  the other — and it is the GOAL that decides, not strict mode: the same pair under
@@ -403,6 +409,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         bindings: new Map(),
         errors: [],
         isModule: false,
+        isTs: false,
     };
 }
 
@@ -702,7 +709,8 @@ function declare(
         //
         // So strict mode does NOT make a top-level declaration lexical — the module GOAL does — and the
         // block allowance needs BOTH sides plain and sloppy code.
-        const isBlockFn = (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
+        const isBlockFn =
+            !state.sem.isTs && (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
         // Module top level is the one lexical position this model CAN decide: both declarations bind
         // in the same scope, so a collision there is genuine.
         // The MIRROR of `isBlockFn`: `{ function f(){} var f; }` is an error, and the `var` is second so
@@ -710,7 +718,10 @@ function declare(
         // else written in that same block collides with it. `appearAt !== targetScope` is what says
         // "written in a nested scope" — inside one function body, `function f(){} var f;` is legal.
         const prevBlockFn =
-            (prevFlags & SYM.FUNCTION) !== 0 && state.sem.symbols[existing].at === appearAt && appearAt !== targetScope;
+            !state.sem.isTs &&
+            (prevFlags & SYM.FUNCTION) !== 0 &&
+            state.sem.symbols[existing].at === appearAt &&
+            appearAt !== targetScope;
         const lexicalFn =
             isBlockFn ||
             prevBlockFn ||
@@ -886,9 +897,10 @@ function resetSem(out: Semantic): void {
  * every binding. `resolveRef` is reused verbatim for the deferred step, so resolution is identical
  * to the two-pass. LIMIT: no TDZ or redeclaration diagnostics; labels not tracked.
  */
-export function analyze(out: Semantic, program: Node, sourceIsModule = false, check = false): void {
+export function analyze(out: Semantic, program: Node, sourceIsModule = false, check = false, ts = false): void {
     resetSem(out);
     out.isModule = sourceIsModule;
+    out.isTs = ts;
     const state: AnalyseState = {
         sem: out,
         scope: 0,

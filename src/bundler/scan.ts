@@ -1280,6 +1280,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     program,
                     kind === 'module' || parsed.hasEsmExport || parsed.hasEsmImport,
                     checkSyntaxErrors,
+                    isTs,
                 );
                 for (const e of semantic.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
                 // AFTER `analyze` — the resolver reads `sym` off the binding identifiers, which is

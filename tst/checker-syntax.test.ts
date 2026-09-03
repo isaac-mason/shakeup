@@ -154,6 +154,30 @@ describe('Annex B decides HOW FAR the block-function check reaches', () => {
     });
 });
 
+describe("Annex B's block-function alias is JavaScript-only", () => {
+    // oxc gates the hoist on `!source_type.is_typescript()` (`binder.rs:179`), so in a `.ts` file a
+    // block function stays block-scoped and never meets a hoisted `var`. Confirmed with `tsc`, which
+    // accepts BOTH orders — we were rejecting one of them, a false rejection in a TS-capable bundler.
+    const checkTs = (src: string) => {
+        const { program } = parse(src, { ts: true, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false, true, true);
+        return sem.errors.map((e) => e.msg);
+    };
+
+    it.each(['{ function f(){} var f; }', '{ var f; function f(){} }'])('accepts %s in TypeScript', (src) => {
+        expect(checkTs(src)).toEqual([]);
+    });
+
+    it.each(['{ function f(){} var f; }', '{ var f; function f(){} }'])('but rejects %s in JavaScript', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it('a lexical collision in the same block is still an error in TypeScript', () => {
+        expect(checkTs('{ let f; function f(){} }')).toEqual(['Identifier `f` has already been declared']);
+    });
+});
+
 describe('at most one constructor per class', () => {
     it.each(['class C { constructor(){} constructor(){} }', 'const K = class { constructor(){} constructor(){} };'])(
         'rejects %s',
