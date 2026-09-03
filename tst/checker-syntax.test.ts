@@ -118,6 +118,41 @@ describe('strict-mode reserved words', () => {
     });
 });
 
+describe('a `var` may not hoist THROUGH a scope that lexically binds the same name', () => {
+    // The `var` lands in the hoist target while the `let` stays in the block, so the two never meet on
+    // one binding and the ordinary redeclaration path cannot see them.
+    it.each([
+        '{ let x; var x; }',
+        '{ const x = 1; var x; }',
+        '{ class x {} var x; }',
+        'class C { static { let x; var x; } }',
+        'class C { static { let x; { var x; } } }',
+        'switch(0){ case 1: let x; case 2: var x; }',
+        'for (let x of []) { var x; }',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(['Identifier `x` has already been declared']);
+    });
+
+    it.each([
+        // Nothing hoists THROUGH the `let` in any of these.
+        'var x; { let x; }',
+        '{ let x; } var x;',
+        'function f(){ { let x; } { var x; } }',
+        '{ let x; function g(){ var x; } }',
+        '{ let x; var y; }',
+        'try {} catch (e) { var e; }',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('KNOWN GAP: the mirror form `{ var x; let x; }`', () => {
+        // By the time the `let` is declared the `var` sits in the hoist target, indistinguishable from
+        // a legitimately shadowed `var x; { let x; }`. Same root cause as the block-function gap:
+        // `SymbolRec.scope` is the hoist TARGET, not where the binding was written.
+        expect(check('{ var x; let x; }')).toEqual([]);
+    });
+});
+
 describe('`eval`/`arguments` as a DESTRUCTURING assignment target', () => {
     // The rule used to look at the top-level node only, so it caught `eval = 1` and none of these.
     it.each([

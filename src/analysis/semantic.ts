@@ -509,6 +509,33 @@ function declare(
             });
     }
     const nameId = internName(state, identNode.name);
+    // A `var` may not hoist THROUGH a scope that lexically binds the same name:
+    //
+    //     { let x; var x; }                     ERROR
+    //     class C { static { let x; var x; } }  ERROR
+    //     class C { static { let x; { var x; } } }  ERROR
+    //     var x; { let x; }                     ok — the `let` shadows, nothing hoists through it
+    //
+    // The `var` lands in the hoist target while the `let` stays in the block, so the two never collide
+    // on one binding and the ordinary redeclaration path cannot see them. Walking the scopes the `var`
+    // passes through is what oxc does, and it is decidable here because `state.scope` IS where the
+    // `var` was written.
+    //
+    // The MIRROR case, `{ var x; let x; }`, is not: by the time the `let` is declared the `var` sits in
+    // the hoist target, indistinguishable from a legitimately shadowed `var x; { let x; }`. Same root
+    // cause as the block-function gap — `SymbolRec.scope` is the hoist target, not the appearance.
+    if (state.check && (flags & SYM.VAR) !== 0 && targetScope !== state.scope) {
+        for (let sc = state.scope; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
+            const through = state.sem.bindings.get(bindingKey(sc, NS_VALUE, nameId));
+            if (through !== undefined && (state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
+                state.sem.errors.push({
+                    pos: identNode.start,
+                    msg: `Identifier \`${identNode.name}\` has already been declared`,
+                });
+                break;
+            }
+        }
+    }
     const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
     if (existing !== undefined) {
