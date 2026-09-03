@@ -50,6 +50,7 @@ const files: string[] = [];
 
 let scanned = 0;
 let bothClean = 0;
+const backlogRules = new Map<string, { n: number; file: string }>();
 let backlog = 0;
 let matched = 0;
 const falsePositives: { file: string; msg: string }[] = [];
@@ -61,13 +62,19 @@ for (const file of files) {
     } catch {
         continue;
     }
-    const isModule = file.endsWith('.mjs');
+    // Module-ness must be decided the SAME WAY for both sides. Keying it off the extension alone told
+    // oxc "script" for every `.js` file while we parsed it `unambiguous`, so oxc reported "Cannot use
+    // import statement outside a module" on code we correctly read as ESM — 14,149 occurrences across
+    // 2,371 files, which was the whole of the reported backlog and none of it a real rule gap.
+    let isModule = file.endsWith('.mjs');
     // Only files BOTH accept syntactically are comparable; a parse divergence is `parsercorpus`'s job.
     let program: ReturnType<typeof parse>['program'];
     try {
         const r = parse(src, { ts: false, jsx: false, kind: isModule ? 'module' : 'unambiguous' });
         if (r.errors.length > 0) continue;
         program = r.program;
+        // What our own `unambiguous` parse concluded, which is what `scan.ts` feeds `analyze`.
+        isModule = isModule || r.hasEsmExport || r.hasEsmImport;
     } catch {
         continue;
     }
@@ -85,8 +92,18 @@ for (const file of files) {
     const ours = sem.errors.map((e) => e.msg);
     for (const m of ours) if (!theirs.includes(m)) falsePositives.push({ file, msg: m });
     if (ours.length > 0) matched++;
-    else if (theirs.length > 0) backlog++;
-    else bothClean++;
+    else if (theirs.length > 0) {
+        backlog++;
+        // WHICH rule, not just how many. Without this the backlog is a single number and the porting
+        // work has nothing to rank by; oxc's message text is the closest thing to a rule identity it
+        // exposes, so the histogram is keyed on it with the quoted specifics stripped.
+        for (const m of theirs) {
+            const key = m.replace(/'[^']*'/g, "'_'").replace(/`[^`]*`/g, '`_`').replace(/\bnamed? [^\s,.]+/g, 'named _');
+            const e = backlogRules.get(key);
+            if (e === undefined) backlogRules.set(key, { n: 1, file });
+            else e.n++;
+        }
+    } else bothClean++;
 }
 
 console.log(`\nscanned ${scanned} files under ${ROOT} (both parsers accept them syntactically)`);
@@ -97,4 +114,6 @@ console.log(`  shakeup reported something: ${matched}\n`);
 console.log(`SHAKEUP REJECTS, oxc accepts  ← the harmful direction: ${falsePositives.length} findings`);
 for (const f of falsePositives.slice(0, 10)) console.log(`     ${f.msg}\n        ${f.file}`);
 console.log(`\noxc rejects, shakeup accepts  ← rules not yet ported: ${backlog} files`);
+for (const [msg, e] of [...backlogRules].sort((a, b) => b[1].n - a[1].n).slice(0, 20))
+    console.log(`  ${String(e.n).padStart(5)}  ${msg}\n           e.g. ${e.file}`);
 if (falsePositives.length > 0) process.exit(1);
