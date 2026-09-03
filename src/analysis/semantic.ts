@@ -10,6 +10,7 @@ import {
     labelsIteration,
     NO_LABELS,
     NO_PRIVATES,
+    paramsAreSimple,
 } from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
@@ -25,12 +26,22 @@ const SCOPE_KIND_MASK = 15;
  *  `is_strict` is a property of the FILE — and every strict-mode early error lives in
  *  `oxc_semantic`'s checker, gated on `ctx.strict_mode()` = `current_scope_flags().is_strict_mode()`. */
 export const SCOPE_STRICT = 1 << 4;
+/**
+ * This function's parameter list must have UNIQUE names, regardless of strict mode.
+ *
+ * The grammar demands `UniqueFormalParameters` for arrows, methods and accessors, and forbids
+ * duplicates in ANY function whose parameter list is non-simple. Checked against oxc rather than read
+ * off the spec, because the boundary is not where it looks: `function* g(a, a) {}` and
+ * `async function h(a, a) {}` are both LEGAL in sloppy code — only arrow/method/non-simple are not.
+ */
+export const SCOPE_UNIQUE_PARAMS = 1 << 5;
 
 /** The kind of a scope, with the flag bits masked off. */
 export const scopeKind = (flags: number): number => flags & SCOPE_KIND_MASK;
 /** Is this scope strict-mode code? oxc's `SemanticBuilder::strict_mode` (`builder.rs:529`). */
 export const isStrictScope = (sem: Semantic, scope: number): boolean =>
     (sem.scopes[scope].flags & SCOPE_STRICT) !== 0;
+export const hasUniqueParams = (sem: Semantic, scope: number): boolean => (sem.scopes[scope].flags & SCOPE_UNIQUE_PARAMS) !== 0;
 
 /** Does a statement list open with a `"use strict"` directive?
  *
@@ -61,6 +72,15 @@ export const SYM = {
     TYPE: 1 << 8,
     ENUM: 1 << 9,
     NAMESPACE: 1 << 10,
+    /**
+     * A named function EXPRESSION's own name — `n` in `(function n(){})`.
+     *
+     * The spec binds it in a scope of its own, OUTSIDE the function scope, so the body may legally
+     * shadow it: `(function n(){ let n = 1; })` is valid and oxc accepts it. We bind it in the
+     * function scope instead (a separate scope would change the scope tree the mangler reads), so the
+     * collision is recorded and then excused by this flag rather than never happening.
+     */
+    FN_EXPR_NAME: 1 << 11,
 } as const;
 
 /** namespace selector for binding/resolution */
@@ -371,6 +391,12 @@ type AnalyseState = {
     /** Private names visible here: the UNION of every enclosing class, since a nested class may still
      *  reference an outer `#field`. NOT scope-shaped — a class is not a function boundary for this. */
     privates: ReadonlySet<string>;
+    /** The next function scope entered must have unique parameter names. Set by the METHOD arms,
+     *  because a method's `FunctionExpression` has no way to know it is one — `visit` reaches it
+     *  through `MethodDefinition`/`ObjectProperty`, and only there is the distinction visible. */
+    uniqueParams: boolean;
+    /** The statement about to be visited is a function declaration in `if`/`else` position. */
+    annexBIf: boolean;
 };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -412,7 +438,15 @@ function internName(state: AnalyseState, s: string): number {
     return id;
 }
 
-function declare(state: AnalyseState, identNode: Node, flags: number, ns: number, targetScope: number): number {
+function declare(
+    state: AnalyseState,
+    identNode: Node,
+    flags: number,
+    ns: number,
+    targetScope: number,
+    /** This is a function declaration in `if`/`else` statement position — see the Annex B note below. */
+    annexB = false,
+): number {
     // `state.scope`, not `targetScope`: the rules judge where the identifier APPEARS, and a `var` or a
     // function declaration binds into a hoist target that is not the scope it was written in.
     if (state.check) checkBindingIdent(state.sem, identNode, state.scope, state.sem.errors);
@@ -423,7 +457,36 @@ function declare(state: AnalyseState, identNode: Node, flags: number, ns: number
         // Record it BEFORE the flags merge, which would otherwise erase which side was which. Only
         // for value bindings: the TYPE namespace legitimately merges (interface + interface, enum +
         // enum, namespace + namespace are all declaration merging, not redeclaration).
-        if (ns === NS_VALUE)
+        // A function declaration nested in a BLOCK is lexical to that block (ES2015+). The binding it
+        // ALSO makes in the enclosing function scope is Annex B's var-like alias, and the early error
+        // for a collision there is explicitly skipped — which is what test262's
+        // `block-decl-*-skip-early-err` fixtures are named for. So
+        // `(function(){ let f = 123; { function f(){} } })()` is legal, confirmed against oxc, and
+        // recording the collision made us reject 16 valid programs.
+        //
+        // This does NOT hide the errors oxc does report in a block: `{ async function f(){} async
+        // function f(){} }` and `{ function f(){} let f; }` are collisions in the BLOCK scope, which
+        // this leaves untouched. Both are currently unported and stay that way.
+        // Annex B covers exactly two positions, verified one by one against oxc rather than reasoned
+        // from the scope shape:
+        //
+        //     let f; { function f(){} }        ok      B.3.3, block-scoped alias
+        //     let f; if (1) function f(){}     ok      B.3.4, and it opens NO scope
+        //     let f; while(0) function f(){}   ERROR
+        //     let f; lbl: function f(){}       ERROR
+        //     let f; function f(){}            ERROR
+        //
+        // So a block is recognised by its SCOPE, while the `if` branch has none and has to be passed
+        // in by the arm that saw it. Generalising this to "appears outside the scope it hoists to"
+        // exempted the loop and label cases too, which oxc rejects.
+        const parentScope = state.sem.scopes[state.scope].parent;
+        // A switch BODY is block-like for this purpose but is its own scope kind here, so it has to be
+        // named. `let f; switch(0){ case 1: function f(){} }` is legal, as are the `catch` and
+        // `for`-body forms — those already qualify because their bodies are real `BlockStatement`s.
+        const parentKind = parentScope === 0 ? -1 : scopeKind(state.sem.scopes[parentScope].flags);
+        const inBlock = parentKind === SCOPE.BLOCK || parentKind === SCOPE.SWITCH;
+        const blockAliasedFunction = (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
+        if (ns === NS_VALUE && !blockAliasedFunction)
             state.sem.redeclarations.push({
                 name: identNode.name,
                 pos: identNode.start,
@@ -571,6 +634,8 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
         cont: false,
         labels: NO_LABELS,
         privates: NO_PRIVATES,
+        uniqueParams: false,
+        annexBIf: false,
     };
     // An ES module is strict by definition; a script is strict only from a directive. oxc seeds the
     // same way, from `source_type.is_module()` (`builder.rs`, `ScopeFlags::Top`).
@@ -729,7 +794,8 @@ function collectPattern(state: AnalyseState, node: Node | null): void {
 }
 
 /** declare params into the current scope, then collect refs in their defaults/types. */
-function declareCollectParams(state: AnalyseState, list: Node[]): void {
+function declareCollectParams(state: AnalyseState, list: Node[], unique = false): void {
+    if (unique || !paramsAreSimple(list)) state.sem.scopes[state.scope].flags |= SCOPE_UNIQUE_PARAMS;
     for (const p of list) declarePattern(state, p, SYM.PARAM, state.scope);
     for (const p of list) {
         if (p.type === N.RestElement) {
@@ -923,11 +989,17 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.ChainExpression:
             visit(state, node.data.expression);
             return;
-        case N.ObjectProperty:
+        case N.ObjectProperty: {
             if (node.data.computed) visit(state, node.data.key);
             if (collectShorthandProp(state, node.data, REF_READ)) return;
+            // `{ m(a, a){} }` and `{ get x(){} }` are methods and accessors; `{ m: function(a, a){} }`
+            // is an ordinary function expression and keeps sloppy duplicates.
+            const wasMethod = node.data.method || node.data.kind === 'get' || node.data.kind === 'set';
+            if (wasMethod) state.uniqueParams = true;
             visit(state, node.data.value);
+            state.uniqueParams = false;
             return;
+        }
         case N.AssignmentExpression: {
             const { operator, left, right } = node.data;
             // `x += 1` READS x as well as writing it; `x = 1` only writes.
@@ -944,7 +1016,11 @@ function visit(state: AnalyseState, node: Node | null): void {
         }
         case N.MethodDefinition:
             if (node.data.computed) visit(state, node.data.key);
+            // Every class element form here — method, accessor, constructor — takes
+            // `UniqueFormalParameters`. The `FunctionExpression` below cannot tell, so it is told.
+            state.uniqueParams = true;
             visit(state, node.data.value);
+            state.uniqueParams = false;
             return;
         case N.PropertyDefinition:
             if (node.data.computed) visit(state, node.data.key);
@@ -977,33 +1053,42 @@ function visit(state: AnalyseState, node: Node | null): void {
             // this shape; only the declaration case attributed the id node to the enclosing scope, which
             // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
             const target = hoistTarget(state);
+            const methodParams = state.uniqueParams;
+            state.uniqueParams = false;
+            // Consumed here so it cannot reach a function nested inside this one's body.
+            const annexBIf = state.annexBIf;
+            state.annexBIf = false;
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target);
+                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, annexBIf);
                 declareTypeParams(state, node.data.typeParameters);
-                declareCollectParams(state, node.data.params);
+                declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
             });
             return;
         }
-        case N.FunctionExpression:
+        case N.FunctionExpression: {
+            const methodParams = state.uniqueParams;
+            state.uniqueParams = false;
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, state.scope);
+                if (id !== null) declare(state, id, SYM.FUNCTION | SYM.FN_EXPR_NAME, NS_VALUE, state.scope);
                 declareTypeParams(state, node.data.typeParameters);
-                declareCollectParams(state, node.data.params);
+                declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
             });
             return;
+        }
         case N.ArrowFunctionExpression:
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 declareTypeParams(state, node.data.typeParameters);
-                declareCollectParams(state, node.data.params);
+                // An arrow's parameters are `UniqueFormalParameters` in every mode.
+                declareCollectParams(state, node.data.params, true);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
             });
@@ -1165,6 +1250,20 @@ function visit(state: AnalyseState, node: Node | null): void {
                 const local = s.data.local;
                 if (local.type === N.IdentifierReference) collect(state, local, NS_VALUE, REF_READ | REF_EXPORTED);
             }
+            return;
+        }
+        case N.IfStatement: {
+            visit(state, node.data.test);
+            // Annex B B.3.4 makes `if (x) function f(){}` a legal declaration in sloppy code whose
+            // binding is aliased exactly like a block's. Only a DIRECT function-declaration branch
+            // qualifies, so the flag is set per branch rather than for the whole subtree.
+            const c = node.data.consequent;
+            state.annexBIf = c !== null && c.type === N.FunctionDeclaration;
+            visit(state, c);
+            const a = node.data.alternate;
+            state.annexBIf = a !== null && a.type === N.FunctionDeclaration;
+            visit(state, a);
+            state.annexBIf = false;
             return;
         }
         case N.LabeledStatement: {

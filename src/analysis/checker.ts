@@ -1,5 +1,5 @@
 import { N, type Node } from '../ast/index.ts';
-import { isStrictScope, type Semantic, SYM } from './semantic.ts';
+import { hasUniqueParams, isStrictScope, type Semantic, SYM } from './semantic.ts';
 
 /** One early error, in the parser's diagnostic shape so both sinks read alike. */
 export type CheckError = { pos: number; msg: string };
@@ -203,11 +203,24 @@ export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
     for (const r of sem.redeclarations) {
         const both = r.prevFlags | r.flags;
         if (isMergeable(both) || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
+        // A named function EXPRESSION's own name is bound in its own scope per the spec, so the body
+        // may shadow it — `(function n(){ let n = 1; })` is valid, as are the `const` and `class`
+        // forms. We bind it in the function scope, so the collision has to be excused here.
+        if (((r.prevFlags | r.flags) & SYM.FN_EXPR_NAME) !== 0) continue;
         const lexical = isLexical(both);
         // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
         // under a directive only reached after the parameters have been bound, which is why this
         // judgement waits until now rather than happening in `declare()`.
-        const dupParam = (r.prevFlags & SYM.PARAM) !== 0 && (r.flags & SYM.PARAM) !== 0 && isStrictScope(sem, r.scope);
+        // Duplicate PARAMETERS. Legal sloppy for a plain `function f(a, a) {}` — and, verified against
+        // oxc rather than assumed, also legal for `function* g(a, a)` and `async function h(a, a)`,
+        // which use FormalParameters rather than UniqueFormalParameters. They are an error under a
+        // directive only reached after the parameters were bound, and independently of mode wherever
+        // the grammar demands UniqueFormalParameters: arrows, methods and accessors, plus any function
+        // whose parameter list is not simple. `analyze` records that last set on the scope.
+        const dupParam =
+            (r.prevFlags & SYM.PARAM) !== 0 &&
+            (r.flags & SYM.PARAM) !== 0 &&
+            (isStrictScope(sem, r.scope) || hasUniqueParams(sem, r.scope));
         if (!lexical && !dupParam) continue;
         errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
     }
@@ -297,6 +310,11 @@ export function checkUseStrictDirective(node: Node, errors: CheckError[]): void 
 /** A SIMPLE parameter is a bare binding identifier and nothing else. A default (`a = 1`) keeps a
  *  `BindingIdentifier` pattern but carries an `init`, so the pattern type alone is not enough; a rest
  *  element is a different node entirely. */
+/** A parameter list is SIMPLE when every entry is a bare binding identifier. Exported because two
+ *  separate rules turn on it: the `"use strict"` directive rule below, and — via `analyze` — duplicate
+ *  parameters, which a non-simple list forbids even in sloppy code. */
+export const paramsAreSimple = (list: Node[]): boolean => list.every(isSimpleParam);
+
 const isSimpleParam = (p: Node): boolean => {
     if (p.type !== N.FormalParameter) return false;
     const d = p.data as { pattern: Node; init: Node | null };

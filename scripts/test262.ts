@@ -24,6 +24,7 @@
  */
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parseWithDiagnostics } from '../src/parser/parser.ts';
 
 const ROOT = 'llm/libs/test262/test';
@@ -83,9 +84,23 @@ const files: string[] = [];
     }
 })(ROOT);
 
+/**
+ * Does SHAKEUP accept this program? Parser AND checker, because `scan.ts` runs both and fails the
+ * build on either — a program the checker rejects is one shakeup refuses, exactly as rolldown refuses
+ * what oxc's checker rejects (`pre_process_ecma_ast.rs:70`).
+ *
+ * This used to be the parser alone, which made the headline number measure only half the pipeline:
+ * every checker rule ported was invisible to it, while the roadmap ranked checker work by a "ceiling"
+ * this figure could not have reached. Same failure as `checkerdiff`'s phantom backlog — a gate that
+ * did not measure the thing it was being read as measuring.
+ */
 const accepts = (src: string, kind: 'module' | 'unambiguous') => {
     try {
-        return parseWithDiagnostics(src, { ts: false, jsx: false, kind }).errors.length === 0;
+        const r = parseWithDiagnostics(src, { ts: false, jsx: false, kind });
+        if (r.errors.length > 0) return false;
+        const sem = createSemantic();
+        analyze(sem, r.program, kind === 'module' || r.hasEsmExport || r.hasEsmImport, true);
+        return sem.errors.length === 0;
     } catch {
         return false;
     }

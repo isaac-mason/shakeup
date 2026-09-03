@@ -334,6 +334,91 @@ describe('duplicate class elements', () => {
     });
 });
 
+describe("a named function expression's own name may be shadowed by its body", () => {
+    // The spec binds it in a scope of its own, outside the function scope. We bind it inside (a
+    // separate scope would change the tree the mangler reads), so the collision is recorded and then
+    // excused. Found as the single remaining checker false-rejection in test262 once the harness
+    // started running the checker at all.
+    it.each([
+        '(function n() { let n = 1; });',
+        '(function n() { const n = 1; });',
+        '(function n() { class n {} });',
+        '(function n(n) { });',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('a function DECLARATION gets no such excuse', () => {
+        expect(check('function n() {} let n;')).toEqual(['Identifier `n` has already been declared']);
+    });
+});
+
+describe("Annex B's block-scoped function alias is not a redeclaration", () => {
+    // 16 valid test262 programs were rejected over this, and no gate could see it: `checkerdiff`'s
+    // corpus has no such shape, and `test262` was not running the checker at all.
+    // Annex B covers exactly two positions. Every line below was run through oxc first; generalising
+    // from the two that pass to "anywhere nested" wrongly exempts the loop and label forms.
+    it.each([
+        'let f; { function f(){} }',
+        '"use strict"; let f; { function f(){} }',
+        'let f; if (1) function f(){}',
+        'let f; if (1) ; else function f(){}',
+        '(function() { let f = 123; if (true) function f() {} else function _f() {} }());',
+        '(function() { var f = 1; { function f() {} } }());',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        'let f; function f(){}',
+        'function g(){ let f; function f(){} }',
+        'let f; while(0) function f(){}',
+        'let f; lbl: function f(){}',
+        '{ let f; let f; }',
+    ])('still rejects %s', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it('the `if` exemption does not reach a function nested inside the branch', () => {
+        expect(check('let f; if (1) function g(){ let f; function f(){} }')).toEqual([
+            'Identifier `f` has already been declared',
+        ]);
+    });
+});
+
+describe('duplicate parameters — every verdict here was taken from oxc, not from the spec', () => {
+    // The boundary is not where reading the grammar suggests. `UniqueFormalParameters` covers arrows,
+    // methods and accessors; everything else uses `FormalParameters`, which permits duplicates in
+    // sloppy code — INCLUDING generators and async functions, which is the part that surprises.
+    it.each([
+        '(a, a) => {}',
+        '(a, a = 1) => {}',
+        '(a, [a]) => {}',
+        'function f(a, a = 1) {}',
+        'function f(a, [a]) {}',
+        '({ m(a, a) {} });',
+        'class C { m(a, a) {} }',
+        '"use strict"; function f(a, a) {}',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(['Identifier `a` has already been declared']);
+    });
+
+    it.each(['function f(a, a) {}', 'function* g(a, a) {}', 'async function h(a, a) {}', '({ m: function (a, a) {} });'])(
+        'accepts %s in sloppy code',
+        (src) => {
+            expect(check(src)).toEqual([]);
+        },
+    );
+
+    it('the method flag does not leak into a nested ordinary function', () => {
+        expect(check('({ m(x) { function g(a, a) {} } });')).toEqual([]);
+    });
+
+    it('nor past the method that set it', () => {
+        expect(check('class C { m(){} } function f(a, a) {}')).toEqual([]);
+    });
+});
+
 describe('a jump may not cross a function boundary', () => {
     // Added because SABOTAGING the static-block reset left all 98 tests passing. The rule worked; it
     // was simply unguarded, which is how `1f03586` shipped — `staticBlockDepth` lost its function
@@ -345,7 +430,11 @@ describe('a jump may not cross a function boundary', () => {
         'while(1){ class C { static { break; } } }',
         'for(;;){ class C { static { continue; } } }',
     ])('%s', (src) => {
-        expect(check(src)).toEqual([src.includes('continue') ? 'Illegal continue statement: no surrounding iteration statement' : 'Illegal break statement']);
+        expect(check(src)).toEqual([
+            src.includes('continue')
+                ? 'Illegal continue statement: no surrounding iteration statement'
+                : 'Illegal break statement',
+        ]);
     });
 
     it('a label does not leak across a function boundary either', () => {
