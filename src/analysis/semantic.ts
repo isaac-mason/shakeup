@@ -25,7 +25,23 @@ import {
 } from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
-export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');
+export const SCOPE = enumeration(
+    'MODULE',
+    'FUNCTION',
+    'BLOCK',
+    'CLASS',
+    'CATCH',
+    'FOR',
+    'SWITCH',
+    'TYPE',
+    'ENUM',
+    'NAMESPACE',
+    // A class static block. oxc gives it its own `ScopeFlags::ClassStaticBlock` because the
+    // redeclaration rules ask whether the current scope is VAR-LIKE, and a static block is —
+    // `check_redeclared_function` tests `is_function() || is_class_static_block() || is_top()`
+    // (`checker/javascript.rs:719-722`). Modelled as a plain `BLOCK` it could not be distinguished.
+    'STATIC_BLOCK',
+);
 /** Ten kinds fit in four bits, leaving the rest of `flags` for real flags — oxc's `ScopeFlags`,
  *  which packs the kind and `StrictMode` into one word (`oxc_syntax/src/scope.rs`). */
 const SCOPE_KIND_MASK = 15;
@@ -826,7 +842,11 @@ function hoistTarget(state: AnalyseState): number {
     for (;;) {
         const f = state.sem.scopes[s].flags;
         const k = scopeKind(f);
-        if (k === SCOPE.FUNCTION || k === SCOPE.MODULE || k === SCOPE.NAMESPACE) return s;
+        // oxc's `ScopeFlags::Var = Top | Function | ClassStaticBlock | TsModuleBlock`
+        // (`oxc_syntax/src/scope.rs:46`). The static block was missing here, so a `var` inside one
+        // hoisted out of it: `class C { static { var x = 1; } } x;` resolved that `x` to the block's
+        // binding, where node reports it as an ordinary undefined global.
+        if (k === SCOPE.FUNCTION || k === SCOPE.MODULE || k === SCOPE.NAMESPACE || k === SCOPE.STATIC_BLOCK) return s;
         s = state.sem.scopes[s].parent;
         if (s === 0) return state.scope;
     }
@@ -1525,7 +1545,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             // A class static block is a jump boundary exactly like a function body, and it does not go
             // through `visitFunctionBody`, so it resets here. This is the arm whose absence in the old
             // `staticBlockDepth` took harmful from 5 to 26 while the PASS count went UP (`1f03586`).
-            declareInScope(state, SCOPE.BLOCK, node, () => {
+            declareInScope(state, SCOPE.STATIC_BLOCK, node, () => {
                 const b = state.brk,
                     c = state.cont,
                     l = state.labels;

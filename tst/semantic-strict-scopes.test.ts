@@ -82,7 +82,7 @@ describe('what is NOT a directive', () => {
         expect(scopesOf('"use asm"; "use strict"; function f(){}').every((s) => s.strict)).toBe(true);
     });
 
-    it("single quotes count too", () => {
+    it('single quotes count too', () => {
         expect(scopesOf("'use strict'; function f(){}").every((s) => s.strict)).toBe(true);
     });
 });
@@ -128,5 +128,44 @@ describe('a parameter default resolves before the body is visited', () => {
         const sem = createSemantic();
         analyze(sem, program, false);
         expect(sem.symbols[sym].scope).not.toBe(1); // the parameter, inside the function
+    });
+});
+
+// A class static block is a VAR SCOPE. oxc's `ScopeFlags::Var = Top | Function | ClassStaticBlock |
+// TsModuleBlock` (`oxc_syntax/src/scope.rs:46`); we were missing the static block, so a `var` inside
+// one hoisted out of it and an outer reference bound to it — where node treats that name as an
+// ordinary undefined global.
+//
+// The scope KIND is also what oxc's redeclaration rules ask for: `check_redeclared_function` tests
+// `is_function() || is_class_static_block() || is_top()` to decide whether a position is var-like
+// (`checker/javascript.rs:719-722`), which a plain `BLOCK` could not express.
+describe('a class static block is a var scope', () => {
+    const symOfLast = (src: string): number => {
+        const { program } = parse(src, { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        let last = -1;
+        const walk = (n: Node): void => {
+            if (n.type === N.IdentifierReference && n.name === 'x') last = n.sym;
+            walkChildren(n, walk);
+        };
+        walk(program);
+        return last;
+    };
+
+    it('a `var` inside one does not escape it', () => {
+        expect(symOfLast('class C { static { var x = 1; } } x;')).toBe(0);
+        expect(symOfLast('function g(){ class C { static { var x = 1; } } x; }')).toBe(0);
+    });
+
+    it('but is visible INSIDE it', () => {
+        expect(symOfLast('class C { static { var x = 1; x; } }')).toBeGreaterThan(0);
+    });
+
+    it('and it carries its own scope kind, not BLOCK', () => {
+        const { program } = parse('class C { static { var x = 1; } }', { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        expect(sem.scopes.some((sc) => scopeKind(sc.flags) === SCOPE.STATIC_BLOCK)).toBe(true);
     });
 });
