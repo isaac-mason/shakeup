@@ -35,7 +35,7 @@
  * is why rolldown ignores 163 of them.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -242,6 +242,19 @@ for (const { d, c } of selected) {
     const out = mkdtempSync(join(tmpdir(), 'rs-'));
     tmpDirs.push(out);
     writeFileSync(join(out, 'package.json'), '{"type":"module"}');
+    // Rollup ships STUB PACKAGES for the fixtures that import a bare `external` specifier
+    // (`test/node_modules/external.js`, `external-esm`). Its own runner resolves them because it
+    // executes from inside the repo; we run the bundle from a temp directory, so without this link
+    // `import foo from 'external'` fails with ERR_MODULE_NOT_FOUND — a gap in OUR runner, not a
+    // defect in the bundle it produced.
+    const stubs = resolve('llm/libs/rollup/test/node_modules');
+    if (existsSync(stubs)) {
+        try {
+            symlinkSync(stubs, join(out, 'node_modules'), 'dir');
+        } catch {
+            // A pre-existing link or a filesystem that refuses one: the fixture will fail as before.
+        }
+    }
     for (const ch of chunks) writeFileSync(join(out, ch.fileName), ch.code);
     const entryFile = chunks.find((ch) => ch.isEntry)?.fileName ?? 'main.js';
     // The child re-loads `_config.js` so `exports()` and `runtimeError()` — functions, which cannot
