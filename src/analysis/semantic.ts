@@ -774,10 +774,21 @@ function declare(
         const isBlockFn = !state.sem.isTs && (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
         // Module top level is the one lexical position this model CAN decide: both declarations bind
         // in the same scope, so a collision there is genuine.
-        // The MIRROR of `isBlockFn`: `{ function f(){} var f; }` is an error, and the `var` is second so
-        // the branch below never runs for it. The block function is lexical in its block, so anything
-        // else written in that same block collides with it. `appearAt !== targetScope` is what says
-        // "written in a nested scope" — inside one function body, `function f(){} var f;` is legal.
+        // `{ function f(){} var f; }` — the `var` comes second, so the Annex B branch below never runs
+        // for it, and after the move both sit in the same var scope where FUNCTION|VAR is not lexical.
+        //
+        // This is the NODE-CORRECT form of oxc's `check_variable_declarator_redeclaration`
+        // (`checker/javascript.rs:615-645`), and the one rule that deliberately SURVIVED the binding
+        // port. oxc asks only where the `var` is written — not in `Top|Function` means error — which
+        // rejects three shapes node accepts:
+        //
+        //     function g(){ function f(){} { var f; } }            node: ok   oxc: ERROR
+        //     { function f(){} } { var f; }                        node: ok   oxc: ERROR
+        //     function g(){ { { function f(){} } { var f; } } }    node: ok   oxc: ERROR
+        //
+        // Comparing `at` — the scope each was WRITTEN in — separates them: the collision is real only
+        // when both were written in the SAME block. Removing this leaves exactly two tests failing,
+        // both `{ function f(){} var f; }`, which is how its scope was pinned.
         const prevBlockFn =
             !state.sem.isTs &&
             (prevFlags & SYM.FUNCTION) !== 0 &&
