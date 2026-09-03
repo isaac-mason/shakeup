@@ -529,6 +529,7 @@ function declare(
     // A function or class DECLARATION is already inside its own scope by now (`declareInScope` entered
     // it before the name is bound), so where it was WRITTEN is that scope's parent. Everything else is
     // written where `state.scope` says.
+    const key = bindingKey(targetScope, ns, nameId);
     const appearAt =
         (flags & (SYM.FUNCTION | SYM.CLASS)) !== 0 && targetScope !== state.scope
             ? state.sem.scopes[state.scope].parent
@@ -564,15 +565,44 @@ function declare(
     //     { let f = 1; if (true) function f(){} }   ok      B.3.4 exempts the `if` position outright
     const hoistsPast = (flags & SYM.VAR) !== 0;
     const blockFnHere = (flags & SYM.FUNCTION) !== 0 && !annexB;
-    if (state.check && (hoistsPast || blockFnHere) && targetScope !== appearAt) {
+    if ((hoistsPast || blockFnHere) && targetScope !== appearAt) {
         for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
             const through = state.sem.bindings.get(bindingKey(sc, NS_VALUE, nameId));
-            if (through !== undefined && (state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
-                state.sem.errors.push({
-                    pos: identNode.start,
-                    msg: `Identifier \`${identNode.name}\` has already been declared`,
-                });
-                break;
+            if (through !== undefined) {
+                if ((state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
+                    if (state.check)
+                        state.sem.errors.push({
+                            pos: identNode.start,
+                            msg: `Identifier \`${identNode.name}\` has already been declared`,
+                        });
+                    break;
+                }
+                // COMPATIBLE binding on the way up — a catch parameter, or an earlier `var`. oxc's
+                // `VariableDeclarator::bind` (`binder.rs:73-91`) REUSES it and re-homes its binding to
+                // the hoist target rather than minting a second symbol, and that is load-bearing for
+                // output, not just for diagnostics.
+                //
+                // `catch (e) { var e = 1; }` is the case that proves it. Two symbols meant the
+                // declaration renamed with the outer `var` while the body's `e` stayed on the catch
+                // parameter, so `catch (error) { var error$1 = 2; assert(error, 2) }` read the caught
+                // Error — rollup's `catch-scope-deconflicting` fails at RUNTIME on exactly that. Annex
+                // B.3.5 ties the two spellings together in the source, so they have to rename together;
+                // sharing ONE symbol is how oxc gets that for free.
+                // The binding is ADDED at the hoist target and KEPT where it was. oxc removes the
+                // inner one ("avoid same symbols appear in multi-scopes", `binder.rs:85`), which works
+                // there but not here: our references resolve by walking up from their own scope, so
+                // with the inner binding gone `catch (e) { try {} catch (e) { var e; e } }` resolved
+                // the inner `e` to the OUTER catch parameter. Rollup's
+                // `catch-scope-nested-deconflicting` is exactly that shape. One symbol, reachable from
+                // both scopes, is what both ends actually need.
+                if (!state.sem.bindings.has(key)) {
+                    state.sem.bindings.set(key, through);
+                    state.sem.symbols[through].scope = targetScope;
+                }
+                state.sem.symbols[through].flags |= flags;
+                identNode.sym = through;
+                recordDecl(state.sem, through, identNode.id, state.scope);
+                return through;
             }
             if (blockFnHere) break; // only its own block, per Annex B
         }
@@ -594,7 +624,6 @@ function declare(
                 msg: `Identifier \`${identNode.name}\` has already been declared`,
             });
     }
-    const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
     if (existing !== undefined) {
         // Record it BEFORE the flags merge, which would otherwise erase which side was which. Only

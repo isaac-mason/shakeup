@@ -148,3 +148,40 @@ describe('an escaped shorthand property binds under its COOKED name', () => {
         expect(r.chunks[0].code).not.toContain('OUTER"');
     });
 });
+
+// Annex B.3.5: `catch (e) { var e = 1; }`. The `var` binding lives in the enclosing var scope, but
+// inside the catch the parameter SHADOWS it, so the two spellings are tied together in the source and
+// must rename together. Treating them as separate symbols split them under deconfliction:
+//
+//     catch (error) { var error$1 = 2; assert.equal(error, 2); }   // reads the caught Error
+//
+// oxc's `VariableDeclarator::bind` (`binder.rs:73-91`) reuses the binding it finds on the way up
+// rather than minting a second symbol, which makes them ONE symbol and the rename consistent for free.
+// Rollup's `catch-scope-deconflicting` and `catch-scope-nested-deconflicting` fail at RUNTIME on this.
+describe('a `var` that shadows a catch parameter shares its symbol', () => {
+    const bundleTwo = async (dep: string, main: string) => {
+        const r = await bundle({
+            entry: '/main.js',
+            fs: createMemoryFs({ '/main.js': `import './dep.js';\n${main}`, '/dep.js': dep }),
+            external: [],
+            output: {},
+        } as never);
+        return r.chunks[0].code;
+    };
+
+    it('renames the catch parameter and the var together', async () => {
+        const body = `try { throw new Error('x'); } catch (error) { var error = 2; sink = error; }\n`;
+        const code = await bundleTwo(body, body);
+        // The renamed copy must rename BOTH the binding and the parameter, never one of the two.
+        expect(code).not.toMatch(/catch \(error\) \{\s*var error\$1/);
+        expect(code).toMatch(/catch \(error\$1\)/);
+    });
+
+    it('a nested catch resolves its own parameter, not the outer one', async () => {
+        // Deleting the inner binding when re-homing (which is what oxc does) made the inner `e`
+        // resolve to the OUTER catch parameter here.
+        const body = `try { throw 1 } catch (e) { try { throw 2 } catch (e) { var e = 'i'; sink = e; } sink = e; }\n`;
+        const code = await bundleTwo(body, body);
+        expect(code).toMatch(/catch \(e\$1\) \{\s*var e\$1 = 'i';\s*sink = e\$1;/);
+    });
+});
