@@ -8,6 +8,7 @@ import {
     CTX_SUPER_BASE_CTOR,
     CTX_SUPER_CALL,
     CTX_SUPER_PROP,
+    checkAssignTarget,
     checkBindingIdent,
     checkEnter,
     checkRedeclarations,
@@ -496,7 +497,17 @@ function declare(
 ): number {
     // `state.scope`, not `targetScope`: the rules judge where the identifier APPEARS, and a `var` or a
     // function declaration binds into a hoist target that is not the scope it was written in.
-    if (state.check) checkBindingIdent(state.sem, identNode, state.scope, state.sem.errors);
+    if (state.check) {
+        checkBindingIdent(state.sem, identNode, state.scope, state.sem.errors);
+        // `let let = 1` and `const let = 1` are errors even in SLOPPY code, where `let` is otherwise an
+        // ordinary identifier — `var let = 1` is fine. In STRICT code oxc reports only the
+        // reserved-word error for the same program, so this defers to it rather than adding a second.
+        if (identNode.name === 'let' && (flags & (SYM.LET | SYM.CONST)) !== 0 && !isStrictScope(state.sem, state.scope))
+            state.sem.errors.push({
+                pos: identNode.start,
+                msg: `\`let\` cannot be declared as a variable name inside of a \`${(flags & SYM.CONST) !== 0 ? 'const' : 'let'}\` declaration`,
+            });
+    }
     const nameId = internName(state, identNode.name);
     const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
@@ -1339,7 +1350,13 @@ function visit(state: AnalyseState, node: Node | null): void {
                 state.cont = true;
                 // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
                 if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
-                else collectTarget(state, node.data.left);
+                else {
+                    // An assignment target, so the strict `eval`/`arguments` rule applies to it —
+                    // `for ([eval] of []) ;` is an error. `checkEnter` cannot see this: the head is
+                    // not an AssignmentExpression, it is a bare pattern.
+                    if (state.check) checkAssignTarget(state.sem, node.data.left, state.scope, state.sem.errors);
+                    collectTarget(state, node.data.left);
+                }
                 visit(state, node.data.right);
                 state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
                 visit(state, node.data.body);

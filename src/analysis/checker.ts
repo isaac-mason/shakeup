@@ -386,10 +386,47 @@ function checkBindingIdentifier(sem: Semantic, node: Node, scope: number, errors
 /** The assignment half — `oxc`'s `check_identifier_reference` (`:275`). Handled from the ASSIGNMENT
  *  node rather than the identifier, so no ancestor stack is needed to know the identifier is a target. */
 export function checkAssignTarget(sem: Semantic, target: Node, scope: number, errors: CheckError[]): void {
-    if (target.type !== N.IdentifierReference) return;
-    if (target.name !== 'eval' && target.name !== 'arguments') return;
     if (!isStrictScope(sem, scope)) return;
-    errors.push({ pos: target.start, msg: `Cannot assign to '${target.name}' in strict mode` });
+    checkTargetPattern(target, errors);
+}
+
+/**
+ * Walk a destructuring TARGET for `eval`/`arguments`.
+ *
+ * `({ eval = 0 } = {})`, `[eval] = []`, `({ a: eval } = {})` and `[...eval] = []` are all assignments to
+ * `eval` and all errors in strict code — the rule used to look at the top-level node only, so it caught
+ * `eval = 1` and none of these. Patterns reuse the EXPRESSION node types here, so this mirrors
+ * `semantic.ts`'s own `collectTarget`, which walks the same shapes to mark them as writes.
+ */
+function checkTargetPattern(target: Node, errors: CheckError[]): void {
+    switch (target.type) {
+        case N.IdentifierReference:
+            if (target.name === 'eval' || target.name === 'arguments')
+                errors.push({ pos: target.start, msg: `Cannot assign to '${target.name}' in strict mode` });
+            return;
+        case N.ArrayExpression:
+            for (const el of (target.data as { elements: (Node | null)[] }).elements)
+                if (el !== null) checkTargetPattern(el, errors);
+            return;
+        case N.ObjectExpression:
+            for (const prop of (target.data as { properties: Node[] }).properties) checkTargetPattern(prop, errors);
+            return;
+        case N.ObjectProperty:
+            checkTargetPattern((target.data as { value: Node }).value, errors);
+            return;
+        case N.SpreadElement:
+        case N.RestElement:
+            checkTargetPattern((target.data as { argument: Node }).argument, errors);
+            return;
+        case N.AssignmentExpression:
+        case N.AssignmentPattern:
+            // The DEFAULT half of `{ eval = 0 }`; only the target side is an assignment.
+            checkTargetPattern((target.data as { left: Node }).left, errors);
+            return;
+        default:
+            // A member target (`a.b = 1`) assigns to a PROPERTY, not to a binding.
+            return;
+    }
 }
 
 /** `oxc`'s `check_directive` (`:494`). A `"use strict"` directive is illegal in a function whose

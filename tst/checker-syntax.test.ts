@@ -118,6 +118,59 @@ describe('strict-mode reserved words', () => {
     });
 });
 
+describe('`eval`/`arguments` as a DESTRUCTURING assignment target', () => {
+    // The rule used to look at the top-level node only, so it caught `eval = 1` and none of these.
+    it.each([
+        '"use strict"; ({ eval = 0 } = {});',
+        '"use strict"; [eval] = [];',
+        '"use strict"; ({ a: eval } = {});',
+        '"use strict"; [...eval] = [];',
+        '"use strict"; ({ a: { b: eval } } = {});',
+        '"use strict"; for ([eval] of []) ;',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(["Cannot assign to 'eval' in strict mode"]);
+    });
+
+    it.each(['"use strict"; ({ arguments = 0 } = {});', '"use strict"; [arguments] = [];'])('rejects %s', (src) => {
+        expect(check(src)).toEqual(["Cannot assign to 'arguments' in strict mode"]);
+    });
+
+    it.each(['({ eval = 0 } = {});', '"use strict"; [a.eval] = [];', '"use strict"; ({ eval: x } = {});'])(
+        'accepts %s',
+        (src) => {
+            expect(check(src)).toEqual([]);
+        },
+    );
+
+    it('DELIBERATELY stricter than oxc: a bare `for (eval of ...)` head', () => {
+        // oxc ACCEPTS this while rejecting `for ([eval] of [])`, which is inconsistent. Node rejects
+        // both ("Unexpected eval or arguments in strict mode"), so the gap is oxc's. Checked against a
+        // third implementation before keeping our answer, per the usual rule about fixtures.
+        expect(check('"use strict"; for (eval of []) ;')).toEqual(["Cannot assign to 'eval' in strict mode"]);
+    });
+});
+
+describe('`let` as a binding name in a `let` or `const` declaration', () => {
+    it.each(['let let = 1;', 'let [let] = [];', 'let { let } = {};', 'for (let let in {}) {}', 'for (let let of []) {}'])(
+        'rejects %s',
+        (src) => {
+            expect(check(src)).toEqual(['`let` cannot be declared as a variable name inside of a `let` declaration']);
+        },
+    );
+
+    it('names the `const` kind in its own message', () => {
+        expect(check('const let = 1;')).toEqual(['`let` cannot be declared as a variable name inside of a `const` declaration']);
+    });
+
+    it.each(['var let = 1;', 'let x = 1;', 'function let(){}'])('accepts %s in sloppy code', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('in STRICT code the reserved-word rule reports instead', () => {
+        expect(check('"use strict"; let let = 1;')).toEqual(["The keyword 'let' is reserved"]);
+    });
+});
+
 describe('legacy octal and non-octal-decimal ESCAPES in a string', () => {
     // `\0` is the exception that makes a naive scan wrong: it is the NUL escape unless a DIGIT
     // follows. Every line was run through oxc first.
