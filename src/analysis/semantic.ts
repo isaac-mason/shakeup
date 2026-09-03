@@ -1059,7 +1059,11 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
 /** `SYM.FUNCTION`, plus `FN_PLAIN` when Annex B's block allowance can apply to it. */
 const fnFlags = (d: { async: boolean; generator: boolean }): number => SYM.FUNCTION | (d.async || d.generator ? 0 : SYM.FN_PLAIN);
 
-const isDecl = (n: Node | null): boolean => n !== null && (n.type === N.FunctionDeclaration || n.type === N.ClassDeclaration);
+/** Statements the position rules have anything to say about. A `LabeledStatement` is included because
+ *  it PASSES the position through to what it labels: `lbl: function f(){}` is legal at statement-list
+ *  level, but `if (1) lbl: function f(){}` is not, and neither is the same under a loop. */
+const isDecl = (n: Node | null): boolean =>
+    n !== null && (n.type === N.FunctionDeclaration || n.type === N.ClassDeclaration || n.type === N.LabeledStatement);
 
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
@@ -1426,6 +1430,9 @@ function visit(state: AnalyseState, node: Node | null): void {
                 visit(state, node.data.body);
                 return;
             }
+            // Consumed before anything else: our own position decides what we may pass on.
+            const incoming = state.stmtPos;
+            state.stmtPos = STMT_POS_NONE;
             const name = node.data.label.name;
             if (state.labels.has(name))
                 state.sem.errors.push({ pos: node.data.label.start, msg: `Label \`${name}\` has already been declared` });
@@ -1433,7 +1440,16 @@ function visit(state: AnalyseState, node: Node | null): void {
             const labels = new Map(outer);
             labels.set(name, labelsIteration(node.data.body));
             state.labels = labels;
-            state.stmtPos = isDecl(node.data.body) ? STMT_POS_LABEL : STMT_POS_NONE;
+            // A label at statement-list level grants Annex B B.3.2's sloppy allowance to the function
+            // it labels. A label that is ITSELF in a single-statement position grants nothing and
+            // passes the ban along, through any number of labels:
+            //
+            //     lbl: function f(){}                     ok sloppy
+            //     if (1) lbl: function f(){}              ERROR
+            //     do lbl: lbl2: function f(){} while(0)   ERROR
+            //     lbl: lbl2: function f(){}               ok sloppy, through any number of labels
+            const passed = incoming === STMT_POS_NONE || incoming === STMT_POS_LABEL ? STMT_POS_LABEL : STMT_POS_LOOP;
+            state.stmtPos = isDecl(node.data.body) ? passed : STMT_POS_NONE;
             visit(state, node.data.body);
             state.stmtPos = STMT_POS_NONE;
             state.labels = outer;

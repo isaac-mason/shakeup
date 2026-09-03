@@ -84,6 +84,9 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
         case N.NumericLiteral:
             checkNumericLiteral(ctx.sem, node, ctx.scope, errors);
             return;
+        case N.StringLiteral:
+            checkStringEscapes(ctx.sem, node, ctx.scope, errors);
+            return;
         case N.PrivateFieldExpression:
             checkPrivateName((node.data as { field: Node }).field, ctx.privates, ctx.privates !== NO_PRIVATES, errors);
             return;
@@ -444,6 +447,45 @@ function unwrap(node: Node): Node {
     let e = node;
     while (e.type === N.ChainExpression) e = (e.data as { expression: Node }).expression;
     return e;
+}
+
+/**
+ * Legacy octal and non-octal-decimal ESCAPES in a string, which are errors in strict code.
+ *
+ * The boundary is narrow and was taken from oxc one case at a time, because `\0` is the exception that
+ * makes a naive scan wrong:
+ *
+ *     "\\0"     ok        the NUL escape, legal in strict code
+ *     "\\0a"    ok        still NUL — only a following DIGIT makes it octal
+ *     "\\08"    ERROR     "'0'-prefixed octal literals and octal escape sequences are deprecated"
+ *     "\\1"     ERROR     same message, as do \\2..\\7 and multi-digit forms like \\377
+ *     "\\8"     ERROR     but "Invalid escape sequence" — a different rule
+ *     "\\\\07"   ok        the backslash is itself escaped
+ *
+ * A string in the DIRECTIVE PROLOGUE is checked too: `"\\07"; "use strict";` is an error, because the
+ * prologue is already strict by the time the directive is reached. `analyze` seeds the scope flag from
+ * the prologue before visiting it, so that falls out without a special case.
+ */
+function checkStringEscapes(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+    const raw = node.name;
+    if (raw.indexOf('\\') < 0 || !isStrictScope(sem, scope)) return;
+    for (let i = 0; i < raw.length - 1; i++) {
+        if (raw.charCodeAt(i) !== 92) continue; // not a backslash
+        const c = raw.charCodeAt(i + 1);
+        i++; // an escape consumes the next character whatever it is, including another backslash
+        if (c === 56 || c === 57) {
+            errors.push({ pos: node.start, msg: 'Invalid escape sequence' });
+            return;
+        }
+        if (c < 48 || c > 55) continue; // not an octal digit
+        // `\0` is the NUL escape unless a DIGIT follows it.
+        if (c === 48) {
+            const next = i + 1 < raw.length ? raw.charCodeAt(i + 1) : -1;
+            if (next < 48 || next > 57) continue;
+        }
+        errors.push({ pos: node.start, msg: "'0'-prefixed octal literals and octal escape sequences are deprecated" });
+        return;
+    }
 }
 
 /** oxc's `check_number_literal` (`checker/javascript.rs:392`). Both forms are legal sloppy and errors

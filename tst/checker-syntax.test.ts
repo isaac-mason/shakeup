@@ -118,6 +118,69 @@ describe('strict-mode reserved words', () => {
     });
 });
 
+describe('legacy octal and non-octal-decimal ESCAPES in a string', () => {
+    // `\0` is the exception that makes a naive scan wrong: it is the NUL escape unless a DIGIT
+    // follows. Every line was run through oxc first.
+    it.each([
+        '"use strict"; "\\07";',
+        '"use strict"; "\\08";',
+        '"use strict"; "\\1";',
+        '"use strict"; "\\7";',
+        '"use strict"; "\\377";',
+        "'use strict'; '\\07';",
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(["'0'-prefixed octal literals and octal escape sequences are deprecated"]);
+    });
+
+    it.each(['"use strict"; "\\8";', '"use strict"; "\\9";'])('reports \\8 and \\9 differently: %s', (src) => {
+        expect(check(src)).toEqual(['Invalid escape sequence']);
+    });
+
+    it.each([
+        '"\\07";',
+        '"use strict"; "\\0";',
+        '"use strict"; "\\0a";',
+        '"use strict"; "\\x41";',
+        '"use strict"; "\\\\07";',
+        '"use strict"; "a\\nb";',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('a module is strict, so no directive is needed', () => {
+        expect(check('"\\07";', true)).toEqual(["'0'-prefixed octal literals and octal escape sequences are deprecated"]);
+    });
+
+    it('the DIRECTIVE PROLOGUE is checked too', () => {
+        // `"\07"; "use strict";` — the prologue is already strict by the time it is reached.
+        expect(check('"\\07"; "use strict";')).toEqual(["'0'-prefixed octal literals and octal escape sequences are deprecated"]);
+    });
+});
+
+describe('a label passes its statement position through to what it labels', () => {
+    it.each([
+        'do label1: function f() {} while (false)',
+        'do label1: label2: function f() {} while (false)',
+        'while(0) lbl: function f(){}',
+        'for(;;) lbl: function f(){}',
+        'for (x of o) lbl: function f(){}',
+        'if (1) lbl: function f(){}',
+        '"use strict"; lbl: lbl2: function f(){}',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual(['Invalid function declaration']);
+    });
+
+    it.each([
+        'lbl: function f(){}',
+        'lbl: lbl2: function f(){}',
+        'lbl: lbl2: lbl3: function f(){}',
+        'lbl: { function f(){} }',
+        'if (1) lbl: { function f(){} }',
+    ])('accepts %s in sloppy code', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+});
+
 describe('a declaration in single-statement position', () => {
     // Four positions, four different answers — taken from oxc one at a time. `if`/`else` and a label
     // keep Annex B's sloppy allowance; a loop body has none.
