@@ -32,6 +32,41 @@ const msg = (src: string) => errs(src)[0]?.msg;
 //
 // These were the LAST findings in `pnpm parsercorpus`; closing them took that differential to 0 in
 // BOTH directions across 4,441 node_modules files.
+// A `yield`/`await` EXPRESSION is illegal in the formal parameters of the function whose context it
+// belongs to. The boundary is what an ARROW does versus what a nested function does: an arrow inherits
+// the surrounding generator/async context, so its parameters are still "inside" it, while an ordinary
+// function or a method gets a fresh context and the same word is just an identifier there.
+describe('yield/await expressions in a formal parameter list', () => {
+    const bad = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each(['function *g(x = yield) {}', 'function *g() { (x = yield) => {}; }', 'function *g() { (x = yield 1) => {}; }'])(
+        'rejects %s',
+        (src) => {
+            expect(bad(src)).toContain('yield expression not allowed in formal parameter');
+        },
+    );
+
+    it.each(['async function a(x = await 1) {}', 'async function a() { (x = await 1) => {}; }'])('rejects %s', (src) => {
+        expect(bad(src)).toContain('await expression not allowed in formal parameter');
+    });
+
+    it.each([
+        // A nested ORDINARY function gets a fresh context, so `yield` there is an identifier.
+        'function *g() { function f(x = yield) {} }',
+        'function *g() { (function(x = yield){}); }',
+        'function *g() { ({ m(x = yield){} }); }',
+        'function f(x = yield) {}',
+        // A default may contain a whole generator, and ITS BODY is not a parameter list.
+        'function *g(a = function*(){ yield 1 }) {}',
+        // Ordinary uses, well away from any parameter list.
+        'function *g(a = 1) { yield a; }',
+        'async function a(b = 1) { await b; }',
+        'function *g(a = () => 1) {}',
+    ])('accepts %s', (src) => {
+        expect(bad(src)).toEqual([]);
+    });
+});
+
 describe('import.meta outside a module', () => {
     const goalErrs = (src: string, kind: 'module' | 'commonjs' | 'unambiguous') =>
         parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);

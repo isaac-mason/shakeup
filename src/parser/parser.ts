@@ -45,6 +45,7 @@ import {
     type ParseError,
     type ParserState,
     raise,
+    raiseSoft,
     raiseAt,
     T_BIGINT,
     T_EOF,
@@ -149,6 +150,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // reason the two above are — `unambiguous` stays permissive, so only a file carrying a real
         // signal (`.cjs`/`.cts`, or a declared `package.json#type`) is held to it.
         allowImportMeta: options.kind !== 'commonjs',
+        inParams: false,
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
         errors: [],
@@ -670,6 +672,7 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
             !isP(state, P.COLON)
         )
             arg = parseAssign(state, noIn);
+        if (state.inParams) raiseSoft(state, start, ParseErrorCode.YieldInFormalParameter);
         return create.YieldExpression(start, arg ? arg.end : state.tokStart, flags, arg);
     }
 
@@ -829,6 +832,7 @@ function parseUnary(state: ParserState): Node {
                 if (state.fnDepth === 0) state.sawTopLevelAwait = true;
                 nextToken(state);
                 const arg = parseUnary(state);
+                if (state.inParams) raiseSoft(state, start, ParseErrorCode.AwaitInFormalParameter);
                 return create.AwaitExpression(start, arg.end, 0, arg);
             }
         }
@@ -1993,6 +1997,14 @@ function raiseRestNotLast(state: ParserState, close: number, notLast: ParseError
 }
 
 function parseParams(state: ParserState): Node[] {
+    const outerInParams = state.inParams;
+    state.inParams = true;
+    const params = parseParamsInner(state);
+    state.inParams = outerInParams;
+    return params;
+}
+
+function parseParamsInner(state: ParserState): Node[] {
     expectP(state, P.LPAREN, "'('");
     const from = state.sp;
     while (!isP(state, P.RPAREN) && (state.tok as number) !== T_EOF) {
@@ -2403,11 +2415,22 @@ function parseBlock(state: ParserState): Node {
     const start = state.tokStart;
     expectP(state, P.LBRACE, "'{'");
     const from = state.sp;
+    // A default value may contain a whole function, and ITS body is not a parameter list:
+    // `function *g(a = function*(){ yield 1 }) {}` is legal. Nested parameter lists re-set the flag
+    // themselves, so clearing it here is enough.
+    //
+    // INLINE, not a wrapper function. A block is the deepest-nesting node there is, and
+    // `tst/deep-nesting.test.ts` pins a ceiling that moves whenever this walker grows — splitting this
+    // into `parseBlock`/`parseBlockInner` added one frame per level and took 1000 nested blocks over
+    // the limit on the first try.
+    const outerInParams = state.inParams;
+    state.inParams = false;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         const mark = state.tokStart;
         push(state, parseStatement(state, false));
         if (noProgress(state, mark)) break;
     }
+    state.inParams = outerInParams;
     expectP(state, P.RBRACE, "'}'");
     return create.BlockStatement(start, state.tokStart, 0, finishList(state, from));
 }

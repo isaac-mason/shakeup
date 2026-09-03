@@ -109,6 +109,11 @@ export type ParserState = {
     allowTopReturn: boolean;
     /** Module goal allows top-level `new.target`. Same rule as {@link allowTopReturn}. */
     allowTopNewTarget: boolean;
+    /** Parsing a FORMAL PARAMETER list right now. A `yield`/`await` EXPRESSION is illegal there —
+     *  `function *g(x = yield) {}` and `async function a(x = await 1) {}` — and an arrow INHERITS the
+     *  surrounding context, so `function *g() { (x = yield) => {}; }` is an error too while a nested
+     *  ordinary function's `yield` is just an identifier. Cleared for any nested BODY. */
+    inParams: boolean;
     /** Module goal allows `import.meta`, which is MODULE-ONLY syntax. False only for an explicitly
      *  CommonJS-declared file; `unambiguous` stays permissive, as with {@link allowTopReturn}. */
     allowImportMeta: boolean;
@@ -216,6 +221,22 @@ export function raise(state: ParserState, code: ParseErrorCode, ...params: strin
 /** {@link raise} at an explicit offset, for an EARLY error — one discovered after the offending
  *  construct has already been parsed, where `tokStart` is a token past it. `f() = 1` is found at the
  *  `=`, but the span oxc labels is the call's. */
+/**
+ * Record an early error WITHOUT latching `fatal` or jumping to end-of-input, so the parse continues.
+ *
+ * Needed where the offending construct sits inside a SPECULATIVE arrow head: `raiseAt` aborts to EOF,
+ * which makes `tryParseArrow` treat the attempt as a failure, rewind, and re-parse the text as a
+ * parenthesised expression — the real diagnostic is discarded and the reader gets "expected ';'".
+ *
+ * A soft error rides the speculation instead. `restoreState` truncates `state.errors` to its saved
+ * length (`restoreState`, index 5), so this survives a probe that SUCCEEDS and is dropped by one that
+ * fails — which is exactly the cover-grammar rule: the error only exists if the arrow does.
+ */
+export function raiseSoft(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
+    if (state.fatal) return;
+    state.errors.push({ pos, msg: formatError(code, params), code });
+}
+
 export function raiseAt(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
     if (state.fatal) return;
     state.fatal = true;
