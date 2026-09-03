@@ -82,6 +82,7 @@ export const ParseErrorCode = enumeration(
     'InvalidEscapedIdentChar',
     'EscapedKeyword',
     'ImportExportNotTopLevel',
+    'ForAwaitOutsideAsync',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
 
@@ -162,6 +163,8 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.InvalidEscape]: 'Invalid escape sequence',
     [ParseErrorCode.InvalidEscapedIdentChar]: "invalid character '%0' in an escaped identifier",
     [ParseErrorCode.EscapedKeyword]: 'keywords cannot contain escape characters',
+    [ParseErrorCode.ForAwaitOutsideAsync]:
+        '`for await` loops are only allowed within async functions and at the top levels of modules',
     [ParseErrorCode.ImportExportNotTopLevel]: "'import' and 'export' may only appear at the top level",
 };
 

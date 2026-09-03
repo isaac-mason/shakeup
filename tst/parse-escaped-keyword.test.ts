@@ -67,6 +67,49 @@ describe('yield/await expressions in a formal parameter list', () => {
     });
 });
 
+// oxc's `error_on_script` (`error_handler.rs:69`) + `deferred_script_errors` (`lib.rs:745-753`):
+// under the `unambiguous` goal the module kind is unknown until the parse ends, and several rules are
+// errors in a SCRIPT and legal in a MODULE. They are parked and resolved at the end.
+//
+// This replaced a family of `allow*` booleans, each answering one such question by hand. The mechanism
+// generalises where the flags did not: `import.meta` is ITSELF an ESM marker, so under `unambiguous`
+// its own deferred error cancels — no flag expressed that. And it brought `for await` at top level
+// with it, which we had been ACCEPTING in both script and unambiguous goals.
+describe('errors that only hold if the file is a SCRIPT', () => {
+    const errs = (src: string, kind: 'module' | 'commonjs' | 'unambiguous') =>
+        parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);
+
+    it('`for await` at top level: rejected in a script, legal in a module', () => {
+        expect(errs('for await (const x of y) {}', 'commonjs')).toEqual([
+            '`for await` loops are only allowed within async functions and at the top levels of modules',
+        ]);
+        expect(errs('for await (const x of y) {}', 'module')).toEqual([]);
+    });
+
+    it('and under `unambiguous` it stays an error, because `for await` does NOT mark ESM', () => {
+        expect(errs('for await (const x of y) {}', 'unambiguous')).not.toEqual([]);
+    });
+
+    it('but ESM syntax elsewhere in the file discards it', () => {
+        expect(errs('for await (const x of y) {} export var z = 1;', 'unambiguous')).toEqual([]);
+    });
+
+    it('inside a NON-async function it is invalid in every goal', () => {
+        for (const k of ['commonjs', 'unambiguous', 'module'] as const)
+            expect(errs('function f(){ for await (const x of y) {} }', k)).not.toEqual([]);
+    });
+
+    it('an async function permits it', () => {
+        expect(errs('async function f(){ for await (const x of y) {} }', 'commonjs')).toEqual([]);
+    });
+
+    it('`import.meta` cancels its OWN deferred error under `unambiguous`', () => {
+        // It is an ESM marker, so the file resolves to a module and the error is discarded.
+        expect(errs('import.meta;', 'unambiguous')).toEqual([]);
+        expect(errs('import.meta;', 'commonjs')).toEqual(['Unexpected import.meta expression']);
+    });
+});
+
 describe('import.meta outside a module', () => {
     const goalErrs = (src: string, kind: 'module' | 'commonjs' | 'unambiguous') =>
         parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);

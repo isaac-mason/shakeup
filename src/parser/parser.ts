@@ -45,6 +45,7 @@ import {
     type ParseError,
     type ParserState,
     raise,
+    raiseOnScript,
     raiseSoft,
     raiseAt,
     T_BIGINT,
@@ -145,11 +146,8 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // `package.json#type` — is held to it. Mirrors oxc's `ModuleKind::Unambiguous`.
         allowTopReturn: options.kind !== 'module',
         allowTopNewTarget: options.kind !== 'module',
-        // `import.meta` is MODULE-ONLY syntax: node says "Cannot use 'import.meta' outside a module",
-        // oxc "Unexpected import.meta expression". Gated on an EXPLICIT commonjs goal for the same
-        // reason the two above are — `unambiguous` stays permissive, so only a file carrying a real
-        // signal (`.cjs`/`.cts`, or a declared `package.json#type`) is held to it.
-        allowImportMeta: options.kind !== 'commonjs',
+        goalIsModule: options.kind === 'module',
+        deferredScriptErrors: [],
         inParams: false,
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
@@ -1406,7 +1404,11 @@ function parsePrimary(state: ParserState): Node {
                 }
                 const prop = parseNameAsIdent(state, R_NAME);
                 if (prop.name !== 'meta') raise(state, ParseErrorCode.InvalidImportProperty);
-                else if (!state.allowImportMeta) raise(state, ParseErrorCode.ImportMetaOutsideModule);
+                // oxc reports this whenever the source is not a MODULE (`js/expression.rs:690`),
+                // deferring under `unambiguous` — where `import.meta` is itself an ESM marker, so the
+                // file upgrades and the error cancels itself. That self-cancellation is the part a
+                // plain `allowImportMeta` flag could not express.
+                else if (!state.goalIsModule) raiseOnScript(state, start, ParseErrorCode.ImportMetaOutsideModule);
                 state.sawImportSyntax = true;
                 return create.ImportMeta(start, state.tokStart, 0);
             }
@@ -2914,7 +2916,18 @@ function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Nod
 function parseFor(state: ParserState, start: number): Node {
     nextToken(state);
     let flags = 0;
-    if (eatK(state, K.AWAIT)) flags |= FL.AWAIT;
+    if (eatK(state, K.AWAIT)) {
+        flags |= FL.AWAIT;
+        // `for await` needs an async function, or the top level of a MODULE. oxc's
+        // `js/statement.rs:355-364`: deferred under `unambiguous`, immediate otherwise. Unlike
+        // `await`, `for await` does NOT mark the file as ESM, so a script keeps the error.
+        if (!inCtx(state, CTX.Await)) {
+            // oxc splits on `ctx.has_top_level()`: at top level the answer depends on the goal, so it
+            // defers; inside a non-async function `for await` is invalid in EVERY goal.
+            if (state.fnDepth === 0) raiseOnScript(state, state.tokStart, ParseErrorCode.ForAwaitOutsideAsync);
+            else raiseSoft(state, state.tokStart, ParseErrorCode.ForAwaitOutsideAsync);
+        }
+    }
     expectP(state, P.LPAREN, "'('");
     let init: Ref = null;
     if (isP(state, P.SEMI)) nextToken(state);
@@ -4352,6 +4365,15 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         push(state, parseStatement(state, false));
     }
     const body = finishList(state, from);
+    // The `unambiguous` goal is settled only now. Errors parked by `raiseOnScript` hold if the file
+    // turned out to be a SCRIPT and are discarded if it turned out to be a MODULE — oxc's
+    // `lib.rs:745-753`. `import.meta` and a top-level `await` both mark ESM themselves, so a file
+    // whose only script-error is one of those resolves to a module and keeps none of them.
+    if (state.deferredScriptErrors.length > 0) {
+        if (!state.sawEsmImport && !state.sawEsmExport && !state.sawImportSyntax)
+            for (const e of state.deferredScriptErrors) state.errors.push(e);
+        state.deferredScriptErrors.length = 0;
+    }
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;
     return {

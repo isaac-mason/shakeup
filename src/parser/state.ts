@@ -114,9 +114,24 @@ export type ParserState = {
      *  surrounding context, so `function *g() { (x = yield) => {}; }` is an error too while a nested
      *  ordinary function's `yield` is just an identifier. Cleared for any nested BODY. */
     inParams: boolean;
-    /** Module goal allows `import.meta`, which is MODULE-ONLY syntax. False only for an explicitly
-     *  CommonJS-declared file; `unambiguous` stays permissive, as with {@link allowTopReturn}. */
-    allowImportMeta: boolean;
+    /** The goal is declared MODULE. `import.meta` and top-level `await` are legal only here (or,
+     *  pending resolution, under `unambiguous`). */
+    goalIsModule: boolean;
+    /**
+     * Errors that only hold if the file turns out to be a SCRIPT.
+     *
+     * oxc's `deferred_script_errors` + `error_on_script` (`error_handler.rs:69`). Under the
+     * `unambiguous` goal the module kind is not known until the parse ends, and several rules —
+     * `import.meta`, top-level `await`, `for await` at top level — are errors in a script and legal in
+     * a module. oxc parks them here and, at the end of `parse`, EMITS them if the file resolved to a
+     * script and DISCARDS them if it resolved to a module (`lib.rs:745-753`).
+     *
+     * This replaces a family of `allow*` booleans that each answered one such question by hand. The
+     * mechanism generalises where the flags did not: `import.meta` and top-level `await` are
+     * themselves ESM markers, so under `unambiguous` their own deferred error self-cancels, which no
+     * flag expressed.
+     */
+    deferredScriptErrors: ParseError[];
     /** Is `await` the OPERATOR here, rather than a plain identifier? oxc's `Context::has_await`
      *  (`js/arrow.rs:261,311` — `ctx.and_await(r#async)`), which is REPLACED on entering a function
      *  body by that function's async-ness and restored on exit, not accumulated. Seeded at top level
@@ -235,6 +250,21 @@ export function raise(state: ParserState, code: ParseErrorCode, ...params: strin
 export function raiseSoft(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
     if (state.fatal) return;
     state.errors.push({ pos, msg: formatError(code, params), code });
+}
+
+/**
+ * Raise an error that only holds if this file is a SCRIPT — oxc's `error_on_script`
+ * (`error_handler.rs:69`).
+ *
+ * With a declared goal the answer is known now, so it behaves like {@link raiseSoft}. Under
+ * `unambiguous` it is parked in {@link ParserState.deferredScriptErrors} and resolved once the parse
+ * has seen whether the file contains ESM syntax.
+ */
+export function raiseOnScript(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
+    if (state.fatal) return;
+    const e = { pos, msg: formatError(code, params), code };
+    if (state.goalUnknown) state.deferredScriptErrors.push(e);
+    else state.errors.push(e);
 }
 
 export function raiseAt(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
