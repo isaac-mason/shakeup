@@ -25,6 +25,7 @@ export const ParseErrorCode = enumeration(
     'NewOptionalChain',
     'NewDynamicImport',
     'InvalidImportProperty',
+    'ImportMetaOutsideModule',
     'ImportRequiresSpecifier',
     'ImportArguments',
     'DynamicImportSpread',
@@ -100,6 +101,7 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.NewDynamicImport]: 'Cannot use new with dynamic import',
     [ParseErrorCode.InvalidImportProperty]:
         'The only valid property accesses on import are `import.meta`, `import.source()`, and `import.defer()`',
+    [ParseErrorCode.ImportMetaOutsideModule]: 'Unexpected import.meta expression',
     [ParseErrorCode.ImportRequiresSpecifier]: 'import() requires a specifier.',
     [ParseErrorCode.ImportArguments]:
         'Dynamic imports can only accept a module specifier and an optional set of attributes as arguments',

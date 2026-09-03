@@ -144,6 +144,11 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // `package.json#type` — is held to it. Mirrors oxc's `ModuleKind::Unambiguous`.
         allowTopReturn: options.kind !== 'module',
         allowTopNewTarget: options.kind !== 'module',
+        // `import.meta` is MODULE-ONLY syntax: node says "Cannot use 'import.meta' outside a module",
+        // oxc "Unexpected import.meta expression". Gated on an EXPLICIT commonjs goal for the same
+        // reason the two above are — `unambiguous` stays permissive, so only a file carrying a real
+        // signal (`.cjs`/`.cts`, or a declared `package.json#type`) is held to it.
+        allowImportMeta: options.kind !== 'commonjs',
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
         errors: [],
@@ -1397,6 +1402,7 @@ function parsePrimary(state: ParserState): Node {
                 }
                 const prop = parseNameAsIdent(state, R_NAME);
                 if (prop.name !== 'meta') raise(state, ParseErrorCode.InvalidImportProperty);
+                else if (!state.allowImportMeta) raise(state, ParseErrorCode.ImportMetaOutsideModule);
                 state.sawImportSyntax = true;
                 return create.ImportMeta(start, state.tokStart, 0);
             }

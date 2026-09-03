@@ -25,6 +25,37 @@ import { parse } from '../src/parser/index.ts';
 const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors;
 const msg = (src: string) => errs(src)[0]?.msg;
 
+// `import.meta` is MODULE-ONLY syntax — node says "Cannot use 'import.meta' outside a module", oxc
+// "Unexpected import.meta expression". Gated on an EXPLICIT commonjs goal for the same reason
+// `allowTopReturn` and `allowTopNewTarget` are: `unambiguous` stays permissive, so only a file with a
+// real signal (`.cjs`/`.cts`, or a declared `package.json#type`) is held to it.
+//
+// These were the LAST findings in `pnpm parsercorpus`; closing them took that differential to 0 in
+// BOTH directions across 4,441 node_modules files.
+describe('import.meta outside a module', () => {
+    const goalErrs = (src: string, kind: 'module' | 'commonjs' | 'unambiguous') =>
+        parse(src, { ts: false, jsx: false, kind }).errors.map((e) => e.msg);
+
+    it.each(['import.meta.url;', 'function f(){ return import.meta; }', 'new URL("a", import.meta.url);'])(
+        'rejects %s under an explicit commonjs goal',
+        (src) => {
+            expect(goalErrs(src, 'commonjs')).toEqual(['Unexpected import.meta expression']);
+        },
+    );
+
+    it.each(['import.meta.url;', 'import.meta;'])('accepts %s in a module', (src) => {
+        expect(goalErrs(src, 'module')).toEqual([]);
+    });
+
+    it('stays permissive under the unambiguous default', () => {
+        expect(goalErrs('import.meta.url;', 'unambiguous')).toEqual([]);
+    });
+
+    it('leaves dynamic import alone', () => {
+        expect(goalErrs('import(x);', 'commonjs')).toEqual([]);
+    });
+});
+
 const rejects = (src: string) => {
     expect(() => new Function(src), `node must agree ${src} is invalid`).toThrow();
     expect(errs(src), src).not.toEqual([]);

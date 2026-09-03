@@ -109,6 +109,9 @@ export type ParserState = {
     allowTopReturn: boolean;
     /** Module goal allows top-level `new.target`. Same rule as {@link allowTopReturn}. */
     allowTopNewTarget: boolean;
+    /** Module goal allows `import.meta`, which is MODULE-ONLY syntax. False only for an explicitly
+     *  CommonJS-declared file; `unambiguous` stays permissive, as with {@link allowTopReturn}. */
+    allowImportMeta: boolean;
     /** Is `await` the OPERATOR here, rather than a plain identifier? oxc's `Context::has_await`
      *  (`js/arrow.rs:261,311` — `ctx.and_await(r#async)`), which is REPLACED on entering a function
      *  body by that function's async-ness and restored on exit, not accumulated. Seeded at top level
