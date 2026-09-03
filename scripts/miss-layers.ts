@@ -31,7 +31,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseSync } from 'oxc-parser';
-import { checkSyntax } from '../src/analysis/checker.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parseWithDiagnostics } from '../src/parser/parser.ts';
 
@@ -163,8 +162,8 @@ for (const p of files) {
                 kind: sourceType === 'module' ? 'module' : 'unambiguous',
             }).program;
             const sem = createSemantic();
-            analyze(sem, prog, sourceType === 'module');
-            if (checkSyntax(sem, prog).length > 0) ported++;
+            analyze(sem, prog, sourceType === 'module', true);
+            if (sem.errors.length > 0) ported++;
         } catch {
             // a checker crash must not change the layer verdict
         }

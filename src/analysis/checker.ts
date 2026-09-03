@@ -1,116 +1,116 @@
-import { N, type Node, walkChildren } from '../ast/index.ts';
+import { N, type Node } from '../ast/index.ts';
 import { isStrictScope, type Semantic, SYM } from './semantic.ts';
 
 /** One early error, in the parser's diagnostic shape so both sinks read alike. */
 export type CheckError = { pos: number; msg: string };
 
 /**
- * Early errors that need the SEMANTIC MODEL — the rules a parser cannot decide because they depend on
- * accumulated strict mode, on scopes, or on symbols. oxc keeps these in a separate crate for exactly
- * that reason (`oxc_semantic/src/checker/`, 41 rules); its parser has no strict bit at all.
+ * Context the rules read, structurally satisfied by `analyze`'s own `AnalyseState`.
  *
- * **A separate PASS, where oxc fuses this into the semantic build.** oxc calls `check(kind, ctx)` from
- * `SemanticBuilder::leave_node` and pays nothing for it, and its own doc comment says why: both are
- * `#[inline(always)]`, so each `visit_*` site passes a statically known `AstKind` and the compiler
- * constant-folds the match, deleting every non-matching arm. There is no equivalent in JS — the match
- * would be a live switch on every node of every `analyze` call, and `analyze` has 25 call sites, most
- * of them mid-pass rebuilds that never want checking. Running separately costs ZERO when it is off and
- * one extra walk when it is on, which happens once per source module.
- *
- * Iterative, not recursive: the same reason `walk` is (a 300-deep program used to exhaust the stack).
- * Scope is carried down rather than looked up, because only scope-OWNING nodes record a `scopeId`.
+ * Declared here rather than importing `AnalyseState` (which `semantic.ts` does not export) so the
+ * dependency runs one way: `semantic.ts` imports the rules, and this module knows nothing about the
+ * walker beyond the six fields it reads.
  */
-export function checkSyntax(sem: Semantic, program: Node): CheckError[] {
-    const errors: CheckError[] = [];
-    checkRedeclarations(sem, errors);
-    const stack: Node[] = [program];
-    // ONE context object per stack entry, not three parallel arrays. Almost no node changes any of
-    // scope, jump target or visible private names, so the same object is pushed for every child and a
-    // new one allocated only where something actually differs. That halves the pushes per node from
-    // four to two, on a walk that runs over every node of every module.
-    const ctxs: Ctx[] = [{ scope: ownScopeOf(program), jump: TOP_JUMP, privates: NO_PRIVATES }];
-    while (stack.length > 0) {
-        const node = stack.pop() as Node;
-        const inherited = ctxs.pop() as Ctx;
-        const own = ownScopeOf(node);
-        const scope = own === 0 ? inherited.scope : own;
-        checkNode(sem, node, scope, inherited.jump, inherited.privates, errors);
-        const jump = descendJump(node, inherited.jump, errors);
-        const priv = descendPrivates(node, inherited.privates, errors);
-        const ctx =
-            scope === inherited.scope && jump === inherited.jump && priv === inherited.privates
-                ? inherited
-                : { scope, jump, privates: priv };
-        walkChildren(node, (child) => {
-            stack.push(child);
-            ctxs.push(ctx);
-        });
-    }
-    return errors;
-}
+export type CheckCtx = {
+    sem: Semantic;
+    scope: number;
+    brk: boolean;
+    cont: boolean;
+    labels: ReadonlyMap<string, boolean>;
+    privates: ReadonlySet<string>;
+};
 
 /**
- * What a `break` or `continue` may target at this point in the tree.
+ * Every rule that needs only the node and the current context, called once per node from the top of
+ * `analyze`'s `visit`. This is the fused equivalent of oxc's `checker::check(kind, self)` inside
+ * `SemanticBuilder::leave_node` (`builder.rs:840`).
  *
- * oxc walks UP from the jump statement (`ctx.ancestry().ancestor_kinds()`); this carries the same
- * information DOWN, because the walk here is already top-down and a parent map would cost an entry per
- * node. Same answers, and the context object is only reallocated at the handful of nodes that change
- * it — a loop, a switch, a label, or a function boundary.
+ * The rules that need ENTER/LEAVE bracketing — a loop making `break` legal, a class contributing
+ * private names, a function boundary a jump may not cross — are NOT here. They live inline in the
+ * `visit` arms that already open those scopes, because only there is there a "leave" to restore on.
  *
- * `labels` maps a label name to whether it names an ITERATION statement, which is the distinction
- * between `break a` (any label) and `continue a` (loops only).
+ * ORDER IS SOURCE ORDER, which the separate walk got wrong: it pushed children onto an explicit stack
+ * and popped siblings back-to-front, so `"use strict"; delete x; var y = 010; delete z;` reported at
+ * 44, 32, 21. oxc reports in source order and now so do we.
  */
-type JumpCtx = { breakable: boolean; continuable: boolean; labels: ReadonlyMap<string, boolean> };
+export function checkEnter(ctx: CheckCtx, node: Node): void {
+    const errors = ctx.sem.errors;
+    switch (node.type) {
+        case N.UnaryExpression:
+            checkUnaryExpression(ctx.sem, node, ctx.scope, errors);
+            return;
+        case N.NumericLiteral:
+            checkNumericLiteral(ctx.sem, node, ctx.scope, errors);
+            return;
+        case N.PrivateFieldExpression:
+            checkPrivateName((node.data as { field: Node }).field, ctx.privates, ctx.privates !== NO_PRIVATES, errors);
+            return;
+        case N.BinaryExpression: {
+            // `#x in o` — the ergonomic brand check. The private name is the LEFT operand here rather
+            // than a member access, so it needs its own arm; everything else about the rule is the same.
+            const b = node.data as { operator: string; left: Node };
+            if (b.operator === 'in' && b.left.type === N.PrivateIdentifier)
+                checkPrivateName(b.left, ctx.privates, ctx.privates !== NO_PRIVATES, errors);
+            return;
+        }
+        case N.AssignmentExpression:
+            checkAssignTarget(ctx.sem, (node.data as { left: Node }).left, ctx.scope, errors);
+            return;
+        case N.UpdateExpression:
+            checkAssignTarget(ctx.sem, (node.data as { argument: Node }).argument, ctx.scope, errors);
+            return;
+        case N.BreakStatement:
+        case N.ContinueStatement: {
+            checkJump(node, ctx.brk, ctx.cont, ctx.labels, errors);
+            // A LabelIdentifier is not a reference and is never collected, so `collect`'s hook cannot
+            // reach it; both the jump's label and the labelled statement's own are checked here.
+            const label = (node.data as { label: Node | null }).label;
+            if (label !== null) checkReservedWord(ctx.sem, label, ctx.scope, errors);
+            return;
+        }
+        case N.LabeledStatement:
+            checkReservedWord(ctx.sem, (node.data as { label: Node }).label, ctx.scope, errors);
+            return;
+        case N.FunctionDeclaration:
+        case N.FunctionExpression:
+        case N.ArrowFunctionExpression:
+            checkUseStrictDirective(node, errors);
+            return;
+        case N.ObjectProperty:
+        case N.MethodDefinition:
+        case N.PropertyDefinition: {
+            // `visit` descends into a key only when it is COMPUTED, because a plain key is not a
+            // reference. But `"use strict"; ({ 010: 1 })` is a legacy-octal error the separate walk
+            // caught by visiting every node, so the key is checked here rather than descended into.
+            const d = node.data as { computed: boolean; key?: Node };
+            if (!d.computed && d.key !== undefined && d.key.type === N.NumericLiteral)
+                checkNumericLiteral(ctx.sem, d.key, ctx.scope, errors);
+            return;
+        }
+        default:
+            return;
+    }
+}
 
-/** Everything carried down the walk, in one object so the stack holds one entry per node rather than
- *  one per context dimension. */
-type Ctx = { scope: number; jump: JumpCtx; privates: ReadonlySet<string> };
-const NO_LABELS: ReadonlyMap<string, boolean> = new Map();
-const TOP_JUMP: JumpCtx = { breakable: false, continuable: false, labels: NO_LABELS };
+export const NO_LABELS: ReadonlyMap<string, boolean> = new Map();
 
 const ITERATION = new Set<number>([N.WhileStatement, N.DoWhileStatement, N.ForStatement, N.ForInStatement, N.ForOfStatement]);
 
 /** The label of `a: b: while (1) {}` names an iteration statement, through any number of labels. */
-function labelsIteration(body: Node): boolean {
+export function labelsIteration(body: Node): boolean {
     let b = body;
     while (b.type === N.LabeledStatement) b = (b.data as { body: Node }).body;
     return ITERATION.has(b.type);
 }
 
-/** The context this node's CHILDREN see. */
-function descendJump(node: Node, ctx: JumpCtx, errors: CheckError[]): JumpCtx {
-    // A function body starts fresh: a jump may not cross the boundary, which is why
-    // `while(1){ (function(){ break; }); }` is an error. A class static block is the same.
-    if (
-        node.type === N.FunctionDeclaration ||
-        node.type === N.FunctionExpression ||
-        node.type === N.ArrowFunctionExpression ||
-        node.type === N.StaticBlock
-    )
-        return TOP_JUMP;
-    if (ITERATION.has(node.type)) return { breakable: true, continuable: true, labels: ctx.labels };
-    if (node.type === N.SwitchStatement) return { breakable: true, continuable: ctx.continuable, labels: ctx.labels };
-    if (node.type === N.LabeledStatement) {
-        const d = node.data as { label: Node; body: Node };
-        const name = d.label.name;
-        if (ctx.labels.has(name)) errors.push({ pos: d.label.start, msg: `Label \`${name}\` has already been declared` });
-        const labels = new Map(ctx.labels);
-        labels.set(name, labelsIteration(d.body));
-        return { breakable: ctx.breakable, continuable: ctx.continuable, labels };
-    }
-    return ctx;
-}
-
-const NO_PRIVATES: ReadonlySet<string> = new Set();
+export const NO_PRIVATES: ReadonlySet<string> = new Set();
 
 /** Private names visible here — the UNION of every enclosing class, since a nested class may still
  *  reference an outer class's `#field`. Collected before descending, because a method may reference a
  *  private declared later in the same body.
  *
  *  A class is not a function boundary for this: `class C { #y; m(){ return o => o.#y; } }` is fine. */
-function descendPrivates(node: Node, inherited: ReadonlySet<string>, errors: CheckError[]): ReadonlySet<string> {
-    if (node.type !== N.ClassDeclaration && node.type !== N.ClassExpression) return inherited;
-    const elements = (node.data as { body: Node[] }).body;
+export function classPrivateNames(elements: Node[], inherited: ReadonlySet<string>, errors: CheckError[]): ReadonlySet<string> {
     const own = new Set(inherited);
     // Private names share ONE namespace per class — unlike public members, where `m(){}` and
     // `static m(){}` coexist. The single exemption is a getter/setter PAIR, and only when both have
@@ -136,7 +136,7 @@ function descendPrivates(node: Node, inherited: ReadonlySet<string>, errors: Che
 
 /** oxc's `check_private_identifier_outside_class` (`:352`) and `check_private_identifier` (`:361`).
  *  Two distinct messages: no enclosing class at all, versus a class that never declares the name. */
-function checkPrivateName(field: Node, privates: ReadonlySet<string>, inClass: boolean, errors: CheckError[]): void {
+export function checkPrivateName(field: Node, privates: ReadonlySet<string>, inClass: boolean, errors: CheckError[]): void {
     if (privates.has(field.name)) return;
     errors.push({
         pos: field.start,
@@ -147,19 +147,25 @@ function checkPrivateName(field: Node, privates: ReadonlySet<string>, inClass: b
 }
 
 /** oxc's `check_break_statement` / `check_continue_statement` (`checker/javascript.rs:782,825`). */
-function checkJump(node: Node, ctx: JumpCtx, errors: CheckError[]): void {
+export function checkJump(
+    node: Node,
+    brk: boolean,
+    cont: boolean,
+    labels: ReadonlyMap<string, boolean>,
+    errors: CheckError[],
+): void {
     const isBreak = node.type === N.BreakStatement;
     const label = (node.data as { label: Node | null }).label;
     if (label === null) {
         // A bare `break` needs a loop OR a switch; a bare `continue` needs a loop.
-        if (isBreak ? !ctx.breakable : !ctx.continuable)
+        if (isBreak ? !brk : !cont)
             errors.push({
                 pos: node.start,
                 msg: isBreak ? 'Illegal break statement' : 'Illegal continue statement: no surrounding iteration statement',
             });
         return;
     }
-    const iter = ctx.labels.get(label.name);
+    const iter = labels.get(label.name);
     if (iter === undefined) {
         errors.push({ pos: label.start, msg: 'Use of undefined label' });
         return;
@@ -172,10 +178,14 @@ function checkJump(node: Node, ctx: JumpCtx, errors: CheckError[]): void {
         });
 }
 
-/** Bindings that are LEXICAL: redeclaring one, or redeclaring anything as one, is an error.
+/** These three read `SYM` at CALL time, not at module-init time, and must stay that way: `semantic.ts`
+ *  imports this module, so a module-level `const LEXICAL = SYM.LET | ...` would evaluate a binding
+ *  from a half-initialised `semantic.ts` and throw on TDZ. Arrow BODIES run after both modules are up.
+ *
+ *  Bindings that are LEXICAL: redeclaring one, or redeclaring anything as one, is an error.
  *  `var`, `function`, a parameter and a catch binding may all collide with each other freely — the
  *  matrix was taken from oxc rather than from the spec, and every pair agrees. */
-const LEXICAL = SYM.LET | SYM.CONST | SYM.CLASS | SYM.IMPORT;
+const isLexical = (f: number): boolean => (f & (SYM.LET | SYM.CONST | SYM.CLASS | SYM.IMPORT)) !== 0;
 /** TS declaration MERGING, which is not redeclaration: an enum or namespace may legally be declared
  *  many times and combined.
  *
@@ -183,111 +193,23 @@ const LEXICAL = SYM.LET | SYM.CONST | SYM.CLASS | SYM.IMPORT;
  *  value and a type — including `TYPE` in this mask silently exempted every class collision, which is
  *  half the rule. A binding that is ONLY a type (an interface, a type alias) is handled separately
  *  below: it merges, but it never collides with a value binding in the first place. */
-const MERGEABLE = SYM.ENUM | SYM.NAMESPACE;
+const isMergeable = (f: number): boolean => (f & (SYM.ENUM | SYM.NAMESPACE)) !== 0;
 /** A pure TYPE binding — an interface or type alias, which may be declared repeatedly. */
 const isTypeOnly = (flags: number): boolean => flags === SYM.TYPE;
 
 /** oxc raises this from `SemanticBuilder` as bindings are made (`builder.rs`) as well as from its
  *  checker; we do the same split — `declare()` records the collision, this decides. */
-function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
+export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
     for (const r of sem.redeclarations) {
         const both = r.prevFlags | r.flags;
-        if ((both & MERGEABLE) !== 0 || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
-        const lexical = (both & LEXICAL) !== 0;
+        if (isMergeable(both) || isTypeOnly(r.prevFlags) || isTypeOnly(r.flags)) continue;
+        const lexical = isLexical(both);
         // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
         // under a directive only reached after the parameters have been bound, which is why this
         // judgement waits until now rather than happening in `declare()`.
         const dupParam = (r.prevFlags & SYM.PARAM) !== 0 && (r.flags & SYM.PARAM) !== 0 && isStrictScope(sem, r.scope);
         if (!lexical && !dupParam) continue;
         errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
-    }
-}
-
-/** Node types that carry a `scopeId` field. Reading `.scopeId` off an arbitrary `node.data` is a
- *  MEGAMORPHIC property access — `data` has one shape per node type, and this walk visits every node —
- *  so the type is checked first and the read only happens for the sixteen shapes that have the field.
- *
- *  Kept in sync with the defs by `tst/checker-syntax.test.ts`, which asserts the two agree rather than
- *  trusting this list to be maintained by hand. */
-export const SCOPE_OWNING = new Set<number>([
-    N.Program,
-    N.FunctionDeclaration,
-    N.FunctionExpression,
-    N.ArrowFunctionExpression,
-    N.ClassDeclaration,
-    N.ClassExpression,
-    N.BlockStatement,
-    N.StaticBlock,
-    N.CatchClause,
-    N.ForStatement,
-    N.ForInStatement,
-    N.ForOfStatement,
-    N.SwitchStatement,
-    N.TSModuleDeclaration,
-    N.TSInterfaceDeclaration,
-    N.TSTypeAliasDeclaration,
-]);
-
-/** The scope a node OWNS, or 0 for one that owns none.
- *
- *  The field is declared on several node types that do not always GET a scope — a function body's
- *  `BlockStatement` is the common case, since the function scope already covers it — and it defaults
- *  to `0`, which is the table's NULL SENTINEL rather than a real scope. Treating that 0 as a scope
- *  silently reparents every node under it to the sentinel, whose flags are empty: strictness looked
- *  off inside every function body. */
-const ownScopeOf = (node: Node): number => (SCOPE_OWNING.has(node.type) ? ((node.data as { scopeId: number }).scopeId ?? 0) : 0);
-
-function checkNode(
-    sem: Semantic,
-    node: Node,
-    scope: number,
-    jump: JumpCtx,
-    privates: ReadonlySet<string>,
-    errors: CheckError[],
-): void {
-    switch (node.type) {
-        case N.PrivateFieldExpression:
-            checkPrivateName((node.data as { field: Node }).field, privates, privates !== NO_PRIVATES, errors);
-            return;
-        case N.BinaryExpression: {
-            // `#x in o` — the ergonomic brand check. The private name is the LEFT operand here rather
-            // than a member access, so it needs its own arm; everything else about the rule is the same.
-            const b = node.data as { operator: string; left: Node };
-            if (b.operator === 'in' && b.left.type === N.PrivateIdentifier)
-                checkPrivateName(b.left, privates, privates !== NO_PRIVATES, errors);
-            return;
-        }
-        case N.BreakStatement:
-        case N.ContinueStatement:
-            checkJump(node, jump, errors);
-            return;
-        case N.UnaryExpression:
-            checkUnaryExpression(sem, node, scope, errors);
-            return;
-        case N.NumericLiteral:
-            checkNumericLiteral(sem, node, scope, errors);
-            return;
-        case N.BindingIdentifier:
-            checkReservedWord(sem, node, scope, errors);
-            checkBindingIdentifier(sem, node, scope, errors);
-            return;
-        case N.IdentifierReference:
-        case N.LabelIdentifier:
-            checkReservedWord(sem, node, scope, errors);
-            return;
-        case N.AssignmentExpression:
-            checkAssignTarget(sem, (node.data as { left: Node }).left, scope, errors);
-            return;
-        case N.UpdateExpression:
-            checkAssignTarget(sem, (node.data as { argument: Node }).argument, scope, errors);
-            return;
-        case N.FunctionDeclaration:
-        case N.FunctionExpression:
-        case N.ArrowFunctionExpression:
-            checkUseStrictDirective(node, errors);
-            return;
-        default:
-            return;
     }
 }
 
@@ -307,7 +229,32 @@ const STRICT_RESERVED = new Set([
     'yield',
 ]);
 
-function checkReservedWord(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+/**
+ * The two rules that fire on a BINDING identifier, called from `declare()` — the semantic builder's
+ * own binding hook, which sees every one of them with `state.scope` already correct.
+ *
+ * This is where the naive fusion goes wrong. `analyze`'s `visit` never receives a `BindingIdentifier`
+ * at all: measured on `three.core.js`, all 7,331 of them are reached through `declare`/`declarePattern`
+ * and 1,731 `IdentifierReference` through `collect`, so hanging the rules off `visit` would silently
+ * stop checking them — and coverage lost that way shows up as test262 PASS going UP.
+ *
+ * The type is checked because `declare` is also reached for names the old walk never ran these rules
+ * on; firing unconditionally would invent errors rather than preserve behaviour.
+ */
+export function checkBindingIdent(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+    if (node.type !== N.BindingIdentifier) return;
+    checkReservedWord(sem, node, scope, errors);
+    checkBindingIdentifier(sem, node, scope, errors);
+}
+
+/** The reference half, called from `collect()`. `LabelIdentifier` is NOT reached this way — it has its
+ *  own hook on the labelled statement, because a label is not a reference and is never collected. */
+export function checkReferenceIdent(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+    if (node.type !== N.IdentifierReference) return;
+    checkReservedWord(sem, node, scope, errors);
+}
+
+export function checkReservedWord(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
     if (!STRICT_RESERVED.has(node.name) || !isStrictScope(sem, scope)) return;
     errors.push({ pos: node.start, msg: `The keyword '${node.name}' is reserved` });
 }
@@ -322,7 +269,7 @@ function checkBindingIdentifier(sem: Semantic, node: Node, scope: number, errors
 
 /** The assignment half — `oxc`'s `check_identifier_reference` (`:275`). Handled from the ASSIGNMENT
  *  node rather than the identifier, so no ancestor stack is needed to know the identifier is a target. */
-function checkAssignTarget(sem: Semantic, target: Node, scope: number, errors: CheckError[]): void {
+export function checkAssignTarget(sem: Semantic, target: Node, scope: number, errors: CheckError[]): void {
     if (target.type !== N.IdentifierReference) return;
     if (target.name !== 'eval' && target.name !== 'arguments') return;
     if (!isStrictScope(sem, scope)) return;
@@ -332,7 +279,7 @@ function checkAssignTarget(sem: Semantic, target: Node, scope: number, errors: C
 /** `oxc`'s `check_directive` (`:494`). A `"use strict"` directive is illegal in a function whose
  *  parameter list is not SIMPLE — any default, rest or destructuring pattern — because the parameters
  *  would have to be evaluated under a strictness the directive only establishes afterwards. */
-function checkUseStrictDirective(node: Node, errors: CheckError[]): void {
+export function checkUseStrictDirective(node: Node, errors: CheckError[]): void {
     const d = node.data as { params: Node[]; body: Node | null };
     if (d.body === null || d.body.type !== N.BlockStatement) return;
     if (d.params.every(isSimpleParam)) return;
@@ -357,7 +304,7 @@ const isSimpleParam = (p: Node): boolean => {
 };
 
 /** oxc's `check_unary_expression` (`checker/javascript.rs:1278`). */
-function checkUnaryExpression(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+export function checkUnaryExpression(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
     const d = node.data as { operator: string; argument: Node };
     if (d.operator !== 'delete') return;
     const arg = unwrap(d.argument);
@@ -384,7 +331,7 @@ function unwrap(node: Node): Node {
 /** oxc's `check_number_literal` (`checker/javascript.rs:392`). Both forms are legal sloppy and errors
  *  in strict code, and they carry DIFFERENT messages: `010` is a legacy octal, `08` is a decimal that
  *  merely starts with a zero. The raw text decides — `0o10`, `0x1f` and `0` are all fine. */
-function checkNumericLiteral(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
+export function checkNumericLiteral(sem: Semantic, node: Node, scope: number, errors: CheckError[]): void {
     const raw = node.name;
     if (raw.length < 2 || raw.charCodeAt(0) !== 48) return;
     const second = raw.charCodeAt(1);

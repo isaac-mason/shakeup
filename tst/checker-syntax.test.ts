@@ -14,16 +14,15 @@
 // Every expectation here was checked against `oxc-parser` with `showSemanticErrors: true` before it
 // was written, not read off the Rust.
 import { describe, expect, it } from 'vitest';
-import { checkSyntax, SCOPE_OWNING } from '../src/analysis/checker.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { DEFS, N } from '../src/ast/index.ts';
+import { DEFS, N, type Node, walkChildren } from '../src/ast/index.ts';
 import { parse } from '../src/parser/index.ts';
 
 const check = (src: string, isModule = false) => {
     const { program } = parse(src, { ts: false, jsx: false });
     const sem = createSemantic();
-    analyze(sem, program, isModule);
-    return checkSyntax(sem, program).map((e) => e.msg);
+    analyze(sem, program, isModule, true);
+    return sem.errors.map((e) => e.msg);
 };
 
 describe('delete of a private field — an error in EVERY mode', () => {
@@ -335,14 +334,101 @@ describe('duplicate class elements', () => {
     });
 });
 
-describe('the SCOPE_OWNING list stays in sync with the AST defs', () => {
-    // `ownScopeOf` checks the node TYPE before reading `.scopeId`, because reading an arbitrary
-    // `node.data` field is a MEGAMORPHIC access on a walk that visits every node. That makes the list
-    // a second source of truth, so it is derived from the defs here rather than trusted.
-    it('every def declaring scopeId is listed, and nothing else is', () => {
-        const fromDefs = DEFS.filter((d) => d.fields !== null && Object.hasOwn(d.fields, 'scopeId')).map(
-            (d) => (N as unknown as Record<string, number>)[d.name],
+describe('a jump may not cross a function boundary', () => {
+    // Added because SABOTAGING the static-block reset left all 98 tests passing. The rule worked; it
+    // was simply unguarded, which is how `1f03586` shipped — `staticBlockDepth` lost its function
+    // boundary and harmful went 5 -> 26 while the test262 PASS count ROSE.
+    it.each([
+        'while(1){ (() => { break; }); }',
+        'while(1){ (function(){ break; }); }',
+        'while(1){ function f(){ break; } }',
+        'while(1){ class C { static { break; } } }',
+        'for(;;){ class C { static { continue; } } }',
+    ])('%s', (src) => {
+        expect(check(src)).toEqual([src.includes('continue') ? 'Illegal continue statement: no surrounding iteration statement' : 'Illegal break statement']);
+    });
+
+    it('a label does not leak across a function boundary either', () => {
+        expect(check('a: while(1){ (() => { continue a; }); }')).toEqual(['Use of undefined label']);
+    });
+
+    it('but a class body is NOT a boundary for private names', () => {
+        expect(check('class C { #y; m(){ return o => o.#y; } }')).toEqual([]);
+    });
+});
+
+describe('errors are reported in SOURCE order', () => {
+    // The separate walk pushed children onto an explicit stack and popped siblings back-to-front, so
+    // this reported at 44, 32, 21. oxc reports in source order; fusing the checker into `analyze`
+    // fixed it, and this is what keeps it fixed.
+    const positions = (src: string) => {
+        const { program } = parse(src, { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false, true);
+        return sem.errors.map((e) => e.pos);
+    };
+
+    it('three errors across sibling statements', () => {
+        expect(positions('"use strict"; delete x; var y = 010; delete z;')).toEqual([21, 32, 44]);
+    });
+
+    it('a redeclaration is ordered with the rest, not emitted first', () => {
+        expect(positions('"use strict"; delete x; function f(a,a){}')).toEqual([21, 37]);
+    });
+
+    it('a redeclaration EARLIER than a walk error still sorts first', () => {
+        // The case that actually exercises the sort. Redeclarations are judged after the walk, so they
+        // are appended last; here the duplicate parameter at 27 precedes the `delete` at 38 in the
+        // source, and without the sort they come back as [38, 27]. Sabotaging the sort with only the
+        // test above left all 110 passing, because that case was already in order by accident.
+        expect(positions('"use strict"; function f(a,a){ delete x; }')).toEqual([27, 38]);
+    });
+});
+
+describe('a legacy octal in a non-computed property key', () => {
+    // `visit` descends into a key only when it is COMPUTED, so this is the one place the fused walk
+    // needed a hook the separate walk got for free by visiting every node.
+    it.each(['"use strict"; ({ 010: 1 });', '"use strict"; class C { 010(){} }', '"use strict"; ({ [010]: 1 });'])(
+        '%s',
+        (src) => {
+            expect(check(src)).toEqual(["'0'-prefixed octal literals and octal escape sequences are deprecated"]);
+        },
+    );
+});
+
+describe('`analyze` never adds a `scopeId` field a node type did not declare', () => {
+    // Replaces a test that checked the checker's hand-maintained `SCOPE_OWNING` list against the defs.
+    // That list is gone — the fused walk reads `state.scope` and never touches `node.data.scopeId` —
+    // but the invariant UNDER it outlived it, and is the stronger of the two.
+    //
+    // `newScope` ASSIGNS `scopeId` to every scope-owning node. Four types were receiving it without
+    // declaring it (`CatchClause`, `ClassExpression`, `StaticBlock`, `TSModuleDeclaration`), so every
+    // catch clause and class expression in every module took a hidden-class transition mid-analysis —
+    // against a rule `bundler/transform.ts` states outright: "Must be present at construction so the
+    // hidden class is stable." Fixed in `b5c820e`; this is what keeps it fixed.
+    it('every node carrying scopeId after analyze declares it in DEFS', () => {
+        const src = `
+            try { x() } catch (e) { let a }
+            const K = class Inner { static { let b } #p = 1; m() { return this.#p } };
+            function f() { for (const q of xs) { switch (q) { case 1: { let c } } } }
+            label: while (1) break label;
+        `;
+        const { program } = parse(src, { ts: false, jsx: false });
+        analyze(createSemantic(), program, false, true);
+        const declares = new Map(
+            DEFS.map((d) => [
+                (N as unknown as Record<string, number>)[d.name],
+                d.fields !== null && Object.hasOwn(d.fields, 'scopeId'),
+            ]),
         );
-        expect([...fromDefs].sort((a, b) => a - b)).toEqual([...SCOPE_OWNING].sort((a, b) => a - b));
+        const undeclared = new Set<string>();
+        const walk = (n: Node): void => {
+            const d = n.data as Record<string, unknown> | null;
+            if (d !== null && Object.hasOwn(d, 'scopeId') && declares.get(n.type) !== true)
+                undeclared.add(String((N as unknown as Record<number, string>)[n.type] ?? n.type));
+            walkChildren(n, walk);
+        };
+        walk(program);
+        expect([...undeclared]).toEqual([]);
     });
 });

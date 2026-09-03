@@ -21,7 +21,6 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseSync } from 'oxc-parser';
-import { checkSyntax } from '../src/analysis/checker.ts';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { parse } from '../src/parser/index.ts';
 
@@ -82,8 +81,8 @@ for (const file of files) {
     }
     scanned++;
     const sem = createSemantic();
-    analyze(sem, program, isModule);
-    const ours = checkSyntax(sem, program).map((e) => e.msg);
+    analyze(sem, program, isModule, true);
+    const ours = sem.errors.map((e) => e.msg);
     for (const m of ours) if (!theirs.includes(m)) falsePositives.push({ file, msg: m });
     if (ours.length > 0) matched++;
     else if (theirs.length > 0) backlog++;

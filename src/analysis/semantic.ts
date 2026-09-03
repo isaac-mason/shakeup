@@ -1,5 +1,16 @@
 import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration.ts';
+import {
+    type CheckError,
+    checkBindingIdent,
+    checkEnter,
+    checkRedeclarations,
+    checkReferenceIdent,
+    classPrivateNames,
+    labelsIteration,
+    NO_LABELS,
+    NO_PRIVATES,
+} from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
 export const SCOPE = enumeration('MODULE', 'FUNCTION', 'BLOCK', 'CLASS', 'CATCH', 'FOR', 'SWITCH', 'TYPE', 'ENUM', 'NAMESPACE');
@@ -160,6 +171,16 @@ export type Semantic = {
      */
     refPairs: number[][] | null;
     declPairs: number[][] | null;
+
+    /**
+     * Early errors found by the CHECKER, which now runs fused into this walk rather than as a second
+     * pass over the same tree (oxc calls `checker::check` from `SemanticBuilder::leave_node` and holds
+     * its diagnostics on the builder the same way — `errors: RefCell<Diagnostics>`, `builder.rs:153`).
+     *
+     * EMPTY unless `analyze` was called with `check`. Seven of the eight `analyze` call sites are
+     * mid-pass rebuilds that must not re-check a tree already checked at scan; only `scan.ts` asks.
+     */
+    errors: CheckError[];
 };
 
 /** Read/write tally for one symbol. */
@@ -306,6 +327,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         redeclarations: [],
         names: new Map(),
         bindings: new Map(),
+        errors: [],
     };
 }
 
@@ -330,6 +352,25 @@ type AnalyseState = {
     pendScope: number[];
     pendNs: number[];
     pendFlags: number[];
+    /** Run the checker rules as we walk. A live branch at a handful of hooks, NOT per node — benched
+     *  against a build with the checks codegen'd out entirely and the two are indistinguishable
+     *  (4.01ms vs a 4.05ms floor, +/-1.5%), so the simple flag is what ships. */
+    check: boolean;
+
+    // ── checker context, maintained only while `check` (oxc holds the same on its builder) ─────────
+    // The separate checker carried a `{breakable, continuable, labels}` OBJECT down its own stack and
+    // allocated a new one at every loop, switch and label. Three FLAT FIELDS saved and restored around
+    // the descent allocate nothing at all, which is strictly better than what they replace: only
+    // `labels` ever allocates, and only at a labelled statement.
+    /** A bare `break` has somewhere to go — a loop or a switch. */
+    brk: boolean;
+    /** A bare `continue` has somewhere to go — a loop only. */
+    cont: boolean;
+    /** Label name -> does it name an ITERATION statement, the `break a` / `continue a` distinction. */
+    labels: ReadonlyMap<string, boolean>;
+    /** Private names visible here: the UNION of every enclosing class, since a nested class may still
+     *  reference an outer `#field`. NOT scope-shaped — a class is not a function boundary for this. */
+    privates: ReadonlySet<string>;
 };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -372,6 +413,9 @@ function internName(state: AnalyseState, s: string): number {
 }
 
 function declare(state: AnalyseState, identNode: Node, flags: number, ns: number, targetScope: number): number {
+    // `state.scope`, not `targetScope`: the rules judge where the identifier APPEARS, and a `var` or a
+    // function declaration binds into a hoist target that is not the scope it was written in.
+    if (state.check) checkBindingIdent(state.sem, identNode, state.scope, state.sem.errors);
     const nameId = internName(state, identNode.name);
     const key = bindingKey(targetScope, ns, nameId);
     const existing = state.sem.bindings.get(key);
@@ -492,6 +536,7 @@ function resetSem(out: Semantic): void {
     out.symbols.length = 1;
     out.unresolved.length = 0;
     out.redeclarations.length = 0;
+    out.errors.length = 0;
     out.names.clear();
     out.bindings.clear();
     // Capacity KEPT: clear in place rather than reallocating. `refs` is reset to `undefined` (absent),
@@ -512,9 +557,21 @@ function resetSem(out: Semantic): void {
  * every binding. `resolveRef` is reused verbatim for the deferred step, so resolution is identical
  * to the two-pass. LIMIT: no TDZ or redeclaration diagnostics; labels not tracked.
  */
-export function analyze(out: Semantic, program: Node, sourceIsModule = false): void {
+export function analyze(out: Semantic, program: Node, sourceIsModule = false, check = false): void {
     resetSem(out);
-    const state: AnalyseState = { sem: out, scope: 0, pendNode: [], pendScope: [], pendNs: [], pendFlags: [] };
+    const state: AnalyseState = {
+        sem: out,
+        scope: 0,
+        pendNode: [],
+        pendScope: [],
+        pendNs: [],
+        pendFlags: [],
+        check,
+        brk: false,
+        cont: false,
+        labels: NO_LABELS,
+        privates: NO_PRIVATES,
+    };
     // An ES module is strict by definition; a script is strict only from a directive. oxc seeds the
     // same way, from `source_type.is_module()` (`builder.rs`, `ScopeFlags::Top`).
     const topStrict = sourceIsModule || hasUseStrictDirective((program.data as { body: Node[] }).body);
@@ -541,6 +598,16 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false): v
         out.uses[sym] = (out.uses[sym] ?? 0) + 1;
         if ((f & REF_SHORTHAND) !== 0) out.shorthand.add(sym);
         if ((f & REF_EXPORTED) !== 0) out.exported.add(sym);
+    }
+    if (check) {
+        // Redeclaration does NOT move onto the walk. It needs the symbol table, and whether a
+        // collision is an error can depend on a `"use strict"` only reached after the colliding
+        // parameters were bound — `declare()` records it, this decides. oxc splits it the same way.
+        checkRedeclarations(out, out.errors);
+        // Then order by position. The separate walk emitted siblings BACK-TO-FRONT because it popped
+        // them off an explicit stack, so `"use strict"; delete x; var y = 010; delete z;` reported at
+        // 44, 32, 21. oxc reports in source order. Almost always sorting an empty array.
+        if (out.errors.length > 1) out.errors.sort((a, b) => a.pos - b.pos);
     }
 }
 
@@ -592,6 +659,7 @@ function declareInScope(state: AnalyseState, kind: number, node: Node, body: () 
 // ─── single-pass traversal: declare + create scopes + COLLECT refs (resolution deferred) ──────────
 
 const collect = (state: AnalyseState, node: Node, ns: number, flags: number = REF_READ): void => {
+    if (state.check) checkReferenceIdent(state.sem, node, state.scope, state.sem.errors);
     state.pendNode.push(node);
     state.pendScope.push(state.scope);
     state.pendNs.push(ns);
@@ -795,6 +863,21 @@ const descendVisit = new Function('state', 'n', 'V', buildDescendBody()) as (
     V: (state: AnalyseState, node: Node | null) => void,
 ) => void;
 
+/**
+ * A `"use strict"` in the body makes the PARAMETERS and the function NAME strict code too — and both
+ * are bound BEFORE the body is reached, so the flag has to be set before `declare` runs rather than
+ * when the body is visited.
+ *
+ * This is the retroactive-strictness case that makes parser-side checking hard, and fusing the checker
+ * re-exposed it: the separate walk ran entirely after `analyze`, so the directive had always been seen
+ * by the time any rule read the scope. Nine test262 files regressed on exactly this shape
+ * (`function eval(){"use strict"}`, `function f(eval){"use strict"}`) before this existed.
+ */
+function seedFunctionStrict(state: AnalyseState, body: Node | null): void {
+    if (body === null || body.type !== N.BlockStatement) return;
+    if (hasUseStrictDirective((body.data as { body: Node[] }).body)) state.sem.scopes[state.scope].flags |= SCOPE_STRICT;
+}
+
 function visitFunctionBody(state: AnalyseState, body: Node | null): void {
     if (body === null) return;
     if (body.type !== N.BlockStatement) {
@@ -805,11 +888,26 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
     // Set on the scope already opened by `declareInScope`, because the parameters were declared into
     // it before the body was reached and they are strict code too.
     if (hasUseStrictDirective((body.data as { body: Node[] }).body)) state.sem.scopes[state.scope].flags |= SCOPE_STRICT;
+    // A jump may not cross a function boundary — `while(1){ (function(){ break; }); }` is an error —
+    // so every function body starts fresh and restores on the way out. Labels reset with it.
+    const b = state.brk,
+        c = state.cont,
+        l = state.labels;
+    state.brk = false;
+    state.cont = false;
+    state.labels = NO_LABELS;
     for (const s of body.data.body) visit(state, s);
+    state.brk = b;
+    state.cont = c;
+    state.labels = l;
 }
 
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
+    // oxc's `checker::check(kind, self)` in `SemanticBuilder::leave_node`. One branch per node when
+    // the checker is off, which measured indistinguishable from a build with the calls codegen'd out
+    // entirely (`llm/notes/perf-findings.md` 1g), so no second walker is emitted.
+    if (state.check) checkEnter(state, node);
     switch (node.type) {
         case N.IdentifierReference:
             collect(state, node, NS_VALUE);
@@ -880,6 +978,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
             const target = hoistTarget(state);
             declareInScope(state, SCOPE.FUNCTION, node, () => {
+                seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target);
                 declareTypeParams(state, node.data.typeParameters);
@@ -891,6 +990,7 @@ function visit(state: AnalyseState, node: Node | null): void {
         }
         case N.FunctionExpression:
             declareInScope(state, SCOPE.FUNCTION, node, () => {
+                seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, state.scope);
                 declareTypeParams(state, node.data.typeParameters);
@@ -901,6 +1001,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             return;
         case N.ArrowFunctionExpression:
             declareInScope(state, SCOPE.FUNCTION, node, () => {
+                seedFunctionStrict(state, node.data.body);
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params);
                 visitType(state, node.data.returnType);
@@ -929,7 +1030,10 @@ function visit(state: AnalyseState, node: Node | null): void {
                     visitType(state, h.data.typeArguments);
                 }
                 visitType(state, node.data.superTypeArguments);
+                const outerPrivates = state.privates;
+                if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
                 for (const m of node.data.body) visit(state, m);
+                state.privates = outerPrivates;
             });
             return;
         }
@@ -947,37 +1051,85 @@ function visit(state: AnalyseState, node: Node | null): void {
                     visitType(state, h.data.typeArguments);
                 }
                 visitType(state, node.data.superTypeArguments);
+                const outerPrivates = state.privates;
+                if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
                 for (const m of node.data.body) visit(state, m);
+                state.privates = outerPrivates;
             });
             return;
         case N.BlockStatement:
-        case N.StaticBlock:
             declareInScope(state, SCOPE.BLOCK, node, () => {
                 for (const s of node.data.body) visit(state, s);
             });
             return;
+        case N.StaticBlock:
+            // A class static block is a jump boundary exactly like a function body, and it does not go
+            // through `visitFunctionBody`, so it resets here. This is the arm whose absence in the old
+            // `staticBlockDepth` took harmful from 5 to 26 while the PASS count went UP (`1f03586`).
+            declareInScope(state, SCOPE.BLOCK, node, () => {
+                const b = state.brk,
+                    c = state.cont,
+                    l = state.labels;
+                state.brk = false;
+                state.cont = false;
+                state.labels = NO_LABELS;
+                for (const s of node.data.body) visit(state, s);
+                state.brk = b;
+                state.cont = c;
+                state.labels = l;
+            });
+            return;
         case N.ForStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
+                const b = state.brk,
+                    c = state.cont;
+                state.brk = true;
+                state.cont = true;
                 visit(state, node.data.init);
                 visit(state, node.data.test);
                 visit(state, node.data.update);
                 visit(state, node.data.body);
+                state.brk = b;
+                state.cont = c;
             });
             return;
         case N.ForInStatement:
         case N.ForOfStatement:
             declareInScope(state, SCOPE.FOR, node, () => {
+                const b = state.brk,
+                    c = state.cont;
+                state.brk = true;
+                state.cont = true;
                 // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
                 if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
                 else collectTarget(state, node.data.left);
                 visit(state, node.data.right);
                 visit(state, node.data.body);
+                state.brk = b;
+                state.cont = c;
             });
             return;
+        // `while`/`do` open no scope, so they had no arm and fell through to the generated descent.
+        // They still make `break` and `continue` legal, so the checker needs them bracketed.
+        case N.WhileStatement:
+        case N.DoWhileStatement: {
+            const b = state.brk,
+                c = state.cont;
+            state.brk = true;
+            state.cont = true;
+            descendVisit(state, node, visit);
+            state.brk = b;
+            state.cont = c;
+            return;
+        }
         case N.SwitchStatement:
             declareInScope(state, SCOPE.SWITCH, node, () => {
+                // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
+                const b = state.brk;
+                state.brk = true;
                 visit(state, node.data.discriminant);
                 for (const c of node.data.cases) visit(state, c);
+                state.brk = b;
             });
             return;
         case N.CatchClause:
@@ -1015,9 +1167,22 @@ function visit(state: AnalyseState, node: Node | null): void {
             }
             return;
         }
-        case N.LabeledStatement:
+        case N.LabeledStatement: {
+            if (!state.check) {
+                visit(state, node.data.body);
+                return;
+            }
+            const name = node.data.label.name;
+            if (state.labels.has(name))
+                state.sem.errors.push({ pos: node.data.label.start, msg: `Label \`${name}\` has already been declared` });
+            const outer = state.labels;
+            const labels = new Map(outer);
+            labels.set(name, labelsIteration(node.data.body));
+            state.labels = labels;
             visit(state, node.data.body);
+            state.labels = outer;
             return;
+        }
         case N.BreakStatement:
         case N.ContinueStatement:
             return;
