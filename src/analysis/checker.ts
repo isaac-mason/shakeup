@@ -18,7 +18,16 @@ export type CheckCtx = {
     cont: boolean;
     labels: ReadonlyMap<string, boolean>;
     privates: ReadonlySet<string>;
+    superCall: number;
+    superProp: boolean;
 };
+
+/** `super()` is not reachable from here at all. */
+export const SUPER_CALL_NONE = 0;
+/** Inside the constructor of a DERIVED class, or an arrow nested in one — the only legal position. */
+export const SUPER_CALL_OK = 1;
+/** Inside the constructor of a class with no `extends`, which oxc reports differently. */
+export const SUPER_CALL_BASE_CTOR = 2;
 
 /**
  * Every rule that needs only the node and the current context, called once per node from the top of
@@ -51,6 +60,35 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             const b = node.data as { operator: string; left: Node };
             if (b.operator === 'in' && b.left.type === N.PrivateIdentifier)
                 checkPrivateName(b.left, ctx.privates, ctx.privates !== NO_PRIVATES, errors);
+            return;
+        }
+        case N.CallExpression: {
+            // `super()` — oxc's `check_super` (`checker/javascript.rs:985`). Two DIFFERENT messages,
+            // which is why the context is a small enum rather than a boolean: inside the constructor
+            // of a class with no `extends` the complaint is about the class, everywhere else it is
+            // about the position.
+            if ((node.data as { callee: Node }).callee.type !== N.Super) return;
+            if (ctx.superCall === SUPER_CALL_OK) return;
+            errors.push({
+                pos: node.start,
+                msg:
+                    ctx.superCall === SUPER_CALL_BASE_CTOR
+                        ? "'super' can only be referenced in a derived class."
+                        : 'Super calls are not permitted outside constructors or in nested functions inside constructors.',
+            });
+            return;
+        }
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression: {
+            // `super.x` is legal in ANY class element and in an object-literal METHOD — including a
+            // non-derived class, which is why this is tracked separately from `super()`. An ordinary
+            // function resets it, so `({ m: function(){ return super.x; } })` is an error while
+            // `({ m(){ return super.x; } })` is not.
+            if ((node.data as { object: Node }).object.type !== N.Super || ctx.superProp) return;
+            errors.push({
+                pos: node.start,
+                msg: "'super' can only be referenced in members of derived classes or object literal expressions.",
+            });
             return;
         }
         case N.AssignmentExpression:

@@ -11,6 +11,9 @@ import {
     NO_LABELS,
     NO_PRIVATES,
     paramsAreSimple,
+    SUPER_CALL_BASE_CTOR,
+    SUPER_CALL_NONE,
+    SUPER_CALL_OK,
 } from './checker.ts';
 
 /** Scope kinds, stored in the low bits of `ScopeRec.flags`. */
@@ -397,6 +400,19 @@ type AnalyseState = {
     uniqueParams: boolean;
     /** The statement about to be visited is a function declaration in `if`/`else` position. */
     annexBIf: boolean;
+
+    // ── `super` context ──────────────────────────────────────────────────────────────────────────
+    /** One of the `SUPER_CALL_*` constants: whether `super()` is reachable, and if not, which of oxc's
+     *  two messages applies. */
+    superCall: number;
+    /** Whether `super.x` is legal here — true in any class element and in an object-literal method. */
+    superProp: boolean;
+    /** The class currently being visited has an `extends` clause, which its CONSTRUCTOR needs to know. */
+    classDerived: boolean;
+    /** What the next function scope should inherit, set by the arms that know a `FunctionExpression`
+     *  is a method. The function itself cannot tell, exactly as with {@link AnalyseState.uniqueParams}. */
+    methodSuperCall: number;
+    methodSuperProp: boolean;
 };
 
 function newScope(state: AnalyseState, flags: number, node: Node | null): number {
@@ -636,6 +652,11 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
         privates: NO_PRIVATES,
         uniqueParams: false,
         annexBIf: false,
+        superCall: SUPER_CALL_NONE,
+        superProp: false,
+        classDerived: false,
+        methodSuperCall: SUPER_CALL_NONE,
+        methodSuperProp: false,
     };
     // An ES module is strict by definition; a script is strict only from a directive. oxc seeds the
     // same way, from `source_type.is_module()` (`builder.rs`, `ScopeFlags::Top`).
@@ -995,9 +1016,15 @@ function visit(state: AnalyseState, node: Node | null): void {
             // `{ m(a, a){} }` and `{ get x(){} }` are methods and accessors; `{ m: function(a, a){} }`
             // is an ordinary function expression and keeps sloppy duplicates.
             const wasMethod = node.data.method || node.data.kind === 'get' || node.data.kind === 'set';
-            if (wasMethod) state.uniqueParams = true;
+            if (wasMethod) {
+                state.uniqueParams = true;
+                // An object-literal METHOD may use `super.x` — `({ m(){ return super.x; } })` is legal
+                // while `({ m: function(){ return super.x; } })` is not. `super()` never is.
+                state.methodSuperProp = true;
+            }
             visit(state, node.data.value);
             state.uniqueParams = false;
+            state.methodSuperProp = false;
             return;
         }
         case N.AssignmentExpression: {
@@ -1019,14 +1046,30 @@ function visit(state: AnalyseState, node: Node | null): void {
             // Every class element form here — method, accessor, constructor — takes
             // `UniqueFormalParameters`. The `FunctionExpression` below cannot tell, so it is told.
             state.uniqueParams = true;
+            // `super.x` is legal in every class element; `super()` only in a constructor, and the
+            // message differs by whether the class has an `extends`.
+            state.methodSuperProp = true;
+            state.methodSuperCall =
+                node.data.kind === 'constructor' ? (state.classDerived ? SUPER_CALL_OK : SUPER_CALL_BASE_CTOR) : SUPER_CALL_NONE;
             visit(state, node.data.value);
             state.uniqueParams = false;
+            state.methodSuperProp = false;
+            state.methodSuperCall = SUPER_CALL_NONE;
             return;
-        case N.PropertyDefinition:
+        case N.PropertyDefinition: {
             if (node.data.computed) visit(state, node.data.key);
+            // `class A { p = super.x; }` is legal. A field initializer is not a function scope, so
+            // unlike a method this sets the context directly rather than staging it for one.
+            const outerProp = state.superProp;
+            const outerCall = state.superCall;
+            state.superProp = true;
+            state.superCall = SUPER_CALL_NONE;
             visit(state, node.data.value);
+            state.superProp = outerProp;
+            state.superCall = outerCall;
             visitType(state, node.data.typeAnnotation);
             return;
+        }
         case N.VariableDeclaration: {
             const kind = node.data.kind;
             const flags = kind === 'var' ? SYM.VAR : kind === 'let' ? SYM.LET : SYM.CONST;
@@ -1055,6 +1098,10 @@ function visit(state: AnalyseState, node: Node | null): void {
             const target = hoistTarget(state);
             const methodParams = state.uniqueParams;
             state.uniqueParams = false;
+            const methodSuperCall = state.methodSuperCall,
+                methodSuperProp = state.methodSuperProp;
+            state.methodSuperCall = SUPER_CALL_NONE;
+            state.methodSuperProp = false;
             // Consumed here so it cannot reach a function nested inside this one's body.
             const annexBIf = state.annexBIf;
             state.annexBIf = false;
@@ -1062,24 +1109,44 @@ function visit(state: AnalyseState, node: Node | null): void {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, annexBIf);
+                // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
+                // setting it around the body alone rejected four valid test262 programs.
+                const outerCall = state.superCall;
+                const outerProp = state.superProp;
+                state.superCall = methodSuperCall;
+                state.superProp = methodSuperProp;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
+                state.superCall = outerCall;
+                state.superProp = outerProp;
             });
             return;
         }
         case N.FunctionExpression: {
             const methodParams = state.uniqueParams;
             state.uniqueParams = false;
+            const methodSuperCall = state.methodSuperCall,
+                methodSuperProp = state.methodSuperProp;
+            state.methodSuperCall = SUPER_CALL_NONE;
+            state.methodSuperProp = false;
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
                 if (id !== null) declare(state, id, SYM.FUNCTION | SYM.FN_EXPR_NAME, NS_VALUE, state.scope);
+                // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
+                // setting it around the body alone rejected four valid test262 programs.
+                const outerCall = state.superCall;
+                const outerProp = state.superProp;
+                state.superCall = methodSuperCall;
+                state.superProp = methodSuperProp;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
                 visitFunctionBody(state, node.data.body);
+                state.superCall = outerCall;
+                state.superProp = outerProp;
             });
             return;
         }
@@ -1117,7 +1184,10 @@ function visit(state: AnalyseState, node: Node | null): void {
                 visitType(state, node.data.superTypeArguments);
                 const outerPrivates = state.privates;
                 if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
+                const outerDerived = state.classDerived;
+                state.classDerived = node.data.superClass !== null;
                 for (const m of node.data.body) visit(state, m);
+                state.classDerived = outerDerived;
                 state.privates = outerPrivates;
             });
             return;
@@ -1138,15 +1208,25 @@ function visit(state: AnalyseState, node: Node | null): void {
                 visitType(state, node.data.superTypeArguments);
                 const outerPrivates = state.privates;
                 if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
+                const outerDerived = state.classDerived;
+                state.classDerived = node.data.superClass !== null;
                 for (const m of node.data.body) visit(state, m);
+                state.classDerived = outerDerived;
                 state.privates = outerPrivates;
             });
             return;
-        case N.BlockStatement:
-            declareInScope(state, SCOPE.BLOCK, node, () => {
-                for (const s of node.data.body) visit(state, s);
-            });
+        case N.BlockStatement: {
+            // Inlined rather than routed through `declareInScope`, which costs TWO extra frames per
+            // level (itself plus the closure). A block is the deepest-nesting node there is, and
+            // `tst/deep-nesting.test.ts` exists because this walker's ceiling moves whenever `visit`
+            // grows — fusing the checker in and then adding the `super` context spent the margin and
+            // took 1000 nested blocks over the limit. Three frames per level become one.
+            const outer = state.scope;
+            state.scope = newScope(state, SCOPE.BLOCK, node);
+            for (const st of node.data.body) visit(state, st);
+            state.scope = outer;
             return;
+        }
         case N.StaticBlock:
             // A class static block is a jump boundary exactly like a function body, and it does not go
             // through `visitFunctionBody`, so it resets here. This is the arm whose absence in the old
@@ -1158,7 +1238,14 @@ function visit(state: AnalyseState, node: Node | null): void {
                 state.brk = false;
                 state.cont = false;
                 state.labels = NO_LABELS;
+                // `class A { static { super.x; } }` is legal; `super()` is not.
+                const outerProp = state.superProp;
+                const outerCall = state.superCall;
+                state.superProp = true;
+                state.superCall = SUPER_CALL_NONE;
                 for (const s of node.data.body) visit(state, s);
+                state.superProp = outerProp;
+                state.superCall = outerCall;
                 state.brk = b;
                 state.cont = c;
                 state.labels = l;

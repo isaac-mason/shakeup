@@ -386,6 +386,71 @@ describe("Annex B's block-scoped function alias is not a redeclaration", () => {
     });
 });
 
+describe('`super()` — oxc reports two different messages, and the distinction is the class', () => {
+    it.each([
+        'class A extends B { constructor() { super(); } }',
+        'class A extends B { constructor() { () => super(); } }',
+        'class A extends B { constructor() { { super(); } } }',
+        'class A extends B { constructor() { class C extends D { constructor(){ super(); } } } }',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        'class A { constructor() { super(); } }',
+        'class A extends B { constructor() { class C { constructor(){ super(); } } } }',
+    ])('a class with no `extends` complains about the CLASS: %s', (src) => {
+        expect(check(src)).toEqual(["'super' can only be referenced in a derived class."]);
+    });
+
+    it.each([
+        'class A extends B { m() { super(); } }',
+        'class A extends B { constructor() { function f(){ super(); } } }',
+        'function f() { super(); }',
+        'super();',
+        '({ m() { super(); } });',
+    ])('anywhere else complains about the POSITION: %s', (src) => {
+        expect(check(src)).toEqual([
+            'Super calls are not permitted outside constructors or in nested functions inside constructors.',
+        ]);
+    });
+});
+
+describe('`super.x` is legal in any class element and in an object-literal method', () => {
+    it.each([
+        'class A { m() { return super.x; } }',
+        'class A { m() { return super["x"]; } }',
+        'class A { m() { return () => super.x; } }',
+        'class A { p = super.x; }',
+        'class A { static { super.x; } }',
+        '({ m() { return super.x; } });',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        // The context covers PARAMETERS as well as the body — setting it around the body alone
+        // rejected four valid test262 programs, all of this shape.
+        '({ method(x = super.toString) { return x; } });',
+        'class A {} class B extends A { async method(x = super.method()) {} }',
+        'class A extends B { constructor(x = super()) {} }',
+    ])('accepts %s in a parameter default', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        '({ m: function() { return super.x; } });',
+        'function f() { return super.x; }',
+        'super.x;',
+        'class A { p = function(){ return super.x; } }',
+        'function f(x = super.y){}',
+    ])('rejects %s', (src) => {
+        expect(check(src)).toEqual([
+            "'super' can only be referenced in members of derived classes or object literal expressions.",
+        ]);
+    });
+});
+
 describe('duplicate parameters — every verdict here was taken from oxc, not from the spec', () => {
     // The boundary is not where reading the grammar suggests. `UniqueFormalParameters` covers arrows,
     // methods and accessors; everything else uses `FormalParameters`, which permits duplicates in
