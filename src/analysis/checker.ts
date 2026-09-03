@@ -1,5 +1,5 @@
 import { N, type Node } from '../ast/index.ts';
-import { hasUniqueParams, isStrictScope, type Semantic, SYM } from './semantic.ts';
+import { hasUniqueParams, isStrictScope, SCOPE, type Semantic, SYM, scopeKind } from './semantic.ts';
 
 /** One early error, in the parser's diagnostic shape so both sinks read alike. */
 export type CheckError = { pos: number; msg: string };
@@ -339,6 +339,32 @@ export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
             if (((r.prevFlags | r.flags) & SYM.FN_EXPR_NAME) !== 0) continue;
             // `lexicalFn` is set by `declare()` for the positions where a function declaration is lexical
             // rather than var-scoped — a block, a switch, or module top level. The flags alone cannot say.
+            // oxc's `check_redeclared_function` (`checker/javascript.rs:697-759`), which asks what KIND
+            // of scope the declaration sits in rather than reconstructing where anything hoisted:
+            //
+            //   prev is BlockScoped                      -> the general rule already reports it
+            //   prev is var-or-function AND the scope is
+            //     function | class static block | script top   -> VAR-LIKE, legal
+            //   else if sloppy and this one is plain     -> Annex B.3.3: legal unless some EARLIER
+            //     declaration was async/generator, and then the error points at THAT one
+            //
+            // The scan is why the per-symbol list exists; merged flags cannot say which declaration
+            // was the async one.
+            if ((r.flags & SYM.FUNCTION) !== 0 && (r.prevFlags & (SYM.LET | SYM.CONST | SYM.CLASS)) === 0) {
+                const kind = scopeKind(sem.scopes[r.at].flags);
+                const varLike =
+                    kind === SCOPE.FUNCTION || kind === SCOPE.STATIC_BLOCK || (kind === SCOPE.MODULE && !sem.isModule);
+                if ((r.prevFlags & (SYM.VAR | SYM.FUNCTION)) !== 0 && varLike) continue;
+                if (!isStrictScope(sem, r.scope) && (r.flags & SYM.FN_PLAIN) !== 0 && (r.prevFlags & SYM.FUNCTION) !== 0) {
+                    if (sem.isTs) continue; // TypeScript treats these as overloads / merging
+                    const culprit = list
+                        .slice(0, i)
+                        .find((d) => (d.flags & SYM.FUNCTION) !== 0 && (d.flags & SYM.FN_PLAIN) === 0);
+                    if (culprit === undefined) continue;
+                    errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
+                    continue;
+                }
+            }
             const lexical = isLexical(both) || r.lexicalFn === true;
             // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
             // under a directive only reached after the parameters have been bound, which is why this

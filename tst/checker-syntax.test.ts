@@ -178,6 +178,28 @@ describe("Annex B's block-function alias is JavaScript-only", () => {
     });
 });
 
+describe('a redeclared function is judged against ALL its earlier declarations', () => {
+    // oxc's `check_redeclared_function` (`checker/javascript.rs:740-751`) scans every previous
+    // declaration for the `async`/generator one that makes the set illegal, so it can point the error
+    // at it. A pairwise record cannot express this: with three declarations the offender may be two
+    // back, and merged symbol flags cannot say which declaration was which.
+    it.each([
+        '{ async function f(){} function f(){} function f(){} }',
+        '{ function* f(){} function f(){} function f(){} }',
+        '{ function f(){} function f(){} async function f(){} }',
+    ])('rejects %s — the culprit is not the immediately previous one', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it('three plain declarations in one block stay legal under Annex B', () => {
+        expect(check('{ function f(){} function f(){} function f(){} }')).toEqual([]);
+    });
+
+    it('reports ONCE, not once per pair', () => {
+        expect(check('{ async function f(){} function f(){} function f(){} }')).toHaveLength(1);
+    });
+});
+
 describe('at most one constructor per class', () => {
     it.each(['class C { constructor(){} constructor(){} }', 'const K = class { constructor(){} constructor(){} };'])(
         'rejects %s',
