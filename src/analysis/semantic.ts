@@ -548,8 +548,24 @@ function declare(
     // The MIRROR case, `{ var x; let x; }`, is not: by the time the `let` is declared the `var` sits in
     // the hoist target, indistinguishable from a legitimately shadowed `var x; { let x; }`. Same root
     // cause as the block-function gap — `SymbolRec.scope` is the hoist target, not the appearance.
-    if (state.check && (flags & SYM.VAR) !== 0 && targetScope !== state.scope) {
-        for (let sc = state.scope; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
+    // A block FUNCTION hoists the same way a `var` does and collides the same way: `{ let f;
+    // function f(){} }` is an error in both orders and in both modes — Annex B only ever excuses
+    // function-against-function, never function-against-lexical.
+    // A block FUNCTION differs from a `var` in HOW FAR the check reaches, which is the whole of Annex
+    // B B.3.3 and is not obvious:
+    //
+    //     { let f; function f(){} }              ERROR   the lexical binding is in the function's OWN block
+    //     { let f = 1; { function f(){} } }      ok      the alias merely hoists PAST it — error skipped
+    //     { let x; { var x; } }                  ERROR   a `var` gets no such reprieve
+    //
+    // So a `var` is checked against every scope it passes through, and a function only against the one
+    // it was written in. Walking the full chain for functions rejected 80 valid test262 programs, all
+    // of them in the `annexB/language/*-code/*skip-early-err*` families named for exactly this rule.
+    //     { let f = 1; if (true) function f(){} }   ok      B.3.4 exempts the `if` position outright
+    const hoistsPast = (flags & SYM.VAR) !== 0;
+    const blockFnHere = (flags & SYM.FUNCTION) !== 0 && !annexB;
+    if (state.check && (hoistsPast || blockFnHere) && targetScope !== appearAt) {
+        for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
             const through = state.sem.bindings.get(bindingKey(sc, NS_VALUE, nameId));
             if (through !== undefined && (state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
                 state.sem.errors.push({
@@ -558,6 +574,7 @@ function declare(
                 });
                 break;
             }
+            if (blockFnHere) break; // only its own block, per Annex B
         }
     }
     // The MIRROR of the walk above: a LEXICAL binding collides with a `var` written in the SAME scope,
@@ -568,7 +585,7 @@ function declare(
         const hoisted = state.sem.bindings.get(bindingKey(hoistTarget(state), NS_VALUE, nameId));
         if (
             hoisted !== undefined &&
-            (state.sem.symbols[hoisted].flags & SYM.VAR) !== 0 &&
+            (state.sem.symbols[hoisted].flags & (SYM.VAR | SYM.FUNCTION)) !== 0 &&
             state.sem.symbols[hoisted].at === appearAt &&
             appearAt !== hoistTarget(state)
         )

@@ -118,6 +118,42 @@ describe('strict-mode reserved words', () => {
     });
 });
 
+describe('Annex B decides HOW FAR the block-function check reaches', () => {
+    // Not obvious, and each line below cost a round of false rejections in test262 before it was right:
+    // a `var` is checked against every scope it passes through, a block function only against the one
+    // it was written in, and the `if` position is exempt outright.
+    it.each([
+        '{ let f; function f(){} }',
+        '{ let f; async function f(){} }',
+        '{ const f = 1; function f(){} }',
+        '{ class f {} function f(){} }',
+        '{ function f(){} let f; }',
+        '{ function f(){} class f {} }',
+        '{ async function f(){} class f {} }',
+        'switch(0){ case 1: function f(){} case 2: class f {} }',
+    ])('rejects %s — the collision is in the function OWN block', (src) => {
+        expect(check(src)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it.each([
+        // B.3.3: the alias merely hoists PAST the lexical binding, so the early error is skipped.
+        // Walking the full scope chain for functions rejected 80 valid test262 programs.
+        '{ let f = 123; { function f(){} } }',
+        '{ let f; { { function f(){} } } }',
+        'let f = 1; { function f(){} }',
+        // B.3.4: the `if` position is exempt outright. Missing this rejected 20 more.
+        '{ let f = 123; if (true) function f(){} }',
+        'let f; if (1) function f(){}',
+        '{ let f = 1; if (1) function f(){} else function _f(){} }',
+    ])('accepts %s — Annex B skips the early error', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('a `var` gets no such reprieve — it IS checked against every scope it passes', () => {
+        expect(check('{ let x; { var x; } }')).toEqual(['Identifier `x` has already been declared']);
+    });
+});
+
 describe('a `var` may not hoist THROUGH a scope that lexically binds the same name', () => {
     // The `var` lands in the hoist target while the `let` stays in the block, so the two never meet on
     // one binding and the ordinary redeclaration path cannot see them.
