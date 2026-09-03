@@ -169,3 +169,37 @@ describe('a class static block is a var scope', () => {
         expect(sem.scopes.some((sc) => scopeKind(sc.flags) === SCOPE.STATIC_BLOCK)).toBe(true);
     });
 });
+
+// WHERE a function declaration binds, ported from oxc's `Function::bind` (`binder.rs:138-201`): it
+// binds in the scope it is WRITTEN in, and only Annex B B.3.3 moves it to the enclosing var scope —
+// plain, non-async, non-generator, sloppy, JavaScript, and only if that scope is still free.
+//
+// We used to hoist EVERY block function, which over-EXPOSED the excluded ones. node gives a
+// ReferenceError for the first and third of these; we were resolving `f` to the block's function, so a
+// later `f()` meaning a GLOBAL could bind to a local and be renamed with it.
+describe('a block function binds in its block unless Annex B moves it', () => {
+    const symOfCall = (src: string): number => {
+        const { program } = parse(src, { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        let last = -1;
+        const walk = (n: Node): void => {
+            if (n.type === N.IdentifierReference && n.name === 'f') last = n.sym;
+            walkChildren(n, walk);
+        };
+        walk(program);
+        return last;
+    };
+
+    it.each([
+        '{ async function f(){} } f();',
+        '"use strict"; { function f(){} } f();',
+        'function g(){ { async function f(){} } f(); }',
+    ])('does not escape its block: %s', (src) => {
+        expect(symOfCall(src)).toBe(0); // unresolved, as node's ReferenceError implies
+    });
+
+    it('but Annex B does move a plain sloppy one', () => {
+        expect(symOfCall('{ function f(){} } f();')).toBeGreaterThan(0);
+    });
+});

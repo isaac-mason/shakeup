@@ -203,6 +203,22 @@ export type Semantic = {
 
     names: Map<string, number>;
     bindings: Map<number, number>;
+    /**
+     * Bindings reachable from a scope they HOISTED THROUGH — oxc's `hoisting_variables`
+     * (`builder.rs:91`), keyed the same way `bindings` is.
+     *
+     * A `var` in a block binds in the enclosing var scope, and Annex B moves a plain block function
+     * there too, so the block itself ends up with no binding for the name. A later declaration in that
+     * block must still see it: `{ { var f; } function f(){} }` and `{ function f(){} async function
+     * f(){} }` are both errors, and neither collides in one scope. oxc records the binding against
+     * EVERY scope it passed through ("add the variable to all hoisted scopes to support redeclaration
+     * checks when declaring variables with the same name later", `binder.rs:102`) and its
+     * `check_redeclaration` consults this as a fallback (`builder.rs:586`).
+     *
+     * This replaces a family of hand-rolled scope walks that each reconstructed one hoist path from a
+     * single endpoint. The path is recorded once instead.
+     */
+    hoisting: Map<number, number>;
 
     // ── reference facts (compress prelude, computed here instead of by a separate walk) ───────────
     // These were `computePrelude`'s job: it ran a full ref-tally walk PLUS a `walkRefIdents` walk at
@@ -446,6 +462,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         redeclarations: new Map(),
         names: new Map(),
         bindings: new Map(),
+        hoisting: new Map(),
         errors: [],
         isModule: false,
         isTs: false,
@@ -654,7 +671,14 @@ function declare(
         for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
             const through = state.sem.bindings.get(bindingKey(sc, NS_VALUE, nameId));
             if (through !== undefined) {
-                if ((state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
+                // A FUNCTION still BOUND in an intermediate scope was not moved by Annex B — async,
+                // generator, strict or TS — which means it is lexically scoped there and a `var`
+                // hoisting past it collides. TypeScript merges the two, so that half is JS-only.
+                const throughFlags = state.sem.symbols[through].flags;
+                if (
+                    (throughFlags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0 ||
+                    ((throughFlags & SYM.FUNCTION) !== 0 && !state.sem.isTs)
+                ) {
                     if (state.check)
                         recordRedeclaration(
                             state,
@@ -699,31 +723,9 @@ function declare(
             if (blockFnHere) break; // only its own block, per Annex B
         }
     }
-    // The MIRROR of the walk above: a LEXICAL binding collides with a `var` written in the SAME scope,
-    // even though the `var` hoisted away to a different binding. `{ var x; let x; }` is an error while
-    // `var x; { let x; }` legitimately shadows — `at` is what separates them, and it was added for the
-    // block-function rule.
-    if (state.check && ns === NS_VALUE && (flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
-        const hoisted = state.sem.bindings.get(bindingKey(hoistTarget(state), NS_VALUE, nameId));
-        if (
-            hoisted !== undefined &&
-            (state.sem.symbols[hoisted].flags & (SYM.VAR | SYM.FUNCTION)) !== 0 &&
-            state.sem.symbols[hoisted].at === appearAt &&
-            appearAt !== hoistTarget(state)
-        )
-            recordRedeclaration(
-                state,
-                hoisted,
-                identNode,
-                targetScope,
-                appearAt,
-                state.sem.symbols[hoisted].flags,
-                flags,
-                false,
-                true,
-            );
-    }
-    const existing = state.sem.bindings.get(key);
+    // oxc's `check_redeclaration` (`builder.rs:583-586`): the binding in this scope, OR one that
+    // hoisted THROUGH it and is therefore still visible to a redeclaration check here.
+    const existing = state.sem.bindings.get(key) ?? state.sem.hoisting.get(key);
     if (existing !== undefined) {
         // Record it BEFORE the flags merge, which would otherwise erase which side was which. Only
         // for value bindings: the TYPE namespace legitimately merges (interface + interface, enum +
@@ -769,8 +771,7 @@ function declare(
         //
         // So strict mode does NOT make a top-level declaration lexical — the module GOAL does — and the
         // block allowance needs BOTH sides plain and sloppy code.
-        const isBlockFn =
-            !state.sem.isTs && (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
+        const isBlockFn = !state.sem.isTs && (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
         // Module top level is the one lexical position this model CAN decide: both declarations bind
         // in the same scope, so a collision there is genuine.
         // The MIRROR of `isBlockFn`: `{ function f(){} var f; }` is an error, and the `var` is second so
@@ -861,6 +862,9 @@ function declare(
     const id = state.sem.symbols.length;
     state.sem.symbols.push({ scope: targetScope, decl: identNode, flags, nameId, at: appearAt });
     state.sem.bindings.set(key, id);
+    // Every scope this binding hoisted THROUGH can still see it — oxc's `binder.rs:102-104`.
+    for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent)
+        state.sem.hoisting.set(bindingKey(sc, ns, nameId), id);
     identNode.sym = id;
     // `state.scope`, not `targetScope`: the APPEARANCE scope, per `declPairs`.
     recordDecl(state.sem, id, identNode.id, state.scope);
@@ -975,6 +979,7 @@ function resetSem(out: Semantic): void {
     out.errors.length = 0;
     out.names.clear();
     out.bindings.clear();
+    out.hoisting.clear();
     // Capacity KEPT: clear in place rather than reallocating. `refs` is reset to `undefined` (absent),
     // never to zeroed records — see the field docs. `refsPool` is deliberately untouched so the record
     // objects survive to be reused.
@@ -1375,6 +1380,28 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
 
 /** Is this statement a DECLARATION, i.e. one the statement-position rules have anything to say about?
  *  Checked at the branch rather than in `visit` so the flag is only ever set where it matters. */
+/**
+ * Annex B B.3.3's implicit var-like binding for a plain block function — oxc's
+ * `Function::bind` (`binder.rs:176-201`), which binds in the block and then MOVES.
+ *
+ * Only when the var scope is still free: with it taken,
+ * `{ function f(){} function f(){} }` leaves the second declaration in the block, so the two are
+ * separate bindings and Annex B's tolerance falls out rather than being special-cased.
+ */
+function annexBMove(state: AnalyseState, sym: number, appear: number, hoist: number, name: string): void {
+    if (sym === 0) return;
+    const nameId = state.sem.names.get(name);
+    if (nameId === undefined) return;
+    const hoistKey = bindingKey(hoist, NS_VALUE, nameId);
+    if (state.sem.bindings.has(hoistKey)) return;
+    state.sem.bindings.delete(bindingKey(appear, NS_VALUE, nameId));
+    state.sem.bindings.set(hoistKey, sym);
+    state.sem.symbols[sym].scope = hoist;
+    // The block it came from must still see it, or a later declaration there misses the collision.
+    for (let sc = appear; sc !== hoist && sc !== 0; sc = state.sem.scopes[sc].parent)
+        state.sem.hoisting.set(bindingKey(sc, NS_VALUE, nameId), sym);
+}
+
 /** `SYM.FUNCTION`, plus `FN_PLAIN` when Annex B's block allowance can apply to it. */
 const fnFlags = (d: { async: boolean; generator: boolean }): number => SYM.FUNCTION | (d.async || d.generator ? 0 : SYM.FN_PLAIN);
 
@@ -1489,7 +1516,33 @@ function visit(state: AnalyseState, node: Node | null): void {
             // while the `declare` call itself happens inside. `FunctionExpression` below already had
             // this shape; only the declaration case attributed the id node to the enclosing scope, which
             // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
-            const target = hoistTarget(state);
+            // WHERE a function declaration binds, ported from oxc's `Function::bind`
+            // (`binder.rs:138-201`) rather than reconstructed. oxc binds it in the CURRENT scope and
+            // then, ONLY for Annex B B.3.3, moves the binding to the enclosing var scope:
+            //
+            //     is_declaration && !async && !generator && !is_typescript()
+            //       && !scope_flags.is_var() && !scope_flags.is_strict_mode()
+            //       && !scope_has_binding(var_scope, name)
+            //
+            // We used to hoist EVERY block function to the var scope, which over-exposed the ones
+            // Annex B excludes: node gives a ReferenceError for `{ async function f(){} } f()` and for
+            // the same shape under `"use strict"`, while we resolved `f` to the block's function. That
+            // is a real mis-resolution, not only a layout difference — a later `f()` meaning a GLOBAL
+            // could bind to the local and be renamed with it.
+            //
+            // The last clause matters too: with the var scope already taken,
+            // `{ function f(){} function f(){} }` leaves the second one in the block, so the two are
+            // distinct bindings and Annex B's tolerance falls out instead of being special-cased.
+            const appear = state.scope;
+            const hoist = hoistTarget(state);
+            const fnData = node.data;
+            // TWO STEPS, in oxc's order. The declaration binds in the scope it is WRITTEN in, which is
+            // what runs the redeclaration check there, and only then does Annex B move the binding to
+            // the var scope. Choosing the destination up front instead skipped the check against the
+            // block: `{ async function f(){} function f(){} }` went unreported, because the async one
+            // sits in the block while the plain one had already been sent to the var scope.
+            const annexBEligible =
+                appear !== hoist && !state.sem.isTs && !fnData.async && !fnData.generator && !isStrictScope(state.sem, appear);
             const methodParams = state.uniqueParams;
             state.uniqueParams = false;
             const methodCtx = state.methodCtx;
@@ -1500,7 +1553,10 @@ function visit(state: AnalyseState, node: Node | null): void {
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
-                if (id !== null) declare(state, id, fnFlags(node.data), NS_VALUE, target, stmtPos === STMT_POS_IF);
+                if (id !== null) {
+                    const sym = declare(state, id, fnFlags(node.data), NS_VALUE, appear, stmtPos === STMT_POS_IF);
+                    if (annexBEligible) annexBMove(state, sym, appear, hoist, id.name);
+                }
                 // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
                 // setting it around the body alone rejected four valid test262 programs.
                 const outerCtx = state.posCtx;
