@@ -155,6 +155,7 @@ for (const p of files) {
     } else if (!oxcOk(true)) {
         // Does OUR checker already catch it? Splits the CHECKER bucket into ported and not, so the
         // rule-porting work has a number to move.
+        let weCatch = false;
         try {
             const prog = parseWithDiagnostics(src, {
                 ts: false,
@@ -163,12 +164,16 @@ for (const p of files) {
             }).program;
             const sem = createSemantic();
             analyze(sem, prog, sourceType === 'module', true);
-            if (sem.errors.length > 0) ported++;
+            weCatch = sem.errors.length > 0;
+            if (weCatch) ported++;
         } catch {
             // a checker crash must not change the layer verdict
         }
+        // TWO buckets, not one. A single CHECKER histogram is dominated by rules we ALREADY have —
+        // the top entry was `delete` of a private identifier at 192, which has been ported since the
+        // first cut — so it ranks work already done. Only the second bucket is the porting queue.
         bump(
-            'CHECKER (oxc_semantic/checker)',
+            weCatch ? 'CHECKER — already caught by our rules' : 'CHECKER — NOT caught (the porting queue)',
             firstError(src, sourceType, true) ?? firstError(strictSrc, sourceType, true) ?? '?',
             rel,
         );
