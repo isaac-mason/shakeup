@@ -91,6 +91,14 @@ export const SYM = {
      * collision is recorded and then excused by this flag rather than never happening.
      */
     FN_EXPR_NAME: 1 << 11,
+    /**
+     * A PLAIN function declaration — not `async`, not a generator.
+     *
+     * Annex B B.3.3's block allowance covers only these: `{ function f(){} function f(){} }` is legal
+     * sloppy, while the same pair with `async` or `*` on either side is an error. Verified against oxc
+     * across the whole matrix; the flag exists because the exemption has to inspect BOTH sides.
+     */
+    FN_PLAIN: 1 << 12,
 } as const;
 
 /** namespace selector for binding/resolution */
@@ -102,7 +110,17 @@ export type ScopeRec = { parent: number; flags: number; node: Node | null };
 
 /** A name bound twice in one scope. `prevFlags`/`flags` are the two `SYM` sets, which decide whether
  *  it is legal: `var` may shadow `var` or a function, but anything LEXICAL may not. */
-export type Redeclaration = { name: string; pos: number; scope: number; prevFlags: number; flags: number };
+export type Redeclaration = {
+    name: string;
+    pos: number;
+    scope: number;
+    prevFlags: number;
+    flags: number;
+    /** Treat this collision as LEXICAL even though the flags say `FUNCTION`. A function declaration is
+     *  var-scoped only at the top level of a script or a function body; in a block, a switch, or at
+     *  module top level it is lexical, and `declare()` is the only place that knows which. */
+    lexicalFn?: boolean;
+};
 
 /** One binding. `scope` is the owning scope id; `decl` is the declaring Ident; `nameId` is an interned name. */
 export type SymbolRec = { scope: number; decl: Node | null; flags: number; nameId: number };
@@ -201,6 +219,12 @@ export type Semantic = {
      */
     refPairs: number[][] | null;
     declPairs: number[][] | null;
+
+    /** The source was analysed as an ES MODULE. Module top-level function declarations are LEXICAL
+     *  where a script's are var-scoped, so `function f(){} function f(){}` is an error in one and not
+     *  the other — and it is the GOAL that decides, not strict mode: the same pair under
+     *  `"use strict"` in a script is still legal. */
+    isModule: boolean;
 
     /**
      * Early errors found by the CHECKER, which now runs fused into this walk rather than as a second
@@ -358,6 +382,7 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         names: new Map(),
         bindings: new Map(),
         errors: [],
+        isModule: false,
     };
 }
 
@@ -507,14 +532,49 @@ function declare(
         // `for`-body forms — those already qualify because their bodies are real `BlockStatement`s.
         const parentKind = parentScope === 0 ? -1 : scopeKind(state.sem.scopes[parentScope].flags);
         const inBlock = parentKind === SCOPE.BLOCK || parentKind === SCOPE.SWITCH;
-        const blockAliasedFunction = (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
-        if (ns === NS_VALUE && !blockAliasedFunction)
+        const prevFlags = state.sem.symbols[existing].flags;
+        // Where a function DECLARATION is var-scoped and where it is lexical, from oxc's answers rather
+        // than from the flags, which cannot tell:
+        //
+        //     function f(){} function f(){}              script top level      ok, even under "use strict"
+        //     function g(){ function f(){} function f(){} }                    ok
+        //     function f(){} function f(){}              MODULE top level      ERROR
+        //     { function f(){} function f(){} }          sloppy                ok    (Annex B B.3.3)
+        //     { function f(){} function f(){} }          strict                ERROR
+        //     { async function f(){} function f(){} }    either                ERROR (Annex B is plain-only)
+        //
+        // So strict mode does NOT make a top-level declaration lexical — the module GOAL does — and the
+        // block allowance needs BOTH sides plain and sloppy code.
+        const isBlockFn = (flags & SYM.FUNCTION) !== 0 && targetScope !== state.scope && (inBlock || annexB);
+        // Module top level is the one lexical position this model CAN decide: both declarations bind
+        // in the same scope, so a collision there is genuine.
+        const lexicalFn =
+            (flags & SYM.FUNCTION) !== 0 && state.sem.isModule && scopeKind(state.sem.scopes[targetScope].flags) === SCOPE.MODULE;
+        if (isBlockFn) {
+            // NOT ATTEMPTED, and the reason is structural rather than effort. A function declared in a
+            // block IS lexical — `{ async function f(){} async function f(){} }` is an error, and so is
+            // the plain pair under `"use strict"` — but this model hoists every block function to the
+            // enclosing FUNCTION scope, so two declarations in DIFFERENT blocks land on the same
+            // binding and look like a collision. Implementing the rule here rejected
+            // `"use strict"; { function f(){} } { function f(){} }`, which is valid, and test262 caught
+            // it as one false rejection in `Array/prototype/find/resizable-buffer-shrink-mid-iteration`.
+            //
+            // Doing it properly means binding a block function in its BLOCK, which changes the scope
+            // tree the mangler reads — a separate piece of work with `unchanged` as its gate. Until
+            // then these ~142 test262 cases stay in the queue, missed rather than wrongly reported.
+            state.sem.symbols[existing].flags |= flags;
+            identNode.sym = existing;
+            recordDecl(state.sem, existing, identNode.id, state.scope);
+            return existing;
+        }
+        if (ns === NS_VALUE)
             state.sem.redeclarations.push({
                 name: identNode.name,
                 pos: identNode.start,
                 scope: targetScope,
-                prevFlags: state.sem.symbols[existing].flags,
+                prevFlags,
                 flags,
+                lexicalFn,
             });
         state.sem.symbols[existing].flags |= flags;
         identNode.sym = existing;
@@ -644,6 +704,7 @@ function resetSem(out: Semantic): void {
  */
 export function analyze(out: Semantic, program: Node, sourceIsModule = false, check = false): void {
     resetSem(out);
+    out.isModule = sourceIsModule;
     const state: AnalyseState = {
         sem: out,
         scope: 0,
@@ -995,6 +1056,9 @@ function visitFunctionBody(state: AnalyseState, body: Node | null): void {
 
 /** Is this statement a DECLARATION, i.e. one the statement-position rules have anything to say about?
  *  Checked at the branch rather than in `visit` so the flag is only ever set where it matters. */
+/** `SYM.FUNCTION`, plus `FN_PLAIN` when Annex B's block allowance can apply to it. */
+const fnFlags = (d: { async: boolean; generator: boolean }): number => SYM.FUNCTION | (d.async || d.generator ? 0 : SYM.FN_PLAIN);
+
 const isDecl = (n: Node | null): boolean => n !== null && (n.type === N.FunctionDeclaration || n.type === N.ClassDeclaration);
 
 function visit(state: AnalyseState, node: Node | null): void {
@@ -1113,7 +1177,7 @@ function visit(state: AnalyseState, node: Node | null): void {
             declareInScope(state, SCOPE.FUNCTION, node, () => {
                 seedFunctionStrict(state, node.data.body);
                 const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.FUNCTION, NS_VALUE, target, stmtPos === STMT_POS_IF);
+                if (id !== null) declare(state, id, fnFlags(node.data), NS_VALUE, target, stmtPos === STMT_POS_IF);
                 // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
                 // setting it around the body alone rejected four valid test262 programs.
                 const outerCtx = state.posCtx;

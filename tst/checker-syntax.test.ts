@@ -392,6 +392,41 @@ describe("a named function expression's own name may be shadowed by its body", (
     });
 });
 
+describe('a function declaration is lexical at MODULE top level', () => {
+    // Strict mode does NOT make a top-level declaration lexical — the module GOAL does. The same pair
+    // under `"use strict"` in a script is still legal.
+    it.each(['function f(){} function f(){}', 'async function f(){} async function f(){}'])('rejects %s in a module', (src) => {
+        expect(check(src, true)).toEqual(['Identifier `f` has already been declared']);
+    });
+
+    it.each([
+        'function f(){} function f(){}',
+        '"use strict"; function f(){} function f(){}',
+        'function g(){ function f(){} function f(){} }',
+        'class C { m(){ function f(){} function f(){} } }',
+    ])('accepts %s in a script', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it.each([
+        // NOT ATTEMPTED: a function declared in a BLOCK is lexical, so every one of these is an error
+        // in oxc. This model hoists block functions to the enclosing FUNCTION scope, so two
+        // declarations in DIFFERENT blocks share a binding — implementing the rule rejected the valid
+        // `"use strict"; { function f(){} } { function f(){} }`. Doing it properly means binding a
+        // block function in its block, which moves the scope tree the mangler reads.
+        '{ async function f(){} async function f(){} }',
+        '{ function* f(){} function* f(){} }',
+        '"use strict"; { function f(){} function f(){} }',
+        '{ var f; function f(){} }',
+    ])('KNOWN GAP, accepted for now: %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+
+    it('and the valid different-block form must keep working', () => {
+        expect(check('"use strict"; { function f(){} } { function f(){} }')).toEqual([]);
+    });
+});
+
 describe("Annex B's block-scoped function alias is not a redeclaration", () => {
     // 16 valid test262 programs were rejected over this, and no gate could see it: `checkerdiff`'s
     // corpus has no such shape, and `test262` was not running the checker at all.

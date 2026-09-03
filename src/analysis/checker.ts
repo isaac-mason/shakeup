@@ -305,7 +305,9 @@ export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
         // may shadow it — `(function n(){ let n = 1; })` is valid, as are the `const` and `class`
         // forms. We bind it in the function scope, so the collision has to be excused here.
         if (((r.prevFlags | r.flags) & SYM.FN_EXPR_NAME) !== 0) continue;
-        const lexical = isLexical(both);
+        // `lexicalFn` is set by `declare()` for the positions where a function declaration is lexical
+        // rather than var-scoped — a block, a switch, or module top level. The flags alone cannot say.
+        const lexical = isLexical(both) || r.lexicalFn === true;
         // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
         // under a directive only reached after the parameters have been bound, which is why this
         // judgement waits until now rather than happening in `declare()`.
