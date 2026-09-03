@@ -170,6 +170,24 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             if (ctx.stmtPos === STMT_POS_LOOP || isStrictScope(ctx.sem, ctx.scope))
                 errors.push({ pos: node.start, msg: 'Invalid function declaration' });
             return;
+        case N.ObjectExpression: {
+            // `({ __proto__: 1, __proto__: 2 })` sets the prototype twice and is an early error. Only
+            // a plain `__proto__: value` pair counts — a COMPUTED key (`["__proto__"]`), a SHORTHAND
+            // (`{ __proto__ }`) and an accessor all define an ordinary property instead, which is why
+            // this cannot just compare key names.
+            let protos = 0;
+            for (const prop of (node.data as { properties: Node[] }).properties) {
+                if (prop.type !== N.ObjectProperty) continue;
+                const d = prop.data as { key: Node; computed: boolean; shorthand: boolean; kind: string; method: boolean };
+                if (d.computed || d.shorthand || d.method || d.kind !== 'init') continue;
+                const k = d.key;
+                const name = k.type === N.StringLiteral ? k.name.slice(1, -1) : k.name;
+                if (name !== '__proto__') continue;
+                protos++;
+                if (protos > 1) errors.push({ pos: k.start, msg: 'Identifier `__proto__` has already been declared' });
+            }
+            return;
+        }
         case N.LabeledStatement:
             checkReservedWord(ctx.sem, (node.data as { label: Node }).label, ctx.scope, errors);
             return;
@@ -218,8 +236,15 @@ export function classPrivateNames(elements: Node[], inherited: ReadonlySet<strin
     // the same static-ness: `get #x(){} static get #x(){}` still collides. oxc reports it with the
     // ordinary redeclaration message.
     const seen = new Map<string, { kind: string; isStatic: boolean }>();
+    // A class may declare at most ONE constructor. Counted in this loop rather than its own because
+    // the loop already has every element's `kind` in hand and a class body is short.
+    let ctors = 0;
     for (const el of elements) {
         const d = el.data as { key?: Node; static?: boolean; kind?: string };
+        if (el.type === N.MethodDefinition && d.kind === 'constructor' && d.static !== true) {
+            ctors++;
+            if (ctors > 1) errors.push({ pos: el.start, msg: 'Multiple constructor implementations are not allowed.' });
+        }
         if (d.key === undefined || d.key.type !== N.PrivateIdentifier) continue;
         own.add(d.key.name);
         const kind = d.kind === 'get' || d.kind === 'set' ? d.kind : 'other';

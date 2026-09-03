@@ -154,6 +154,44 @@ describe('Annex B decides HOW FAR the block-function check reaches', () => {
     });
 });
 
+describe('at most one constructor per class', () => {
+    it.each(['class C { constructor(){} constructor(){} }', 'const K = class { constructor(){} constructor(){} };'])(
+        'rejects %s',
+        (src) => {
+            expect(check(src)).toEqual(['Multiple constructor implementations are not allowed.']);
+        },
+    );
+
+    it.each([
+        'class C { constructor(){} }',
+        // A STATIC `constructor` is an ordinary static method, not the class constructor.
+        'class C { constructor(){} static constructor(){} }',
+        'class C { m(){} m(){} }',
+        'class C { get x(){} set x(v){} }',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+});
+
+describe('a duplicate `__proto__` in an object literal', () => {
+    // Only a plain `__proto__: value` pair sets the prototype. Every other spelling defines an
+    // ordinary property, so comparing key NAMES alone would over-report all four accepted forms.
+    it.each(['({ __proto__: 1, __proto__: 2 });', '({ "__proto__": 1, __proto__: 2 });'])('rejects %s', (src) => {
+        expect(check(src)).toEqual(['Identifier `__proto__` has already been declared']);
+    });
+
+    it.each([
+        '({ __proto__: 1, ["__proto__"]: 2 });',
+        '({ __proto__: 1, __proto__ });',
+        '({ __proto__(){}, __proto__(){} });',
+        '({ get __proto__(){}, get __proto__(){} });',
+        '({ __proto__: 1 });',
+        '({ a: 1, a: 2 });',
+    ])('accepts %s', (src) => {
+        expect(check(src)).toEqual([]);
+    });
+});
+
 describe('a `var` and a block FUNCTION that hoist past each other', () => {
     // Every expectation here is NODE's. oxc rejects three of the accepted shapes below — sibling
     // blocks and a var-scoped `function f(){}` with `var f` in a nested block — which node accepts, so
