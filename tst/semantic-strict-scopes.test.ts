@@ -14,6 +14,7 @@
 //   · a class body           — always strict, however it is reached
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic, SCOPE, SCOPE_STRICT, scopeKind } from '../src/analysis/semantic.ts';
+import { N, type Node, walkChildren } from '../src/ast/index.ts';
 import { parse } from '../src/parser/index.ts';
 
 /** Every scope as `kind:strict`, in creation order, skipping the null sentinel at index 0. */
@@ -83,5 +84,49 @@ describe('what is NOT a directive', () => {
 
     it("single quotes count too", () => {
         expect(scopesOf("'use strict'; function f(){}").every((s) => s.strict)).toBe(true);
+    });
+});
+
+// A parameter DEFAULT is evaluated before the body's `var`s exist, so it must never bind to one:
+//
+//     var a = 'main';
+//     function f(b = a) { var a; }        // `b` is 'main', NOT undefined
+//
+// oxc uses ONE function scope and fixes the ORDER — `resolve_references_for_current_scope()` runs
+// straight after `visit_formal_parameters` (`builder.rs:2075-2085`), with the comment "need to avoid
+// binding to variables/types declared inside the function body". We deferred every reference in the
+// module to the end of `analyze`, so the default bound to the body's `var a`. Rollup's
+// `deconflict-parameter-defaults` fails at RUNTIME on exactly this.
+describe('a parameter default resolves before the body is visited', () => {
+    const symOfDefault = (src: string): number => {
+        // The `a` inside the parameter list, which is the first IdentifierReference in the program.
+        const { program } = parse(src, { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        let found = -1;
+        const walk = (n: Node): void => {
+            if (found < 0 && n.type === N.IdentifierReference && n.name === 'a') found = n.sym;
+            walkChildren(n, walk);
+        };
+        walk(program);
+        return found;
+    };
+
+    it('binds to the OUTER a, not the body var of the same name', () => {
+        const outer = symOfDefault('var a = 1; function f(b = a) { var a; }');
+        // The body's `var a` is a different binding; the default must not have taken it.
+        const { program } = parse('var a = 1; function f(b = a) { var a; }', { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        expect(outer).toBeGreaterThan(0);
+        expect(sem.symbols[outer].scope).toBe(1); // the module scope, not the function's
+    });
+
+    it('still binds to a PARAMETER of the same name when there is one', () => {
+        const sym = symOfDefault('var a = 1; function f(a, b = a) { }');
+        const { program } = parse('var a = 1; function f(a, b = a) { }', { ts: false, jsx: false });
+        const sem = createSemantic();
+        analyze(sem, program, false);
+        expect(sem.symbols[sym].scope).not.toBe(1); // the parameter, inside the function
     });
 });

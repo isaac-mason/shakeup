@@ -264,6 +264,8 @@ const REF_READ = 1;
 const REF_WRITE = 2;
 const REF_SHORTHAND = 4;
 const REF_EXPORTED = 8;
+/** Already resolved by {@link resolveEarly}; the deferred pass must TALLY it but not re-resolve it. */
+const REF_EARLY = 16;
 
 /**
  * Resolve `name` in the VALUE namespace starting at `scope` and walking to the root, returning the
@@ -871,7 +873,9 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
     for (let i = 0; i < pn.length; i++) {
         const node = pn[i];
         state.scope = state.pendScope[i];
-        resolveRef(state, node, state.pendNs[i]);
+        // Already bound by `resolveEarly`; re-resolving would re-bind a parameter default to a `var`
+        // the body declares later, which is the whole thing that call prevents.
+        if ((state.pendFlags[i] & REF_EARLY) === 0) resolveRef(state, node, state.pendNs[i]);
         // Tally AFTER resolution — the role was recorded when we collected, the symbol is known only
         // now. Mirrors `computePrelude` exactly, including its quirks: a compound assignment and an
         // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
@@ -1168,6 +1172,31 @@ function seedFunctionStrict(state: AnalyseState, body: Node | null): void {
     if (hasUseStrictDirective((body.data as { body: Node[] }).body)) state.sem.scopes[state.scope].flags |= SCOPE_STRICT;
 }
 
+/**
+ * Resolve the references collected since `mark` NOW, against the scopes they were collected in.
+ *
+ * oxc calls `resolve_references_for_current_scope()` right after `visit_formal_parameters`
+ * (`builder.rs:2075-2085`) and says why: "Parameter initializers must be resolved after all parameters
+ * have been declared... need to avoid binding to variables/types declared inside the function body."
+ *
+ * A parameter DEFAULT is evaluated before the body's `var`s exist, so
+ * `var a = 'main'; function f(b = a) { var a; }` must bind that `a` to the OUTER one. Deferring the
+ * whole module's resolution to the end of `analyze` binds it to the body's `var a` instead, which is
+ * `undefined` — rollup's `deconflict-parameter-defaults` fails at RUNTIME on exactly that.
+ *
+ * oxc uses ONE function scope and fixes the ORDER, rather than a separate parameter scope; this is
+ * that, ported.
+ */
+function resolveEarly(state: AnalyseState, mark: number): void {
+    const saved = state.scope;
+    for (let i = mark; i < state.pendNode.length; i++) {
+        state.scope = state.pendScope[i];
+        resolveRef(state, state.pendNode[i], state.pendNs[i]);
+        state.pendFlags[i] |= REF_EARLY;
+    }
+    state.scope = saved;
+}
+
 function visitFunctionBody(state: AnalyseState, body: Node | null): void {
     if (body === null) return;
     if (body.type !== N.BlockStatement) {
@@ -1324,9 +1353,11 @@ function visit(state: AnalyseState, node: Node | null): void {
                 // setting it around the body alone rejected four valid test262 programs.
                 const outerCtx = state.posCtx;
                 state.posCtx = methodCtx;
+                const paramMark = state.pendNode.length;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
+                resolveEarly(state, paramMark);
                 visitFunctionBody(state, node.data.body);
                 state.posCtx = outerCtx;
             });
@@ -1345,9 +1376,11 @@ function visit(state: AnalyseState, node: Node | null): void {
                 // setting it around the body alone rejected four valid test262 programs.
                 const outerCtx = state.posCtx;
                 state.posCtx = methodCtx;
+                const paramMark = state.pendNode.length;
                 declareTypeParams(state, node.data.typeParameters);
                 declareCollectParams(state, node.data.params, methodParams);
                 visitType(state, node.data.returnType);
+                resolveEarly(state, paramMark);
                 visitFunctionBody(state, node.data.body);
                 state.posCtx = outerCtx;
             });
@@ -1358,8 +1391,10 @@ function visit(state: AnalyseState, node: Node | null): void {
                 seedFunctionStrict(state, node.data.body);
                 declareTypeParams(state, node.data.typeParameters);
                 // An arrow's parameters are `UniqueFormalParameters` in every mode.
+                const paramMark = state.pendNode.length;
                 declareCollectParams(state, node.data.params, true);
                 visitType(state, node.data.returnType);
+                resolveEarly(state, paramMark);
                 visitFunctionBody(state, node.data.body);
             });
             return;
