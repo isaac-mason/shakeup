@@ -145,6 +145,12 @@ export type Redeclaration = {
     at: number;
     prevFlags: number;
     flags: number;
+    /** The two declarations collided by HOISTING PAST each other rather than by sharing a scope, which
+     *  is always an error whatever the flags say. Recorded so that every redeclaration reaches the
+     *  checker through ONE sink: `declare` used to push some of these straight into `sem.errors` while
+     *  routing the rest through this list, and two sinks is how the same collision got reported twice
+     *  the moment a second mechanism learned to see it. */
+    crossed?: boolean;
     /** Treat this collision as LEXICAL even though the flags say `FUNCTION`. A function declaration is
      *  var-scoped only at the top level of a script or a function body; in a block, a switch, or at
      *  module top level it is lexical, and `declare()` is the only place that knows which. */
@@ -627,10 +633,17 @@ function declare(
         ) {
             for (let sc = appearAt; sc !== targetScope && sc !== 0; sc = state.sem.scopes[sc].parent) {
                 if (sc !== fnAt) continue;
-                state.sem.errors.push({
-                    pos: identNode.start,
-                    msg: `Identifier \`${identNode.name}\` has already been declared`,
-                });
+                recordRedeclaration(
+                    state,
+                    atTarget,
+                    identNode,
+                    targetScope,
+                    appearAt,
+                    state.sem.symbols[atTarget].flags,
+                    flags,
+                    false,
+                    true,
+                );
                 break;
             }
         }
@@ -643,10 +656,17 @@ function declare(
             if (through !== undefined) {
                 if ((state.sem.symbols[through].flags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0) {
                     if (state.check)
-                        state.sem.errors.push({
-                            pos: identNode.start,
-                            msg: `Identifier \`${identNode.name}\` has already been declared`,
-                        });
+                        recordRedeclaration(
+                            state,
+                            through,
+                            identNode,
+                            targetScope,
+                            appearAt,
+                            state.sem.symbols[through].flags,
+                            flags,
+                            false,
+                            true,
+                        );
                     break;
                 }
                 // COMPATIBLE binding on the way up — a catch parameter, or an earlier `var`. oxc's
@@ -691,10 +711,17 @@ function declare(
             state.sem.symbols[hoisted].at === appearAt &&
             appearAt !== hoistTarget(state)
         )
-            state.sem.errors.push({
-                pos: identNode.start,
-                msg: `Identifier \`${identNode.name}\` has already been declared`,
-            });
+            recordRedeclaration(
+                state,
+                hoisted,
+                identNode,
+                targetScope,
+                appearAt,
+                state.sem.symbols[hoisted].flags,
+                flags,
+                false,
+                true,
+            );
     }
     const existing = state.sem.bindings.get(key);
     if (existing !== undefined) {
@@ -857,6 +884,7 @@ function recordRedeclaration(
     prevFlags: number,
     flags: number,
     lexicalFn: boolean,
+    crossed = false,
 ): void {
     let list = state.sem.redeclarations.get(sym);
     if (list === undefined) {
@@ -873,7 +901,7 @@ function recordRedeclaration(
         ];
         state.sem.redeclarations.set(sym, list);
     }
-    list.push({ name: identNode.name, pos: identNode.start, scope, at, prevFlags, flags, lexicalFn });
+    list.push({ name: identNode.name, pos: identNode.start, scope, at, prevFlags, flags, lexicalFn, crossed });
 }
 
 function declareDualNs(state: AnalyseState, identNode: Node, flags: number, targetScope: number): number {

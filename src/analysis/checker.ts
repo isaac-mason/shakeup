@@ -365,6 +365,12 @@ export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
                     continue;
                 }
             }
+            // Recorded by a hoist-path check rather than a shared scope: always an error, and the
+            // ONE place it is reported.
+            if (r.crossed === true) {
+                errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
+                continue;
+            }
             const lexical = isLexical(both) || r.lexicalFn === true;
             // Duplicate PARAMETERS are the one pair that depends on strict mode — legal sloppy, an error
             // under a directive only reached after the parameters have been bound, which is why this
