@@ -113,6 +113,10 @@ export type ParserState = {
      *  `function *g(x = yield) {}` and `async function a(x = await 1) {}` — and an arrow INHERITS the
      *  surrounding context, so `function *g() { (x = yield) => {}; }` is an error too while a nested
      *  ordinary function's `yield` is just an identifier. Cleared for any nested BODY. */
+    /** The logical operator at the top level of the expression  just returned — 0 none,
+     *  1 for `||`/`&&`, 2 for `??`. Lets the caller tell an unparenthesised operand from a
+     *  parenthesised one, which the AST cannot: same shape as the unparenthesised-`?.` tracking below. */
+    topLogical: number;
     inParams: boolean;
     /** The goal is declared MODULE. `import.meta` and top-level `await` are legal only here (or,
      *  pending resolution, under `unambiguous`). */

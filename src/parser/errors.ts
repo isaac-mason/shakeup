@@ -33,6 +33,7 @@ export const ParseErrorCode = enumeration(
     'ClassDeclSingleStatement',
     'AsyncFnSingleStatement',
     'GeneratorSingleStatement',
+    'MixedCoalesce',
     'TaggedOptionalChain',
     'DecoratorsUnsupported',
     'ParserStalled',
@@ -115,6 +116,7 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.AsyncFnSingleStatement]:
         'Async functions can only be declared at the top level or inside a block',
     [ParseErrorCode.GeneratorSingleStatement]: 'Generators can only be declared at the top level or inside a block',
+    [ParseErrorCode.MixedCoalesce]: 'Logical expressions and coalesce expressions cannot be mixed',
     [ParseErrorCode.TaggedOptionalChain]: 'tagged template cannot be used with an optional chain',
     [ParseErrorCode.DecoratorsUnsupported]: 'decorators not supported',
     [ParseErrorCode.ParserStalled]: 'parser stalled',

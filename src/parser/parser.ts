@@ -148,6 +148,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         allowTopNewTarget: options.kind !== 'module',
         goalIsModule: options.kind === 'module',
         deferredScriptErrors: [],
+        topLogical: 0,
         inParams: false,
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
@@ -718,8 +719,26 @@ function parseConditional(state: ParserState, noIn: boolean, allowReturnType: bo
     return create.ConditionalExpression(test.start, alt.end, 0, test, cons, alt);
 }
 
+const LOGICAL_NONE = 0;
+const LOGICAL_ANDOR = 1;
+const LOGICAL_QQ = 2;
+
+/**
+ * `??` may not be MIXED with `||`/`&&` without parentheses, in either order: the grammar gives
+ * `CoalesceExpression` its own production rather than a precedence level, so `a || b ?? c` and
+ * `a ?? b || c` are both errors while `(a || b) ?? c` is fine.
+ *
+ * Parentheses are not in our AST, so a parenthesised `(a || b)` is an indistinguishable
+ * `LogicalExpression` — inspecting the operand NODE reports both legal forms as errors, which is how
+ * the first cut failed. What separates them is which FRAME built the node: a parenthesised operand is
+ * parsed by a fresh `parseBinary` reached through `parseUnary`, so this frame resets its view of it.
+ * `state.topLogical` carries the operator at a frame's own top level, the same shape as the
+ * unparenthesised-`?.` tracking at `state.ts:199`.
+ */
 function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
     let left = parseUnary(state);
+    // Whatever a parenthesised operand left behind is not OUR top level.
+    let leftKind = LOGICAL_NONE;
     for (;;) {
         const tok = state.tok;
         // TS `as` / `satisfies` are type operators (they consume a type), not binary ops.
@@ -734,13 +753,26 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
         }
         // One uniform path: punctuator ops and `in`/`instanceof` all carry precedence
         // + IsBinaryOp in the packed token (token.ts), so there is no punct-vs-keyword branch.
-        if (!isBinaryOp(tok)) return left;
-        if (tok === K.IN && noIn) return left; // `in` is not an operator in a no-in context
+        if (!isBinaryOp(tok) || (tok === K.IN && noIn) || precedenceOf(tok) <= minPrec) {
+            state.topLogical = leftKind;
+            return left;
+        }
         const prec = precedenceOf(tok);
-        if (prec <= minPrec) return left;
         nextToken(state);
         const right = parseBinary(state, tok === P.STARSTAR ? prec - 1 : prec, noIn);
         const op = opTextOf(tok);
+        // `??` may not be mixed with `||`/`&&` without parentheses, in either order — the grammar
+        // gives `CoalesceExpression` its own production rather than a precedence level, so
+        // `a || b ?? c` and `a ?? b || c` are both errors while `(a || b) ?? c` is fine. Parenthesised
+        // operands arrive here as some OTHER node type, so testing the child's own operator is the
+        // whole check.
+        const rightKind = state.topLogical;
+        if (isLogical(tok)) {
+            const cur = tok === P.QQ ? LOGICAL_QQ : LOGICAL_ANDOR;
+            const other = cur === LOGICAL_QQ ? LOGICAL_ANDOR : LOGICAL_QQ;
+            if (leftKind === other || rightKind === other) raiseAt(state, left.start, ParseErrorCode.MixedCoalesce);
+            leftKind = cur;
+        } else leftKind = LOGICAL_NONE;
         left = isLogical(tok)
             ? create.LogicalExpression(left.start, right.end, op, left, right)
             : create.BinaryExpression(left.start, right.end, op, left, right);
@@ -2553,6 +2585,11 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 // `let [` stays a declaration even here: it is ambiguous with `let[a] = b` member
                 // assignment, so the position rule cannot settle it.
                 if ((single && peeked !== P.LBRACKET) || peeked === P.SEMI) break;
+                // …but a DECLARATION is still not a Statement, so this position is an error even
+                // though the disambiguation went the declaration way. node and oxc both report it:
+                // `if (1) let [x] = [];` is "Lexical declaration cannot appear in a single-statement
+                // context", while the bare `let[a] = b;` it is ambiguous with stays legal.
+                if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
                 return parseVarDecl(state, VAR_KIND.LET, 0);
             }
             case K.FUNCTION:

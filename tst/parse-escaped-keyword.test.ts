@@ -209,3 +209,46 @@ describe('what stays legal', () => {
         expect(errs(src), src).toEqual([]);
     });
 });
+
+// `??` may not be MIXED with `||`/`&&` without parentheses, in either order: the grammar gives
+// `CoalesceExpression` its own production rather than a precedence level.
+//
+// Parentheses are not in our AST, so inspecting the operand NODE reports `(a || b) ?? c` as an error
+// too — that was the first cut. What separates them is which FRAME built the node: a parenthesised
+// operand is parsed by a fresh `parseBinary` reached through `parseUnary`.
+describe('coalesce mixed with logical operators', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each(['a || b ?? c;', 'a && b ?? c;', 'a ?? b || c;', 'a ?? b && c;'])('rejects %s', (src) => {
+        expect(errs(src)).toEqual(['Logical expressions and coalesce expressions cannot be mixed']);
+    });
+
+    it.each([
+        '(a || b) ?? c;',
+        'a ?? (b || c);',
+        '(a ?? b) || c;',
+        'a || (b ?? c);',
+        'a ?? b ?? c;',
+        'a || b && c;',
+        'f(a || b, c ?? d);',
+        'a ? b || c : d ?? e;',
+    ])('accepts %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+});
+
+// A LexicalDeclaration is not a Statement, so it may not be the body of `if`/`do`/`while`. The
+// destructuring form fell through the `let [` disambiguation, which exists because `let[a] = b` is a
+// legal member assignment — that ambiguity decides what it PARSES as, not whether the position is
+// legal.
+describe('a lexical declaration in a single-statement context', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each(['if (1) let [x] = [];', 'do let [x] = [] \n while(false);', 'while(0) let [x] = [];'])('rejects %s', (src) => {
+        expect(errs(src)).toEqual(['Lexical declaration cannot appear in a single-statement context']);
+    });
+
+    it.each(['let[a] = b;', 'let [x] = [];', 'if (1) { let [x] = []; }'])('accepts %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+});
