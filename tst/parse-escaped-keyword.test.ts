@@ -274,3 +274,38 @@ describe('a private field on `super`, and a computed key without a value', () =>
         expect(errs(src)).toEqual([]);
     });
 });
+
+describe('a class FIELD named `constructor`, and a rest element with a trailing comma', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it.each(['class C { "constructor" = 1; }', 'class C { static "constructor" = 1; }'])(
+        'rejects %s — banned static or not, unlike a METHOD',
+        (src) => {
+            expect(errs(src)).toEqual(["Classes can't have a field named 'constructor'"]);
+        },
+    );
+
+    it.each(['class C { constructor(){} }', 'class C { static constructor(){} }', 'class C { ["constructor"] = 1; }'])(
+        'accepts %s',
+        (src) => {
+            expect(errs(src)).toEqual([]);
+        },
+    );
+
+    it.each(['[...a,] = [];', '({ ...a, } = {});', '[a, ...b,] = [];'])('a trailing comma after a rest TARGET: %s', (src) => {
+        // Legal in the literal, illegal once it becomes a destructuring target — and the comma
+        // leaves no trace in the AST, so the parser records it beside the tree.
+        expect(errs(src)).toEqual(['A rest parameter or binding pattern may not have a trailing comma.']);
+    });
+
+    it.each(['[...a,];', '({ ...a, });', '[...a] = [];', '({ ...a } = {});'])(
+        'but the LITERAL keeps its trailing comma: %s',
+        (src) => {
+            expect(errs(src)).toEqual([]);
+        },
+    );
+
+    it.each(['({ 0 });', '({ "a" });'])('a literal key has no shorthand form: %s', (src) => {
+        expect(errs(src)).not.toEqual([]);
+    });
+});

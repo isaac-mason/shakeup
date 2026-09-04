@@ -116,6 +116,11 @@ export type ParserState = {
     /** The logical operator at the top level of the expression  just returned — 0 none,
      *  1 for `||`/`&&`, 2 for `??`. Lets the caller tell an unparenthesised operand from a
      *  parenthesised one, which the AST cannot: same shape as the unparenthesised-`?.` tracking below. */
+    /** Node ids of array/object literals that had a trailing comma after a REST element. Legal in the
+     *  literal, illegal once it becomes a destructuring TARGET — and the comma leaves no trace in the
+     *  AST, while the literal builders discard their flags argument and the node SHAPE is fixed on
+     *  purpose. So it is recorded beside the tree, lazily, like `notArrow` below. */
+    restComma: Set<number> | null;
     topLogical: number;
     inParams: boolean;
     /** The goal is declared MODULE. `import.meta` and top-level `await` are legal only here (or,

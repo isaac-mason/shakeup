@@ -148,6 +148,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         allowTopNewTarget: options.kind !== 'module',
         goalIsModule: options.kind === 'module',
         deferredScriptErrors: [],
+        restComma: null,
         topLogical: 0,
         inParams: false,
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
@@ -531,7 +532,13 @@ function checkMaybeDefault(state: ParserState, node: Node): void {
     checkAssignTarget(state, node, false);
 }
 
+const markRestComma = (state: ParserState, node: Node): void => {
+    (state.restComma ??= new Set<number>()).add(node.id);
+};
+const hasRestComma = (state: ParserState, node: Node): boolean => state.restComma !== null && state.restComma.has(node.id);
+
 function checkArrayTarget(state: ParserState, node: NodeOf<'ArrayExpression'>): void {
+    if (hasRestComma(state, node)) raiseAt(state, node.start, ParseErrorCode.RestTrailingComma);
     const elements = node.data.elements as (Node | null)[];
     for (let i = 0; i < elements.length; i++) {
         const el = elements[i];
@@ -553,6 +560,7 @@ function checkArrayTarget(state: ParserState, node: NodeOf<'ArrayExpression'>): 
 }
 
 function checkObjectTarget(state: ParserState, node: NodeOf<'ObjectExpression'>): void {
+    if (hasRestComma(state, node)) raiseAt(state, node.start, ParseErrorCode.RestTrailingComma);
     const props = node.data.properties as Node[];
     for (let i = 0; i < props.length; i++) {
         const prop = props[i];
@@ -1376,6 +1384,7 @@ function parsePrimary(state: ParserState): Node {
             case P.LBRACKET: {
                 nextToken(state);
                 const from = state.sp;
+                let sawRestComma = false;
                 while (!isP(state, P.RBRACKET) && (state.tok as number) !== T_EOF) {
                     const mark = state.tokStart;
                     if (isP(state, P.COMMA)) {
@@ -1388,12 +1397,23 @@ function parsePrimary(state: ParserState): Node {
                         nextToken(state);
                         const arg = parseAssign(state);
                         push(state, create.SpreadElement(s, arg.end, 0, arg));
+                        // A comma after a rest element: fine in the LITERAL, an error once this
+                        // becomes a destructuring target. The comma leaves no trace in the AST, so it
+                        // is recorded here and judged by `checkArrayTarget`.
+                        if (isP(state, P.COMMA)) {
+                            nextToken(state);
+                            if (isP(state, P.RBRACKET)) sawRestComma = true;
+                            if (noProgress(state, mark)) break;
+                            continue;
+                        }
                     } else push(state, parseAssign(state));
                     if (!isP(state, P.RBRACKET)) expectP(state, P.COMMA, "','");
                     if (noProgress(state, mark)) break;
                 }
                 expectP(state, P.RBRACKET, "']'");
-                return create.ArrayExpression(start, state.tokStart, 0, finishListWithHoles(state, from));
+                const arr = create.ArrayExpression(start, state.tokStart, 0, finishListWithHoles(state, from));
+                if (sawRestComma) markRestComma(state, arr);
+                return arr;
             }
             case P.LBRACE:
                 return parseObjectLiteral(state);
@@ -1463,6 +1483,7 @@ function parseObjectLiteral(state: ParserState): Node {
     nextToken(state);
     const from = state.sp;
     let last = -1;
+    let objFlags = 0;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         if (state.tokStart === last) {
             raise(state, ParseErrorCode.UnexpectedInObjectLiteral, tokenDesc(state));
@@ -1475,11 +1496,18 @@ function parseObjectLiteral(state: ParserState): Node {
             nextToken(state);
             const arg = parseAssign(state);
             push(state, create.SpreadElement(s, arg.end, 0, arg));
+            if (isP(state, P.COMMA)) {
+                nextToken(state);
+                if (isP(state, P.RBRACE)) objFlags = 1;
+                continue;
+            }
         } else push(state, parseObjectMember(state));
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
     }
     expectP(state, P.RBRACE, "'}'");
-    return create.ObjectExpression(start, state.tokStart, 0, finishList(state, from));
+    const obj = create.ObjectExpression(start, state.tokStart, 0, finishList(state, from));
+    if (objFlags !== 0) markRestComma(state, obj);
+    return obj;
 }
 
 function parseObjectMember(state: ParserState): Node {
@@ -1530,7 +1558,10 @@ function parseObjectMember(state: ParserState): Node {
     // A COMPUTED key has no shorthand form — `({ [b] })` is not `({ [b]: b })`, because the shorthand
     // takes its VALUE from the name and a computed key has no name. Both oracles demand the colon.
 
-    if ((flags & FL.COMPUTED) !== 0) expectP(state, P.COLON, "':'");
+    // Only an IDENTIFIER key has a shorthand form. A computed key has no name to take the value from,
+    // and a string or numeric key is not a binding: `({ [b] })`, `({ "a" })` and `({ 0 })` all need
+    // the colon.
+    if ((flags & FL.COMPUTED) !== 0 || key.type !== N.IdentifierName) expectP(state, P.COLON, "':'");
     checkShorthandName(state, key);
     const shorthandRef = identNamed(state, R_REF, key.start, key.end, key.name);
     if (isP(state, P.EQ)) {
@@ -2370,7 +2401,10 @@ function parseClassMember(state: ParserState): Node {
         (flags & (FL.STATIC | FL.COMPUTED)) === 0 &&
         (key.type === N.IdentifierName || key.type === N.StringLiteral) &&
         nameIs(state, key, 'constructor');
-    if (kind === 0 && namedConstructor) kind = 3;
+    // Promote to the constructor KIND only when this is actually a method: `class C { "constructor" =
+    // 1; }` is a FIELD named `constructor`, and marking it kind 3 sent it down the method path, where
+    // it failed as "expected '('" instead of the rule that applies to it.
+    if (kind === 0 && namedConstructor && (isP(state, P.LPAREN) || (state.tsMode && isP(state, P.LT)))) kind = 3;
     // Early errors on the constructor's FORM (oxc `diagnostics.rs:547,603` and the class checker).
     // The grammar happily parses each of these; only the name makes them illegal.
     // `#constructor` is reserved outright — static or not, method or field (`diagnostics.rs:534`).
@@ -2403,6 +2437,16 @@ function parseClassMember(state: ParserState): Node {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
         return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), decorators, key, fn);
     }
+    // Past the method branch, so this is a FIELD. A field named `constructor` is banned STATIC OR NOT
+    // — unlike a METHOD, where only the non-static one claims the constructor slot and
+    // `static constructor(){}` is an ordinary method. That is why this cannot reuse
+    // `namedConstructor`, which is deliberately static-exempt.
+    if (
+        (flags & FL.COMPUTED) === 0 &&
+        (key.type === N.IdentifierName || key.type === N.StringLiteral) &&
+        nameIs(state, key, 'constructor')
+    )
+        raise(state, ParseErrorCode.FieldNamedConstructor);
     if (state.tsMode && isP(state, P.BANG)) {
         flags |= FL.DEFINITE;
         nextToken(state);
