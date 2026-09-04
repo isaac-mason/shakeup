@@ -37,7 +37,7 @@ import {
 import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx, pluginParse } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
-import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
+import { buildGraph, externalModuleInfo, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake.ts';
 import type { FileEvent } from './watch.ts';
 
@@ -294,7 +294,11 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         getModuleInfo: (id): ModuleInfo | null => {
             if (graph === undefined) return null;
             const idx = graph.byId.get(id);
-            return idx === undefined ? null : toModuleInfo(graph, graph.modules[idx]);
+            if (idx !== undefined) return toModuleInfo(graph, graph.modules[idx]);
+            // Externals are not modules here, but Rollup keeps them in the graph and answers for
+            // them — `custom-external-module-options` reads one's `meta` from `buildEnd`.
+            const ext = graph.externals.get(id);
+            return ext === undefined ? null : externalModuleInfo(ext);
         },
         getModuleIds: () => (graph === undefined ? [][Symbol.iterator]() : graph.byId.keys()),
     };

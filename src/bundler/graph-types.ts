@@ -218,6 +218,23 @@ export type Graph = {
      *  Externals are otherwise tracked by SPECIFIER, so a caller holding an absolute path — such as
      *  `manualChunks`, which lists ids — has no other way to learn that the path is external. */
     externalIds: Set<string>;
+    /** External modules, keyed by id, so `this.getModuleInfo` can answer for one. Rollup keeps
+     *  externals IN the module graph as `ExternalModule`s with their own `ModuleInfo`
+     *  (`isExternal: true`), which is how `custom-external-module-options` reads back the `meta` its
+     *  `resolveId` attached. shakeup does not make them modules — they have no source, no AST and no
+     *  symbols — so this is the bookkeeping a plugin can ask about, and nothing else consumes it. */
+    externals: Map<string, ExternalRec>;
+};
+
+/** {@link Graph.externals}. `importers` is a set because the same external is normally imported from
+ *  several places, and `moduleSideEffects` mirrors {@link Graph.externalSideEffects} at the id (that
+ *  map is keyed by specifier and read on the emit path; this is the plugin-facing view). */
+export type ExternalRec = {
+    id: string;
+    meta: CustomPluginOptions;
+    moduleSideEffects: boolean;
+    importers: Set<string>;
+    dynamicImporters: Set<string>;
 };
 
 /** A module's parse/analyze/extract result — everything derived purely from its

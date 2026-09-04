@@ -19,6 +19,7 @@ import type { Fs, MaybePromise } from './fs.ts';
 import {
     type CachedParse,
     type ExportsKind,
+    type ExternalRec,
     type Graph,
     type ImportRecordKind,
     isCommonJsFormat,
@@ -723,6 +724,28 @@ export function scanJSX(program: Program): { hasJSX: boolean; needsCreateElement
     return { hasJSX, needsCreateElement };
 }
 
+/** {@link ModuleInfo} for an EXTERNAL module. Rollup's `ExternalModule.info` reports the fields it
+ *  cannot know as null/empty — there is no source, no AST and no export surface — and the ones it
+ *  does as the resolution recorded them. `hasDefaultExport` is null for the same reason it is null
+ *  for a module still loading: nothing was parsed. */
+export function externalModuleInfo(rec: ExternalRec): ModuleInfo {
+    return {
+        id: rec.id,
+        code: null,
+        isEntry: false,
+        isExternal: true,
+        moduleSideEffects: rec.moduleSideEffects,
+        meta: rec.meta,
+        moduleType: 'js',
+        importedIds: [],
+        dynamicallyImportedIds: [],
+        importers: [...rec.importers],
+        dynamicImporters: [...rec.dynamicImporters],
+        exports: [],
+        hasDefaultExport: null,
+    };
+}
+
 /** Project a live {@link Module} into the plugin-facing {@link ModuleInfo}. Reads the graph
  *  as it's being built, so `importers` may be partial when called from `moduleParsed`. */
 export function toModuleInfo(graph: Graph, mod: Module): ModuleInfo {
@@ -880,6 +903,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         changed: new Set(),
         externalSideEffects: new Map(),
         externalIds: new Set(),
+        externals: new Map(),
     };
     const cache = options.cache;
     // `moduleTypes` keys are extensions with the leading dot optional, matching rolldown's
@@ -926,6 +950,32 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         return p;
     };
 
+    /** `meta` a plugin's `resolveId` attached to an EXTERNAL result, keyed by specifier. */
+    const externalMeta = new Map<string, CustomPluginOptions>();
+    /** Specifier → the id a plugin's `resolveId` gave the external, where it differs. Rollup keys an
+     *  external's `ModuleInfo` by its RESOLVED id, and `resolveId` may rewrite it. */
+    const externalIdOf = new Map<string, string>();
+
+    /** Register an external import edge in {@link Graph.externals}. Called from every site that sets
+     *  `rec.external`, so the `external` option, a plugin verdict and an unresolvable bare specifier
+     *  all produce the same record. Keyed by the plugin-supplied id where there is one, since that is
+     *  the id `getModuleInfo` will be asked about. */
+    const noteExternal = (specifier: string, importer: string, kind: ImportRecordKind): void => {
+        const id = externalIdOf.get(specifier) ?? specifier;
+        let rec = graph.externals.get(id);
+        if (rec === undefined) {
+            rec = {
+                id,
+                meta: externalMeta.get(specifier) ?? {},
+                moduleSideEffects: graph.externalSideEffects.get(specifier) !== false,
+                importers: new Set(),
+                dynamicImporters: new Set(),
+            };
+            graph.externals.set(id, rec);
+        }
+        (kind === 'dynamic' ? rec.dynamicImporters : rec.importers).add(importer);
+    };
+
     /** The shared resolve path used by both the graph walk and `ctx.resolve`. Runs the
      *  resolveId pipeline, normalizes {@link PartialResolvedId}, records its option overrides
      *  against the resolved id, then falls through to `baseResolve`. `skipPipeline` bypasses the
@@ -951,6 +1001,12 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Keep the RESOLVED id too — `manualChunks` lists ids, and this is the only place an
                 // external's absolute path is known (everything else keys externals by specifier).
                 if (typeof partial.id === 'string') graph.externalIds.add(partial.id);
+                // Rollup gives an external module a `ModuleInfo` carrying whatever `meta` its
+                // `resolveId` attached (`custom-external-module-options` asserts exactly that from
+                // `buildEnd`). The external branch returns before `mergeOptions`, which is where a
+                // RESOLVED id's options are recorded, so keep them here instead.
+                if (partial.meta !== undefined) externalMeta.set(specifier, partial.meta);
+                if (typeof partial.id === 'string') externalIdOf.set(specifier, partial.id);
                 // A plugin may declare the external side-effect-free (rolldown `moduleSideEffects`),
                 // letting an unreferenced import of it drop entirely.
                 if (partial.moduleSideEffects === false) graph.externalSideEffects.set(specifier, false);
@@ -984,7 +1040,6 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
 
     /** Modules whose load/transform/parse is in progress, keyed by id — see `getModuleInfo`. */
     const inFlight = new Map<string, ModuleInfo>();
-
     // One context per (plugin, skip-set), because `this.resolve`'s behaviour depends on WHO is
     // asking. rolldown makes a `PluginContext` per plugin carrying `plugin_idx` and
     // `skipped_resolve_calls`; this is that, built on demand. `null` is the driver itself — the graph
@@ -1057,7 +1112,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // `has-default-export` asserts `getModuleInfo(id).hasDefaultExport === null` from inside
             // `load(id)`. Our `Module` cannot exist before parsing (it needs `program`/`semantic`),
             // so the in-flight entry is a partial `ModuleInfo` rather than a placeholder module.
-            return inFlight.get(id) ?? null;
+            const ext = graph.externals.get(id);
+            return inFlight.get(id) ?? (ext === undefined ? null : externalModuleInfo(ext));
         },
         getModuleIds: () => graph.byId.keys(),
     });
@@ -1617,6 +1673,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             }
             if (isExternal(options, rec.specifier, id) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
+                noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             const resolved = await resolveFn(rec.specifier, id, {
@@ -1625,6 +1682,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             });
             if (resolved === false || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
+                noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             if (resolved === null) {
@@ -1636,6 +1694,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     );
                 }
                 rec.external = true;
+                noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             // symlinks:false disables the realpath deref (preserve the symlinked path).
