@@ -32,6 +32,7 @@ import {
 import { compileToModule, loaderWantsBytes } from './loaders.ts';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve.ts';
 import {
+    type CtxFor,
     type CustomPluginOptions,
     compilePipeline,
     type EmittedFile,
@@ -42,11 +43,12 @@ import {
     type PartialResolvedId,
     type Pipeline,
     type PluginCtx,
+    pluginParse,
     type ResolveIdExtra,
+    type ResolveSkip,
     runLoad,
     runResolveId,
     runTransform,
-    pluginParse,
 } from './plugin.ts';
 import {
     type GraphOptions,
@@ -914,8 +916,6 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     const pluginExternals = new Set<string>();
     /** resolveId/load option overrides keyed by RESOLVED id, finalized in addModule. */
     const pendingOptions = new Map<string, PendingOptions>();
-    /** (specifier, importer) pairs currently being resolved — the `skipSelf` recursion guard. */
-    const resolving = new Set<string>();
 
     const pendingFor = (id: string): PendingOptions => {
         let p = pendingOptions.get(id);
@@ -935,9 +935,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         specifier: string,
         importer: string | null,
         extra: ResolveIdExtra,
-        skipPipeline = false,
+        skipped: readonly ResolveSkip[] = [],
     ): Promise<string | false | null> => {
-        const hit = skipPipeline ? null : await runResolveId(pipe, ctx, specifier, importer, extra);
+        const hit = await runResolveId(pipe, ctxFor, specifier, importer, extra, skipped);
         if (hit === false) {
             pluginExternals.add(specifier);
             return false;
@@ -985,7 +985,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     /** Modules whose load/transform/parse is in progress, keyed by id — see `getModuleInfo`. */
     const inFlight = new Map<string, ModuleInfo>();
 
-    const ctx: PluginCtx = {
+    // One context per (plugin, skip-set), because `this.resolve`'s behaviour depends on WHO is
+    // asking. rolldown makes a `PluginContext` per plugin carrying `plugin_idx` and
+    // `skipped_resolve_calls`; this is that, built on demand. `null` is the driver itself — the graph
+    // walk's own resolutions, which skip nothing.
+    const ctxFor: CtxFor = (callerPluginIdx, callerSkips) => ({
         warn: (m) => graph.warnings.push(m),
         error: (m) => {
             throw new Error(m);
@@ -1000,31 +1004,40 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 kind: opts?.kind ?? 'import-statement',
                 custom: opts?.custom,
             };
-            // Recursion guard: skipSelf (default true) short-circuits a resolveId hook that
-            // re-resolves the same (specifier, importer) already in flight — if the key is
-            // already being resolved, skip the pipeline and go straight to baseResolve.
-            // Otherwise mark it in-flight for the duration so a NESTED ctx.resolve of the same
-            // pair is caught.
-            const key = `${importer ?? ''}\x00${source}`;
-            const skipSelf = opts?.skipSelf !== false;
-            const guardHit = skipSelf && resolving.has(key);
-            const marked = skipSelf && !guardHit;
-            if (marked) resolving.add(key);
-            try {
-                const r = await resolveThrough(source, importer, extra, guardHit);
-                if (r === false) return { id: source, external: true };
-                if (r === null) return null;
-                const pending = pendingOptions.get(r);
-                return {
-                    id: r,
-                    external: false,
-                    moduleSideEffects: pending?.moduleSideEffects,
-                    meta: pending?.meta,
-                    moduleType: pending?.moduleType,
-                };
-            } finally {
-                if (marked) resolving.delete(key);
+            // `skipSelf` (default true) takes THIS PLUGIN out of the loop for THIS
+            // (specifier, importer) — not the whole pipeline, and not the plugin for every
+            // specifier. rolldown's `HookResolveIdSkipped` triple
+            // (`native_plugin_context.rs:96-108`); the previous guard was keyed on
+            // (specifier, importer) alone and short-circuited straight to `baseResolve`, which gave
+            // `context-resolve-skipself` the wrong resolution for three of its four cases.
+            //
+            // Inherited skips are kept even when `skipSelf` is FALSE — rolldown's `else if
+            // (!self.skipped_resolve_calls.is_empty())` branch. `context-resolve-skipself` depends on
+            // it: a plugin re-entering itself with `skipSelf: false` must still see the OUTER call's
+            // skip, or it recurses forever.
+            let skips = callerSkips;
+            if (opts?.skipSelf !== false && callerPluginIdx !== null) {
+                // ALREADY in the set means this plugin has been called before with the same id and
+                // importer, so the chain cannot make progress — Rollup #5768. Its
+                // `resolveid-recursive-call` sample is two plugins that each re-resolve under a
+                // DIFFERENT importer, so neither is ever skipped by the other's entry and the pair
+                // recurses forever. Returning null is what lets that fixture's
+                // `(await this.resolve(id, importer)) ?? 'success'` terminate.
+                if (callerSkips.some((k) => k.pluginIdx === callerPluginIdx && k.specifier === source && k.importer === importer))
+                    return null;
+                skips = [...callerSkips, { pluginIdx: callerPluginIdx, importer, specifier: source }];
             }
+            const r = await resolveThrough(source, importer, extra, skips);
+            if (r === false) return { id: source, external: true };
+            if (r === null) return null;
+            const pending = pendingOptions.get(r);
+            return {
+                id: r,
+                external: false,
+                moduleSideEffects: pending?.moduleSideEffects,
+                meta: pending?.meta,
+                moduleType: pending?.moduleType,
+            };
         },
         emitFile: (file) => {
             const fileName = resolveEmittedFileName(file);
@@ -1047,27 +1060,18 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             return inFlight.get(id) ?? null;
         },
         getModuleIds: () => graph.byId.keys(),
-    };
+    });
+    /** The driver's own context: outside any plugin, so it skips nothing. */
+    const ctx: PluginCtx = ctxFor(null, []);
 
-    /** Graph-walk resolve: enters the resolving-set (so a plugin's `ctx.resolve`
-     *  on the same pair is guarded), delegates to `resolveThrough`, exits. */
-    const resolveFn = async (
-        specifier: string,
-        importer: string | null,
-        extra: ResolveIdExtra,
-    ): Promise<string | false | null> => {
-        const key = `${importer ?? ''}\x00${specifier}`;
-        resolving.add(key);
-        try {
-            return await resolveThrough(specifier, importer, extra);
-        } finally {
-            resolving.delete(key);
-        }
-    };
+    /** Graph-walk resolve. The driver is outside any plugin, so it skips nothing and this is just
+     *  `resolveThrough`; it stays a named function because the walk reads better for it. */
+    const resolveFn = (specifier: string, importer: string | null, extra: ResolveIdExtra): Promise<string | false | null> =>
+        resolveThrough(specifier, importer, extra);
 
     const loadFn = async (id: string, wantBytes: boolean): Promise<string | Uint8Array | null> => {
         if (id === EMPTY_MODULE_ID) return ''; // browser:false-disabled module → empty
-        const r = await runLoad(pipe, ctx, id);
+        const r = await runLoad(pipe, ctxFor, id);
         // A byte-shaped module type reads through `Fs.readBytes` when the fs offers one. Only when
         // NO plugin claimed the load: a `load` hook returns source text by contract, and a plugin
         // that wants to own a binary file does so by handing back the text it wants compiled.

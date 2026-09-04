@@ -298,7 +298,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
 
     async function resolveIdInner(spec: string, importer: string | null): Promise<ResolveResult> {
-        const hit = await runResolveId(pipeline, ctx, spec, importer);
+        const hit = await runResolveId(pipeline, () => ctx, spec, importer);
         if (hit === false) return { external: spec };
         if (typeof hit === 'string') return hit;
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
@@ -383,7 +383,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         }
 
         const tIo = performance.now();
-        const loaded = await runLoad(pipeline, ctx, id);
+        const loaded = await runLoad(pipeline, () => ctx, id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =

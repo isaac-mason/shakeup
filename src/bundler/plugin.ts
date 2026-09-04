@@ -256,7 +256,27 @@ export type Plugin = {
     ) => MaybePromise<void>;
 };
 
-type Compiled<F> = { plugin: string; matches: ((id: string) => boolean) | null; handler: F };
+type Compiled<F> = {
+    plugin: string;
+    /** The plugin's index in the user's `plugins` array — the identity `skipSelf` is keyed on. A
+     *  plugin's `load` hook calling `this.resolve` must skip THAT PLUGIN's `resolveId`, so the
+     *  identity has to be shared across hook kinds and cannot be a per-array position. */
+    pluginIdx: number;
+    matches: ((id: string) => boolean) | null;
+    handler: F;
+};
+
+/**
+ * One entry in the `skipSelf` set: this plugin's `resolveId` is not to run for this exact
+ * (specifier, importer). rolldown's `HookResolveIdSkipped { plugin_idx, importer, specifier }`
+ * (`native_plugin_context.rs:99`), and the triple matters — skipping the plugin outright would break
+ * `prevent-context-resolve-loop`, where a plugin skipped for one specifier must still resolve others.
+ */
+export type ResolveSkip = { pluginIdx: number; importer: string | null; specifier: string };
+
+/** Build the context a hook belonging to `pluginIdx` sees, carrying the skips in force. `null` is a
+ *  caller outside any plugin (the driver itself), which skips nothing. */
+export type CtxFor = (pluginIdx: number | null, skipped: readonly ResolveSkip[]) => PluginCtx;
 
 /** Plugins flattened into dense per-hook arrays so hot loops skip feature tests. */
 export type Pipeline = {
@@ -276,14 +296,14 @@ function compileMatcher(filter: HookFilter | undefined): ((id: string) => boolea
     return (id: string) => patterns.some((p) => p.test(id));
 }
 
-function normalize<F>(plugin: string, hook: WithFilter<F> | undefined | null): Compiled<F> | null {
+function normalize<F>(plugin: string, pluginIdx: number, hook: WithFilter<F> | undefined | null): Compiled<F> | null {
     // `null` as well as `undefined`: rollup treats an explicitly-null hook as absent, and plugins
     // written as `{ transform: cond ? fn : null }` are common. It used to reach `compileMatcher`
     // through the object branch and crash the whole build with `Cannot read properties of null`.
     if (hook === undefined || hook === null) return null;
-    if (typeof hook === 'function') return { plugin, matches: null, handler: hook as F };
+    if (typeof hook === 'function') return { plugin, pluginIdx, matches: null, handler: hook as F };
     const h = hook as { filter?: HookFilter; handler: F };
-    return { plugin, matches: compileMatcher(h.filter), handler: h.handler };
+    return { plugin, pluginIdx, matches: compileMatcher(h.filter), handler: h.handler };
 }
 
 /** Flatten a plugin list into a {@link Pipeline}, compiling each hook's id filter. */
@@ -298,22 +318,22 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         renderChunk: [],
         buildEnd: [],
     };
-    for (const p of plugins) {
-        const bs = normalize(p.name, p.buildStart);
+    for (const [pluginIdx, p] of plugins.entries()) {
+        const bs = normalize(p.name, pluginIdx, p.buildStart);
         if (bs !== null) pipeline.buildStart.push(bs);
-        const ri = normalize(p.name, p.resolveId);
+        const ri = normalize(p.name, pluginIdx, p.resolveId);
         if (ri !== null) pipeline.resolveId.push(ri as Pipeline['resolveId'][number]);
-        const ld = normalize(p.name, p.load);
+        const ld = normalize(p.name, pluginIdx, p.load);
         if (ld !== null) pipeline.load.push(ld as Pipeline['load'][number]);
-        const tr = normalize(p.name, p.transform);
+        const tr = normalize(p.name, pluginIdx, p.transform);
         if (tr !== null) pipeline.transform.push(tr as Pipeline['transform'][number]);
-        const mp = normalize(p.name, p.moduleParsed);
+        const mp = normalize(p.name, pluginIdx, p.moduleParsed);
         if (mp !== null) pipeline.moduleParsed.push(mp);
-        const rc = normalize(p.name, p.renderChunk);
+        const rc = normalize(p.name, pluginIdx, p.renderChunk);
         if (rc !== null) pipeline.renderChunk.push(rc);
-        const be = normalize(p.name, p.buildEnd);
+        const be = normalize(p.name, pluginIdx, p.buildEnd);
         if (be !== null) pipeline.buildEnd.push(be);
-        const gb = normalize(p.name, p.generateBundle);
+        const gb = normalize(p.name, pluginIdx, p.generateBundle);
         if (gb !== null) pipeline.generateBundle.push(gb);
     }
     return pipeline;
@@ -322,16 +342,20 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
 /** Default `extra` for resolveId callers that don't supply one (dev server, tests). */
 const DEFAULT_RESOLVE_EXTRA: ResolveIdExtra = { isEntry: false, kind: 'import-statement' };
 
+const EMPTY_SKIPS: readonly ResolveSkip[] = [];
+
 /** first-wins resolveId. Returns the RAW hook value (object / string / false) —
  *  normalization happens at the call site so the driver stays shape-agnostic.
  *  Stays synchronous unless a hook returns a promise, then resumes the loop after
  *  it settles. */
 export function runResolveId(
     pipeline: Pipeline,
-    ctx: PluginCtx,
+    ctxFor: CtxFor,
     specifier: string,
     importer: string | null,
     extra: ResolveIdExtra = DEFAULT_RESOLVE_EXTRA,
+    /** The `skipSelf` set in force, accumulated down a chain of nested `this.resolve` calls. */
+    skipped: readonly ResolveSkip[] = EMPTY_SKIPS,
 ): MaybePromise<ResolveIdResult> {
     const hooks = pipeline.resolveId;
     let i = 0;
@@ -339,7 +363,14 @@ export function runResolveId(
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(specifier)) continue;
-            const r = hook.handler.call(ctx, specifier, importer, extra);
+            // Skipped only for THIS (specifier, importer): a plugin taken out of the loop for one
+            // resolution still resolves every other one.
+            if (
+                skipped.length > 0 &&
+                skipped.some((k) => k.pluginIdx === hook.pluginIdx && k.specifier === specifier && k.importer === importer)
+            )
+                continue;
+            const r = hook.handler.call(ctxFor(hook.pluginIdx, skipped), specifier, importer, extra);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as ResolveIdResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
@@ -350,14 +381,16 @@ export function runResolveId(
 
 /** first-wins load. Returns the RAW hook value (string / SourceDescription);
  *  the call site takes `.code`. */
-export function runLoad(pipeline: Pipeline, ctx: PluginCtx, id: string): MaybePromise<LoadResult> {
+export function runLoad(pipeline: Pipeline, ctxFor: CtxFor, id: string): MaybePromise<LoadResult> {
     const hooks = pipeline.load;
     let i = 0;
     const step = (): MaybePromise<LoadResult> => {
         while (i < hooks.length) {
             const hook = hooks[i++];
             if (hook.matches !== null && !hook.matches(id)) continue;
-            const r = hook.handler.call(ctx, id);
+            // A `load` hook's own `this.resolve` skips ITS plugin's `resolveId`, so it needs the same
+            // per-plugin context a `resolveId` hook gets. Nothing is inherited: this is a fresh chain.
+            const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS), id);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as LoadResult) : step()));
             if (r !== null && r !== undefined) return r;
         }
