@@ -112,7 +112,10 @@ export function normalizeResolve(resolve: ResolveOptions | undefined, platform: 
  *  the dev and prod paths. */
 export type CommonOptions = {
     fs?: Fs;
-    external?: string[] | ((specifier: string) => boolean);
+    /** Specifiers to leave as imports. The FUNCTION form takes Rollup's three arguments —
+     *  `(id, parentId, isResolved)` — because real configs branch on the importer; passing only the
+     *  specifier made every call look like an entry resolution. */
+    external?: string[] | ((specifier: string, parentId?: string, isResolved?: boolean) => boolean | undefined);
     /** A low-level resolver function OR a {@link ResolveOptions} config. */
     resolve?: ResolveFn | ResolveOptions;
     /** Deployment target → mainFields/conditionNames defaults. Default 'browser'. */
@@ -277,12 +280,28 @@ export function makeBaseResolve(
 }
 
 /** Whether a specifier is externalized by the `external` option. */
-export function isExternalSpecifier(external: CommonOptions['external'], specifier: string): boolean {
+export function isExternalSpecifier(
+    external: CommonOptions['external'],
+    specifier: string,
+    parentId?: string,
+    isResolved = false,
+): boolean {
     if (external === undefined) return false;
-    if (typeof external === 'function') return external(specifier);
+    if (typeof external === 'function') {
+        // `\0` is the reserved marker for a plugin's VIRTUAL module — never a real specifier, so it
+        // is never offered to the predicate. rolldown wraps a function `external` with exactly this
+        // (`bindingify-input-options.ts:172`), and Rollup's
+        // `external-ignore-reserved-null-marker` throws if the id ever reaches the hook.
+        // The ARRAY form is not filtered, in either bundler: naming a `\0` id there is explicit.
+        if (specifier.startsWith('\0')) return false;
+        // TRUTHY, not `=== true`: rolldown normalises with `measured(...) ?? false`
+        // (`bindingify-input-options.ts:173`), so `undefined` means "not external" and anything else
+        // truthy means it is. A first cut used `=== true` and quietly disagreed with both oracles.
+        return Boolean(external(specifier, parentId, isResolved) ?? false);
+    }
     return external.includes(specifier);
 }
 
-export function isExternal(options: GraphOptions, specifier: string): boolean {
-    return isExternalSpecifier(options.external, specifier);
+export function isExternal(options: GraphOptions, specifier: string, parentId?: string): boolean {
+    return isExternalSpecifier(options.external, specifier, parentId);
 }

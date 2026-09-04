@@ -1615,7 +1615,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 rec.assetPath = normalizedResolve.symlinks ? ((await fs.realpath?.(hit)) ?? hit) : hit;
                 continue;
             }
-            if (isExternal(options, rec.specifier) || pluginExternals.has(rec.specifier)) {
+            if (isExternal(options, rec.specifier, id) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
                 continue;
             }
