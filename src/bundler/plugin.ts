@@ -238,7 +238,10 @@ export type Plugin = {
     moduleParsed?: (this: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     /** Return the rewritten code, or rollup's `{ code, map }` object form. A returned `map` is NOT
      *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
-    renderChunk?: (this: PluginCtx, code: string) => string | { code: string; map?: unknown } | null | undefined;
+    /** Rewrite an emitted chunk. Rollup documents this as ASYNC, and plugins written against it
+     *  return promises — hence {@link MaybePromise}. Hooks run in order, each seeing the previous
+     *  one's output. */
+    renderChunk?: (this: PluginCtx, code: string) => MaybePromise<string | { code: string; map?: unknown } | null | undefined>;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
     /**
      * `generateBundle(options, bundle, isWrite)` — the last chance to inspect or MUTATE the output.

@@ -15,8 +15,17 @@ import {
     renderChunks,
 } from './generate/chunks.ts';
 import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
-import { externalKey, type Graph, type Linked,
-    NAME_NAMESPACE, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types.ts';
+import {
+    externalKey,
+    type Graph,
+    type Linked,
+    NAME_NAMESPACE,
+    type ParseCache,
+    type ParseStats,
+    packRef,
+    refMod,
+    refSym,
+} from './graph-types.ts';
 import { computeInteropOwners } from './init-obligations.ts';
 import { linkGraph } from './link.ts';
 import {
@@ -597,7 +606,12 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     for (let i = 0; i < outputChunks.length; i++) {
         const oc = outputChunks[i];
         for (const hook of pipeline.renderChunk) {
-            const raw = hook.handler.call(pluginCtx, oc.code);
+            // AWAITED, and in ORDER. Rollup documents `renderChunk` as async and plugins return
+            // promises; calling it synchronously meant the `{ code, map }` unwrap below read `.code`
+            // off a PROMISE, got `undefined`, and discarded the result — every hook then saw the
+            // original chunk and the bundle was emitted unmodified, with no error and no warning.
+            // Sequential rather than parallel because each hook's input is the previous one's output.
+            const raw = await hook.handler.call(pluginCtx, oc.code);
             // rollup's `renderChunk` may return either a string or `{ code, map }`, and plugins
             // written against rollup return the object form. It used to be assigned straight to
             // `oc.code`, so the chunk was emitted as the string `[object Object]` — no error, no
@@ -699,7 +713,6 @@ function isFileNameOutsideOutputDirectory(fileName: string): boolean {
         /^(?:\/|(?:[A-Za-z]:)?[/\\|])/.test(normalized)
     );
 }
-
 
 /** Per-group fallbacks (top-level advancedChunks values, else engine defaults). */
 type GroupDefaults = {
@@ -863,7 +876,6 @@ function resolveChunkOptions(
     }
     return { codeSplitting, preserveModules: output?.preserveModules === true, groups };
 }
-
 
 /** A persistent, incremental build handle (esbuild `Context.Rebuild` lineage). Holds a
  *  module parse cache across rebuilds, so unchanged modules skip parse/analyze/extract. */
