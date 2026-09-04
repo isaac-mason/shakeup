@@ -76,6 +76,15 @@ const LIMIT = Number(args.find((a) => /^\d+$/.test(a)) ?? Number.POSITIVE_INFINI
 const onlyIdx = args.indexOf('--only');
 const ONLY = onlyIdx >= 0 ? args[onlyIdx + 1] : null;
 
+/** A fixture's own options, minus the keys whose meaning differs between the two bundlers. Only one
+ *  so far: Rollup's `cache` is a build cache (an object, or `false` to disable), shakeup's is the
+ *  incremental PARSE cache, a Map. Forwarding `cache: false` broke
+ *  `plugin-module-information-no-cache`, which a net-zero suite delta would have hidden. Everything
+ *  else is either a shakeup option with the same meaning, or a key shakeup ignores. */
+const SHAKEUP_MEANS_SOMETHING_ELSE = new Set(['cache']);
+const forwardable = (o: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(Object.entries(o).filter(([k]) => !SHAKEUP_MEANS_SOMETHING_ELSE.has(k)));
+
 const diskFs = {
     read: (id: string) => (existsSync(id) && statSync(id).isFile() ? readFileSync(id, 'utf8') : null),
     exists: (id: string) => existsSync(id),
@@ -251,6 +260,12 @@ for (const { d, c } of selected) {
     let chunks: { fileName: string; code: string; isEntry: boolean }[];
     try {
         const r = await bundle({
+            // The fixture's OWN options first, so every explicit field below still wins. Rollup's
+            // runner passes `config.options` straight to `rollup()`, so an `options` hook sees
+            // everything the fixture set. Without this, `aync-options`' hook asserted on
+            // `preserveEntrySignatures` — which shakeup DOES implement — and got `undefined`,
+            // measuring the harness rather than shakeup.
+            ...forwardable(o),
             ...(inputName === undefined ? { entry } : { input: { [inputName]: entry } }),
             fs: diskFs,
             external: (o.external ?? []) as string[],

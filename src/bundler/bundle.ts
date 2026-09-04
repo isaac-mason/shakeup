@@ -34,7 +34,16 @@ import {
     type OutputOptionsNaming,
     resolveMinify,
 } from './output-options.ts';
-import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx, pluginParse } from './plugin.ts';
+import {
+    callOptionsHook,
+    compilePipeline,
+    type GenerateBundleEntry,
+    type MinimalPluginCtx,
+    type ModuleInfo,
+    normalizePluginOption,
+    type PluginCtx,
+    pluginParse,
+} from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
 import { buildGraph, externalModuleInfo, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
@@ -260,8 +269,27 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // last build's before anything reads them, or a cached module's call node keeps a stamp whose
     // justification has since changed. See `resetInferredPure`.
     resetInferredPure();
-    const pipeline = compilePipeline(options.plugins ?? []);
-    const warningsOut: string[] = [];
+    // Resolve the plugin list the way both oracles do, in three steps: flatten (nested arrays,
+    // promises, falsy holes), run every `options` hook against the build options, then flatten AGAIN
+    // over the result — which is what lets an `options` hook add a plugin that takes part in the
+    // build. Rollup's `getProcessedInputOptions` / rolldown's `PluginDriver.callOptionsHook`.
+    const optionsWarnings: string[] = [];
+    const minimalCtx: MinimalPluginCtx = {
+        warn: (m) => optionsWarnings.push(m),
+        error: (m) => {
+            throw new Error(m);
+        },
+        info: (m) => optionsWarnings.push(m),
+        debug: () => {},
+    };
+    const firstPass = await normalizePluginOption(options.plugins);
+    options = (await callOptionsHook(
+        firstPass,
+        options as unknown as Record<string, unknown>,
+        minimalCtx,
+    )) as unknown as BundleOptions;
+    const pipeline = compilePipeline(await normalizePluginOption(options.plugins));
+    const warningsOut: string[] = [...optionsWarnings];
     // Full PluginCtx for the bundle-level hooks (buildStart/renderChunk/buildEnd).
     // getModuleInfo/getModuleIds read `graph` once it's built (null/empty before);
     // in-build resolution (resolveId hooks, ctx.resolve) runs through buildGraph's

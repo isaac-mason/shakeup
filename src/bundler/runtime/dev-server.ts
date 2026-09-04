@@ -6,6 +6,7 @@ import { EMPTY_MODULE_ID } from '../node-resolve.ts';
 import {
     compilePipeline,
     type ModuleInfo,
+    normalizePluginOptionSync,
     type PartialResolvedId,
     type Pipeline,
     type PluginCtx,
@@ -210,7 +211,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
     const fs = options.fs ?? NULL_FS;
     const wantSourcemap = normalizeSourcemap(options.sourcemap);
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => options.warn?.(m));
-    const pipeline: Pipeline = compilePipeline(options.plugins ?? []);
+    const pipeline: Pipeline = compilePipeline(normalizePluginOptionSync(options.plugins, (m) => options.warn?.(m)));
     // Cumulative bundling metrics (exposed via `stats()`). firstAt/lastAt bound the wall span;
     // busyMs is the wall time with ≥1 fetch in flight (so wall − busyMs ≈ idle/eval/transport).
     const perf = {

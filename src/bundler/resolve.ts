@@ -2,7 +2,7 @@ import type { CompressMode } from '../passes/compress/index.ts';
 import { dirnameOf, type Fs, fileExists, joinPath, type MaybePromise } from './fs.ts';
 import type { ParseCache } from './graph-types.ts';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
-import type { ModuleType, Plugin } from './plugin.ts';
+import type { ModuleType, PluginOption } from './plugin.ts';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
  * automatic runtime only. */
@@ -135,7 +135,9 @@ export type CommonOptions = {
     resolve?: ResolveFn | ResolveOptions;
     /** Deployment target → mainFields/conditionNames defaults. Default 'browser'. */
     platform?: Platform;
-    plugins?: Plugin[];
+    /** Nested arrays, promises and falsy holes are all legal — `normalizePluginOption` flattens them
+     *  the way both oracles do. See {@link PluginOption}. */
+    plugins?: PluginOption;
     jsx?: JSXOptions;
 };
 

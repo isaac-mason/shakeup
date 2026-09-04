@@ -41,6 +41,7 @@ import {
     type ModuleOptions,
     type ModuleSideEffects,
     type ModuleType,
+    normalizePluginOption,
     type PartialResolvedId,
     type Pipeline,
     type PluginCtx,
@@ -942,7 +943,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // injected `jsx`/`jsxs`/`Fragment` import prunes cleanly — the general form of the old
     // jsx-runtime special-case (see pruneUnusedExternals).
     graph.externalSideEffects.set(`${jsxOptions.importSource}/jsx-runtime`, false);
-    const pipe = pipeline ?? compilePipeline(options.plugins ?? []);
+    // `bundle()` hands a pipeline in, already normalized and with the `options` hooks run. A direct
+    // `buildGraph` caller gets the flattening but not the `options` hook, which belongs to the
+    // top-level entry — Rollup's `Graph` is the same way.
+    const pipe = pipeline ?? compilePipeline(await normalizePluginOption(options.plugins));
     const baseResolve = makeBaseResolve(fs, options.resolve, options.platform, (m) => graph.warnings.push(m));
     // Per-build declared-format lookup (cjs.md §7.1b): a RESOLVE output, so its package.json cache
     // lives exactly one build and a `"type"` edit can never go stale.

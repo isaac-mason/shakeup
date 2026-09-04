@@ -229,6 +229,15 @@ export function assertSync<T>(x: MaybePromise<T>): T {
  *  the dev server awaits, bundle mode requires sync. */
 export type Plugin = {
     name: string;
+    /** Inspect or replace the build options before anything else runs. Returning an object replaces
+     *  them; mutating the one handed in works too, which is how `nested-and-async-plugin` adds a
+     *  plugin (`options.plugins.push(...)`). Runs before the plugin list is resolved a second time,
+     *  so a plugin added here takes part in the build. Both oracles do exactly this — Rollup's
+     *  `getProcessedInputOptions` and rolldown's `PluginDriver.callOptionsHook`. */
+    options?: (
+        this: MinimalPluginCtx,
+        options: Record<string, unknown>,
+    ) => MaybePromise<Record<string, unknown> | null | undefined>;
     buildStart?: (this: PluginCtx) => MaybePromise<void>;
     resolveId?: WithFilter<
         (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
@@ -310,6 +319,65 @@ function normalize<F>(plugin: string, pluginIdx: number, hook: WithFilter<F> | u
 }
 
 /** Flatten a plugin list into a {@link Pipeline}, compiling each hook's id filter. */
+/** The context an `options` hook gets. There is no graph yet, so it is the logging surface only —
+ *  Rollup passes a cut-down context there for the same reason, and rolldown a
+ *  `MinimalPluginContextImpl`. */
+export type MinimalPluginCtx = {
+    warn(message: string): void;
+    error(message: string): never;
+    info(message: string): void;
+    debug(message: string): void;
+};
+
+/** A plugin as the user may write it: nested arrays, promises, and falsy holes are all legal.
+ *  Rollup and rolldown share one implementation of the flattening — rolldown's
+ *  `utils/async-flatten.ts` is a copy of Rollup's `utils/asyncFlatten.ts`, with the source URL in a
+ *  comment — so this follows it exactly rather than approximating. */
+export type PluginOption = Plugin | null | undefined | false | PluginOption[] | Promise<PluginOption>;
+
+/** `(await asyncFlatten([plugins])).filter(Boolean)`, which is verbatim what both oracles run
+ *  (`normalizePluginOption` in each). The loop re-flattens while any entry is still a thenable,
+ *  because a promise may resolve TO an array of promises; `flat(Infinity)` also drops the holes a
+ *  sparse array literal leaves, and `filter(Boolean)` drops `null` / `undefined` / `false`. */
+export async function normalizePluginOption(plugins: PluginOption): Promise<Plugin[]> {
+    let array: unknown[] = [plugins];
+    do {
+        array = (await Promise.all(array)).flat(Number.POSITIVE_INFINITY);
+    } while (array.some((v) => (v as { then?: unknown } | null)?.then));
+    return array.filter(Boolean) as Plugin[];
+}
+
+/** The synchronous half of {@link normalizePluginOption}: flatten nested arrays and drop the falsy
+ *  holes, but a PROMISE cannot be awaited. For `createDevServer`, whose constructor is synchronous —
+ *  it warns and drops rather than passing a thenable to `compilePipeline`, where it would have become
+ *  a plugin with no hooks and no explanation. `bundle()` is async and does the full thing. */
+export function normalizePluginOptionSync(plugins: PluginOption, warn: (m: string) => void): Plugin[] {
+    const flat = ([plugins] as unknown[]).flat(Number.POSITIVE_INFINITY).filter(Boolean) as Plugin[];
+    return flat.filter((p) => {
+        if ((p as { then?: unknown }).then === undefined) return true;
+        warn('a Promise-valued plugin was dropped: the dev server builds its plugin pipeline synchronously');
+        return false;
+    });
+}
+
+/** Run every plugin's `options` hook, in order, threading the result. A hook returning a value
+ *  REPLACES the options; returning nothing leaves the (possibly mutated) object in place. The caller
+ *  must re-run {@link normalizePluginOption} over the result's `plugins` afterwards — that is what
+ *  lets a hook add a plugin, and it is the order both oracles use. */
+export async function callOptionsHook(
+    plugins: readonly Plugin[],
+    options: Record<string, unknown>,
+    ctx: MinimalPluginCtx,
+): Promise<Record<string, unknown>> {
+    let current = options;
+    for (const p of plugins) {
+        if (p.options === undefined) continue;
+        const next = await p.options.call(ctx, current);
+        if (next !== null && next !== undefined) current = next;
+    }
+    return current;
+}
+
 export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
     const pipeline: Pipeline = {
         buildStart: [],
