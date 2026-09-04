@@ -309,3 +309,79 @@ describe('a class FIELD named `constructor`, and a rest element with a trailing 
         expect(errs(src)).not.toEqual([]);
     });
 });
+
+describe('accessor parameter lists, `using` placement, and ill-formed export names', () => {
+    const errs = (src: string, ts = false) => parse(src, { ts, jsx: false, kind: 'module' }).errors.map((e) => e.msg);
+
+    it.each(['class C { get x(a){} }', 'class C { get x(a = 1){} }', '({ get x(a){} });'])(
+        'a getter takes no parameters: %s',
+        (src) => {
+            expect(errs(src)).toEqual(["A 'get' accessor must not have any formal parameters."]);
+        },
+    );
+
+    it.each(['class C { set x(){} }', 'class C { set x(a,b){} }', '({ set x(){} });'])(
+        'a setter takes exactly one: %s',
+        (src) => {
+            expect(errs(src)).toEqual(["A 'set' accessor must have exactly one parameter."]);
+        },
+    );
+
+    it.each(['class C { set x(...a){} }', '({ set x(...a){} });'])(
+        'and that one may not be a rest: %s — oxc reports the COUNT first, so this needs count 1',
+        (src) => {
+            expect(errs(src)).toEqual(["A 'set' accessor cannot have rest parameter."]);
+        },
+    );
+
+    it('a TS `this` parameter is not a parameter for the arity rule', () => {
+        expect(errs('class C { set x(this: C, v: number){} get y(): number { return 1; } }', true)).toEqual([]);
+    });
+
+    it.each(['class C { get x(){} set y(v){} }', '({ get x(){}, set y(v){} });'])('accepts %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+
+    it.each(['switch(x){case 1: using a = null;}', 'switch(x){default: using a = null;}'])(
+        'a `using` declaration may not sit bare in a case clause: %s',
+        (src) => {
+            expect(errs(src)).toEqual(["'using' declaration cannot appear in the bare case statement."]);
+        },
+    );
+
+    it('and neither may `await using`', () => {
+        expect(errs('async function f(){ switch(x){case 1: await using a = null;} }')).toEqual([
+            "'await using' declaration cannot appear in the bare case statement.",
+        ]);
+    });
+
+    it.each(['switch(x){case 1: { using a = null; } }', 'switch(x){case 1: var a = null;}'])(
+        'a block or a `var` is fine: %s',
+        (src) => {
+            expect(errs(src)).toEqual([]);
+        },
+    );
+
+    it('a `using` declarator may not be a binding pattern — checked per declarator', () => {
+        // The FIRST declarator is what settles that this is a using declaration at all; `using [a]`
+        // on its own stays a member expression, and oxc accepts it.
+        expect(errs('using a = null, [b] = null;')).toEqual(['Using declarations may not have binding patterns.']);
+        expect(errs('using [a] = null;')).toEqual([]);
+    });
+
+    it.each(['var x; export { x as "\uD83D" };', 'import { "\uD83D" as y } from "m";', 'export * as "\uD83D" from "m";'])(
+        'an export name may not carry a lone surrogate: %s',
+        (src) => {
+            expect(errs(src)).toEqual(['An export name cannot include a unicode lone surrogate']);
+        },
+    );
+
+    it.each([
+        'var x; export { x as "\\uD83D\\uDE00" };',
+        'var x; export { x as "\\u{1F600}" };',
+        'var x; export { x as "a-b" };',
+        'export * as "ok" from "m";',
+    ])('a well-formed one is fine: %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+});

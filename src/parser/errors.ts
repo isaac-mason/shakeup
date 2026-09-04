@@ -85,6 +85,13 @@ export const ParseErrorCode = enumeration(
     'InvalidEscapedIdentChar',
     'EscapedKeyword',
     'ImportExportNotTopLevel',
+    'ExportLoneSurrogate',
+    'UsingBindingPattern',
+    'UsingInBareCase',
+    'AwaitUsingInBareCase',
+    'GetterParameters',
+    'SetterParameters',
+    'SetterRestParameter',
     'ForAwaitOutsideAsync',
 );
 export type ParseErrorCode = (typeof ParseErrorCode)[keyof typeof ParseErrorCode];
@@ -172,6 +179,13 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.ForAwaitOutsideAsync]:
         '`for await` loops are only allowed within async functions and at the top levels of modules',
     [ParseErrorCode.ImportExportNotTopLevel]: "'import' and 'export' may only appear at the top level",
+    [ParseErrorCode.ExportLoneSurrogate]: 'An export name cannot include a unicode lone surrogate',
+    [ParseErrorCode.UsingBindingPattern]: 'Using declarations may not have binding patterns.',
+    [ParseErrorCode.UsingInBareCase]: "'using' declaration cannot appear in the bare case statement.",
+    [ParseErrorCode.AwaitUsingInBareCase]: "'await using' declaration cannot appear in the bare case statement.",
+    [ParseErrorCode.GetterParameters]: "A 'get' accessor must not have any formal parameters.",
+    [ParseErrorCode.SetterParameters]: "A 'set' accessor must have exactly one parameter.",
+    [ParseErrorCode.SetterRestParameter]: "A 'set' accessor cannot have rest parameter.",
 };
 
 /** Format a diagnostic message, substituting `%0`/`%1`… with `params`. */

@@ -1544,6 +1544,7 @@ function parseObjectMember(state: ParserState): Node {
 
     if (kind !== 0 || async || generator || isP(state, P.LPAREN)) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
+        if (kind !== 0) checkAccessor(state, kind, fn);
         flags |= kind << FL.KIND_SHIFT;
         // `get`/`set` already print in shorthand form off `kind`; FL.METHOD marks the plain
         // `{ m(){} }` case so the printer does not degrade it to `{ m: function(){} }`.
@@ -1592,6 +1593,32 @@ function nextIsPropertyEnd(state: ParserState): boolean {
                 state.tok === P.RBRACKET));
     restoreState(state, s);
     return endLike;
+}
+
+/**
+ * A `get`/`set` accessor's parameter list, ported from oxc's `check_getter` / `check_setter`
+ * (`js/class.rs:775,784`), which are called from BOTH the class body and the object literal
+ * (`js/object.rs:226`) — the rule is the accessor's, not the container's.
+ *
+ * oxc's order matters: a wrong COUNT is reported before a rest parameter, so `set x(...a)` — count 1
+ * with a rest — is the rest diagnostic while `set x(a, ...b)` is the count one.
+ *
+ * A TS `this` parameter is not a parameter for this purpose: oxc keeps it in `Function::this_param`,
+ * outside `FormalParameters`, so `set x(this: C, v: T){}` counts ONE. We keep it in the list, so it
+ * has to be discounted here.
+ */
+function checkAccessor(state: ParserState, kind: number, fn: Node): void {
+    const params = (fn.data as { params: Node[] }).params;
+    let n = params.length;
+    if (n > 0 && params[0].type === N.FormalParameter && (params[0].data as { pattern: Node }).pattern.name === 'this')
+        n--;
+    if (kind === 1) {
+        if (n !== 0) raiseAt(state, params[0].start, ParseErrorCode.GetterParameters);
+        return;
+    }
+    if (n !== 1) raiseAt(state, n === 0 ? fn.start : params[0].start, ParseErrorCode.SetterParameters);
+    else if (params[params.length - 1].type === N.RestElement)
+        raiseAt(state, params[params.length - 1].start, ParseErrorCode.SetterRestParameter);
 }
 
 function parseMethodTail(state: ParserState, start: number, flags: number): Node {
@@ -2435,6 +2462,7 @@ function parseClassMember(state: ParserState): Node {
 
     if (kind !== 0 || async || generator || isP(state, P.LPAREN) || (state.tsMode && isP(state, P.LT))) {
         const fn = parseMethodTail(state, start, (async ? FL.ASYNC : 0) | (generator ? FL.GENERATOR : 0));
+        if (kind === 1 || kind === 2) checkAccessor(state, kind, fn);
         return create.MethodDefinition(start, state.tokStart, flags | (kind << FL.KIND_SHIFT), decorators, key, fn);
     }
     // Past the method branch, so this is a FIELD. A field named `constructor` is banned STATIC OR NOT
@@ -2749,8 +2777,21 @@ function parseStatement(state: ParserState, single: boolean): Node {
                         !isK(state, K.CASE) &&
                         !isK(state, K.DEFAULT) &&
                         (state.tok as number) !== T_EOF
-                    )
-                        push(state, parseStatement(state, false));
+                    ) {
+                        const stmt = parseStatement(state, false);
+                        // "It is a Syntax Error if UsingDeclaration is contained directly within the
+                        // StatementList of either a CaseClause or DefaultClause" — the clause is not
+                        // its own scope, so there is no point at which the resource would be
+                        // disposed. A BLOCK inside the clause is fine, and so is `var`. oxc checks
+                        // the statement it just parsed, here (`js/statement.rs:786`).
+                        if (stmt.type === N.VariableDeclaration) {
+                            const dk = (stmt.data as { kind: string }).kind;
+                            if (dk === 'using') raiseAt(state, stmt.start, ParseErrorCode.UsingInBareCase);
+                            else if (dk === 'await using')
+                                raiseAt(state, stmt.start, ParseErrorCode.AwaitUsingInBareCase);
+                        }
+                        push(state, stmt);
+                    }
                     const body = finishList(state, bodyFrom);
                     push(state, create.SwitchCase(cs, state.tokStart, 0, test, body));
                     if (noProgress(state, mark)) break;
@@ -2977,6 +3018,7 @@ function checkMissingInit(state: ParserState, kind: number, target: Node, init: 
 }
 
 function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Node {
+    const k = kind & VAR_KIND.KIND_MASK;
     const start = state.tokStart;
     nextToken(state);
     const from = state.sp;
@@ -2996,6 +3038,13 @@ function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Nod
             init = parseAssign(state);
         }
         checkMissingInit(state, kind, target, init, ds);
+        // `using [a] = r()` — the resource has to be a plain name, because disposal is keyed on the
+        // binding. oxc checks it per DECLARATOR (`js/declaration.rs:219`), which is why
+        // `using a = r(), [b] = r()` is rejected on the second one: the first already settled that
+        // this is a using declaration rather than a member expression on a variable named `using`.
+        if ((k === VAR_KIND.USING || k === VAR_KIND.AWAIT_USING) && target.type !== N.BindingIdentifier)
+            raiseAt(state, target.start, ParseErrorCode.UsingBindingPattern);
+        
         push(state, create.VariableDeclarator(ds, state.tokStart, flags, target, typeAnn, init));
     } while (eatP(state, P.COMMA));
     consumeSemi(state);
@@ -3165,10 +3214,55 @@ function parseFor(state: ParserState, start: number): Node {
 /** oxc's `can_parse_module_export_name` (`js/module.rs:1060`). */
 const atModuleExportName = (state: ParserState): boolean => isNameLike(state) || (state.tok as number) === T_STR;
 
+/**
+ * `IsStringWellFormedUnicode` on a string literal's VALUE, read off the RAW source slice.
+ *
+ * Only a unicode escape or a raw source character can put a surrogate in the value — every other
+ * escape (`\n`, `\x41`, `\0`, a line continuation) yields a BMP non-surrogate — so the scan can
+ * skip the rest without decoding them, and never has to build the decoded string at all.
+ */
+function isWellFormedUnicode(raw: string): boolean {
+    let pendingHigh = false;
+    const end = raw.length - 1; // the closing quote
+    for (let i = 1; i < end; i++) {
+        let unit = raw.charCodeAt(i);
+        if (unit === 0x5c) {
+            const c = raw.charCodeAt(i + 1);
+            if (c === 0x75 /* u */) {
+                if (raw.charCodeAt(i + 2) === 0x7b /* { */) {
+                    const close = raw.indexOf('}', i + 3);
+                    if (close < 0) return true; // a malformed escape is a different rule's error
+                    const cp = Number.parseInt(raw.slice(i + 3, close), 16);
+                    i = close;
+                    // Above the BMP `\u{...}` denotes a well-formed PAIR, so it introduces no lone
+                    // unit; at or below it, it is the one code unit it names.
+                    unit = cp > 0xffff ? 0 : cp;
+                } else {
+                    unit = Number.parseInt(raw.slice(i + 2, i + 6), 16);
+                    i += 5;
+                }
+                if (Number.isNaN(unit)) return true;
+            } else {
+                i++;
+                unit = 0;
+            }
+        }
+        const low = unit >= 0xdc00 && unit <= 0xdfff;
+        if (pendingHigh !== low) return false;
+        pendingHigh = unit >= 0xd800 && unit <= 0xdbff;
+    }
+    return !pendingHigh;
+}
+
 /** A `ModuleExportName`: an identifier name, or an arbitrary string (`{ "a-b" as c }`). */
 function parseModuleExportName(state: ParserState): Node {
     if ((state.tok as number) === T_STR) {
         const n = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
+        // "It is a Syntax Error if IsStringWellFormedUnicode(the SV of StringLiteral) is false" — a
+        // name that cannot round-trip through a module record. oxc checks it inside its own
+        // `parse_module_export_name` (`js/module.rs:975`), so the rule reaches every string name:
+        // import, export, and `export * as`.
+        if (!isWellFormedUnicode(n.name)) raiseAt(state, n.start, ParseErrorCode.ExportLoneSurrogate);
         nextToken(state);
         return n;
     }
@@ -3477,13 +3571,9 @@ function parseExport(state: ParserState, decorators: Node[] = EMPTY_LIST): Node 
     if (isP(state, P.STAR)) {
         nextToken(state);
         let exported: Ref = null;
-        if (eatK(state, K.AS)) {
-            // `export * as "ns name" from './m'` — the namespace name may be a string too.
-            if ((state.tok as number) === T_STR) {
-                exported = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
-                nextToken(state);
-            } else exported = parseNameAsIdent(state, R_NAME);
-        }
+        // `export * as "ns name" from './m'` — the namespace name is a full `ModuleExportName`, so it
+        // may be a string, and carries that production's well-formedness rule (oxc `module.rs:797`).
+        if (eatK(state, K.AS)) exported = parseModuleExportName(state);
         if (!eatK(state, K.FROM)) raise(state, ParseErrorCode.Expected, "'from'");
         let source: Ref = null;
         if ((state.tok as number) === T_STR) {
