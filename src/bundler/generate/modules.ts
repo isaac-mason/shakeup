@@ -215,7 +215,10 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                 const spec = mod.source.slice(source.start + 1, source.end - 1);
                 const rec = mod.importRecords.find((r) => r.specifier === spec);
                 if (rec !== undefined && !rec.external && rec.resolved >= 0) {
-                    const targetChunk = chunkGraph.chunkByModule[rec.resolved];
+                    // Through the FACADE when the target has one — `chunkByModule` names the chunk
+                    // that HOLDS the module, which for a faced dynamic entry exports more than the
+                    // module does. See the facade pass in `chunk-graph.ts`.
+                    const targetChunk = chunkGraph.entryChunkOf.get(rec.resolved) ?? chunkGraph.chunkByModule[rec.resolved];
                     if (targetChunk < 0) {
                         map.set(n, 'Promise.resolve({})');
                     } else if (targetChunk === chunkGraph.chunkByModule[mod.idx]) {

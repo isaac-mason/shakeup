@@ -622,6 +622,61 @@ function wireAndDeconflict(
         }
     }
 
+    // FACADES for dynamic entries whose chunk carries more than the entry module's own surface.
+    //
+    // `import(m)` must resolve to M's namespace — exactly the names `m` exports. We rewrite a dynamic
+    // import to the PATH OF THE CHUNK holding the target, so when that chunk also surfaces bindings
+    // another chunk needs, those appear in the namespace too. The already-loaded optimization is the
+    // usual way in (`optimizeColors`, which rolldown also has as `dynamic_already_loaded.rs`): it
+    // folds a module into a dynamic entry's chunk, and the OTHER dynamic chunk that still needs that
+    // module forces the re-export.
+    //
+    // AFTER the entry-map loop above, not before it: a re-export (`export { x } from './y'`) is wired
+    // by that loop and not by the per-module pass, so a chunk's `exports` is still empty when the
+    // loop starts and the leak does not exist yet to be detected.
+    //
+    // A facade is an entry chunk holding NO modules that re-exports its entry module's surface from
+    // the chunk that does hold it — the same shape `formChunks` already mints when a second STATIC
+    // entry lands in a chunk another static entry owns. It works because `chunkByModule[m]` still
+    // points at the real producer, so wiring treats the facade as an ordinary consumer of it.
+    for (const [entryModule, chunkIdx] of [...entryChunkOf]) {
+        const chunk = chunks[chunkIdx];
+        if (!chunk.isDynamicEntry || chunk.isEntry || chunk.entryModule !== entryModule) continue;
+        const own = linked.exportMaps.get(entryModule);
+        let leaks = false;
+        for (const name of chunk.exports.keys())
+            if (own === undefined || !own.has(name)) {
+                leaks = true;
+                break;
+            }
+        if (!leaks) continue;
+        const fi = chunks.length;
+        chunks.push({
+            name: reprName(graph.modules[entryModule]),
+            modules: [],
+            color: chunk.color,
+            entryModule,
+            isEntry: false,
+            isDynamicEntry: true,
+            imports: new Map(),
+            sideEffectImports: new Set(),
+            exports: new Map(),
+            dynamicImports: new Set(),
+            importLocalOf: new Map(),
+            nsImportLocalOf: new Map(),
+        });
+        memberSets.push(new Set());
+        chunkClaim.push(deconflictChunk(graph, linked, [], memberSets[fi], [], new Set()));
+        // The real chunk stops being the dynamic entry: otherwise BOTH would emit the entry surface,
+        // and presenting it exactly once, from the facade, is the whole point. Its cross-chunk
+        // `exports` are untouched — the facade is about to import from them.
+        chunk.isDynamicEntry = false;
+        chunk.entryModule = -1;
+        entryChunkOf.set(entryModule, fi);
+        if (own !== undefined)
+            for (const bind of own.values()) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, fi, bind);
+    }
+
     // Dynamic import targets → dynamicImports edges + side-effect imports for cross-chunk bare
     // `import './x'` (no named bindings).
     for (let c = 0; c < chunks.length; c++) {
@@ -631,7 +686,10 @@ function wireAndDeconflict(
             for (const rec of mod.importRecords) {
                 if (rec.external || rec.resolved < 0) continue;
                 if (rec.kind === 'dynamic') {
-                    const targetChunk = chunkByModule[rec.resolved];
+                    // `entryChunkOf` first: a dynamic target with a facade must be reached THROUGH
+                    // it, or the edge (and the emitted specifier) points past the facade at the
+                    // chunk whose surface the facade exists to hide.
+                    const targetChunk = entryChunkOf.get(rec.resolved) ?? chunkByModule[rec.resolved];
                     if (targetChunk >= 0 && targetChunk !== c) chunk.dynamicImports.add(targetChunk);
                     // A MODE-2 target cannot surface its names as native chunk exports — half of
                     // them only exist once `__reExport` has run. So the chunk exports the OBJECT and

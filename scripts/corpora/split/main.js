@@ -13,6 +13,8 @@ export async function load(which, rows) {
     return which === 'panel' ? mod.render(rows) : mod.build(rows);
 }
 
-// Statically importing a module that is ALSO a dynamic target, which is what forces a decision about
-// duplication versus a shared chunk.
-export { summarise } from './shared-dynamic.js';
+// `shared-dynamic.js` is deliberately NOT reachable from here. Reached only from the two dynamic
+// branches, it is the module the already-loaded optimisation folds into whichever branch it can —
+// leaving the OTHER branch importing it across the chunk boundary, which is what makes that branch's
+// chunk export more than its entry module does and forces a facade. Re-exporting it from the entry
+// would pull it into the entry chunk and the whole case would collapse.

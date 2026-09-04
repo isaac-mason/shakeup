@@ -14,8 +14,10 @@ import { bundle } from '../src/bundler/bundle.ts';
 //   2. A dynamic entry landing in a chunk a STATIC entry already owns, where the leak is the whole
 //      static surface.
 //
-// The fix is Rollup's and shakeup already has the mechanism for static entries: a facade chunk that
-// re-exports only the entry module's own surface.
+// The fix is Rollup's, and shakeup already had the mechanism for static entries: a facade chunk that
+// re-exports only the entry module's own surface. It is now minted for dynamic entries too, in
+// `wireAndDeconflict` — after the entry-map loop, because a re-export is wired BY that loop and the
+// leak does not exist yet when it starts.
 const build = async (files: Record<string, string>, entry: string) => {
     const fs = { read: (id: string) => files[id] ?? null, exists: (id: string) => id in files };
     const r = await bundle({ entry, fs, external: [], output: {} });
@@ -32,10 +34,7 @@ const exportNames = (code: string): string[] => {
 };
 
 describe('a dynamic import yields the MODULE’s namespace, not its chunk’s', () => {
-    // KNOWN FAILING, pinned with `it.fails` rather than skipped: `it.fails` asserts the test DOES
-    // fail, so the day the facade lands this flips red and forces the annotation to be removed. A
-    // `skip` would just rot. The fix is §2x in the roadmap.
-    it.fails('does not leak a module merged into the dynamic entry’s chunk', async () => {
+    it('does not leak a module merged into the dynamic entry’s chunk', async () => {
         // `sharedDynamic` is reachable from both dynamic entries, so it may be merged into `dyn1`'s
         // chunk — but `dyn2` still needs it, so that chunk must re-export it. `dyn1` itself does not.
         const r = await build(
