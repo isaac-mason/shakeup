@@ -252,6 +252,8 @@ function computeNsUsage(
     /** Out-param: target → member names that would be CAPTURED by a nested binding if the namespace
      *  were elided. Collected here because it rides on the same accumulator. */
     captured: Map<number, Set<string>>,
+    /** Out-param: target → the member names some consumer CALLED off it. */
+    called: Map<number, Set<string>>,
 ): Map<number, Set<string>> {
     const forceWhole = new Set<number>();
     for (const { module } of graph.entries) forceWhole.add(module);
@@ -270,10 +272,11 @@ function computeNsUsage(
     const fold = (target: number, u: NsUsage): void => {
         let a = acc.get(target);
         if (a === undefined) {
-            a = { escapes: false, members: new Set(), captured: new Set() };
+            a = { escapes: false, called: new Set(), members: new Set(), captured: new Set() };
             acc.set(target, a);
         }
         if (u.escapes) a.escapes = true;
+        for (const m of u.called) a.called.add(m);
         for (const m of u.members) a.members.add(m);
         for (const m of u.captured) a.captured.add(m);
     };
@@ -297,9 +300,26 @@ function computeNsUsage(
         // targets need their whole surface.
         if (a.escapes || forceWhole.has(target) || deadDynamic.has(target)) continue;
         narrowable.set(target, a.members);
+        if (a.called.size > 0) called.set(target, a.called);
         if (a.captured.size > 0) captured.set(target, a.captured);
     }
     return narrowable;
+}
+
+/** Does this module contain a `this` anywhere? The over-approximation behind the namespace-method
+ *  widening above: if nothing in the module that defines an export mentions `this`, no call of that
+ *  export can read a member off the namespace it was called on. Cached — only ever asked about the
+ *  handful of modules that provide a called namespace member. */
+function moduleMentionsThis(graph: Graph, modIdx: number, cache: Map<number, boolean>): boolean {
+    const hit = cache.get(modIdx);
+    if (hit !== undefined) return hit;
+    let found = false;
+    walk(graph.modules[modIdx].program, (n) => {
+        if (n.type === N.ThisExpression) found = true;
+        return found ? false : undefined;
+    });
+    cache.set(modIdx, found);
+    return found;
 }
 
 /** {@link TreeshakeResult.elidableNs}. Runs off the SAME accumulator narrowing uses, then removes
@@ -372,10 +392,11 @@ function computeDynamicUsage(graph: Graph): Map<number, NsUsage> {
             if (rec === undefined || rec.external || rec.resolved < 0) continue;
             let a = acc.get(rec.resolved);
             if (a === undefined) {
-                a = { escapes: false, members: new Set(), captured: new Set() };
+                a = { escapes: false, called: new Set(), members: new Set(), captured: new Set() };
                 acc.set(rec.resolved, a);
             }
             if (usage.escapes) a.escapes = true;
+            for (const m of usage.called) a.called.add(m);
             for (const m of usage.members) a.members.add(m);
         }
     }
@@ -408,8 +429,38 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     const dynUsage = computeDynamicUsage(graph);
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
     const nsCaptured = new Map<number, Set<string>>();
-    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCaptured);
+    const thisCache = new Map<number, boolean>();
+    const nsCalled = new Map<number, Set<string>>();
+    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCaptured, nsCalled);
     const elidableNs = computeElidableNs(graph, linked, nsUsage, nsCaptured);
+    // A namespace some consumer CALLS a member off (`ns.foo()`) and that still gets built keeps its
+    // WHOLE surface: the callee receives the object as `this`, so `this.other` must find `other`.
+    //
+    // Two things keep this from costing the narrowing everywhere (+1,704 minified bytes on crashcat
+    // when it did). Elision runs FIRST and is allowed to keep narrowing: an elided namespace has no
+    // object, `ns.foo()` becomes `foo()`, and losing `this` there is what Rollup does too. And a
+    // callee that cannot mention `this` cannot observe the namespace — approximated per MODULE (does
+    // the module defining that export contain a `this` at all), which is cheap, sound, and false only
+    // in the direction of keeping too much.
+    for (const [target, names] of nsCalled) {
+        if (elidableNs.has(target) || !nsUsage.has(target)) continue;
+        const map = linked.exportMaps.get(target);
+        if (map === undefined) continue;
+        let observable = false;
+        for (const name of names) {
+            const bind = map.get(name);
+            // An unresolved or namespace-valued export: no single defining module to consult.
+            if (bind === undefined || (bind.kind !== 'found' && bind.kind !== 'cjs-member')) {
+                observable = true;
+                break;
+            }
+            if (moduleMentionsThis(graph, refMod(bind.ref), thisCache)) {
+                observable = true;
+                break;
+            }
+        }
+        if (observable) nsUsage.delete(target);
+    }
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];

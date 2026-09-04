@@ -8,6 +8,12 @@ import { lookupValue, type Semantic, symbolOf } from './semantic.ts';
 export type NsUsage = {
     escapes: boolean;
     members: Set<string>;
+    /** Members CALLED as a method (`ns.foo()`), which hands the callee the namespace as `this` so it
+     *  may read any member of it. Only matters for a namespace that is MATERIALISED: narrowing it to
+     *  the statically-read members would drop what `this.x` needs. An ELIDED namespace has no object
+     *  to read off — `ns.foo()` becomes `foo()` and loses `this`, which is what Rollup does too
+     *  (verified: it emits `const r = test()` for `ns.test()`). Always a subset of {@link members}. */
+    called: Set<string>;
     /** Members whose name resolves to a NESTED binding at some `ns.foo` site, so rewriting the read
      *  to that name would be captured by it. `function test(mutate) { dep.mutate(); }` is the shape.
      *
@@ -24,7 +30,7 @@ export type NsUsage = {
  *  One walk classifies all of a module's namespace bindings at once. */
 export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<number>): Map<number, NsUsage> {
     const out = new Map<number, NsUsage>();
-    for (const s of nsSyms) out.set(s, { escapes: false, members: new Set(), captured: new Set() });
+    for (const s of nsSyms) out.set(s, { escapes: false, called: new Set(), members: new Set(), captured: new Set() });
     // The scope the walk is currently inside, for the capture test. Scope-owning nodes carry their
     // id on `data.scopeId`; everything else inherits its parent's.
     let scope = 0;
@@ -37,6 +43,24 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
     };
 
     const visit = (node: Node): void => {
+        // `ns.foo()` hands the NAMESPACE to the callee as `this`, so the callee may read any member —
+        // including ones nothing names here. Only FLAGGED here; the member read (and its capture
+        // test) is still recorded by the ordinary member-expression case below, which this falls
+        // through to. Narrowing to the statically-read members is unsound for a member CALL: Rollup's
+        // `dynamic-import-call-method-with-this-await` is a method returning `this.value`, and
+        // `value` was narrowed away, so the call answered `undefined`. rolldown drops it too
+        // (verified on that fixture); Rollup keeps it, and a program that returns the wrong answer is
+        // not something to align with.
+        //
+        // A tagged template (``ns.tag`x` ``) receives `this` the same way.
+        if (node.type === N.CallExpression || node.type === N.TaggedTemplateExpression) {
+            const callee = (node.data as { callee?: Node; tag?: Node }).callee ?? (node.data as { tag: Node }).tag;
+            if (callee.type === N.StaticMemberExpression) {
+                const s = nsSymOf((callee.data as { object: Node }).object);
+                if (s !== 0) out.get(s)!.called.add((callee.data as { property: Node }).property.name as string);
+            }
+            // `ns[expr]()` needs no case: the computed read below already escapes the whole surface.
+        }
         if (node.type === N.StaticMemberExpression) {
             const s = nsSymOf(node.data.object);
             if (s !== 0) {
@@ -78,8 +102,8 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
     return out;
 }
 
-const allUsage = (): NsUsage => ({ escapes: true, members: new Set(), captured: new Set() });
-const noUsage = (): NsUsage => ({ escapes: false, members: new Set(), captured: new Set() });
+const allUsage = (): NsUsage => ({ escapes: true, called: new Set(), members: new Set(), captured: new Set() });
+const noUsage = (): NsUsage => ({ escapes: false, called: new Set(), members: new Set(), captured: new Set() });
 
 /** Members read by an object-destructuring pattern (`const { a, b } = …`). A rest element,
  *  computed key, or non-identifier key means the whole surface may be observed → escape. */
@@ -92,7 +116,7 @@ function membersFromPattern(pattern: Node): NsUsage {
         if (key.type !== N.IdentifierName) return allUsage();
         members.add(key.name);
     }
-    return { escapes: false, members, captured: new Set() };
+    return { escapes: false, called: new Set(), members, captured: new Set() };
 }
 
 /** Usage of a namespace-valued binding (an `await import()` result or a `.then` callback param):
@@ -127,7 +151,7 @@ function awaitedUsage(awaitNode: Node, parentOf: Map<Node, Node>, program: Node,
     }
     // `(await import(x)).foo`
     if (q.type === N.StaticMemberExpression && q.data.object === awaitNode) {
-        return { escapes: false, members: new Set([q.data.property.name]), captured: new Set() };
+        return { escapes: false, called: new Set(), members: new Set([q.data.property.name]), captured: new Set() };
     }
     if (q.type === N.ExpressionStatement) return noUsage(); // `await import(x);` — result discarded
     return allUsage();

@@ -450,3 +450,12 @@ for (const [k, b] of [...buckets.entries()].sort((a, c) => c[1].count - a[1].cou
     console.log(`${String(b.count).padStart(4)}  ${k}`);
     console.log(`      e.g. ${b.samples[0]}`);
 }
+
+// The bucket table above is TRUNCATED — 20 buckets, one sample each — and a truncated view has twice
+// hidden a regression behind a net-zero delta: a change fixed one sample and broke another, and the
+// only number that moved was inside a bucket that never printed. So dump the whole failing SET, one
+// name per line, sorted, for `diff`. Under `llm/` because it is a local working artifact, not output.
+const FAILING = join(import.meta.dirname, '..', 'llm', 'rollupsuite-failing.txt');
+const failing = [...buckets.values()].flatMap((b) => b.samples).sort();
+writeFileSync(FAILING, `${failing.join('\n')}\n`);
+console.log(`\nfull failing set (${failing.length}) written to llm/rollupsuite-failing.txt — diff it against the previous run`);
