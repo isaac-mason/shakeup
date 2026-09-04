@@ -120,7 +120,9 @@ const TOOLS: Tool[] = [
                             external: corpus.external,
                             output: { minify: true, optimize: true },
                         } as never)
-                    ).code,
+                    ).chunks
+                        .map((c: { code: string }) => c.code)
+                        .join('\n'),
                 true,
             ),
     },
@@ -141,7 +143,9 @@ const TOOLS: Tool[] = [
                             external: corpus.external,
                             output: {},
                         } as never)
-                    ).code,
+                    ).chunks
+                        .map((c: { code: string }) => c.code)
+                        .join('\n'),
                 true,
             ),
     },
@@ -459,6 +463,15 @@ async function main(): Promise<void> {
     for (const t of TOOLS) {
         const r = first[t.name];
         if (r === undefined) continue;
+        // A tool that produced no code is a BROKEN ARM, not a zero-byte result. Both shakeup arms
+        // read `BundleResult.code` — an alias removed on 2026-08-28 — so they returned `undefined`
+        // and this whole script threw a bare TypeError while printing the size table. The numbers in
+        // ROADMAP §1 were carried forward from before that. Name the arm and keep going.
+        if (typeof r.code !== 'string') {
+            console.log(`${t.name.padEnd(10)}   BROKEN ARM — produced no code`);
+            delete first[t.name];
+            continue;
+        }
         console.log(
             `${t.name.padEnd(10)}${r.code.length.toLocaleString().padStart(12)}${gz(r.code).toLocaleString().padStart(10)}${br(r.code).toLocaleString().padStart(10)}   ${assertValid(t.name, r.code, dir)}${t.name === 'rollup' || t.name === 'shakeup (no min)' ? '   ← NOT minified' : ''}`,
         );
