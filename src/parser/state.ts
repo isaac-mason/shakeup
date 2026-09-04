@@ -280,11 +280,21 @@ export function raiseOnScript(state: ParserState, pos: number, code: ParseErrorC
 }
 
 export function raiseAt(state: ParserState, pos: number, code: ParseErrorCode, ...params: string[]): void {
-    if (state.fatal) return;
-    state.fatal = true;
-    state.errors.push({ pos, msg: formatError(code, params), code });
-    // Jump the lexer to end-of-input. `tokStart`/`tokEnd` follow so the next `raise` (there will not
-    // be one) and any span built from them stay inside the source.
+    // Only the FIRST error is recorded — but the jump below runs EVERY time, fatal or not.
+    //
+    // It used to return here, and that was a termination hazard. A lexer bailout that reports and
+    // returns without advancing `pos` — `scanEscapedIdent` has four of them — relies on this jump for
+    // its progress. Once `fatal` was latched by an earlier error the jump stopped happening, the
+    // bailout left the lexer exactly where it was, and the parser span until the stack ran out.
+    // `…\`a\`b ${i} c:\\` is 15 bytes that did it: the `…` latches `fatal`, and the trailing lone `\`
+    // is then a bailout with nowhere to go. Jumping unconditionally is idempotent in every other
+    // case, because after the first fatal `pos` is already `srcLen`.
+    if (!state.fatal) {
+        state.fatal = true;
+        state.errors.push({ pos, msg: formatError(code, params), code });
+    }
+    // Jump the lexer to end-of-input. `tokStart`/`tokEnd` follow so any span built from them stays
+    // inside the source.
     state.pos = state.srcLen;
     state.tokStart = state.srcLen;
     state.tokEnd = state.srcLen;

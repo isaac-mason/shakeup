@@ -137,12 +137,76 @@ export const C_AFTER_NEWLINE = 4;
 export const C_WS = 1;
 export const C_NL = 2;
 export const C_ID = 3;
-/** ZWNJ (U+200C) and ZWJ (U+200D) are IdentifierPart but NOT IdentifierStart, so `a\u200Db` is an
- *  identifier and `\u200Da` is not — escaped or literal, both oracles agree. They are the only two
- *  code points this lexer distinguishes by POSITION: it otherwise treats every non-ASCII character
- *  as an identifier character rather than carrying the Unicode ID_Start / ID_Continue tables, which
- *  is deliberate (see `scanEscapedIdent`). Two named exceptions are not those tables. */
-const isJoinerControl = (c: number): boolean => c === 0x200c || c === 0x200d;
+/**
+ * The real Unicode identifier tables, for the NON-ASCII path only.
+ *
+ * This lexer used to treat every non-ASCII character as an identifier character, with ZWNJ (U+200C)
+ * and ZWJ (U+200D) hand-listed as the two that are `ID_Continue` but not `ID_Start`. That was a
+ * deliberate trade — the tables are large and the identifier scan is the parser's hottest loop — but
+ * it accepted `var a\u2E2F` (U+2E2F is `Pattern_Syntax`, which `ID_Start` excludes) and it accepted a
+ * raw emoji while `scanEscapedIdent` rejected the escaped spelling of the same character.
+ *
+ * The engine already ships these tables: `\p{ID_Start}` / `\p{ID_Continue}` in a `u`-flag regex are
+ * exactly the spec's `UnicodeIDStart` / `UnicodeIDContinue`. Nothing is added to the bundle, the
+ * hand-listed pair falls out for free (ZWNJ and ZWJ are `ID_Continue` and not `ID_Start`), and the
+ * ASCII fast path is untouched: every call site tests `< 128` against the `CHAR` table first, so an
+ * ordinary identifier — every identifier in practice — never reaches here.
+ *
+ * `$` and `_` are the two ASCII identifier characters the tables do NOT contain; they are in `CHAR`.
+ */
+const ID_START = /^\p{ID_Start}$/u;
+const ID_CONTINUE = /^\p{ID_Continue}$/u;
+/**
+ * Unassigned in the ENGINE'S Unicode version — which is not the same as unassigned.
+ *
+ * The engine's tables are whatever Unicode it shipped with (this node: 16.0), and test262 and oxc are
+ * already on 17.0. Taking `\p{ID_Start}` literally therefore REJECTED eight programs that oxc
+ * accepts: the code points Unicode 17 added as identifier characters. Hard-coding that delta would be
+ * fitting to the fixture that reports it, and it would go stale in the wrong direction.
+ *
+ * `\p{Cn}` asks the engine the right question instead — "have you heard of this code point at all?"
+ * A character the engine knows and classifies as a non-identifier (U+2E2F VERTICAL TILDE, an emoji,
+ * U+180E) is REJECTED; one it has never heard of is accepted, because a newer Unicode may well have
+ * made it a letter and Unicode's identifier stability policy guarantees these sets only grow. The
+ * permissiveness is therefore exactly the old accept-everything behaviour, narrowed from "every
+ * non-ASCII character" to "the ones this engine cannot classify" — and it shrinks on its own as the
+ * engine updates, with no table to maintain.
+ *
+ * What it still accepts that oxc rejects: an identifier containing a genuinely unassigned code point
+ * or a noncharacter (`var a\uFFFF`). That is the residue, and it is registered as a divergence.
+ */
+const UNASSIGNED = /^\p{Cn}$/u;
+/**
+ * Memoised, because a regex test costs a `String.fromCodePoint` allocation and a source that uses
+ * non-ASCII identifiers uses the SAME few hundred code points over and over. Measured on 4,000 lines
+ * of CJK identifiers: 4.25 ms uncached, 3.05 ms cached, against 2.98 ms for the old accept-everything
+ * lexer — so the cache recovers all but ~2% of the cost, on a workload that is 32,000 non-ASCII
+ * identifier characters and nothing else. The ASCII CONTROL arm is 2.83-2.86 ms across all three,
+ * inside the harness's ±0.6% resolution: no call site reaches here without failing a `< 128` test
+ * first, so the hot path is untouched.
+ *
+ * Keyed by code point, values `ID_NONE` / `ID_CONT` / `ID_START_BIT | ID_CONT` — one lookup answers
+ * both questions, and every entry is a pure function of the key, so the cache never goes stale.
+ */
+const ID_CONT_BIT = 1;
+const ID_START_BIT = 2;
+const idClasses = new Map<number, number>();
+function idClass(cp: number): number {
+    let v = idClasses.get(cp);
+    if (v === undefined) {
+        const ch = String.fromCodePoint(cp);
+        v = (ID_CONTINUE.test(ch) ? ID_CONT_BIT : 0) | (ID_START.test(ch) ? ID_START_BIT : 0);
+        if (v === 0 && UNASSIGNED.test(ch)) v = ID_CONT_BIT | ID_START_BIT;
+        idClasses.set(cp, v);
+    }
+    return v;
+}
+const isIdStart = (cp: number): boolean => (idClass(cp) & ID_START_BIT) !== 0;
+const isIdContinue = (cp: number): boolean => (idClass(cp) & ID_CONT_BIT) !== 0;
+/** The code point at `pos`, joining a surrogate PAIR. `𝐀` (U+1D400) is `ID_Start`, so testing the
+ *  lone high surrogate would reject valid JavaScript rather than merely miss an error. */
+const cpAt = (src: string, pos: number, unit: number): number =>
+    unit >= 0xd800 && unit <= 0xdbff ? (src.codePointAt(pos) as number) : unit;
 export const C_DIG = 4;
 /** One bit per legal regex flag, indexed by char code — oxc's `gimsuydv` (`literal.rs:206`). A
  *  `0` entry is "not a flag at all", which is how the unknown-flag error is spelled. */
@@ -285,7 +349,7 @@ function scanEscapedIdent(state: ParserState, nameStart: number, tok: number): v
                     raise(state, ParseErrorCode.InvalidEscapedIdentChar, String.fromCodePoint(cp));
                     return;
                 }
-            } else if (first && isJoinerControl(cp)) {
+            } else if (first ? !isIdStart(cp) : !isIdContinue(cp)) {
                 raise(state, ParseErrorCode.InvalidIdentStartChar, String.fromCodePoint(cp));
                 return;
             }
@@ -297,10 +361,19 @@ function scanEscapedIdent(state: ParserState, nameStart: number, tok: number): v
         if (c < 128) {
             const cl = CHAR[c];
             if (cl !== C_ID && (first || cl !== C_DIG)) break;
-        } else if (c === 0x2028 || c === 0x2029) break;
-        else if (first && isJoinerControl(c)) {
-            raise(state, ParseErrorCode.InvalidIdentStartChar, src[pos]);
-            return;
+        } else {
+            const cp = cpAt(src, pos, c);
+            // A raw character that is no identifier character ENDS the identifier and is left for the
+            // next token, which is where oxc reports it too — symmetric with the ASCII branch above,
+            // which also just breaks. `var a\u0062\u2E2F;` is the shape: the name is `ab`, and the
+            // dispatch then rejects the `\u2E2F` as a token start.
+            if (first ? !isIdStart(cp) : !isIdContinue(cp)) break;
+            if (cp > 0xffff) {
+                name += src[pos] + src[pos + 1];
+                pos += 2;
+                first = false;
+                continue;
+            }
         }
         name += src[pos];
         pos++;
@@ -525,18 +598,29 @@ export function nextToken(state: ParserState): void {
     const c = src.charCodeAt(pos);
 
     if (c < 128 ? CHAR[c] === C_ID : true) {
-        // A joiner control cannot START an identifier, but it is not "unexpected" either — it is a
-        // valid identifier character in the wrong position, so it gets oxc's own message rather than
-        // the generic unexpected-character branch. Guarded on `c >= 128` first so an ASCII
-        // identifier — every identifier in practice — short-circuits on one integer compare.
-        if (c >= 128 && isJoinerControl(c)) {
-            raise(state, ParseErrorCode.InvalidIdentStartChar, src[pos]);
-            state.pos = pos + 1;
-            state.tok = T_IDENT;
-            state.tokEnd = pos + 1;
-            return;
-        }
+        // A non-ASCII character that cannot START an identifier: a joiner control (an identifier
+        // character in the wrong POSITION), or one that is no identifier character at all. Both get
+        // oxc's own message rather than the generic unexpected-character branch. Guarded on
+        // `c >= 128` first so an ASCII identifier — every identifier in practice — short-circuits on
+        // one integer compare and never touches the tables.
         let h = c;
+        if (c >= 128) {
+            const cp = cpAt(src, pos, c);
+            if (!isIdStart(cp)) {
+                // `raise` latches `fatal` and jumps the lexer to end-of-input, which is the whole
+                // recovery. This used to overwrite `pos`/`tok` afterwards to hand back a one-character
+                // identifier and keep going — undoing that jump, and leaving a later non-advancing
+                // bailout with nothing to move it forward.
+                raise(state, ParseErrorCode.InvalidIdentStartChar, String.fromCodePoint(cp));
+                return;
+            }
+            // An ASTRAL start is two units, and the second is a lone low surrogate that the continue
+            // loop would end the identifier on. `𝐀a` is one identifier, so consume both halves here.
+            if (cp > 0xffff) {
+                pos++;
+                h = (Math.imul(h, 31) + src.charCodeAt(pos)) | 0;
+            }
+        }
         pos++;
         while (pos < srcLen) {
             const cc = src.charCodeAt(pos);
@@ -551,7 +635,19 @@ export function nextToken(state: ParserState): void {
                     }
                     break;
                 }
-            } else if (cc === 0x2028 || cc === 0x2029) break;
+            } else {
+                const cp = cpAt(src, pos, cc);
+                if (!isIdContinue(cp)) break;
+                if (cp > 0xffff) {
+                    // Hash both UNITS: `intern` re-derives the hash from the source slice, so the two
+                    // have to walk the string the same way.
+                    h = (Math.imul(h, 31) + cc) | 0;
+                    pos++;
+                    h = (Math.imul(h, 31) + src.charCodeAt(pos)) | 0;
+                    pos++;
+                    continue;
+                }
+            }
             h = (Math.imul(h, 31) + cc) | 0;
             pos++;
         }
@@ -635,7 +731,17 @@ export function nextToken(state: ParserState): void {
                 }
                 break;
             }
-            if (cc >= 128 && (cc === 0x2028 || cc === 0x2029)) break;
+            if (cc >= 128) {
+                const cp = cpAt(src, pos, cc);
+                if (!isIdContinue(cp)) break;
+                if (cp > 0xffff) {
+                    h = (Math.imul(h, 31) + cc) | 0;
+                    pos++;
+                    h = (Math.imul(h, 31) + src.charCodeAt(pos)) | 0;
+                    pos++;
+                    continue;
+                }
+            }
             h = (Math.imul(h, 31) + cc) | 0;
             pos++;
         }
