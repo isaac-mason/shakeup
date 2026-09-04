@@ -151,6 +151,10 @@ class Ctx {
      *  Tracked across the child-descent (see {@link descend}) so lowering passes can parent a
      *  synthesized scope (`createScope`) to the correct lexical scope. */
     currentScope = 0;
+    /** The node whose children are currently being visited (oxc `TraverseCtx.parent()`). A single
+     *  field maintained in {@link descend}, not a stack — a hook only ever needs the immediate
+     *  parent, which is what oxc's `should_keep_indirect_access` asks for. `null` at the root. */
+    parent: Node | null = null;
     /** Per-node-type hook lists for this visitor set — see {@link hookTablesFor}. */
     enterByType: (Hook[] | null | undefined)[];
     exitByType: (Hook[] | null | undefined)[];
@@ -453,14 +457,18 @@ function descend(node: Node, ctx: Ctx): void {
     // it, and scope 0 is the table's root sentinel which is never owned by a node. A node type that
     // cannot own a scope has no field at all, which `?? 0` folds into the same case.
     const s = (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
+    const prevParent = ctx.parent;
+    ctx.parent = node;
     if (s === 0) {
         WALKERS[node.type](node, ctx, visitSingle, visitList);
+        ctx.parent = prevParent;
         return;
     }
     const prev = ctx.currentScope;
     ctx.currentScope = s;
     WALKERS[node.type](node, ctx, visitSingle, visitList);
     ctx.currentScope = prev;
+    ctx.parent = prevParent;
 }
 
 /** Visit a single-child slot; returns the (possibly replaced) node to write back. */

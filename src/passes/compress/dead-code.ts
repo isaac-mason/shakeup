@@ -20,6 +20,7 @@
 // would leak lexical scope, so we keep the block intact.
 import { create, N, type Node, statementListOf } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
+import { keepIndirectAccess } from './indirect-access.ts';
 
 // Narrow views used where the `Node` union isn't already refined by a `switch (node.type)`. The
 // codebase's `(node.data as { field })` idiom — the traversal keys hooks by type, so these casts are
@@ -213,7 +214,8 @@ export const deadCode: Visitor = {
             const d = n.data as IfData;
             const v = constTruthiness(d.test);
             if (v === -1) return;
-            ctx.replaceWith(v === 1 ? d.consequent : (d.alternate as Node));
+            // `(1 ? a.b : 0)()` folds to `(0, a.b)()`, not `a.b()` — see `keepIndirectAccess`.
+            ctx.replaceWith(keepIndirectAccess(v === 1 ? d.consequent : (d.alternate as Node), n, ctx.parent));
         },
     }),
     exit: null,

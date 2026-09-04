@@ -35,8 +35,9 @@
 //
 // NOT De Morgan (`!(a||b)` → `!a&&!b`): that is `minimize-not`'s lane; doing it here would oscillate.
 import { create, N, type Node } from '../../ast/index.ts';
-import { boolCoerce } from './fold-constants.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
+import { boolCoerce } from './fold-constants.ts';
+import { keepIndirectAccess } from './indirect-access.ts';
 
 type LogicalData = { operator: string; left: Node; right: Node };
 type BinaryData = { operator: string; left: Node; right: Node };
@@ -224,11 +225,12 @@ export const minimizeLogical: Visitor = {
         [N.LogicalExpression]: (n, ctx: TransformCtx) => {
             const folded = tryFoldConstantOperand(n);
             if (folded !== null) {
-                ctx.replaceWith(folded);
+                // `(true && o.f)()` folds to `(0, o.f)()`, not `o.f()` — see `keepIndirectAccess`.
+                ctx.replaceWith(keepIndirectAccess(folded, n, ctx.parent));
                 return;
             }
             const rewritten = tryNullCollapse(n);
-            if (rewritten !== null) ctx.replaceWith(rewritten);
+            if (rewritten !== null) ctx.replaceWith(keepIndirectAccess(rewritten, n, ctx.parent));
         },
         [N.AssignmentExpression]: (n, ctx: TransformCtx) => {
             const rewritten = tryCompoundAssign(n);
