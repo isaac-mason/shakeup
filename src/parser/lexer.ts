@@ -173,7 +173,9 @@ const ID_CONTINUE = /^\p{ID_Continue}$/u;
  * engine updates, with no table to maintain.
  *
  * What it still accepts that oxc rejects: an identifier containing a genuinely unassigned code point
- * or a noncharacter (`var a\uFFFF`). That is the residue, and it is registered as a divergence.
+ * or a noncharacter (`var a\uFFFF`). node rejects those too, so this is a place WE are the odd one
+ * out — which by `oxc-divergences.md`'s own rule is a roadmap entry and not a register row. It is
+ * §2v. The price of it is not shipping a Unicode table; the alternative is shipping one.
  */
 const UNASSIGNED = /^\p{Cn}$/u;
 /**
