@@ -73,9 +73,23 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
         // `importDynamicFallback` → `matchImportNamespace`), and a static match wins over it
         // (`matchImportNormalAndNamespace` keeps the normal binding).
         let cjsFallback: ImportBind | null = null;
+        // An EXTERNAL star source can supply any name, and nothing here can prove it does not — so it
+        // is a fallback like the CommonJS one, taken only when no ESM star source matched statically.
+        // Skipping it outright reported `'dirname' is not exported by` for `export * from 'path'`,
+        // which is a valid program: the spec resolves the import THROUGH the star to the external's
+        // own binding, and a named import from the external is exactly that. If the external really
+        // lacks the name, the host raises the link error the spec asks for.
+        //
+        // rolldown lowers this differently — a namespace object for the barrel with `__reExport` of
+        // the external at runtime, so a missing name reads `undefined` rather than failing to link.
+        // That is the lenient reading; this is the spec-exact one, and it emits less.
+        let externalFallback: ImportBind | null = null;
         for (const recIdx of module.starExports) {
             const rec = module.importRecords[recIdx];
-            if (rec.external) continue;
+            if (rec.external) {
+                externalFallback ??= { kind: 'external', specifier: rec.specifier, name };
+                continue;
+            }
             if (ctx.linked.cjsWrap.has(rec.resolved)) {
                 cjsFallback ??= cjsBind(ctx, graph.modules[rec.resolved], name, module);
                 continue;
@@ -90,6 +104,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
         }
         if (found !== null) return found;
         if (cjsFallback !== null) return cjsFallback;
+        if (externalFallback !== null) return externalFallback;
     }
     return { kind: 'none' };
 }
