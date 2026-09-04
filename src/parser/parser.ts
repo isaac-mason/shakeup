@@ -176,6 +176,8 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         fatal: false,
         thisDepth: 0,
         topLevelThis: [],
+        coverInit: [],
+        coverInitOk: [],
         sawImportSyntax: false,
         chainSawOptional: false,
     };
@@ -385,7 +387,7 @@ function consumeSemi(state: ParserState): void {
 
 // No line-table field to save/restore: the line table is built once, deferred, so nothing
 // mutates it during (speculative) parsing.
-type LexState = [number, number, number, number, number, number, number, boolean, number, number, number];
+type LexState = [number, number, number, number, number, number, number, boolean, number, number, number, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -402,6 +404,8 @@ const saveState = (state: ParserState): LexState => [
     state.nseAt.length,
     state.commentsLen,
     state.topLevelThis.length,
+    state.coverInit.length,
+    state.coverInitOk.length,
 ];
 function restoreState(state: ParserState, s: LexState): void {
     state.pos = s[0];
@@ -417,6 +421,8 @@ function restoreState(state: ParserState, s: LexState): void {
     state.nseAt.length = s[8];
     state.commentsLen = s[10];
     state.topLevelThis.length = s[9];
+    state.coverInit.length = s[11];
+    state.coverInitOk.length = s[12];
 }
 
 function push(state: ParserState, v: Ref): void {
@@ -576,6 +582,9 @@ function checkObjectTarget(state: ParserState, node: NodeOf<'ObjectExpression'>)
             continue;
         }
         if (prop.type !== N.ObjectProperty) continue;
+        // This object IS a destructuring target, so a CoverInitializedName in it is legal — oxc
+        // removes the entry at the same point (`js/grammar.rs:227`).
+        if ((prop.data.value as Node).type === N.AssignmentPattern) state.coverInitOk.push(prop.start);
         // A getter/setter cannot appear in a destructuring target; its `value` is a function, which
         // the target check below rejects on its own.
         checkMaybeDefault(state, prop.data.value as Node);
@@ -1606,6 +1615,9 @@ function parseObjectMember(state: ParserState): Node {
         nextToken(state);
         const right = parseAssign(state);
         const value = create.AssignmentPattern(key.start, right.end, 0, shorthandRef, right);
+        // CoverInitializedName: legal only if this object turns out to be a destructuring target.
+        // Recorded now, legitimised by `checkObjectTarget`, reported at end of parse if neither.
+        state.coverInit.push(start);
         return create.ObjectProperty(start, right.end, flags | FL.SHORTHAND, key, value);
     }
     return create.ObjectProperty(start, key.end, flags | FL.SHORTHAND, key, shorthandRef);
@@ -4671,6 +4683,15 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         if (!state.sawEsmImport && !state.sawEsmExport && !state.sawImportSyntax)
             for (const e of state.deferredScriptErrors) state.errors.push(e);
         state.deferredScriptErrors.length = 0;
+    }
+    // CoverInitializedName, reported LAST — the same place oxc reports it
+    // (`check_unfinished_errors`). A `{ bar = baz }` is only legal once something reinterprets the
+    // object as a destructuring target, and whether that happens is not known until the whole
+    // expression has been parsed. Anything still unlegitimised is the spec's
+    // "It is a Syntax Error if any source text is matched by this production".
+    if (state.coverInit.length > 0) {
+        const ok = new Set(state.coverInitOk);
+        for (const at of state.coverInit) if (!ok.has(at)) raiseAt(state, at, ParseErrorCode.CoverInitializedName);
     }
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;

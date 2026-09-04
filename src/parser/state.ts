@@ -195,6 +195,21 @@ export type ParserState = {
      *  because the predicate is a parse-time fact — oxc/rolldown likewise gather them during
      *  scanning and defer the rewrite (`ast_scanner/mod.rs:352-362`). */
     topLevelThis: Node[];
+    /**
+     * Offsets of shorthand properties written with an initializer — `{ bar = baz }`, the spec's
+     * CoverInitializedName. Legal ONLY where the object literal is reinterpreted as a destructuring
+     * pattern; as a plain expression, "It is a Syntax Error if any source text is matched by this
+     * production" (PropertyDefinition).
+     *
+     * oxc records the same thing in `state.cover_initialized_name`, removes an entry when the cover
+     * grammar converts the property (`js/grammar.rs:227`), and reports whatever is left from
+     * `check_unfinished_errors`. shakeup validates rather than converts, so {@link coverInitOk}
+     * records the legitimised offsets instead of deleting from this list — both are append-only and
+     * truncated together on a speculative rewind.
+     */
+    coverInit: number[];
+    /** Offsets from {@link coverInit} that a destructuring target check legitimised. */
+    coverInitOk: number[];
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];
