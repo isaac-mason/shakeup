@@ -73,6 +73,9 @@ export type ChunkOptions = {
     preserveModules: boolean;
     /** manualChunks-normalized groups. Empty = pure auto-chunking. */
     groups: ResolvedGroup[];
+    /** `output.keepNames` — reaches deconflict so a nested class can reserve its own name against
+     *  the outer symbols it references. See `classNameForbids`. */
+    keepNames?: boolean;
 };
 
 /** A group after option normalization (manualChunks → single group). */
@@ -428,7 +431,7 @@ export function buildChunkGraph(
     if (options.preserveModules) {
         const formed = formPreserveModulesChunks(graph, linked);
         const color: bigint[] = graph.modules.map(() => ZERO);
-        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf);
+        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf, options.keepNames === true);
         addRuntimeChunk(graph, linked, formed.chunks);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
@@ -510,7 +513,7 @@ export function buildChunkGraph(
         groupNames,
     );
 
-    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf);
+    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true);
     addRuntimeChunk(graph, linked, chunks);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
@@ -523,6 +526,7 @@ function wireAndDeconflict(
     chunks: Chunk[],
     chunkByModule: Int32Array,
     entryChunkOf: Map<number, number>,
+    keepNames = false,
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
@@ -550,7 +554,7 @@ function wireAndDeconflict(
     const chunkClaim: ((base: string) => string)[] = [];
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
-        chunkClaim.push(deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], taken));
+        chunkClaim.push(deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], taken, keepNames));
     }
 
     // Wire imports/exports. For every imported binding whose producer lands in another chunk,
@@ -666,7 +670,7 @@ function wireAndDeconflict(
             nsImportLocalOf: new Map(),
         });
         memberSets.push(new Set());
-        chunkClaim.push(deconflictChunk(graph, linked, [], memberSets[fi], [], new Set()));
+        chunkClaim.push(deconflictChunk(graph, linked, [], memberSets[fi], [], new Set(), keepNames));
         // The real chunk stops being the dynamic entry: otherwise BOTH would emit the entry surface,
         // and presenting it exactly once, from the facade, is the whole point. Its cross-chunk
         // `exports` are untouched — the facade is about to import from them.

@@ -906,7 +906,7 @@ function resolveChunkOptions(
             }
         }
     }
-    return { codeSplitting, preserveModules: output?.preserveModules === true, groups };
+    return { codeSplitting, preserveModules: output?.preserveModules === true, groups, keepNames: output?.keepNames === true };
 }
 
 /** A persistent, incremental build handle (esbuild `Context.Rebuild` lineage). Holds a

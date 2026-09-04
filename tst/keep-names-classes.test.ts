@@ -69,6 +69,29 @@ describe('keepNames, for classes', () => {
         expect((await run(code)).v).toEqual(['C', 'C']);
     });
 
+    it("reserves a NESTED class's name against the outer symbols it reaches", async () => {
+        // The upstream half of the guard, and Rollup's actual mechanism: rather than let the nested
+        // class be renamed and then decline to preserve its name, forbid the name to the OUTER symbol
+        // so the class never needs renaming. Rollup emits `let Foo$1 = class Foo {}` at module level
+        // with the nested `class Foo` untouched — verified on rollup 4.63.
+        const code = await build(
+            {
+                '/main.js': [
+                    "import Bar from './foo.js';",
+                    'const wrapper = () => {',
+                    '  class Foo extends Bar { static who() { return this.name; } }',
+                    '  return Foo;',
+                    '};',
+                    'export const v = wrapper().who();',
+                ].join('\n'),
+                '/foo.js': 'export default class Foo {}\n',
+            },
+            true,
+        );
+        expect(code, 'the NESTED class keeps its name; the outer one takes the suffix').toContain('class Foo extends Foo$1');
+        expect((await run(code)).v).toBe('Foo');
+    });
+
     it('does NOT preserve a name that would capture something the class reaches', async () => {
         // Naming the class introduces a binding inside its scope. Here the inner class extends the
         // OUTER `bar`, so calling it `bar` would make it inherit from itself. Correctness wins over

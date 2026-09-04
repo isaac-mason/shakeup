@@ -4,8 +4,8 @@
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
 import { SCOPE, scopeKind, scopeOf } from '../analysis/semantic.ts';
-import { N, type Node, walkChildren } from '../ast/index.ts';
-import { externalKey, type Graph, type Linked, packRef, refMod, refSym } from './graph-types.ts';
+import { N, type Node, walk, walkChildren } from '../ast/index.ts';
+import { externalKey, type Graph, type Linked, type Module, packRef, refMod, refSym } from './graph-types.ts';
 import { finalNameOf } from './link.ts';
 
 export const RESERVED = new Set([
@@ -56,16 +56,82 @@ export const RESERVED = new Set([
 
 /** A `claim` closure over a mutable `taken` set: returns a unique name derived from
  *  `base` (suffixing `$1`, `$2`, … on collision) and reserves it. */
-export function makeClaim(taken: Set<string>): (base: string) => string {
-    return (base: string): string => {
+export function makeClaim(taken: Set<string>): (base: string, avoid?: ReadonlySet<string>) => string {
+    return (base: string, avoid?: ReadonlySet<string>): string => {
         let name = base;
         let n = 1;
-        while (taken.has(name)) name = `${base}$${n++}`;
+        // `avoid` is per-CALL, not global: a name forbidden to one symbol is still free for the
+        // symbol that forbade it. Rollup's `Variable.forbidName` has the same per-variable shape.
+        while (taken.has(name) || avoid?.has(name) === true) name = `${base}$${n++}`;
         taken.add(name);
         return name;
     };
 }
 
+/**
+ * Names a top-level symbol must NOT take, because a NESTED class wants to keep that name.
+ *
+ * Under `keepNames`, a class whose binding gets renamed loses its `.name` unless the original is
+ * moved onto the class itself — and the printer declines to do that when the name would capture
+ * something the class reaches (`preservedClassName`). Rollup avoids ever reaching that point: for
+ * every variable a class's scope accesses from outside, it calls `accessedVariable.forbidName(name)`
+ * (`ClassDeclaration.applyDeoptimizations`, `VariableDeclarator.includeNode`), so the renamer gives
+ * the OUTER symbol the suffix and the class keeps its name. Its `class-name-conflict-3` output is
+ * `let Foo$1 = class Foo {}` at module level with the nested `class Foo` untouched.
+ *
+ * This computes that forbid set. Only NESTED classes contribute: a top-level class is claimed in the
+ * same pass as everything it could collide with, so there is no inner binding to protect.
+ */
+function classNameForbids(graph: Graph, linked: Linked, memberSet: Set<number> | null): Map<number, Set<string>> {
+    const forbids = new Map<number, Set<string>>();
+    for (const mod of graph.modules) {
+        if (memberSet !== null && !memberSet.has(mod.idx)) continue;
+        if (mod.external) continue;
+        const sem = mod.semantic;
+        const moduleScope = scopeOf(sem, mod.program);
+        /** The ref a reference ULTIMATELY names, following an import to its producer — the symbol
+         *  whose claimed name the printer will emit. Null when it is not a claimable top-level
+         *  binding (an external, a namespace, a nested local). */
+        const producerRef = (sym: number): number | null => {
+            if (mod.namedImports.get(sym) === undefined) {
+                return sem.symbols[sym]?.scope === moduleScope ? packRef(mod.idx, sym) : null;
+            }
+            const bind = linked.binds.get(packRef(mod.idx, sym));
+            if (bind === undefined) return null;
+            return bind.kind === 'found' || bind.kind === 'cjs-member' ? bind.ref : null;
+        };
+        walk(mod.program, (n) => {
+            const name = nestedClassName(n, sem, moduleScope);
+            if (name === null) return;
+            walk(n, (m) => {
+                if (m.type !== N.IdentifierReference || m.sym === 0) return;
+                const ref = producerRef(m.sym);
+                if (ref === null) return;
+                let set = forbids.get(ref);
+                if (set === undefined) forbids.set(ref, (set = new Set()));
+                set.add(name);
+                return;
+            });
+            return;
+        });
+    }
+    return forbids;
+}
+
+/** The name a NESTED class would keep — its own id, or the binding it is assigned to when the class
+ *  is anonymous. Null for a top-level class, an unnamed one nothing can name, or a non-class. */
+function nestedClassName(n: Node, sem: Module['semantic'], moduleScope: number): string | null {
+    if (n.type === N.ClassDeclaration) {
+        const id = (n.data as { id: Node | null }).id;
+        if (id === null || id.sym === 0) return null;
+        return sem.symbols[id.sym]?.scope === moduleScope ? null : (id.name as string);
+    }
+    if (n.type !== N.VariableDeclarator) return null;
+    const d = n.data as { id: Node; init: Node | null };
+    if (d.init === null || d.init.type !== N.ClassExpression || (d.init.data as { id: Node | null }).id !== null) return null;
+    if (d.id.type !== N.BindingIdentifier || d.id.sym === 0) return null;
+    return sem.symbols[d.id.sym]?.scope === moduleScope ? null : (d.id.name as string);
+}
 
 /** Deconflict the module-scope symbols, synthetics, namespaces, and external locals of a
  *  set of modules (`memberOrder`, exec-ordered) into a FRESH scope. Whole-bundle deconflict
@@ -85,7 +151,9 @@ export function deconflictChunk(
     memberSet: Set<number> | null,
     seed: Iterable<string>,
     taken: Set<string> = new Set<string>(),
-): (base: string) => string {
+    /** See {@link classNameForbids} — only consulted under `output.keepNames`. */
+    keepNames = false,
+): (base: string, avoid?: ReadonlySet<string>) => string {
     for (const name of RESERVED) taken.add(name);
     for (const name of seed) taken.add(name);
     for (const idx of memberOrder) {
@@ -146,8 +214,9 @@ export function deconflictChunk(
     // Claimed in the order the modules were walked — readable names depend on it. (There used to be a
     // frequency-ranked alternative here, feeding shortest names to the busiest slots; it was reachable
     // only from the link-time mangler, which no longer exists. The chunk mangler ranks its own slots.)
+    const forbids = keepNames ? classNameForbids(graph, linked, memberSet) : null;
     for (const { ref, original } of topLevel) {
-        const final = claim(original);
+        const final = claim(original, forbids?.get(ref));
         if (final !== original) linked.finalNames.set(ref, final);
     }
     // No ad-hoc claiming for the CJS wrapper/namespace: they are synthetic REFS now, so the
