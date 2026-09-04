@@ -35,7 +35,17 @@
  * is why rolldown ignores 163 of them.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -311,10 +321,41 @@ for (const { d, c } of selected) {
     // defect in the bundle it produced.
     const stubs = resolve('llm/libs/rollup/test/node_modules');
     if (existsSync(stubs)) {
+        const nm = join(out, 'node_modules');
+        mkdirSync(nm, { recursive: true });
+        for (const name of readdirSync(stubs)) {
+            const from = join(stubs, name);
+            if (statSync(from).isDirectory()) {
+                try {
+                    symlinkSync(from, join(nm, name), 'dir');
+                } catch {
+                    // A pre-existing link or a filesystem that refuses one.
+                }
+                continue;
+            }
+            // A stub shipped as a bare FILE (`external.js`) is resolvable for `require('external')`
+            // and NOT for `import 'external'`: node's ESM resolver does no extension guessing in
+            // node_modules. Rollup runs these fixtures as CommonJS, so the file form is enough there;
+            // we emit ESM. Wrapping it in a real package directory is what makes the same stub
+            // resolve — a gap in OUR runner, not in the bundle it produced.
+            if (!name.endsWith('.js')) continue;
+            const pkg = join(nm, name.slice(0, -3));
+            mkdirSync(pkg, { recursive: true });
+            writeFileSync(join(pkg, 'package.json'), '{"type":"commonjs","main":"index.js"}');
+            writeFileSync(join(pkg, 'index.js'), readFileSync(from, 'utf8'));
+        }
+    }
+    // A fixture may declare its own RELATIVE imports external (`external-function-always-true`
+    // returns true for everything with an importer). Those specifiers are emitted verbatim, so the
+    // files have to exist beside the chunks. Link the fixture's own files in, skipping anything a
+    // chunk will overwrite.
+    const chunkNames = new Set(chunks.map((ch) => ch.fileName));
+    for (const name of readdirSync(dir)) {
+        if (name === '_config.js' || chunkNames.has(name)) continue;
         try {
-            symlinkSync(stubs, join(out, 'node_modules'), 'dir');
+            symlinkSync(join(dir, name), join(out, name));
         } catch {
-            // A pre-existing link or a filesystem that refuses one: the fixture will fail as before.
+            // Same tolerance as above.
         }
     }
     for (const ch of chunks) writeFileSync(join(out, ch.fileName), ch.code);
