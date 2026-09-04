@@ -2,6 +2,19 @@ import { resolveNoSideEffects } from '../analysis/purity.ts';
 import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts.ts';
 import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic.ts';
 import { isJSXNode, N, type Node, type Program, walk } from '../ast/index.ts';
+import { parse } from '../parser/index.ts';
+import { runCompress } from '../passes/compress/index.ts';
+import { compileDefines, makeDefine } from '../passes/define.ts';
+import { makeJsxLower } from '../passes/lower-jsx.ts';
+import { resolveEnumConsts, sawUnloweredTs, tsLower } from '../passes/lower-ts.ts';
+import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
+import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
+import { inlineFunctions } from '../passes/optimize/inline-functions.ts';
+import { resolveShapes, shapeCollector } from '../passes/optimize/shapes.ts';
+import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
+import { unrollLoops } from '../passes/optimize/unroll.ts';
+import { tsStrip } from '../passes/strip-ts.ts';
+import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse.ts';
 import type { Fs, MaybePromise } from './fs.ts';
 import {
     type CachedParse,
@@ -18,19 +31,6 @@ import {
 } from './graph-types.ts';
 import { compileToModule, loaderWantsBytes } from './loaders.ts';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve.ts';
-import { parse } from '../parser/index.ts';
-import { runCompress } from '../passes/compress/index.ts';
-import { compileDefines, makeDefine } from '../passes/define.ts';
-import { makeJsxLower } from '../passes/lower-jsx.ts';
-import { sawUnloweredTs, tsLower } from '../passes/lower-ts.ts';
-import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
-import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
-import { inlineFunctions } from '../passes/optimize/inline-functions.ts';
-import { resolveShapes, shapeCollector } from '../passes/optimize/shapes.ts';
-import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
-import { unrollLoops } from '../passes/optimize/unroll.ts';
-import { tsStrip } from '../passes/strip-ts.ts';
-import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse.ts';
 import {
     type CustomPluginOptions,
     compilePipeline,
@@ -47,7 +47,14 @@ import {
     runResolveId,
     runTransform,
 } from './plugin.ts';
-import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, normalizeResolve, resolveJSXOptions } from './resolve.ts';
+import {
+    type GraphOptions,
+    type InputOption,
+    isExternal,
+    makeBaseResolve,
+    normalizeResolve,
+    resolveJSXOptions,
+} from './resolve.ts';
 
 /** How the semantic reaches the passes that run AFTER the TS/JSX lowering.
  *
@@ -67,6 +74,7 @@ import { type GraphOptions, type InputOption, isExternal, makeBaseResolve, norma
  *  annotations, and `tsStrip` (last) erases them, so within a node's enter phase it must run before
  *  the strip. Its output is only ever read by `scalarReplaceAggregates`, so without the tier there is
  *  nothing to collect for. */
+const EMPTY_ENUM_CONSTS: Map<number, Map<string, string>> = new Map();
 const TS_PASSES: Visitor[] = [tsLower, tsStrip];
 const TS_PASSES_WITH_SHAPES: Visitor[] = [shapeCollector, tsLower, tsStrip];
 const EMPTY_PASSES: Visitor[] = [];
@@ -1123,6 +1131,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let hasJSX: boolean;
         let hasImportSyntax: boolean;
         let hasTopLevelReturn = false;
+        let enumConsts: Map<number, Map<string, string>> = EMPTY_ENUM_CONSTS;
         let comments: Int32Array = EMPTY_COMMENTS;
         let hasRequire = false;
         let hasTopLevelAwait = false;
@@ -1233,6 +1242,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX = hit.hasJSX;
                 hasImportSyntax = hit.hasImportSyntax;
                 hasTopLevelReturn = hit.hasTopLevelReturn;
+                enumConsts = hit.enumConsts;
                 comments = hit.comments;
                 hasRequire = hit.hasRequire;
                 hasTopLevelAwait = hit.hasTopLevelAwait;
@@ -1338,6 +1348,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // Resolved AFTER the walk: a `type`/`interface` may be declared after the declaration
                 // that references it, so the alias table is only complete once the traversal ends.
                 const shapes = wantShapes ? resolveShapes() : new Map<number, string[]>();
+                // Same "resolve after the walk" reason as `shapes`: `tsLower` fills the table as it
+                // lowers each enum, so it is only complete once the traversal ends. Harvested
+                // unconditionally — the call also RESETS the pass's module-level state, and skipping
+                // it would leak one module's enums into the next.
+                enumConsts = resolveEnumConsts();
                 // INVARIANT: a pass that reads `Semantic` must get one that describes the CURRENT
                 // tree. The lowering above creates real bindings and scopes (a TS enum lowers to an
                 // IIFE, JSX injects a runtime import), which the pre-lowering `analyze` cannot know
@@ -1461,6 +1476,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasJSX,
             hasImportSyntax,
             hasTopLevelReturn,
+            enumConsts,
             comments,
             hasRequire,
             hasTopLevelAwait,
@@ -1530,6 +1546,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 hasJSX: mod.hasJSX,
                 hasImportSyntax: mod.hasImportSyntax,
                 hasTopLevelReturn: mod.hasTopLevelReturn,
+                enumConsts: mod.enumConsts,
                 comments: mod.comments,
                 hasRequire: mod.hasRequire,
                 hasTopLevelAwait: mod.hasTopLevelAwait,

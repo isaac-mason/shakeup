@@ -8,6 +8,12 @@
 // `options.cache`, and mutating it during render would poison the next build.
 import { SYM, symbolOf } from '../../analysis/semantic.ts';
 import { N, type Node, walk } from '../../ast/index.ts';
+import { lazySplit } from '../../passes/lazy-split.ts';
+import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../passes/wrap-module.ts';
+import { printModule } from '../../print/print-js.ts';
+import { createPrinter, finishPrinter } from '../../print/printer.ts';
+import type { Mappings } from '../../util/sourcemap.ts';
+import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
 import type { Chunk } from '../chunk-graph.ts';
 import {
     type Graph,
@@ -22,14 +28,8 @@ import {
 } from '../graph-types.ts';
 import { initRefForRecord, recordIsInitObligation } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
-import { lazySplit } from '../../passes/lazy-split.ts';
-import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../passes/wrap-module.ts';
-import { printModule } from '../../print/print-js.ts';
-import { createPrinter, finishPrinter } from '../../print/printer.ts';
-import { isRequireCall } from '../scan.ts';
-import type { Mappings } from '../../util/sourcemap.ts';
 import { effectiveComments } from '../output-options.ts';
-import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
+import { isRequireCall } from '../scan.ts';
 import {
     clauseSep,
     type EmitCtx,
@@ -40,6 +40,31 @@ import {
     type RenderedModules,
 } from './context.ts';
 import { freeRequireRefs } from './esm.ts';
+
+/**
+ * The constant text for `E.MEMBER`, or null when it is not a constant enum member.
+ *
+ * `E` is resolved through the import graph, because an enum is almost always declared in one module
+ * and read from many — `ctx.mod.enumConsts` alone would miss every cross-module read, which on
+ * crashcat is nearly all 887 of them. A local enum resolves to this module's own symbol; an imported
+ * one goes through `binds` to the producing module, exactly as {@link renameOf} does for names.
+ *
+ * Substituting a LITERAL is why this is safe where the namespace rewrite needed guards: it introduces
+ * no identifier, so nothing can be shadowed by a local and nothing needs importing across a chunk.
+ */
+function enumConstOf(ctx: EmitCtx, objectNode: Node, member: string): string | null {
+    const sym = symbolOf(ctx.mod.semantic, objectNode);
+    if (sym === 0) return null;
+    let ownerIdx = ctx.mod.idx;
+    let ownerSym = sym;
+    if (ctx.mod.namedImports.has(sym)) {
+        const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
+        if (bind === undefined || bind.kind !== 'found') return null;
+        ownerIdx = refMod(bind.ref);
+        ownerSym = refSym(bind.ref);
+    }
+    return ctx.linked.graph.modules[ownerIdx]?.enumConsts.get(ownerSym)?.get(member) ?? null;
+}
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
 function renameOf(ctx: EmitCtx, identNode: Node): string | null {
@@ -219,12 +244,27 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     // Only `import()` and `new URL(...)` produce the OTHER overrides, and the scan already recorded
     // both as import records — so a module with neither, and no elided namespace, cannot contribute
     // one and the whole-program walk is skipped. Checking is O(records).
+    // The walk also has to run for a module that merely READS an enum member, which no import record
+    // announces — so `hasEnumReads` is the module's own table plus "imports anything at all", the
+    // cheap over-approximation. A JS module with no imports still skips it.
+    const hasEnumReads = mod.enumConsts.size > 0 || mod.namedImports.size > 0;
     if (
         elidedNs.size === 0 &&
+        !hasEnumReads &&
         !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)
     )
         return map;
     walk(mod.program, (n) => {
+        if (n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
+            // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the
+            // other bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not
+            // only a `const enum`, keeping the object for whatever else still reads it.
+            const lit = enumConstOf(ctx, n.data.object, n.data.property.name as string);
+            if (lit !== null) {
+                map.set(n, lit);
+                return;
+            }
+        }
         if (elidedNs.size > 0 && n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
             const target = elidedNs.get(symbolOf(mod.semantic, n.data.object));
             if (target !== undefined) {

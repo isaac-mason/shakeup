@@ -144,6 +144,11 @@ export type Module = {
     /** Module contained a `return` outside any function body (set by the parser). Tier 2 of the
      *  CommonJS kind rule — only a CJS body can legally contain one. */
     hasTopLevelReturn: boolean;
+    /** Constant TS enum members: enum SYMBOL -> member name -> the literal's source text, from
+     *  `tsLower`. The emit inlines `Kind.DYNAMIC` to `2` from this, across module boundaries — the
+     *  reads are resolved through the import graph, which is why it lives on the module rather than
+     *  staying inside the lowering. */
+    enumConsts: Map<number, Map<string, string>>;
     /** Module mentions `require` (set by the parser) — gates the `require("lit")` edge walk. */
     hasRequire: boolean;
     /** Module-level `await`. See {@link ParseState.sawTopLevelAwait}. */
@@ -245,6 +250,9 @@ export type CachedParse = {
     /** Source-derived, so cacheable — unlike the {@link ExportsKind} computed from it. */
     comments: Int32Array;
     hasTopLevelReturn: boolean;
+    /** Constant TS enum members: enum SYMBOL -> member name -> the literal's source text. Collected by
+     *  `tsLower`, which is the only place that already knows each value. Empty for a JS module. */
+    enumConsts: Map<number, Map<string, string>>;
     hasRequire: boolean;
     /** Module-level `await`. See {@link ParseState.sawTopLevelAwait}. */
     hasTopLevelAwait: boolean;

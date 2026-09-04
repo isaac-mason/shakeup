@@ -2,7 +2,7 @@
 // print-time `emitEnum` (print-js.ts) to a mutation pass that emits real AST. Namespace lowering and
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
 import { isPureExpr } from '../analysis/effects.ts';
-import { attachScopeNode, createScope, declareLocal, SCOPE, SYM, scopeOf, type Semantic } from '../analysis/semantic.ts';
+import { attachScopeNode, createScope, declareLocal, SCOPE, type Semantic, SYM, scopeOf } from '../analysis/semantic.ts';
 import {
     assign,
     boundBinding,
@@ -17,8 +17,8 @@ import {
     N,
     type Node,
     num,
-    set,
     SPAN,
+    set,
     str,
     VAR_KIND,
     walk,
@@ -157,6 +157,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
         const init = md.initializer;
         if (init === null) {
             // auto: `_E[_E["A"]=n]="A"`
+            if (autoOk) recordEnumConst(enumSym, key, String(autoNext));
             stmts.push(exprStmt(assign(computed(pRef(), assign(computed(pRef(), str(key)), num(autoNext))), str(key))));
             autoNext++;
         } else {
@@ -172,6 +173,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
             qualifyMemberRefs(init, prior, param);
             ctx.addRefs(init);
             if (init.type === N.StringLiteral) {
+                recordEnumConst(enumSym, key, init.name);
                 stmts.push(exprStmt(assign(computed(pRef(), str(key)), init)));
                 autoOk = false;
             } else {
@@ -180,6 +182,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
                 if (init.type === N.NumericLiteral) {
                     const v = Number(init.name);
                     if (Number.isFinite(v)) {
+                        recordEnumConst(enumSym, key, init.name);
                         autoNext = v + 1;
                         autoOk = true;
                     } else autoOk = false;
@@ -335,6 +338,41 @@ function isPureNsStmt(stmt: Node): boolean {
         if (e.type === N.AssignmentExpression) return isPureExpr((e.data as { right: Node }).right);
     }
     return false;
+}
+
+/**
+ * Constant enum members, by enum SYMBOL then member name, with the literal's SOURCE TEXT as the
+ * value. Collected here because this is the only place that already knows each member's value — the
+ * auto-increment sequence is computed to build the IIFE, and throwing it away meant every
+ * `Kind.DYNAMIC` stayed a property read on the lowered object.
+ *
+ * TypeScript treats an enum member access as a constant, and so do the other bundlers: rolldown emits
+ * `0` for `Kind.STATIC` on a PLAIN enum, not only a `const enum`, and keeps the object solely for
+ * whatever else references it. Verified against `rolldown` on a two-file fixture before this existed.
+ *
+ * Only a NUMERIC or STRING literal initialiser is recorded, plus auto members while the sequence is
+ * still known. `A = -1` parses as a unary expression and `A = f()` is a call; both are simply absent,
+ * which is the safe direction — an absent member is read off the object as before.
+ *
+ * Module-level state reset at Program enter, harvested by {@link resolveEnumConsts}: `traverse`
+ * caches its hook tables on the visitor array's identity, so the visitor has to stay a shared
+ * constant.
+ */
+let ENUM_CONSTS: Map<number, Map<string, string>> | null = null;
+
+function recordEnumConst(enumSym: number, key: string, text: string): void {
+    if (enumSym === 0) return;
+    ENUM_CONSTS ??= new Map();
+    let m = ENUM_CONSTS.get(enumSym);
+    if (m === undefined) ENUM_CONSTS.set(enumSym, (m = new Map()));
+    m.set(key, text);
+}
+
+/** Take what {@link tsLower} recorded for this module and reset for the next one. */
+export function resolveEnumConsts(): Map<number, Map<string, string>> {
+    const t = ENUM_CONSTS ?? new Map<number, Map<string, string>>();
+    ENUM_CONSTS = null;
+    return t;
 }
 
 const isValueEnum = (n: Node): boolean => n.type === N.TSEnumDeclaration && (n.data as { declare: boolean }).declare !== true;
