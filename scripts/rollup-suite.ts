@@ -124,6 +124,19 @@ function skipReason(c: Config): string | null {
     // shakeup emits ES modules and nothing else — a stated non-goal, not a gap.
     if (format !== undefined && format !== 'es' && format !== 'esm' && format !== 'module') return `output format '${format}'`;
     if (o.preserveModules === true || out.preserveModules === true) return 'output.preserveModules';
+    // `treeshake.moduleSideEffects` decides whether a module's top-level effects run AT ALL, and
+    // shakeup does not model it — so a sample that sets it is measuring a feature we do not have.
+    // The harness forwards only `treeshake: false` and dropped the object silently, which reported
+    // that gap as an unexplained assertion failure; the same trap the `output` forwarding note below
+    // records. Naming the option is honest, and the samples come back the day it is implemented.
+    //
+    // ONLY that option. The others a sample may set — `propertyReadSideEffects`,
+    // `tryCatchDeoptimization`, `unknownGlobalSideEffects`, `preset` — tune how AGGRESSIVE shaking
+    // is within a module that is already included. Ignoring them leaves us more conservative, which
+    // costs bytes and not correctness, and those samples pass today. Skipping on them measured 3
+    // fewer passes for nothing.
+    const ts = o.treeshake;
+    if (typeof ts === 'object' && ts !== null && 'moduleSideEffects' in ts) return 'treeshake.moduleSideEffects';
     if (typeof c.code === 'function') return 'asserts on generated TEXT (`code`)';
     if (c.warnings !== undefined || c.logs !== undefined) return 'asserts on warnings/logs';
     if (typeof c.context === 'object' && c.context !== null) return 'needs a custom `context` global';
@@ -199,7 +212,19 @@ for (const { d, c } of selected) {
             // `generateError` samples were being reported as shakeup gaps when the harness had thrown
             // the input away. `skipReason` still filters the formats and `preserveModules` we do not
             // implement, so nothing unsupported gets through here.
-            output: (o.output ?? {}) as never,
+            // ADAPT ROLLUP'S DEFAULTS, as rolldown's own Rollup-test harness does
+            // (`packages/rollup-tests/test/function/index.js:106` force-enables `keepNames` for the
+            // `class-name-conflict` samples, "to avoid other tests snapshot changed").
+            //
+            // `generatedCode.symbols` is a DEFAULT the two oracles disagree on: Rollup's is `false`
+            // (`es5`), rolldown's is `true` (`GeneratedCodeOptions::default() == es2015()`), and
+            // shakeup's bundler follows rolldown. Left alone, three samples failed on the presence of
+            // `Symbol.toStringTag` and nothing else, which measures the disagreement rather than
+            // shakeup. A sample that sets the option itself still wins.
+            output: {
+                generatedCode: { symbols: false },
+                ...((o.output ?? {}) as Record<string, unknown>),
+            } as never,
         });
         if (r.errors.length > 0) {
             if (wantsError) {

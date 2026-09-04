@@ -100,6 +100,9 @@ export type RenderCtx = {
     interopOwners: Map<number, InteropOwner>;
     warnings: string[];
     naming: NormalizedOutputNaming;
+    /** `output.generatedCode.symbols` — whether a namespace object gets its `Symbol.toStringTag`
+     *  stamp. rolldown's default is TRUE; Rollup's is false. See {@link OutputOptions.generatedCode}. */
+    symbols: boolean;
     wantMap: boolean;
     tight: boolean;
     /** The cosmetic tier runs later over the assembled chunk, so this render must stay READABLE.

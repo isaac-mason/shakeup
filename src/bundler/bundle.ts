@@ -82,6 +82,17 @@ export type OutputOptions = OutputOptionsNaming & {
     /** One chunk per module, imports preserved as real ESM. */
     preserveModules?: boolean;
     preserveModulesRoot?: string;
+    /** Which language features the GENERATED code may use — rolldown's `generatedCode`
+     *  (`generated_code_options.rs`). Only `symbols` is modelled, because it is the only one whose
+     *  absence is observable rather than cosmetic.
+     *
+     *  `symbols: false` drops the `Symbol.toStringTag` stamp from every namespace object, so
+     *  `Object.prototype.toString.call(ns)` reads `[object Object]` instead of `[object Module]`.
+     *
+     *  DEFAULT TRUE, which is rolldown's (`GeneratedCodeOptions::default() == es2015()`). Rollup
+     *  defaults it FALSE (`es5`), so this is one of the few places the two oracles disagree on a
+     *  default rather than on behaviour; shakeup's bundler follows rolldown. */
+    generatedCode?: { symbols?: boolean };
 };
 
 export type BundleOptions = GraphOptions & {
@@ -523,6 +534,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 interopOwners,
                 warnings,
                 naming,
+                symbols: options.output?.generatedCode?.symbols !== false,
                 wantMap: want,
                 // Emit-glue spacing and module printing both stay readable when the chunk pass will
                 // minify: it re-parses this text, and minified printing loses `@__PURE__`.

@@ -297,6 +297,8 @@ function renderNamespaceObject(
     chunk: Chunk,
     nsMembers: Set<string> | undefined,
     tight: boolean,
+    /** `output.generatedCode.symbols` — see {@link RenderCtx.symbols}. */
+    symbols: boolean,
     /** The `var` is already declared outside (lazy-init form) — assign, do not redeclare. */
     preDeclared = false,
     /** Force accessors for every member. A SPLIT lazy module's bindings are hoisted `var`s that stay
@@ -355,7 +357,9 @@ function renderNamespaceObject(
     // the tag, which feature detection reads — and drop what only affects code that is already
     // assigning to a namespace member. Freezing also blocks the `__reExport` chain that
     // `export * from 'cjs'` (namespace mode 2) needs to extend the object.
-    const tag = `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
+    const tag = !symbols
+        ? ''
+        : `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
     const decl = preDeclared ? '' : 'const ';
     // MODE 2 (cjs.md §4.4) — the module `export *`s from CommonJS, so its surface is not knowable
     // here. The statically-known names become getter THUNKS handed to `__exportAll`, which is the
@@ -376,7 +380,11 @@ function renderNamespaceObject(
             if (value !== null) thunks.push(`${name}${tight ? ':' : ': '}()${tight ? '=>' : ' => '}${value}`);
         }
         const body = tight ? `{${thunks.join(',')}}` : `{ ${thunks.join(', ')} }`;
-        const lines = [`${decl}${nsName} = /* @__PURE__ */ __exportAll(${thunks.length === 0 ? '{}' : body});`];
+        // `__exportAll(all, no_symbols)` — the second argument SUPPRESSES the tag, so it is passed
+        // only when `symbols` is off. Same shape and same polarity as rolldown's
+        // (`module_finalizers/mod.rs:993`), whose runtime this one was ported from.
+        const noSymbols = symbols ? '' : `,${tight ? '' : ' '}1`;
+        const lines = [`${decl}${nsName} = /* @__PURE__ */ __exportAll(${thunks.length === 0 ? '{}' : body}${noSymbols});`];
         for (const recIdx of graph.modules[modIdx].starExports) {
             const rec = graph.modules[modIdx].importRecords[recIdx];
             if (rec.external || rec.resolved < 0) continue;
@@ -623,6 +631,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 chunk,
                 shaken?.nsUsage.get(idx),
                 tight,
+                ctx.symbols,
                 lazyRef !== undefined && !linked.esmInitSplit.has(idx),
                 linked.esmInitSplit.has(idx),
             );
