@@ -532,6 +532,38 @@ export function linkGraph(graph: Graph): Linked {
         if (def !== undefined && def.symbol === 0 && def.rec < 0 && def.exprNode !== null) {
             matchImport(ctx, mod, NAME_DEFAULT, new Set());
         }
+        // The EXPORT side of the same check. The loop above validates what a module IMPORTS; nothing
+        // validated what it claims to EXPORT, so `export { doesNotExist }` and a re-export of a name
+        // the target does not have both built a graph with a dangling binding and emitted silently.
+        // rolldown errors on both (verified on Rollup's `missing-entry-export` and
+        // `circular-missed-reexports-2` fixtures).
+        for (const [name, exp] of mod.namedExports) {
+            // A local binding, or an expression export (`export default <expr>`) — nothing to match.
+            if (exp.symbol !== 0 || exp.exprNode !== null) continue;
+            if (exp.rec < 0) {
+                // `export { doesNotExist }` — no local binding of that name in this module.
+                linked.errors.push(`Exported variable '${name}' is not defined in '${mod.id}'`);
+                continue;
+            }
+            const rec = mod.importRecords[exp.rec];
+            // An external target's surface is not knowable here, exactly as on the import side.
+            if (rec.external || rec.resolved < 0) continue;
+            if (exp.sourceName === NAME_NAMESPACE) continue; // `export * as ns from` — always valid
+            // A WRAPPED CommonJS target builds its exports imperatively, so no name can be proved
+            // absent — the import side takes the same escape (`cjsBind`) before ever calling
+            // `matchImport`, and skipping it here is what four `cjs-detect` re-export tests caught.
+            // `dynamicExports` is the same story one level out: `export * from <cjs>` leaves the
+            // surface unknowable until `__reExport` has run.
+            if (ctx.linked.cjsWrap.has(rec.resolved) || ctx.linked.dynamicExports.has(rec.resolved)) continue;
+            if (matchImport(ctx, graph.modules[rec.resolved], exp.sourceName, new Set()).kind === 'none') {
+                // `matchImport` returns `none` for a re-export CYCLE too (its `seen` set breaks it),
+                // which is Rollup's separate CIRCULAR_REEXPORT. One message covers both: either way
+                // the name cannot be produced, and distinguishing them needs the chain, not the result.
+                linked.errors.push(
+                    `'${exp.sourceName}' is not exported by '${graph.modules[rec.resolved].id}' (re-exported by '${mod.id}')`,
+                );
+            }
+        }
     }
 
     for (const { module } of graph.entries) exportMapOf(ctx, graph.modules[module]);

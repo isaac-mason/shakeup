@@ -41,7 +41,11 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { bundle } from '../src/bundler/bundle.ts';
 
-const ROOT = 'llm/libs/rollup/test/function/samples';
+// ABSOLUTE, as Rollup's own runner is: its fixtures build ids with `path.join(__dirname, …)` and
+// compare plugin arguments against them, so a relative root silently fails those comparisons. Four
+// samples were failing on that alone — `custom-path-resolver-sync` returns `false` for anything it
+// does not recognise, so a relative entry specifier became "entry cannot be external".
+const ROOT = resolve('llm/libs/rollup/test/function/samples');
 // A FIXTURE'S floating promise must not kill the run. Several samples do
 //
 //     const p = this.load({ id });                  // stored, deliberately not awaited yet

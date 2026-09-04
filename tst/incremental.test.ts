@@ -106,7 +106,8 @@ describe('incremental: createBuildContext', () => {
         // One entry pulling four modules → a single chunk. A body-only edit to one module must
         // re-render just that module; the other three reuse their cached text.
         const files: Record<string, string> = {
-            '/entry.ts': "import { a } from './a';\nimport { b } from './b';\nimport { c } from './c';\nexport const t = a + b + c;",
+            '/entry.ts':
+                "import { a } from './a';\nimport { b } from './b';\nimport { c } from './c';\nexport const t = a + b + c;",
             '/a.ts': 'export const a = 1;',
             '/b.ts': 'export const b = 2;',
             '/c.ts': 'export const c = 3;',
@@ -131,15 +132,19 @@ describe('incremental: createBuildContext', () => {
         // b and c both declare a top-level `x`; deconfliction renames the later one. Editing b to
         // ADD a colliding top-level `x` shifts names, so the global names signature changes and
         // per-module reuse is (correctly) disabled — output must still be byte-identical.
+        // The entry re-exports `y` from b, not `x`: the edit below turns b's `x` into a LOCAL, and
+        // an entry re-exporting a name b no longer exports is invalid — link now says so, which is
+        // how this fixture was caught. `y` survives the edit, so the deconflict shift this test is
+        // actually about is unchanged.
         const files: Record<string, string> = {
-            '/entry.ts': "export { x as bx } from './b';\nexport { x as cx } from './c';",
-            '/b.ts': 'export const x = 1;',
+            '/entry.ts': "export { y as by } from './b';\nexport { x as cx } from './c';",
+            '/b.ts': 'export const x = 1;\nexport const y = 5;',
             '/c.ts': 'export const x = 2;',
         };
         const ctx = createBuildContext({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
         await ctx.rebuild();
-        // b gains a top-level binding that collides with c's `x` at bundle scope, shifting names.
-        files['/b.ts'] = 'const x = 9;\nexport const x2 = x + 1;';
+        // b's `x` becomes a local that still collides with c's `x` at bundle scope, shifting names.
+        files['/b.ts'] = 'const x = 9;\nexport const y = x + 1;';
         const r = await ctx.rebuild();
         const fresh = await bundle({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
         expect(r.chunks[0].code).toBe(fresh.chunks[0].code);

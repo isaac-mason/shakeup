@@ -1665,6 +1665,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     const seen = new Set<number>();
     for (const { name, specifier } of normalized) {
         const entryResolved = await resolveFn(specifier, null, { isEntry: true, kind: 'entry' });
+        // An ENTRY cannot be external. `false` from a `resolveId` hook means "leave this to the host",
+        // which is meaningless for the thing being bundled — Rollup's UNRESOLVED_ENTRY, and it used to
+        // fall through to `?? specifier` and bundle an empty module instead.
+        if (entryResolved === false) {
+            graph.errors.push(`Entry module '${specifier}' cannot be external.`);
+            continue;
+        }
         const entryId = typeof entryResolved === 'string' ? entryResolved : specifier;
         const idx = await addModule(entryId, true);
         if (idx < 0) continue; // addModule already pushed a load error
