@@ -25,7 +25,7 @@ import {
     type OutputOptionsNaming,
     resolveMinify,
 } from './output-options.ts';
-import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx } from './plugin.ts';
+import { compilePipeline, type GenerateBundleEntry, type ModuleInfo, type PluginCtx, pluginParse } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
 import { buildGraph, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
@@ -265,6 +265,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         },
         info: (m) => warningsOut.push(m),
         debug: () => {},
+        parse: pluginParse,
         fs: options.fs,
         resolve: () => null,
         emitFile: (file) => {

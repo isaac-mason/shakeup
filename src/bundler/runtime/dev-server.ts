@@ -1,13 +1,15 @@
 import { analyze, createSemantic } from '../../analysis/semantic.ts';
+import { parse } from '../../parser/index.ts';
+import type { SourceMap } from '../../util/sourcemap.ts';
 import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
-import { parse } from '../../parser/index.ts';
 import {
     compilePipeline,
     type ModuleInfo,
     type PartialResolvedId,
     type Pipeline,
     type PluginCtx,
+    pluginParse,
     type ResolveIdExtra,
     runLoad,
     runModuleParsed,
@@ -15,7 +17,6 @@ import {
     runTransform,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
-import type { SourceMap } from '../../util/sourcemap.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
 import type { HmrUpdate } from './environment.ts';
 
@@ -261,6 +262,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         },
         info: warn,
         debug: () => {},
+        parse: pluginParse,
         fs,
         resolve: async (source, importer = null, opts) => {
             const r = await resolveId(source, importer ?? null, {

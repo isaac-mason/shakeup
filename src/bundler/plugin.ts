@@ -1,8 +1,10 @@
 import type { Semantic } from '../analysis/semantic.ts';
+import { astToEstree } from '../ast/estree.ts';
 import type { Program } from '../ast/index.ts';
+import { parse } from '../parser/index.ts';
+import type { SourceMap } from '../util/sourcemap.ts';
 import type { Fs, MaybePromise } from './fs.ts';
 import { applyEdits, type Edit } from './patches.ts';
-import type { SourceMap } from '../util/sourcemap.ts';
 
 /** false = no side effects (droppable if unused); true = default liveness;
  *  'no-treeshake' = keep every statement + always include the module. */
@@ -161,7 +163,37 @@ export type PluginCtx = {
     getModuleInfo(id: string): ModuleInfo | null;
     /** All module ids currently in the graph. */
     getModuleIds(): IterableIterator<string>;
+    /**
+     * `this.parse(code, options)` — run shakeup's own parser and hand back an ESTree-compatible
+     * `Program`. rolldown's is the same shape and the same one-liner (`plugin-context.ts:459` ->
+     * `parseAst`): the bundler already has a parser, so a plugin should not have to bring one.
+     *
+     * Nodes carry `start`/`end` because that is what a plugin actually does with the result —
+     * `magic-string` overwrites by offset, which is the shape of Rollup's own `plugin-parse` sample.
+     */
+    parse(code: string, options?: { sourceType?: 'module' | 'script' } | null): EstreeProgram;
 };
+
+/**
+ * The shared implementation behind `PluginCtx.parse`, so the scan-time, bundle-time and dev-server
+ * contexts cannot drift.
+ *
+ * The ESTree projection is imported DIRECTLY rather than through `../ast/index.ts`: that barrel
+ * deliberately omits it, because `src/index.ts` re-exports the barrel and the projection's only
+ * `@typescript-eslint/types` import is a devDependency. That import is `import type`, so node's
+ * erase-only stripping removes it and nothing is resolved at runtime — `tst/node-native-entry.test.ts`
+ * is what actually proves that, and it runs node as a subprocess because nothing else can.
+ */
+export function pluginParse(code: string, options?: { sourceType?: 'module' | 'script' } | null): EstreeProgram {
+    const { program, errors } = parse(code, { ts: false, jsx: true });
+    if (errors.length > 0) throw new Error(`this.parse: ${errors[0].msg}`);
+    return astToEstree(program, options?.sourceType ?? 'module') as unknown as EstreeProgram;
+}
+
+/** An ESTree `Program`, as `this.parse` returns it. Deliberately loose: shakeup ships no runtime
+ *  dependency, and the precise node types live in a devDependency that only the projection imports
+ *  as a TYPE. A plugin walks this structurally, exactly as it would Rollup's. */
+export type EstreeProgram = { type: 'Program'; body: unknown[]; sourceType: string; start: number; end: number };
 
 /** Id filter for a hook; non-matching ids skip the handler entirely. */
 export type HookFilter = { id?: RegExp | RegExp[] };

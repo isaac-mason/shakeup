@@ -46,6 +46,7 @@ import {
     runLoad,
     runResolveId,
     runTransform,
+    pluginParse,
 } from './plugin.ts';
 import {
     type GraphOptions,
@@ -991,6 +992,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         },
         info: (m) => graph.warnings.push(m),
         debug: () => {},
+        parse: pluginParse,
         fs: options.fs,
         resolve: async (source, importer = null, opts) => {
             const extra: ResolveIdExtra = {
