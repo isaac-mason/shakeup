@@ -1764,16 +1764,23 @@ function visit(state: AnalyseState, node: Node | null): void {
             state.cont = c;
             return;
         }
-        case N.SwitchStatement:
+        case N.SwitchStatement: {
+            // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
+            const b = state.brk;
+            state.brk = true;
+            // The DISCRIMINANT is evaluated in the ENCLOSING scope. oxc's `visit_switch_statement`
+            // makes the order explicit: `visit_expression(&stmt.discriminant)` and only then
+            // `enter_scope(ScopeFlags::empty(), &stmt.scope_id)`. Visiting it inside the switch's
+            // scope let `switch (foo)` bind to a `const foo` declared in one of the cases —
+            // `switch (foo) { case 1: const foo = 2; … }` compiled to `switch (2)`, so the case
+            // never matched. rollupsuite's `switch-scope`.
+            visit(state, node.data.discriminant);
             declareInScope(state, SCOPE.SWITCH, node, () => {
-                // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
-                const b = state.brk;
-                state.brk = true;
-                visit(state, node.data.discriminant);
                 for (const c of node.data.cases) visit(state, c);
-                state.brk = b;
             });
+            state.brk = b;
             return;
+        }
         case N.CatchClause:
             declareInScope(state, SCOPE.CATCH, node, () => {
                 declarePattern(state, node.data.param, SYM.CATCH, state.scope);
