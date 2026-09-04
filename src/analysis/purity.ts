@@ -94,9 +94,9 @@ function summarize(fn: Node, resolve: (sym: number) => number | null): Summary {
         locals ??= collectLocals(fn);
         return locals.has(sym);
     };
-    walk(body, (n) => {
+    const visitNode = (root: Node) => (n: Node) => {
         if (s.impure) return false;
-        if (n !== body && isFunctionNode(n)) return false; // nested function: its own summary
+        if (n !== root && isFunctionNode(n)) return false; // nested function: its own summary
         switch (n.type) {
             // Writing to a LOCAL is invisible to the caller; anything else is a real effect.
             case N.AssignmentExpression: {
@@ -161,8 +161,22 @@ function summarize(fn: Node, resolve: (sym: number) => number | null): Summary {
             default:
                 return;
         }
-    });
+    };
+    // PARAMETERS FIRST. A parameter list is not decoration: a default value and a computed key in a
+    // destructuring pattern both RUN on every call, so they are part of what calling this function
+    // does. Rollup checks them explicitly — `FunctionBase.hasEffectsOnInteractionAtPath` loops the
+    // params and returns true on `parameter.hasEffects(context)` — and without it shakeup deleted the
+    // whole call in `function test({ [sideEffect()]: v }) {}` / `test({ v: 1 })`, because the BODY is
+    // empty. The effect never ran. rollupsuite's `parameter-side-effects`.
+    for (const p of paramsOf(fn)) walk(p, visitNode(p));
+    walk(body, visitNode(body));
     return s;
+}
+
+/** A function node's parameter nodes, or empty for a shape that has none. */
+function paramsOf(fn: Node): readonly Node[] {
+    const params = (fn.data as { params?: Node[] } | null)?.params;
+    return Array.isArray(params) ? params : [];
 }
 
 /** Re-enter the main rules for an argument subtree of an allow-listed call. */
