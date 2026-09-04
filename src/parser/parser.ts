@@ -1458,8 +1458,13 @@ function parsePrimary(state: ParserState): Node {
                     nextToken(state);
                     return parseImportCall(state, start, 'defer');
                 }
+                // `meta` is a KEYWORD kind in oxc's lexer, not a property name, so an escaped
+                // spelling is the generic escaped-keyword error rather than a wrong property:
+                // `import.m\u0065ta` names `meta` and is still rejected.
+                const metaEscaped = (state.tokFlags & F_ESCAPED) !== 0;
                 const prop = parseNameAsIdent(state, R_NAME);
                 if (prop.name !== 'meta') raise(state, ParseErrorCode.InvalidImportProperty);
+                else if (metaEscaped) raise(state, ParseErrorCode.EscapedKeyword);
                 // oxc reports this whenever the source is not a MODULE (`js/expression.rs:690`),
                 // deferring under `unambiguous` — where `import.meta` is itself an ESM marker, so the
                 // file upgrades and the error cancels itself. That self-cancellation is the part a
@@ -2832,6 +2837,10 @@ function parseStatement(state: ParserState, single: boolean): Node {
             }
             case K.THROW: {
                 nextToken(state);
+                // `throw` takes no ASI: a newline before the argument does not end the statement, it
+                // makes the statement illegal. oxc reports it and then parses the argument anyway
+                // (`js/statement.rs:808`), so recovery is unaffected.
+                if ((state.tokFlags & F_NL) !== 0) raiseAt(state, start, ParseErrorCode.IllegalNewline, 'throw');
                 const arg = parseExpression(state);
                 consumeSemi(state);
                 return create.ThrowStatement(start, state.tokStart, 0, arg);
@@ -3254,6 +3263,25 @@ function isWellFormedUnicode(raw: string): boolean {
     return !pendingHigh;
 }
 
+/**
+ * A string literal's VALUE, decoded from its raw source slice.
+ *
+ * The parser stores string leaves raw — the printer emits them verbatim and nothing else has needed
+ * the value — so the few rules that compare string VALUES (an import attribute's key) decode here.
+ * `JSON.parse` does the escape work for everything it can express; `\x41`, `\0` and a line
+ * continuation are not among them, hence the hand-rolled fallback.
+ */
+function cookString(raw: string): string {
+    const body = raw.slice(1, -1);
+    if (!body.includes('\\')) return body;
+    const json = raw.charCodeAt(0) === 0x27 ? `"${body.replace(/\\'/g, "'").replace(/(?<!\\)"/g, '\\"')}"` : raw;
+    try {
+        return JSON.parse(json) as string;
+    } catch {
+        return body;
+    }
+}
+
 /** A `ModuleExportName`: an identifier name, or an arbitrary string (`{ "a-b" as c }`). */
 function parseModuleExportName(state: ParserState): Node {
     if ((state.tok as number) === T_STR) {
@@ -3372,6 +3400,16 @@ function parseImport(state: ParserState): Node {
             if (isK(state, K.FROM) || isP(state, P.EQ)) restoreState(state, save);
             else phase = isSource ? 'source' : 'defer';
         }
+        // Each phase admits exactly one specifier FORM, and oxc reports the wrong one here rather
+        // than letting the general specifier parse run into it (`js/module.rs:144-205`): `defer`
+        // takes only a namespace, `source` only a default binding. oxc then keeps parsing the form it
+        // was given, so recovery — and every other diagnostic in the statement — is unchanged.
+        if (phase === 'defer') {
+            if (isP(state, P.LBRACE)) raise(state, ParseErrorCode.DeferNamedImport);
+            else if (!isP(state, P.STAR)) raise(state, ParseErrorCode.DeferDefaultImport);
+        } else if (phase === 'source' && (isP(state, P.STAR) || isP(state, P.LBRACE))) {
+            raise(state, ParseErrorCode.SourcePhaseImport);
+        }
     }
     const from = state.sp;
     if ((state.tok as number) === T_STR) {
@@ -3457,6 +3495,7 @@ function parseImportAttributes(state: ParserState): Node[] | null {
     } else nextToken(state);
     expectP(state, P.LBRACE, "'{'");
     const from = state.sp;
+    let seen: Map<string, number> | null = null;
     while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
         const mark = state.tokStart;
         const s = state.tokStart;
@@ -3469,6 +3508,14 @@ function parseImportAttributes(state: ParserState): Node[] | null {
         const value = leaf(state, N.StringLiteral, state.tokStart, state.tokEnd);
         if ((state.tok as number) === T_STR) nextToken(state);
         else raise(state, ParseErrorCode.Expected, 'a string');
+        // "It is a Syntax Error if AttributeKeys contains any duplicate entries" — keyed on the
+        // attribute key's VALUE, so `{ type: 'json', 'typ\u0065': '' }` is a duplicate. oxc collects
+        // the entries first and then checks the map (`js/module.rs:390`); checking as we go is the
+        // same rule, and reports at the same place.
+        const name = key.type === N.StringLiteral ? cookString(key.name) : key.name;
+        if (seen === null) seen = new Map<string, number>();
+        if (seen.has(name)) raiseAt(state, key.start, ParseErrorCode.Redeclaration, name);
+        else seen.set(name, key.start);
         push(state, create.ImportAttribute(s, state.tokStart, 0, key, value));
         if (!isP(state, P.RBRACE)) expectP(state, P.COMMA, "','");
         if (noProgress(state, mark)) break;

@@ -168,8 +168,8 @@ describe('yield and await are contextual, and become reserved', () => {
     });
 
     it('escaped, as a reference — reports the escape', () => {
-        expect(msg('async () => { void \\u0061wait; };')).toBe('keywords cannot contain escape characters');
-        expect(msg('function* g() { \\u0079ield; }')).toBe('keywords cannot contain escape characters');
+        expect(msg('async () => { void \\u0061wait; };')).toBe('Keywords cannot contain escape characters');
+        expect(msg('function* g() { \\u0079ield; }')).toBe('Keywords cannot contain escape characters');
     });
 
     it('as a shorthand property', () => {
@@ -383,5 +383,53 @@ describe('accessor parameter lists, `using` placement, and ill-formed export nam
         'export * as "ok" from "m";',
     ])('a well-formed one is fine: %s', (src) => {
         expect(errs(src)).toEqual([]);
+    });
+});
+
+describe('`throw` newlines, duplicate import attributes, import phases and escaped `import.meta`', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false, kind: 'module' }).errors.map((e) => e.msg);
+
+    it('a newline after `throw` does not trigger ASI — it makes the statement illegal', () => {
+        expect(errs('try { throw\n1; } catch(e) {}')).toEqual(['Illegal newline after throw']);
+        expect(errs('throw 1;')).toEqual([]);
+        expect(errs('throw (\n1);')).toEqual([]);
+    });
+
+    it('duplicate import-attribute keys are keyed on the VALUE, so an escape still collides', () => {
+        expect(errs("import x from './m.js' with { type: 'json', type: 'js' };")).toEqual([
+            'Identifier `type` has already been declared',
+        ]);
+        expect(errs(String.raw`export * from './m.js' with { type: 'json', 'typ\u0065': '' };`)).toEqual([
+            'Identifier `type` has already been declared',
+        ]);
+        expect(errs("import x from './m.js' with { type: 'json', other: 'js' };")).toEqual([]);
+        expect(errs("import x from './m.js' with { 'a-b': 'json' };")).toEqual([]);
+    });
+
+    it('each import phase admits exactly one specifier form', () => {
+        expect(errs('import defer x, * as ns from "./m.js";')).toEqual(['Default imports are not allowed in a deferred import.']);
+        expect(errs('import defer { a } from "./m.js";')).toEqual(['Named imports are not allowed in a deferred import.']);
+        expect(errs('import source * as w from "./m.wasm";')).toEqual([
+            'Only a single default import is allowed in a source phase import.',
+        ]);
+        expect(errs('import source { a } from "./m.wasm";')).toEqual([
+            'Only a single default import is allowed in a source phase import.',
+        ]);
+    });
+
+    it.each([
+        'import defer * as ns from "./m.js";',
+        'import source w from "./m.wasm";',
+        // `defer` and `source` are contextual, so these are ordinary DEFAULT imports of a binding
+        // named `defer` / `source` and carry no phase at all.
+        'import defer from "./m.js";',
+        'import source from "./m.wasm";',
+    ])('accepts %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+
+    it('`meta` is a keyword to the import-meta rule, so an escaped spelling is rejected', () => {
+        expect(errs(String.raw`import.m\u0065ta;`)).toEqual(['Keywords cannot contain escape characters']);
+        expect(errs('import.meta;')).toEqual([]);
     });
 });
