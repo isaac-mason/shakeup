@@ -4684,6 +4684,112 @@ export function parse(source: string, options: ParseOptions): ParseResult {
             for (const e of state.deferredScriptErrors) state.errors.push(e);
         state.deferredScriptErrors.length = 0;
     }
+/** The name an `export { … as X }` / `export * as X` clause exports under. A string form
+ *  (`export { x as "a b" }`) carries its RAW quoted text, and the quotes have to come off or
+ *  `export { x as "z" }` would not collide with `export { y as z }`, which per spec it does. */
+function exportedNameOf(node: Node): string {
+    const raw = node.name as string;
+    return node.type === N.StringLiteral ? raw.slice(1, -1) : raw;
+}
+
+/** Every name a top-level `export` declaration adds to the module's export surface, appended to
+ *  `out` as [name, offset]. `default` is NOT collected here — it has its own rule and its own
+ *  diagnostic. A bare `export * from 'm'` adds nothing: its names are not known until link time. */
+function exportedNames(stmt: Node, out: [string, number][], defaults: number[]): void {
+    switch (stmt.type) {
+        case N.ExportDefaultDeclaration:
+            defaults.push(stmt.start);
+            return;
+        case N.ExportAllDeclaration: {
+            const d = stmt.data as { exported: Node | null; exportKind: string };
+            if (d.exportKind === 'type' || d.exported === null) return;
+            out.push([exportedNameOf(d.exported), d.exported.start]);
+            return;
+        }
+        case N.ExportNamedDeclaration: {
+            const d = stmt.data as { declaration: Node | null; specifiers: Node[]; exportKind: string };
+            if (d.exportKind === 'type') return;
+            for (const sp of d.specifiers) {
+                const sd = sp.data as { exported: Node; exportKind: string };
+                if (sd.exportKind === 'type') continue;
+                const name = exportedNameOf(sd.exported);
+                if (name === 'default') defaults.push(sd.exported.start);
+                else out.push([name, sd.exported.start]);
+            }
+            if (d.declaration !== null) collectExportedDecl(d.declaration, out);
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+/** The bindings an `export <declaration>` introduces — a function/class name, or every identifier in
+ *  each declarator's binding pattern. Patterns only: this never descends into an initialiser or a
+ *  function body. */
+function collectExportedDecl(decl: Node, out: [string, number][]): void {
+    if (decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration) {
+        const id = (decl.data as { id: Node | null }).id;
+        if (id !== null) out.push([id.name as string, id.start]);
+        return;
+    }
+    if (decl.type !== N.VariableDeclaration) return;
+    for (const d of (decl.data as { declarations: Node[] }).declarations) collectPatternNames((d.data as { id: Node }).id, out);
+}
+
+function collectPatternNames(node: Node | null, out: [string, number][]): void {
+    if (node === null) return;
+    switch (node.type) {
+        case N.BindingIdentifier:
+            out.push([node.name as string, node.start]);
+            return;
+        case N.ArrayPattern:
+            for (const el of (node.data as { elements: (Node | null)[] }).elements) collectPatternNames(el, out);
+            return;
+        case N.ObjectPattern:
+            for (const p of (node.data as { properties: Node[] }).properties) collectPatternNames(p, out);
+            return;
+        case N.ObjectProperty:
+            collectPatternNames((node.data as { value: Node }).value, out);
+            return;
+        case N.AssignmentPattern:
+            collectPatternNames((node.data as { left: Node }).left, out);
+            return;
+        case N.RestElement:
+            collectPatternNames((node.data as { argument: Node }).argument, out);
+            return;
+        default:
+            return;
+    }
+}
+
+/**
+ * "It is a Syntax Error if the ExportedNames of ModuleItemList contains any duplicate entries",
+ * and its sibling rule for `default`.
+ *
+ * oxc keeps an `exported_bindings` map on the module record, notes a collision when an insert
+ * displaces an entry, counts `default` spans across the local and indirect export entries, and
+ * reports both from `ModuleRecordBuilder::errors` — which **skips the whole check for TypeScript**,
+ * because declaration merging makes duplicates legal there. Same skip here.
+ *
+ * A post-pass over the TOP-LEVEL statements rather than state threaded through the parser: exports
+ * are only legal there, so this reads the export nodes and one binding pattern per declarator, never
+ * the tree. Measured at the same cost as before it existed.
+ */
+function checkDuplicateExports(state: ParserState, body: Node[]): void {
+    if (state.tsMode) return;
+    const names: [string, number][] = [];
+    const defaults: number[] = [];
+    for (const stmt of body) exportedNames(stmt, names, defaults);
+    if (defaults.length > 1) raiseAt(state, defaults[1], ParseErrorCode.MultipleDefaultExports);
+    if (names.length < 2) return;
+    const seen = new Set<string>();
+    for (const [name, at] of names) {
+        if (seen.has(name)) raiseAt(state, at, ParseErrorCode.DuplicateExport, name);
+        else seen.add(name);
+    }
+}
+
     // CoverInitializedName, reported LAST — the same place oxc reports it
     // (`check_unfinished_errors`). A `{ bar = baz }` is only legal once something reinterprets the
     // object as a destructuring target, and whether that happens is not known until the whole
@@ -4693,6 +4799,7 @@ export function parse(source: string, options: ParseOptions): ParseResult {
         const ok = new Set(state.coverInitOk);
         for (const at of state.coverInit) if (!ok.has(at)) raiseAt(state, at, ParseErrorCode.CoverInitializedName);
     }
+    checkDuplicateExports(state, body);
     const program = create.Program(0, state.srcLen, 0, body) as Program;
     const nodeCount = program.id - state.baseId + 1;
     return {

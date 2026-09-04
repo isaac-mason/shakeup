@@ -55,6 +55,8 @@ export const ParseErrorCode = enumeration(
     // is visible as a divergence in TEXT and not only in accept/reject.
     'InvalidAssignmentTarget',
     'CoverInitializedName',
+    'DuplicateExport',
+    'MultipleDefaultExports',
     'AssignmentNotSimple',
     'DefaultValueOperator',
     'InvalidRestTarget',
@@ -163,6 +165,8 @@ const TEMPLATE: Record<number, string> = {
         '`with` statements are not allowed in a module, which is always strict mode',
     [ParseErrorCode.InvalidAssignmentTarget]: 'cannot assign to this expression',
     [ParseErrorCode.CoverInitializedName]: 'Invalid assignment in object literal',
+    [ParseErrorCode.DuplicateExport]: "Duplicated export '%0'",
+    [ParseErrorCode.MultipleDefaultExports]: 'A module cannot have multiple default exports.',
     [ParseErrorCode.AssignmentNotSimple]: 'invalid left-hand side in assignment',
     [ParseErrorCode.DefaultValueOperator]: "only '=' operator can be used for specifying default value",
     [ParseErrorCode.InvalidRestTarget]: 'invalid rest element target in destructuring assignment',
