@@ -60,6 +60,13 @@ export type ResolveOptions = {
     exportsFields?: string[][];
     /** package "browser" alias field. */
     aliasFields?: string[][];
+    /** Directory a relative specifier resolves against when there is NO importer — a plugin's
+     *  `this.resolve('./x')`, or a relative entry. Rollup uses `resolve(source)`, i.e. the process
+     *  cwd (`utils/resolveId.ts`); rolldown's resolver holds the same as `self.cwd` and falls back to
+     *  it "matching Rollup's behavior of resolving bare relative paths against CWD when no importer
+     *  is present" (`rolldown_resolver/src/resolver.rs`). Explicit here because shakeup also runs in
+     *  the browser, where there is no `process`. Default: `process.cwd()` if there is one, else `/`. */
+    cwd?: string;
 };
 
 /** Fully-resolved {@link ResolveOptions} with platform defaults applied. */
@@ -73,6 +80,7 @@ export type NormalizedResolve = {
     conditionNames: string[];
     exportsFields: string[][];
     aliasFields: string[][];
+    cwd: string;
 };
 
 const DEFAULT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.json'];
@@ -104,7 +112,14 @@ export function normalizeResolve(resolve: ResolveOptions | undefined, platform: 
         conditionNames: r.conditionNames ?? defaults.conditionNames,
         exportsFields: r.exportsFields ?? [['exports']],
         aliasFields: r.aliasFields ?? [],
+        cwd: r.cwd ?? defaultCwd(),
     };
+}
+
+/** `process.cwd()` where there is a process, `/` in the browser. */
+function defaultCwd(): string {
+    const p = (globalThis as { process?: { cwd?: () => string } }).process;
+    return typeof p?.cwd === 'function' ? p.cwd() : '/';
 }
 
 /** The pipeline surface shared by `bundle()` and `createDevServer()` — how modules are
@@ -210,7 +225,11 @@ async function defaultResolve(
 ): Promise<string | null> {
     const aliased = applyAlias(specifier, resolve.alias);
     if (!aliased.startsWith('./') && !aliased.startsWith('../') && !aliased.startsWith('/')) return null;
-    const base = aliased.startsWith('/') || importer === null ? aliased : joinPath(dirnameOf(importer), aliased);
+    // No importer — a plugin's `this.resolve('./x')` or a relative entry — resolves against the cwd,
+    // which is what both Rollup and rolldown do. Returning the specifier untouched left
+    // `custom-resolve-options` with `id: './main.js'` where Rollup gives an absolute path, and made
+    // `this.resolve` answer null whenever the process cwd was not the fixture directory.
+    const base = aliased.startsWith('/') ? aliased : joinPath(importer === null ? resolve.cwd : dirnameOf(importer), aliased);
 
     // extensionAlias: if the specifier ends in a mapped ext (e.g. '.js'), try the alternatives
     // (e.g. '.ts','.js') BEFORE the generic probe.

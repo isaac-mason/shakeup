@@ -71,6 +71,10 @@ const args = process.argv.slice(2);
 const listIdx = args.indexOf('--list');
 const LIST = listIdx >= 0 ? args[listIdx + 1] : null;
 const LIMIT = Number(args.find((a) => /^\d+$/.test(a)) ?? Number.POSITIVE_INFINITY);
+// `--only <substring>` runs just the matching samples, through the SAME pipeline — a 12-minute suite
+// is not a debugging loop. Never a substitute for the full run before committing.
+const onlyIdx = args.indexOf('--only');
+const ONLY = onlyIdx >= 0 ? args[onlyIdx + 1] : null;
 
 const diskFs = {
     read: (id: string) => (existsSync(id) && statSync(id).isFile() ? readFileSync(id, 'utf8') : null),
@@ -194,7 +198,7 @@ let runFail = 0;
 const tmpDirs: string[] = [];
 const loaded = dirs.map((d) => ({ d, c: loadConfig(join(ROOT, d)) }));
 const soloed = loaded.filter((x) => x.c?.solo === true);
-const selected = (soloed.length > 0 ? soloed : loaded).slice(0, LIMIT);
+const selected = (soloed.length > 0 ? soloed : loaded).filter((x) => ONLY === null || x.d.includes(ONLY)).slice(0, LIMIT);
 
 for (const { d, c } of selected) {
     const dir = join(ROOT, d);
@@ -272,6 +276,12 @@ for (const { d, c } of selected) {
                 generatedCode: { symbols: false },
                 ...((o.output ?? {}) as Record<string, unknown>),
             } as never,
+            // Rollup's own runner does `process.chdir(directory)` before each sample
+            // (`test/function/index.js:72`), so a plugin's `this.resolve('./main.js')` — which has no
+            // importer and therefore resolves against the cwd — lands in the SAMPLE directory.
+            // shakeup takes the same directory as an explicit option rather than mutating global
+            // process state from a harness that also stages files.
+            resolve: { cwd: dir },
         });
         if (r.errors.length > 0) {
             if (wantsError) {
@@ -455,7 +465,12 @@ for (const [k, b] of [...buckets.entries()].sort((a, c) => c[1].count - a[1].cou
 // hidden a regression behind a net-zero delta: a change fixed one sample and broke another, and the
 // only number that moved was inside a bucket that never printed. So dump the whole failing SET, one
 // name per line, sorted, for `diff`. Under `llm/` because it is a local working artifact, not output.
-const FAILING = join(import.meta.dirname, '..', 'llm', 'rollupsuite-failing.txt');
 const failing = [...buckets.values()].flatMap((b) => b.samples).sort();
-writeFileSync(FAILING, `${failing.join('\n')}\n`);
-console.log(`\nfull failing set (${failing.length}) written to llm/rollupsuite-failing.txt — diff it against the previous run`);
+if (ONLY === null) {
+    // Only a FULL run may write it. A `--only` run's set is a subset, and silently overwriting the
+    // baseline with one would make the next diff show a pile of phantom fixes.
+    writeFileSync(join(import.meta.dirname, '..', 'llm', 'rollupsuite-failing.txt'), `${failing.join('\n')}\n`);
+    console.log(
+        `\nfull failing set (${failing.length}) written to llm/rollupsuite-failing.txt — diff it against the previous run`,
+    );
+}
