@@ -122,6 +122,9 @@ export type ParserState = {
      *  purpose. So it is recorded beside the tree, lazily, like `notArrow` below. */
     restComma: Set<number> | null;
     topLogical: number;
+    /** The operator at `parseUnary`'s OWN top level (`''` when its result came from anywhere else,
+     *  a parenthesised operand included). The exponentiation rule's equivalent of `topLogical`. */
+    unaryTop: string;
     inParams: boolean;
     /** The goal is declared MODULE. `import.meta` and top-level `await` are legal only here (or,
      *  pending resolution, under `unambiguous`). */

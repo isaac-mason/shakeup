@@ -433,3 +433,83 @@ describe('`throw` newlines, duplicate import attributes, import phases and escap
         expect(errs('import.meta;')).toEqual([]);
     });
 });
+
+describe('exponentiation bases, `yield*` newlines, regex flags, and four smaller positions', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false, kind: 'unambiguous' }).errors.map((e) => e.msg);
+
+    it.each([
+        ['-a ** b;', '-'],
+        ['+a ** b;', '+'],
+        ['!a ** b;', '!'],
+        ['~a ** b;', '~'],
+        ['typeof a ** b;', 'typeof'],
+        ['void a ** b;', 'void'],
+        ['delete a.b ** c;', 'delete'],
+    ])('a unary base for `**` must be parenthesised: %s', (src, op) => {
+        expect(errs(src)).toEqual([
+            `A unary expression with the '${op}' operator cannot be used as the left operand of an exponentiation expression`,
+        ]);
+    });
+
+    it('but an UpdateExpression base is what the grammar actually asks for', () => {
+        // `ExponentiationExpression : UpdateExpression ** ExponentiationExpression` — so `++a` is
+        // fine where `-a` is not, and parentheses turn any unary back into a legal base.
+        expect(errs('++a ** b;')).toEqual([]);
+        expect(errs('a++ ** b;')).toEqual([]);
+        expect(errs('(-a) ** b;')).toEqual([]);
+        expect(errs('(typeof a) ** b;')).toEqual([]);
+        expect(errs('-(a ** b);')).toEqual([]);
+        expect(errs('2 ** -3;')).toEqual([]);
+    });
+
+    it('the `*` of `yield*` may not be preceded by a line terminator', () => {
+        expect(errs('function* g(){ yield\n* x; }')).toEqual(['Unexpected token']);
+        expect(errs('function* g(){ yield * x; }')).toEqual([]);
+        expect(errs('function* g(){ yield\nx; }')).toEqual([]);
+    });
+
+    it('regex flags are validated in the lexer, in the same pass that scans them', () => {
+        expect(errs('/a/gg;')).toEqual(['Flag g is mentioned twice in regular expression literal']);
+        expect(errs('/a/G;')).toEqual(['Unexpected flag G in regular expression literal']);
+        expect(errs('/a/uv;')).toEqual(["The 'u' and 'v' regular expression flags cannot be enabled at the same time"]);
+        expect(errs('/a/dgimsuy;')).toEqual([]);
+        expect(errs('/a/v;')).toEqual([]);
+        expect(errs('x = a / b / c;')).toEqual([]);
+    });
+
+    it('a `for...in` head has no scope to dispose a `using` resource in', () => {
+        expect(errs('for (using x in y);')).toEqual([
+            'The left-hand side of a for...in statement cannot be an using declaration.',
+        ]);
+        expect(errs('for (await using x in y);')).toEqual([
+            'The left-hand side of a for...in statement cannot be an await using declaration.',
+        ]);
+        expect(errs('for (using x of y);')).toEqual([]);
+        expect(errs('for (var x in y);')).toEqual([]);
+    });
+
+    it('a line terminator before `=>` is banned outright, not resolved by ASI', () => {
+        expect(errs('var f = ()\n=> 1;')).toEqual(['Line terminator not permitted before arrow']);
+        expect(errs('var f = a\n=> 1;')).toEqual(['Line terminator not permitted before arrow']);
+        expect(errs('var f = (\n) => 1;')).toEqual([]);
+        expect(errs('var f = (a,\nb) => 1;')).toEqual([]);
+    });
+
+    it('only the first duplicate `default` clause is reported', () => {
+        expect(errs('switch(x){default: ; default: ;}')).toEqual([
+            "A 'default' clause cannot appear more than once in a 'switch' statement.",
+        ]);
+        expect(errs('switch(x){default: ; default: ; default: ;}')).toEqual([
+            "A 'default' clause cannot appear more than once in a 'switch' statement.",
+        ]);
+        expect(errs('switch(x){case 1: break; default: break;}')).toEqual([]);
+    });
+
+    it('a class static block enables `new.target` but disables `return`', () => {
+        expect(errs('class C { static { return; } }')).toEqual([
+            "A 'return' statement cannot be used inside a class static block.",
+        ]);
+        expect(errs('class C { static { () => { return 1; }; } }')).toEqual([]);
+        expect(errs('class C { m(){ return 1; } }')).toEqual([]);
+    });
+});

@@ -197,9 +197,12 @@ describe('parse goal gates top-level return / new.target', () => {
 
     it('a class static block enables new.target but not return', () => {
         // oxc's asymmetry (`js/function.rs:285` vs `js/statement.rs:710-713`) — hence two counters.
+        // The static block gets its OWN return message, which is the branch oxc takes on
+        // `ctx.has_new_target()`: every other context that allows `new.target` has entered a
+        // function body first, so a `return` reaching there really is the top-level one.
         expect(parseErrs('class C { static { new.target } }', 'module')).toEqual([]);
         expect(parseErrs('class C { static { return } }', 'module')).toEqual([
-            'return statement is only allowed inside a function body',
+            "A 'return' statement cannot be used inside a class static block.",
         ]);
     });
 

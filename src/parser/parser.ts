@@ -150,6 +150,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         deferredScriptErrors: [],
         restComma: null,
         topLogical: 0,
+        unaryTop: '',
         inParams: false,
         // Top-level await: legal in an ES module, not in a CommonJS body (which is wrapped in a
         // non-async function). `unambiguous` stays permissive, as with the other two gates.
@@ -665,6 +666,10 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
         nextToken(state);
         let flags = 0;
         if (isP(state, P.STAR)) {
+            // `yield\n* x` — the `*` of `yield*` may not be preceded by a line terminator, so this is
+            // not a delegate at all and there is no other reading either. oxc's recovery reports the
+            // generic "Unexpected token" here, and matching its TEXT keeps `parserdiff` exact.
+            if ((state.tokFlags & F_NL) !== 0) raise(state, ParseErrorCode.UnexpectedToken);
             flags |= FL.DELEGATE;
             nextToken(state);
         }
@@ -696,8 +701,13 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
     // handled above and never get this far. The role IS the node type (`R_REF`/`R_BIND`), so
     // reinterpreting is one node, built only on the rare real arrow.
     //
-    // `[no LineTerminator here]` is part of the production, so a newline before `=>` is not an arrow.
-    if (isP(state, P.ARROW) && left.type === N.IdentifierReference && (state.tokFlags & F_NL) === 0) {
+    // `[no LineTerminator here]` is part of the production, so a newline before `=>` is not an arrow —
+    // but it is not two statements either. This used to REFUSE the arrow on a newline and drop
+    // through to the generic expression error, which reported `unexpected token '=>'` — the recovery
+    // talking rather than the rule. oxc instead parses the arrow and names the newline, at the arrow
+    // itself; `parseArrowAfterSingleParam` is that site (oxc `js/arrow.rs:245`), so the check belongs
+    // there and not here.
+    if (isP(state, P.ARROW) && left.type === N.IdentifierReference) {
         const bind = node(N.BindingIdentifier, left.start, left.end, left.name, null) as Identifier;
         return parseArrowAfterSingleParam(state, left.start, bind, 0, left.start, allowReturnType);
     }
@@ -747,6 +757,7 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
     let left = parseUnary(state);
     // Whatever a parenthesised operand left behind is not OUR top level.
     let leftKind = LOGICAL_NONE;
+    let leftUnary = state.unaryTop;
     for (;;) {
         const tok = state.tok;
         // TS `as` / `satisfies` are type operators (they consume a type), not binary ops.
@@ -757,6 +768,7 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
             left = satisfies
                 ? create.TSSatisfiesExpression(left.start, ty.end, 0, left, ty)
                 : create.TSAsExpression(left.start, ty.end, 0, left, ty);
+            leftUnary = '';
             continue;
         }
         // One uniform path: punctuator ops and `in`/`instanceof` all carry precedence
@@ -781,6 +793,13 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
             if (leftKind === other || rightKind === other) raiseAt(state, left.start, ParseErrorCode.MixedCoalesce);
             leftKind = cur;
         } else leftKind = LOGICAL_NONE;
+        // `-a ** b` — the grammar's left operand of `**` is an `UpdateExpression`, so a UNARY one has
+        // to be parenthesised to say which precedence was meant. Parenthesisation is not in our AST,
+        // hence `state.unaryTop`, the same shape the coalesce rule above uses. oxc reports it after
+        // the right operand is parsed (`js/expression.rs:1415`), so the error ORDER matches too.
+        if (tok === P.STARSTAR && leftUnary !== '')
+            raiseAt(state, left.start, ParseErrorCode.UnaryExponentiation, leftUnary);
+        leftUnary = '';
         left = isLogical(tok)
             ? create.LogicalExpression(left.start, right.end, op, left, right)
             : create.BinaryExpression(left.start, right.end, op, left, right);
@@ -829,7 +848,9 @@ function parseUnary(state: ParserState): Node {
                     state.tok === P.PLUS ? OP.POS : state.tok === P.MINUS ? OP.NEG : state.tok === P.BANG ? OP.NOT : OP.BIT_NOT;
                 nextToken(state);
                 const arg = parseUnary(state);
-                return create.UnaryExpression(start, arg.end, op, arg);
+                const n = create.UnaryExpression(start, arg.end, op, arg);
+                state.unaryTop = state.src[start];
+                return n;
             }
             case P.PLUSPLUS:
             case P.MINUSMINUS: {
@@ -849,7 +870,9 @@ function parseUnary(state: ParserState): Node {
                 const op = state.tok === K.TYPEOF ? OP.TYPEOF : state.tok === K.VOID ? OP.VOID : OP.DELETE;
                 nextToken(state);
                 const arg = parseUnary(state);
-                return create.UnaryExpression(start, arg.end, op, arg);
+                const n = create.UnaryExpression(start, arg.end, op, arg);
+                state.unaryTop = op === OP.TYPEOF ? 'typeof' : op === OP.VOID ? 'void' : 'delete';
+                return n;
             }
             case K.AWAIT: {
                 // An operator where `await` is in scope. Where it is NOT — a script, or a file whose
@@ -871,7 +894,9 @@ function parseUnary(state: ParserState): Node {
                 nextToken(state);
                 const arg = parseUnary(state);
                 if (state.inParams) raiseSoft(state, start, ParseErrorCode.AwaitInFormalParameter);
-                return create.AwaitExpression(start, arg.end, 0, arg);
+                const n = create.AwaitExpression(start, arg.end, 0, arg);
+                state.unaryTop = 'await';
+                return n;
             }
         }
     }
@@ -882,6 +907,13 @@ function parseUnary(state: ParserState): Node {
         nextToken(state);
         expr = create.UpdateExpression(expr.start, state.tokStart, op, expr);
     }
+    // Every OTHER exit is not a unary at this frame's top — a parenthesised `(-a)` reaches here
+    // through `parsePostfixChain`, and it is that inner frame's `-` that has to be forgotten, which
+    // is exactly what makes `(-a) ** b` legal while `-a ** b` is not. So the clear happens AFTER the
+    // chain is parsed, not before it: before, the nested frame overwrites it again. An
+    // UpdateExpression is deliberately cleared too — the grammar's left operand of `**` IS an
+    // `UpdateExpression`, so `++a ** b` is fine.
+    state.unaryTop = '';
     return expr;
 }
 
@@ -1934,6 +1966,9 @@ function parseArrow(state: ParserState, start: number, flags: number, typeParams
     const params = parseArrowParams(state, flags);
     let returnType: Ref = null;
     if (state.tsMode && isP(state, P.COLON)) returnType = parseTypeAnn(state);
+    // No ASI hazard, an outright ban: `()\n=> 1` is an error rather than two statements
+    // (oxc `js/arrow.rs:245,291`, which checks it at both arrow sites just as we do).
+    if ((state.tokFlags & F_NL) !== 0) raise(state, ParseErrorCode.NewlineBeforeArrow);
     expectP(state, P.ARROW, "'=>'");
     return parseArrowBody(state, start, flags, typeParams, params, returnType, allowReturnType);
 }
@@ -1978,6 +2013,9 @@ function parseArrowAfterSingleParam(
     // — there `start` is the `async`. Passed explicitly rather than defaulted: both call sites know
     // it, and an optional parameter on a hot path is arity the shape check has to carry.
     const param = create.FormalParameter(identStart, id.end, 0, id, null, null);
+    // No ASI hazard, an outright ban: `()\n=> 1` is an error rather than two statements
+    // (oxc `js/arrow.rs:245,291`, which checks it at both arrow sites just as we do).
+    if ((state.tokFlags & F_NL) !== 0) raise(state, ParseErrorCode.NewlineBeforeArrow);
     expectP(state, P.ARROW, "'=>'");
     const isAsync = (flags & FL.ASYNC) !== 0;
     let exprBody = false;
@@ -2757,53 +2795,8 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 eatP(state, P.SEMI);
                 return create.DoWhileStatement(start, state.tokStart, 0, body, test);
             }
-            case K.SWITCH: {
-                nextToken(state);
-                expectP(state, P.LPAREN, "'('");
-                const disc = parseExpression(state);
-                expectP(state, P.RPAREN, "')'");
-                expectP(state, P.LBRACE, "'{'");
-                const from = state.sp;
-                while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
-                    const mark = state.tokStart;
-                    const cs = state.tokStart;
-                    let test: Ref = null;
-                    if (eatK(state, K.CASE)) {
-                        test = parseExpression(state);
-                    } else if (!eatK(state, K.DEFAULT)) {
-                        raise(state, ParseErrorCode.Expected, "'case'");
-                        nextToken(state);
-                        continue;
-                    }
-                    expectP(state, P.COLON, "':'");
-                    const bodyFrom = state.sp;
-                    while (
-                        !isP(state, P.RBRACE) &&
-                        !isK(state, K.CASE) &&
-                        !isK(state, K.DEFAULT) &&
-                        (state.tok as number) !== T_EOF
-                    ) {
-                        const stmt = parseStatement(state, false);
-                        // "It is a Syntax Error if UsingDeclaration is contained directly within the
-                        // StatementList of either a CaseClause or DefaultClause" — the clause is not
-                        // its own scope, so there is no point at which the resource would be
-                        // disposed. A BLOCK inside the clause is fine, and so is `var`. oxc checks
-                        // the statement it just parsed, here (`js/statement.rs:786`).
-                        if (stmt.type === N.VariableDeclaration) {
-                            const dk = (stmt.data as { kind: string }).kind;
-                            if (dk === 'using') raiseAt(state, stmt.start, ParseErrorCode.UsingInBareCase);
-                            else if (dk === 'await using')
-                                raiseAt(state, stmt.start, ParseErrorCode.AwaitUsingInBareCase);
-                        }
-                        push(state, stmt);
-                    }
-                    const body = finishList(state, bodyFrom);
-                    push(state, create.SwitchCase(cs, state.tokStart, 0, test, body));
-                    if (noProgress(state, mark)) break;
-                }
-                expectP(state, P.RBRACE, "'}'");
-                return create.SwitchStatement(start, state.tokStart, 0, disc, finishList(state, from));
-            }
+            case K.SWITCH:
+                return parseSwitch(state, start);
             case K.TRY: {
                 nextToken(state);
                 const block = parseBlock(state);
@@ -2830,8 +2823,15 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 if (!canInsertSemi(state) && !isP(state, P.SEMI)) arg = parseExpression(state);
                 consumeSemi(state);
                 if (state.fnDepth === 0) {
-                    state.sawTopLevelReturn = true;
-                    if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
+                    // A class static block enables `new.target` but disables `return` — oxc splits
+                    // on exactly that (`js/statement.rs:712`), and the split matters because a
+                    // static block is the one non-function body where `return` is unconditionally an
+                    // error, whatever the goal says about a top-level `return`.
+                    if (state.staticBlockDepth > 0) raise(state, ParseErrorCode.ReturnInStaticBlock);
+                    else {
+                        state.sawTopLevelReturn = true;
+                        if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
+                    }
                 }
                 return create.ReturnStatement(start, state.tokStart, 0, arg);
             }
@@ -3060,6 +3060,70 @@ function parseVarDecl(state: ParserState, kind: number, extraFlags: number): Nod
     return create.VariableDeclaration(start, state.tokStart, kind | extraFlags, finishList(state, from));
 }
 
+/**
+ * A `switch` statement. Its own function, as oxc's `parse_switch_statement` is
+ * (`js/statement.rs:734`), and not only for shape: ten locals — the discriminant, the clause
+ * bookkeeping, the two loop marks — sat in `parseStatement`'s frame, which is the frame that
+ * recurses once per level of block nesting. Moving them out bought back the nesting ceiling that
+ * the duplicate-`default` tracking had cost. The extra call frame is paid once per `switch`, not
+ * once per nesting level, which is the distinction that matters here.
+ */
+function parseSwitch(state: ParserState, start: number): Node {
+            nextToken(state);
+            expectP(state, P.LPAREN, "'('");
+            const disc = parseExpression(state);
+            expectP(state, P.RPAREN, "')'");
+            expectP(state, P.LBRACE, "'{'");
+            const from = state.sp;
+            let defaultAt = -1;
+            let reportedDefault = false;
+            while (!isP(state, P.RBRACE) && (state.tok as number) !== T_EOF) {
+                const mark = state.tokStart;
+                const cs = state.tokStart;
+                let test: Ref = null;
+                if (eatK(state, K.CASE)) {
+                    test = parseExpression(state);
+                } else if (!eatK(state, K.DEFAULT)) {
+                    raise(state, ParseErrorCode.Expected, "'case'");
+                    nextToken(state);
+                    continue;
+                } else if (defaultAt < 0) defaultAt = cs;
+                else if (!reportedDefault) {
+                    // Only the FIRST duplicate is reported, as oxc does (`js/statement.rs:744`);
+                    // a switch with four `default`s is one mistake, not three.
+                    raiseAt(state, cs, ParseErrorCode.MultipleDefaultClause);
+                    reportedDefault = true;
+                }
+                expectP(state, P.COLON, "':'");
+                const bodyFrom = state.sp;
+                while (
+                    !isP(state, P.RBRACE) &&
+                    !isK(state, K.CASE) &&
+                    !isK(state, K.DEFAULT) &&
+                    (state.tok as number) !== T_EOF
+                ) {
+                    const stmt = parseStatement(state, false);
+                    // "It is a Syntax Error if UsingDeclaration is contained directly within the
+                    // StatementList of either a CaseClause or DefaultClause" — the clause is not
+                    // its own scope, so there is no point at which the resource would be
+                    // disposed. A BLOCK inside the clause is fine, and so is `var`. oxc checks
+                    // the statement it just parsed, here (`js/statement.rs:786`).
+                    if (stmt.type === N.VariableDeclaration) {
+                        const dk = (stmt.data as { kind: string }).kind;
+                        if (dk === 'using') raiseAt(state, stmt.start, ParseErrorCode.UsingInBareCase);
+                        else if (dk === 'await using')
+                            raiseAt(state, stmt.start, ParseErrorCode.AwaitUsingInBareCase);
+                    }
+                    push(state, stmt);
+                }
+                const body = finishList(state, bodyFrom);
+                push(state, create.SwitchCase(cs, state.tokStart, 0, test, body));
+                if (noProgress(state, mark)) break;
+            }
+            expectP(state, P.RBRACE, "'}'");
+            return create.SwitchStatement(start, state.tokStart, 0, disc, finishList(state, from));
+}
+
 function parseFor(state: ParserState, start: number): Node {
     nextToken(state);
     let flags = 0;
@@ -3138,6 +3202,14 @@ function parseFor(state: ParserState, start: number): Node {
             const target = parseBindingTarget(state);
             if (isK(state, K.OF) || isK(state, K.IN)) {
                 const isOf = isK(state, K.OF);
+                // A `using` resource is disposed at the end of its scope; a `for...in` head has no
+                // scope to hang that on, so only `for...of` takes one (oxc `js/statement.rs:541`).
+                if (!isOf && usingKind !== 0)
+                    raiseAt(
+                        state,
+                        ds,
+                        usingKind === VAR_KIND.AWAIT_USING ? ParseErrorCode.AwaitUsingForIn : ParseErrorCode.UsingForIn,
+                    );
                 nextToken(state);
                 const dtor = create.VariableDeclarator(ds, state.tokStart, 0, target, null, null);
                 const decl = create.VariableDeclaration(ds, state.tokStart, kind, [dtor]);

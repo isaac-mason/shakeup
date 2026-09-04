@@ -144,6 +144,12 @@ export const C_ID = 3;
  *  is deliberate (see `scanEscapedIdent`). Two named exceptions are not those tables. */
 const isJoinerControl = (c: number): boolean => c === 0x200c || c === 0x200d;
 export const C_DIG = 4;
+/** One bit per legal regex flag, indexed by char code — oxc's `gimsuydv` (`literal.rs:206`). A
+ *  `0` entry is "not a flag at all", which is how the unknown-flag error is spelled. */
+const REGEX_FLAG_BIT = new Uint8Array(128);
+const REGEX_U = 1 << 4;
+const REGEX_V = 1 << 7;
+for (const [i, ch] of [...'gimsuydv'].entries()) REGEX_FLAG_BIT[ch.charCodeAt(0)] = 1 << i;
 export const CHAR = new Uint8Array(128);
 CHAR[9] = C_WS;
 CHAR[11] = C_WS;
@@ -709,7 +715,14 @@ function scanNumber(state: ParserState): void {
     let leadingZero = false;
 
     if (first === 48 && pos + 1 < srcLen) {
-        const radix = (src.charCodeAt(pos + 1) | 32) === 120 ? 16 : (src.charCodeAt(pos + 1) | 32) === 111 ? 8 : (src.charCodeAt(pos + 1) | 32) === 98 ? 2 : 0;
+        const radix =
+            (src.charCodeAt(pos + 1) | 32) === 120
+                ? 16
+                : (src.charCodeAt(pos + 1) | 32) === 111
+                  ? 8
+                  : (src.charCodeAt(pos + 1) | 32) === 98
+                    ? 2
+                    : 0;
         if (radix !== 0) {
             pos += 2;
             if (!radixDigitOk(src.charCodeAt(pos), radix)) return badNumber(state, pos);
@@ -757,8 +770,7 @@ function scanNumber(state: ParserState): void {
     endNumber(state, pos, bigint);
 }
 
-const isHexDigit = (c: number): boolean =>
-    (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
+const isHexDigit = (c: number): boolean => (c >= 48 && c <= 57) || (c >= 97 && c <= 102) || (c >= 65 && c <= 70);
 
 /** Is the `\x` / `\u` escape starting at `pos` (just past the backslash) well formed?
  *
@@ -977,11 +989,23 @@ export function reScanRegex(state: ParserState): void {
         else if (c === 93) inClass = false;
         else if (c === 47 && !inClass) {
             pos++;
+            // The flags. oxc validates them in the LEXER (`lexer/regex.rs:64-84`) — one pass over the
+            // same characters the scan is already walking — and its allowed set is `gimsuydv`
+            // (`oxc_ast/src/ast/literal.rs:206`). `u` and `v` are individually valid but mutually
+            // exclusive, which oxc checks separately once the literal is built
+            // (`js/expression.rs:464`); the flags are all here, so we do it in the same pass.
+            let seen = 0;
             while (pos < srcLen) {
                 const f = src.charCodeAt(pos);
-                if (f < 128 && (CHAR[f] === C_ID || CHAR[f] === C_DIG)) pos++;
-                else break;
+                if (f >= 128 || (CHAR[f] !== C_ID && CHAR[f] !== C_DIG)) break;
+                const bit = REGEX_FLAG_BIT[f] ?? 0;
+                if (bit === 0) raiseAt(state, pos, ParseErrorCode.RegExpFlag, src[pos]);
+                else if ((seen & bit) !== 0) raiseAt(state, pos, ParseErrorCode.RegExpFlagTwice, src[pos]);
+                else seen |= bit;
+                pos++;
             }
+            if ((seen & (REGEX_U | REGEX_V)) === (REGEX_U | REGEX_V))
+                raiseAt(state, state.tokStart, ParseErrorCode.RegExpFlagUAndV);
             state.pos = pos;
             state.tok = T_REGEX;
             state.tokEnd = pos;
