@@ -97,7 +97,6 @@ export type OutputOptions = OutputOptionsNaming & {
 };
 
 export type BundleOptions = GraphOptions & {
-    treeshake?: boolean;
     /** Emit a source map (SMv3) mapping the chunk back to the module sources. */
     sourcemap?: boolean;
     /** Output-shaping config (code splitting, manualChunks, preserveModules). */

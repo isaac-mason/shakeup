@@ -1,7 +1,7 @@
+import type { CompressMode } from '../passes/compress/index.ts';
 import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs.ts';
 import type { ParseCache } from './graph-types.ts';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
-import type { CompressMode } from '../passes/compress/index.ts';
 import type { ModuleType, Plugin } from './plugin.ts';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
@@ -122,7 +122,25 @@ export type CommonOptions = {
 };
 
 /** Inputs to {@link buildGraph}. */
+/** `treeshake.moduleSideEffects` — the DEFAULT a module's side-effect flag falls back to, and
+ *  rolldown's option of the same name (`treeshake.rs:206`).
+ *
+ *  `false` treats every module as side-effect-free, so a module whose exports nothing uses is dropped
+ *  whole. A FUNCTION is asked per module and may answer `undefined` to defer. `true` is the default
+ *  and defers to the manifest and then to per-statement analysis, which is what rolldown's
+ *  `Boolean(true) => None` means — it is not "assume side effects".
+ *
+ *  PRECEDENCE, from rolldown's `normalize_side_effects` (`ecma_module_view_factory.rs:171`):
+ *  plugin hook, then THIS, then `package.json#sideEffects`, then per-statement analysis. */
+export type ModuleSideEffectsOption = boolean | ((id: string, external: boolean) => boolean | undefined);
+
+export type TreeshakeOptions = {
+    moduleSideEffects?: ModuleSideEffectsOption;
+};
+
 export type GraphOptions = CommonOptions & {
+    /** `false` disables tree-shaking entirely; an object configures it. */
+    treeshake?: boolean | TreeshakeOptions;
     /** Compile-time global replacement (esbuild/Vite `define`). Keys are a bare identifier
      *  (`__DEV__`) or a dotted global chain (`process.env.NODE_ENV`); VALUES ARE JS SOURCE, so a
      *  string replacement needs its own quotes: `{ 'process.env.NODE_ENV': '"production"' }`.

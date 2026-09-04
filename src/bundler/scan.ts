@@ -203,8 +203,25 @@ function mergeOptions(
  *  `resolveThrough`) → this default. `true` here is NOT "assume side effects": treeshake still roots
  *  only IMPURE statements (`treeshake.ts:289-291`, via `statementIsPure`), which is what rolldown's
  *  final tier — `DeterminedSideEffects::Analyzed(..)` — computes from `stmt_infos`. */
-function resolveModuleSideEffects(pending: PendingOptions): ModuleSideEffects {
-    return pending.moduleSideEffects ?? true;
+function resolveModuleSideEffects(pending: PendingOptions, fromOption: ModuleSideEffects | null): ModuleSideEffects {
+    return pending.moduleSideEffects ?? fromOption ?? true;
+}
+
+/**
+ * `treeshake.moduleSideEffects` as a uniform "what does the OPTION say about this id" function, or
+ * null when it has no opinion at all (the default, and `treeshake: false`, where nothing is shaken).
+ *
+ * `true` returns null on purpose: rolldown's `ModuleSideEffects::Boolean(true) => None` means DEFER,
+ * not "assume side effects" — the manifest and then per-statement analysis still get their say.
+ */
+function moduleSideEffectsOption(
+    treeshake: GraphOptions['treeshake'],
+): ((id: string, external: boolean) => ModuleSideEffects | null) | null {
+    if (treeshake === undefined || typeof treeshake === 'boolean') return null;
+    const opt = treeshake.moduleSideEffects;
+    if (opt === undefined || opt === true) return null;
+    if (opt === false) return () => false;
+    return (id, external) => opt(id, external) ?? null;
 }
 
 /** `with { type: … }` values that name a module type by a DIFFERENT word than the loader does.
@@ -846,6 +863,7 @@ export function resolveEmittedFileName(file: EmittedFile): string {
 }
 
 export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Promise<Graph> {
+    const optSideEffects = moduleSideEffectsOption(options.treeshake);
     const graph: Graph = {
         modules: [],
         platform: options.platform ?? 'browser',
@@ -950,8 +968,15 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         const dst = pendingFor(base.id);
         // `newPendingOptions` seeds this as null (= nothing has spoken), which is the state a
         // manifest value may fill; a plugin having set it is what must not be overwritten.
-        if (base.moduleSideEffects !== undefined && dst.moduleSideEffects === null) {
-            dst.moduleSideEffects = base.moduleSideEffects;
+        if (dst.moduleSideEffects === null) {
+            // The OPTION sits between the hook and the manifest, and this is the one place that can
+            // tell those apart: `dst` is still null exactly when no hook has spoken. Asking the
+            // option here — rather than only as the final default — is what makes
+            // `treeshake.moduleSideEffects: false` beat a `package.json#sideEffects: true`, which is
+            // the order `normalize_side_effects` uses.
+            const opt = optSideEffects?.(base.id, false) ?? null;
+            if (opt !== null) dst.moduleSideEffects = opt;
+            else if (base.moduleSideEffects !== undefined) dst.moduleSideEffects = base.moduleSideEffects;
         }
         return base.id;
     };
@@ -1188,7 +1213,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // Merge transform overrides (transform > load > resolveId precedence).
             const pending = pendingFor(id);
             mergeOptions(pending, transformed);
-            sideEffects = resolveModuleSideEffects(pending);
+            sideEffects = resolveModuleSideEffects(pending, optSideEffects?.(id, false) ?? null);
             metaVal = pending.meta;
             moduleTypeVal = pending.moduleType ?? moduleTypeOf(id, moduleTypes);
             // Declared module goal (cjs.md §7.1b): a per-build RESOLVE output. Needed BEFORE the

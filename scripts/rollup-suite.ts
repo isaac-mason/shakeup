@@ -124,19 +124,12 @@ function skipReason(c: Config): string | null {
     // shakeup emits ES modules and nothing else — a stated non-goal, not a gap.
     if (format !== undefined && format !== 'es' && format !== 'esm' && format !== 'module') return `output format '${format}'`;
     if (o.preserveModules === true || out.preserveModules === true) return 'output.preserveModules';
-    // `treeshake.moduleSideEffects` decides whether a module's top-level effects run AT ALL, and
-    // shakeup does not model it — so a sample that sets it is measuring a feature we do not have.
-    // The harness forwards only `treeshake: false` and dropped the object silently, which reported
-    // that gap as an unexplained assertion failure; the same trap the `output` forwarding note below
-    // records. Naming the option is honest, and the samples come back the day it is implemented.
-    //
-    // ONLY that option. The others a sample may set — `propertyReadSideEffects`,
+    // `treeshake.moduleSideEffects` is IMPLEMENTED now and forwarded below, so those samples run
+    // again. The other options a sample may set — `propertyReadSideEffects`,
     // `tryCatchDeoptimization`, `unknownGlobalSideEffects`, `preset` — tune how AGGRESSIVE shaking
-    // is within a module that is already included. Ignoring them leaves us more conservative, which
-    // costs bytes and not correctness, and those samples pass today. Skipping on them measured 3
-    // fewer passes for nothing.
-    const ts = o.treeshake;
-    if (typeof ts === 'object' && ts !== null && 'moduleSideEffects' in ts) return 'treeshake.moduleSideEffects';
+    // is within a module that is already included. Ignoring them leaves us more conservative,
+    // which costs bytes and not correctness, and those samples pass today; skipping on them
+    // measured 3 fewer passes for nothing.
     if (typeof c.code === 'function') return 'asserts on generated TEXT (`code`)';
     if (c.warnings !== undefined || c.logs !== undefined) return 'asserts on warnings/logs';
     if (typeof c.context === 'object' && c.context !== null) return 'needs a custom `context` global';
@@ -205,7 +198,10 @@ for (const { d, c } of selected) {
             fs: diskFs,
             external: (o.external ?? []) as string[],
             plugins: o.plugins as never,
-            treeshake: o.treeshake === false ? false : undefined,
+            // Forward the whole option. Only `treeshake: false` used to survive, so an OBJECT was
+            // dropped silently and the behavioural difference it asked for was reported as an
+            // unexplained assertion failure.
+            treeshake: o.treeshake as never,
             // FORWARD `options.output`. It used to be dropped, which silently made every sample that
             // asserts on an output OPTION unfailable-and-unpassable: `entryFileNames`,
             // `chunkFileNames`, interop and validation cases never reached the bundler at all, so 38
