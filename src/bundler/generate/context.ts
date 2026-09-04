@@ -36,6 +36,9 @@ export type EmitCtx = {
     pathToChunk: (targetChunkIdx: number) => string;
     /** Which statement owns each wrapped-CommonJS interop namespace — see `computeInteropOwners`. */
     interopOwners: Map<number, InteropOwner>;
+    /** {@link TreeshakeResult.elidableNs} — targets whose namespace object is not built, so this
+     *  module's `ns.foo` reads are rewritten to `foo`'s own binding. Empty when tree-shaking is off. */
+    elidableNs: Set<number>;
 };
 
 /** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
@@ -100,6 +103,9 @@ export type RenderCtx = {
     interopOwners: Map<number, InteropOwner>;
     warnings: string[];
     naming: NormalizedOutputNaming;
+    /** Targets whose namespace object is NOT built — {@link TreeshakeResult.elidableNs} narrowed to
+     *  those whose every consumer shares the target's chunk. See the note at its computation. */
+    elidedNs: Set<number>;
     /** `output.generatedCode.symbols` — whether a namespace object gets its `Symbol.toStringTag`
      *  stamp. rolldown's default is TRUE; Rollup's is false. See {@link OutputOptions.generatedCode}. */
     symbols: boolean;

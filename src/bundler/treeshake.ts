@@ -22,6 +22,15 @@ export type TreeshakeResult = {
      *  external import binding is needed iff its ref is here — lets us drop unused side-effect-free
      *  externals (e.g. the injected jsx runtime) via symbol liveness, not a JSX-specific AST walk. */
     liveRefs: Set<number>;
+    /** Targets whose namespace object need not EXIST: every appearance of every `import * as ns`
+     *  binding for them is a static member read, so each `ns.foo` can name `foo`'s own binding
+     *  instead. A strict subset of {@link nsUsage}'s keys — narrowing only needs the reads to be
+     *  statically known, while elision additionally needs the object to be unobservable, every read
+     *  to resolve to a real export, and no `import()` (whose result IS the namespace, at runtime).
+     *
+     *  rolldown decides the same thing with `ModuleNamespaceIncludedReason`, materialising only a
+     *  namespace that is "semantically observed". Measured on crashcat: 63 objects to rolldown's 0. */
+    elidableNs: Set<number>;
 };
 
 export type StatementInfo = {
@@ -284,6 +293,73 @@ function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynami
     return narrowable;
 }
 
+/** {@link TreeshakeResult.elidableNs}. Runs off the SAME accumulator narrowing uses, then removes
+ *  everything narrowing tolerates but elision cannot. */
+function computeElidableNs(graph: Graph, linked: Linked, narrowable: Map<number, Set<string>>): Set<number> {
+    // A dynamically imported module's namespace is a real runtime value — `import()` resolves TO it —
+    // so it must exist however statically its members are read. `hasDynamicLiteral` and not just
+    // `kind === 'dynamic'`: a specifier imported both ways is deduped into one static record and the
+    // dynamic-ness survives only on that flag.
+    const dynamicTargets = new Set<number>();
+    for (const mod of graph.modules)
+        for (const rec of mod.importRecords)
+            if ((rec.kind === 'dynamic' || rec.hasDynamicLiteral) && !rec.external && rec.resolved >= 0)
+                dynamicTargets.add(rec.resolved);
+
+    // Which modules namespace-import each target — the consumers whose scopes the rewritten names
+    // have to survive.
+    const consumers = new Map<number, Module[]>();
+    for (const mod of graph.modules)
+        for (const [, imp] of mod.namedImports) {
+            if (imp.name !== NAME_NAMESPACE) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (rec.external || rec.resolved < 0) continue;
+            const list = consumers.get(rec.resolved);
+            if (list === undefined) consumers.set(rec.resolved, [mod]);
+            else list.push(mod);
+        }
+
+    const out = new Set<number>();
+    for (const [target, members] of narrowable) {
+        if (dynamicTargets.has(target)) continue;
+        // A module that `export *`s from CommonJS has a surface that is only known once `__reExport`
+        // has run, so no member read can be resolved here.
+        if (linked.dynamicExports.has(target)) continue;
+        const map = linked.exportMaps.get(target);
+        if (map === undefined) continue;
+        // Every read must resolve to a real export. `ns.missing` has no binding to name, and
+        // silently emitting `undefined` would turn a diagnosable mistake into a wrong value.
+        let allResolve = true;
+        for (const name of members)
+            if (!map.has(name)) {
+                allResolve = false;
+                break;
+            }
+        if (!allResolve) continue;
+        // SHADOWING. `dep.mutate(…)` inside `function test(mutate){…}` cannot become `mutate(…)`:
+        // the parameter wins. An ordinary `import { mutate }` would not have this problem — the
+        // reference is in the graph before deconfliction, which renames one of the two — but this
+        // rewrite happens at EMIT time, after deconfliction has already run and cannot learn about
+        // it. So refuse the target outright when any consumer declares one of the read names
+        // anywhere, which is conservative and needs nothing from the renamer.
+        // Rollup's `argument-treeshaking-parameter-conflict` is exactly this shape, and it caught it.
+        let shadowed = false;
+        for (const mod of consumers.get(target) ?? []) {
+            for (const name of members) {
+                const nameId = mod.semantic.names.get(name);
+                if (nameId === undefined) continue;
+                if (mod.semantic.symbols.some((sym) => sym.nameId === nameId)) {
+                    shadowed = true;
+                    break;
+                }
+            }
+            if (shadowed) break;
+        }
+        if (!shadowed) out.add(target);
+    }
+    return out;
+}
+
 /** Aggregate how each dynamic-import target's resolved module is consumed, unioned across every
  *  `import()` site (in any module) that resolves to it. */
 function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; members: Set<string> }> {
@@ -340,6 +416,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     const dynUsage = computeDynamicUsage(graph);
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
     const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic);
+    const elidableNs = computeElidableNs(graph, linked, nsUsage);
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
@@ -562,5 +639,5 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped, nsUsage, deadDynamic, liveRefs };
+    return { live, dropped, nsUsage, deadDynamic, liveRefs, elidableNs };
 }

@@ -15,7 +15,8 @@ import {
     renderChunks,
 } from './generate/chunks.ts';
 import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
-import { externalKey, type Graph, type Linked, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types.ts';
+import { externalKey, type Graph, type Linked,
+    NAME_NAMESPACE, type ParseCache, type ParseStats, packRef, refMod, refSym } from './graph-types.ts';
 import { computeInteropOwners } from './init-obligations.ts';
 import { linkGraph } from './link.ts';
 import {
@@ -477,6 +478,39 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
     const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic);
+    // NAMESPACE ELISION, narrowed to what the chunk partition permits.
+    //
+    // `treeshake` proves the object is unobservable — every appearance of the binding is a static
+    // member read. That is necessary and not sufficient: eliding it changes what a chunk IMPORTS,
+    // from one namespace binding to the individual members, and the cross-chunk wiring has already
+    // run by the time the emitter sees any of this. A consumer in another chunk would have its
+    // `ns.foo` rewritten to a name nothing imported — `preserve-modules-namespace` caught exactly
+    // that, as a `ReferenceError` rather than a diff.
+    //
+    // So: elide only where every consumer sits in the target's own chunk, which is where no wiring is
+    // involved at all. That is the whole of a single-chunk bundle, which is the shape the size gap was
+    // measured on. Extending it across chunks means teaching `wireBind` to import the members instead
+    // — a separate change, with the wiring as its subject.
+    const elidedNs = new Set<number>();
+    if (shaken !== null)
+        for (const target of shaken.elidableNs) {
+            const home = chunkGraph.chunkByModule[target];
+            if (home < 0) continue;
+            let sameChunk = true;
+            for (const mod of graph.modules) {
+                if (chunkGraph.chunkByModule[mod.idx] === home) continue;
+                for (const [, imp] of mod.namedImports) {
+                    if (imp.name !== NAME_NAMESPACE) continue;
+                    const rec = mod.importRecords[imp.rec];
+                    if (!rec.external && rec.resolved === target) {
+                        sameChunk = false;
+                        break;
+                    }
+                }
+                if (!sameChunk) break;
+            }
+            if (sameChunk) elidedNs.add(target);
+        }
     // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
     // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
     // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the
@@ -531,6 +565,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 chunk,
                 chunkIdx: ci,
                 shaken,
+                elidedNs,
                 interopOwners,
                 warnings,
                 naming,

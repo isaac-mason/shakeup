@@ -133,7 +133,12 @@ describe('emit-layer glue respects minify.whitespace', () => {
             "import { one, two } from 'ext';",
             "import def from 'ext2';",
             "import * as ns from './lib.ts';",
+            // The namespace ESCAPES (`ns` exported as a value), which is what keeps an object to
+            // describe: a binding read only as `ns.member` is elided outright now — see
+            // `tst/namespace-elision.test.ts`. The padding this block pins is the object's, so the
+            // object has to exist for the assertions to mean anything.
             'export const out = one() + two() + def() + ns.a;',
+            'export const nsOut = ns;',
         ].join('\n'),
         '/lib.ts': 'export const a = 1;\nexport const b = 2;',
     };
@@ -187,12 +192,12 @@ describe('emit-layer glue respects minify.whitespace', () => {
         // The sourcemap suites never exercised `minify`, so this pairing was untested. Compacting the
         // glue moves COLUMNS only — if it ever added or dropped a line, the map would describe a
         // different number of generated lines than the code has and every segment below would shift.
-        const r = (await bundle({
+        const r = await bundle({
             entry: '/main.ts',
             fs: createMemoryFs(files),
             external: ['ext', 'ext2'],
             output: { minify: true, sourcemap: true },
-        }));
+        });
         // Read through the CHUNK, not a cast. This assertion previously went through
         // `as unknown as { code, map }`, which bypassed type checking entirely — so when the
         // deprecated `BundleResult.code`/`.map` aliases were removed, tsc flagged 319 sites and

@@ -104,11 +104,15 @@ describe('preserveModules: namespaces are native', () => {
 
 // The synthesized object is only NEEDED when there is no module boundary to hang a namespace on.
 describe('single-chunk bundles still synthesize a namespace object', () => {
+    // The namespace has to ESCAPE for there to be an object to describe: a binding whose every
+    // appearance is a static member read is elided outright now (`tst/namespace-elision.test.ts`),
+    // which is what rolldown does too. `export const all = ns` is the escape; the rest of the fixture
+    // is unchanged, so the shape assertions below still describe the object we build when we build one.
     it('builds the object inline when target and consumer share a chunk', async () => {
         const { chunks } = await build(
             {
                 '/a.js': 'export let v = 1;\nexport function bump(){ v = 2 }',
-                '/main.js': "import * as ns from './a.js';\nns.bump();\nexport const got = ns.v;",
+                '/main.js': "import * as ns from './a.js';\nns.bump();\nexport const got = ns.v;\nexport const all = ns;",
             },
             false,
         );

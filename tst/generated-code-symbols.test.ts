@@ -13,12 +13,15 @@ import { bundle } from '../src/bundler/bundle.ts';
 // rolldown's `module_finalizers/mod.rs:993`.
 const files: Record<string, string> = {
     '/dep.js': 'export const a = 1;\nexport const b = 2;\n',
-    '/main.js': "import * as ns from './dep.js';\nexport const got = ns.a + ns.b;\n",
+    // `ns` is exported as a VALUE so the namespace object exists at all: a binding whose every
+    // appearance is a static member read is elided, and then there is no object to stamp a tag on
+    // (see `tst/namespace-elision.test.ts`).
+    '/main.js': "import * as ns from './dep.js';\nexport const got = ns.a + ns.b;\nexport const all = ns;\n",
     // `export *` from CommonJS makes the surface unknowable statically, which is what routes the
     // namespace through `__exportAll` instead of an object literal.
     '/cjs.cjs': 'exports.x = 1;\n',
     '/mid.js': "export * from './cjs.cjs';\nexport const own = 3;\n",
-    '/mainCjs.js': "import * as ns from './mid.js';\nexport const got = ns.own;\n",
+    '/mainCjs.js': "import * as ns from './mid.js';\nexport const got = ns.own;\nexport const all = ns;\n",
 };
 const memFs = {
     read: (id: string) => files[id] ?? null,

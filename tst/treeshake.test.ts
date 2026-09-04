@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
 import { linkGraph } from '../src/bundler/link.ts';
-import { buildGraph } from '../src/bundler/scan.ts';
 import type { ModuleSideEffects } from '../src/bundler/plugin.ts';
+import { buildGraph } from '../src/bundler/scan.ts';
 import { treeshake } from '../src/bundler/treeshake.ts';
 
 const run = async (code: string): Promise<Record<string, unknown>> =>
@@ -28,7 +28,10 @@ describe('tree shaking', () => {
     };
 
     it('drops unused exports, locals, and transitive helpers of dead code', async () => {
-        const { chunks: [{ code }], shaken } = await build(files);
+        const {
+            chunks: [{ code }],
+            shaken,
+        } = await build(files);
         expect(code).not.toContain('DEAD_MARKER_EXPORT');
         expect(code).not.toContain('DEAD_MARKER_LOCAL');
         expect(code).not.toContain('DEAD_MARKER_CONST');
@@ -39,7 +42,10 @@ describe('tree shaking', () => {
     });
 
     it('treeshake: false keeps everything', async () => {
-        const { chunks: [{ code }], shaken } = await build(files, false);
+        const {
+            chunks: [{ code }],
+            shaken,
+        } = await build(files, false);
         expect(code).toContain('DEAD_MARKER_EXPORT');
         expect(shaken).toBeNull();
         const mod = await run(code);
@@ -47,7 +53,9 @@ describe('tree shaking', () => {
     });
 
     it('a wholly-dead module leaves no trace', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import { keep } from './used';", 'export const v = keep;'].join('\n'),
             '/used.ts': ["export { keep } from './deep';", 'export const DEAD_BARREL_ONLY = 1;'].join('\n'),
             '/deep.ts': 'export const keep = 7;',
@@ -56,7 +64,9 @@ describe('tree shaking', () => {
     });
 
     it('side effects are preserved even in otherwise-dead modules', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': [
                 "import './effects';",
                 "import { registry } from './registry';",
@@ -77,7 +87,9 @@ describe('tree shaking', () => {
     });
 
     it('dead enums vanish including their lowering; live enums stay', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import { Live } from './enums';", 'export const kind = Live[Live.B];'].join('\n'),
             '/enums.ts': ['export enum Live { A, B }', 'export enum DeadEnum { X = 1 }'].join('\n'),
         });
@@ -87,7 +99,9 @@ describe('tree shaking', () => {
     });
 
     it('impure top-level initializers are conservatively kept', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import { pure } from './lib';", 'export const out = pure;'].join('\n'),
             '/lib.ts': ['export const pure = 1;', 'const kept = Math.max(1, 2);'].join('\n'),
         });
@@ -96,19 +110,27 @@ describe('tree shaking', () => {
         expect(mod.out).toBe(1);
     });
 
-    it('narrows a namespace object to the members actually read', async () => {
-        const { chunks: [{ code }] } = await build({
+    // The object is now ELIDED outright when nothing can observe it, so the members-actually-read
+    // property is stronger than it was: the unread member is not in the output at all, and neither is
+    // the namespace. Narrowing still governs where elision cannot reach — see the dynamic-import case
+    // below, and `tst/namespace-elision.test.ts` for the elision rule itself.
+    it('drops a member no consumer reads, and builds no namespace at all', async () => {
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import * as ops from './ops';", 'export const r = ops.a();'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
         const mod = await run(code);
         expect(mod.r as number).toBe(1);
-        expect(code).toContain('a:');
-        expect(code).not.toContain('b:');
+        expect(code).not.toContain('_ns');
+        expect(code).not.toContain('() => 2');
     });
 
     it('keeps the whole namespace surface when the namespace escapes', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import * as ops from './ops';", 'export const ns = ops;'].join('\n'),
             '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
         });
@@ -120,7 +142,9 @@ describe('tree shaking', () => {
     });
 
     it('unions member reads across multiple namespace importers', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': [
                 "import * as ops from './ops';",
                 "import { viaB } from './other';",
@@ -131,13 +155,27 @@ describe('tree shaking', () => {
         });
         const mod = await run(code);
         expect(mod.r as number).toBe(3);
-        expect(code).toContain('a:');
-        expect(code).toContain('b:');
-        expect(code).not.toContain('c:'); // c read by nobody
+        expect(code).not.toContain('_ns');
+        expect(code).not.toContain('() => 3'); // c read by nobody
+    });
+
+    it('still NARROWS where the object has to exist — a dynamic target keeps a real namespace', async () => {
+        // `import()` resolves TO the namespace, so it is a runtime value and cannot be elided. The
+        // members-actually-read narrowing is what applies instead, and this is the case that keeps it
+        // covered now that elision handles the static one.
+        const { chunks } = await build({
+            '/main.ts': ["export const p = import('./ops').then((m) => m.a());"].join('\n'),
+            '/ops.ts': ['export const a = () => 1;', 'export const b = () => 2;'].join('\n'),
+        });
+        const all = chunks.map((c) => c.code).join('\n');
+        expect(all).toContain('import(');
+        expect(all).not.toContain('() => 2');
     });
 
     it('keeps the whole surface when the module is also dynamically imported', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': [
                 "import * as ops from './ops';",
                 'export const r = ops.a();',
@@ -152,7 +190,9 @@ describe('tree shaking', () => {
     });
 
     it('keeps the whole surface when re-exported as a namespace', async () => {
-        const { chunks: [{ code }] } = await build({
+        const {
+            chunks: [{ code }],
+        } = await build({
             '/main.ts': ["import * as ops from './ops';", "export * as reexport from './ops';", 'export const r = ops.a();'].join(
                 '\n',
             ),

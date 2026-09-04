@@ -15,6 +15,7 @@ import {
     type ImportRecord,
     isEsmFormat,
     type Linked,
+    NAME_NAMESPACE,
     packRef,
     refMod,
     refSym,
@@ -204,11 +205,43 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunkGraph } = ctx;
     const map = new Map<Node, string>();
-    // Only `import()` and `new URL(...)` produce an override, and the scan already recorded both as
-    // import records — so a module with neither cannot contribute one, and the whole-program walk
-    // below is skipped. Checking is O(records).
-    if (!mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)) return map;
+    // `import * as ns` bindings in THIS module whose target's namespace object is being elided
+    // (`TreeshakeResult.elidableNs`): every `ns.foo` becomes `foo`'s own binding. Built first because
+    // it has its own reason to walk — a module can have namespace imports and no `import()` at all.
+    const elidedNs = new Map<number, number>(); // local ns symbol → target module idx
+    if (ctx.elidableNs.size > 0)
+        for (const [localSym, imp] of mod.namedImports) {
+            if (imp.name !== NAME_NAMESPACE) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (rec.external || rec.resolved < 0) continue;
+            if (ctx.elidableNs.has(rec.resolved)) elidedNs.set(localSym, rec.resolved);
+        }
+    // Only `import()` and `new URL(...)` produce the OTHER overrides, and the scan already recorded
+    // both as import records — so a module with neither, and no elided namespace, cannot contribute
+    // one and the whole-program walk is skipped. Checking is O(records).
+    if (
+        elidedNs.size === 0 &&
+        !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)
+    )
+        return map;
     walk(mod.program, (n) => {
+        if (elidedNs.size > 0 && n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
+            const target = elidedNs.get(symbolOf(mod.semantic, n.data.object));
+            if (target !== undefined) {
+                // `analyzeNsUsage` already proved every appearance of this binding is exactly this
+                // shape, and `computeElidableNs` proved every name resolves — so a miss here is a
+                // bug in one of them, and leaving the node alone would emit a reference to a
+                // namespace that no longer exists. Fail loudly instead.
+                const bind = ctx.linked.exportMaps.get(target)?.get(n.data.property.name as string);
+                const local = bind === undefined ? null : nameOfBind(ctx.linked, bind, ctx.chunk);
+                if (local === null)
+                    throw new Error(
+                        `namespace elision: ${mod.id} reads '${n.data.property.name}' off an elided namespace with no binding`,
+                    );
+                map.set(n, local);
+                return;
+            }
+        }
         if (n.type === N.ImportExpression) {
             const source = n.data.source;
             if (source.type === N.StringLiteral) {
@@ -486,7 +519,17 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         {
             // Named `emit`, not `ctx`: the enclosing function's parameter is the per-CHUNK
             // `RenderCtx`, and the two share six field names. A shadow here would resolve silently.
-            const emit: EmitCtx = { linked, mod, warnings, live, chunk, chunkGraph, pathToChunk, interopOwners };
+            const emit: EmitCtx = {
+                linked,
+                mod,
+                warnings,
+                live,
+                chunk,
+                chunkGraph,
+                pathToChunk,
+                interopOwners,
+                elidableNs: ctx.elidedNs,
+            };
             trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(emit);
             const initCalls = collectInitCalls(emit);
@@ -624,7 +667,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
-        if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx)) {
+        if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx) && !ctx.elidedNs.has(idx)) {
             // `preDeclared` only for the UNSPLIT lazy form, where the binding is hoisted above the
             // closure and assigned inside it. A split module keeps its namespace at top level.
             nsCode = renderNamespaceObject(
