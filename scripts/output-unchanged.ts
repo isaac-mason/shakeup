@@ -33,6 +33,12 @@ const THREE = join(root, 'llm/spikes/node_modules/three/build/three.core.js');
 // rolldown and esbuild in `pnpm standing`.
 const CONSUMER_SRC = join(root, 'scripts/corpora/three-consumer.js');
 const CONSUMER = join(root, 'llm/spikes/three-consumer-entry.js');
+// MULTI-CHUNK corpus. The other three corpora build to ONE chunk each — measured, not assumed — so
+// the entire chunk-graph engine (colouring, the already-loaded optimisation, facades, cross-chunk
+// export wiring, chunk file naming) had no byte-level gate. This one has two dynamic branches, a
+// module shared by both, a module that is both statically imported and a dynamic target, and a
+// dynamic import nested inside a dynamic chunk. In-tree, so it never SKIPs.
+const SPLIT = join(root, 'scripts/corpora/split/main.js');
 if (existsSync(CONSUMER_SRC) && existsSync(dirname(THREE))) writeFileSync(CONSUMER, readFileSync(CONSUMER_SRC, 'utf8'));
 const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
     {
@@ -58,17 +64,42 @@ const CASES: { name: string; opts: () => Record<string, unknown> }[] = [
     { name: 'three-consumer minify', opts: () => ({ entry: CONSUMER, fs: diskFs, output: { minify: true } }) },
     { name: 'three-consumer plain', opts: () => ({ entry: CONSUMER, fs: diskFs, output: {} }) },
     { name: 'three plain', opts: () => ({ entry: THREE, fs: diskFs, output: {} }) },
+    { name: 'split plain', opts: () => ({ entry: SPLIT, fs: diskFs, output: {} }) },
+    { name: 'split minify', opts: () => ({ entry: SPLIT, fs: diskFs, output: { minify: true } }) },
+    {
+        // `manualChunks` forces a partition the colouring would not choose, which is the other half of
+        // the engine: a group that cuts across the reachability colours.
+        name: 'split manualChunks',
+        opts: () => ({
+            entry: SPLIT,
+            fs: diskFs,
+            output: { manualChunks: { vendor: [join(root, 'scripts/corpora/split/util.js')] } },
+        }),
+    },
 ];
 const h = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);
 
-/** The deprecated `BundleResult.code` alias was removed; the entry chunk's code is the replacement.
- *  Like `entryOf` below, this script loads TWO layouts at once — the working tree and an archived git
- *  ref — so it must read a result from either era. A ref older than that removal still returns `code`,
- *  and reading only `chunks[0]` there would compare `undefined` against real output and report a
- *  spurious CHANGED (or, if both sides went undefined, a spurious IDENTICAL — which is worse). */
+/**
+ * EVERY chunk, not just the entry's.
+ *
+ * This read `chunks[0].code`, which was harmless while every corpus produced one chunk and silently
+ * wrong the moment one did not: a change that repartitioned the non-entry chunks, renamed them, or
+ * moved a binding between them compared byte-identical. File NAMES are included deliberately — they
+ * carry the content hash, so a chunking change shows up here even when the entry text is untouched.
+ *
+ * Like `entryOf` below, this script loads TWO layouts at once — the working tree and an archived git
+ * ref — so it must read a result from either era. A ref from before the `BundleResult.code` alias was
+ * removed still returns `code`, and reading only `chunks` there would compare `''` against real
+ * output and report a spurious CHANGED (or, if both sides went empty, a spurious IDENTICAL — which is
+ * worse).
+ */
 const entryCodeOf = (r: unknown): string => {
-    const o = r as { chunks?: { code?: string }[]; code?: string };
-    return o.chunks?.[0]?.code ?? o.code ?? '';
+    const o = r as { chunks?: { fileName?: string; code?: string }[]; code?: string };
+    if (o.chunks === undefined) return o.code ?? '';
+    return [...o.chunks]
+        .sort((a, b) => (a.fileName ?? '').localeCompare(b.fileName ?? ''))
+        .map((c) => `// ${c.fileName ?? '?'}\n${c.code ?? ''}`)
+        .join('\n');
 };
 
 /** `bundle.ts` moved under `src/bundler/` — a ref from before that move still has it at the old
