@@ -111,6 +111,17 @@ function summarize(fn: Node, resolve: (sym: number) => number | null): Summary {
                 s.impure = true;
                 return false;
             }
+            // A LOOP OVER A VALUE runs code the body cannot account for, however empty the body is.
+            // `for (v of xs)` calls `xs[Symbol.iterator]()` and then `.next()` until done — both
+            // ordinary user code, and Rollup's `preserve-for-of-iterable` is an iterator whose
+            // `next()` mutates a module binding. `for await` is the same node. `for...in` enumerates
+            // own keys, which a Proxy's `ownKeys` trap observes; that is the same conservatism this
+            // file already applies to every member access.
+            //
+            // A plain `for (;;)` and a `while` are NOT here: their head is an ordinary expression the
+            // walk already judges, so they need no special case.
+            case N.ForOfStatement:
+            case N.ForInStatement:
             // Anything that can throw or run unknown code.
             case N.ThrowStatement:
             case N.NewExpression:
