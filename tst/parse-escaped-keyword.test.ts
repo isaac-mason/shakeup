@@ -252,3 +252,25 @@ describe('a lexical declaration in a single-statement context', () => {
         expect(errs(src)).toEqual([]);
     });
 });
+
+describe('a private field on `super`, and a computed key without a value', () => {
+    const errs = (src: string) => parse(src, { ts: false, jsx: false }).errors.map((e) => e.msg);
+
+    it('`super.#x` is a SyntaxError', () => {
+        // A private name resolves through the class's private environment, which a `super` reference
+        // does not carry.
+        expect(errs('class C { m(){ super.#x; } }')).toEqual(['Private fields cannot be accessed on super']);
+        expect(errs('class C { #x; m(){ return this.#x; } }')).toEqual([]);
+        expect(errs('class C { m(){ return super.x; } }')).toEqual([]);
+    });
+
+    it.each(['({ [b] });', '({ a, [b] });'])('a computed key has no shorthand form: %s', (src) => {
+        // `({ [b] })` is not `({ [b]: b })` — the shorthand takes its VALUE from the name, and a
+        // computed key has no name.
+        expect(errs(src)).not.toEqual([]);
+    });
+
+    it.each(['({ a, [b]: c });', '({ [a]: 1, [b]: 2 });', '({ a, b });'])('accepts %s', (src) => {
+        expect(errs(src)).toEqual([]);
+    });
+});

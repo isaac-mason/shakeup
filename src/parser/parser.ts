@@ -1022,6 +1022,10 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             nextToken(state);
             if (state.tok === T_PRIVATE) {
                 const prop = parsePrivate(state);
+                // `super.#x` is a SyntaxError: a private name resolves through the class's private
+                // environment, which a `super` reference does not carry. node agrees.
+
+                if (expr.type === N.Super) raiseAt(state, expr.start, ParseErrorCode.SuperPrivateField);
                 expr = create.PrivateFieldExpression(expr.start, prop.end, 0, expr, prop);
             } else {
                 const prop = parseNameAsIdent(state, R_NAME);
@@ -1523,6 +1527,10 @@ function parseObjectMember(state: ParserState): Node {
         const value = parseAssign(state);
         return create.ObjectProperty(start, value.end, flags, key, value);
     }
+    // A COMPUTED key has no shorthand form — `({ [b] })` is not `({ [b]: b })`, because the shorthand
+    // takes its VALUE from the name and a computed key has no name. Both oracles demand the colon.
+
+    if ((flags & FL.COMPUTED) !== 0) expectP(state, P.COLON, "':'");
     checkShorthandName(state, key);
     const shorthandRef = identNamed(state, R_REF, key.start, key.end, key.name);
     if (isP(state, P.EQ)) {
