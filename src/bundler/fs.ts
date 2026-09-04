@@ -11,6 +11,16 @@ export type MaybePromise<T> = T | Promise<T>;
 export type Fs = {
     read(id: string): MaybePromise<string | null>;
     exists(id: string): MaybePromise<boolean>;
+    /** Is this path a FILE (as opposed to a directory)? The resolver's "load as file" step needs the
+     *  distinction: node's algorithm tries X as a file BEFORE X.js and X/index.js, so a directory
+     *  named `one` sitting next to `one.js` must not answer `import './one'`. Both oracles carry the
+     *  bit — Rollup's `findFile` checks `stats.isFile()` on an `lstat`, and oxc-resolver's
+     *  `FileSystem::metadata` returns `FileMetadata { is_file, is_dir, is_symlink }`.
+     *
+     *  Optional, and absent means `exists` answers for it. That is exactly right for an Fs with no
+     *  directories at all, which is every in-memory one; it is wrong for a real filesystem, so
+     *  {@link createNodeFs} implements it. */
+    isFile?(id: string): MaybePromise<boolean>;
     realpath?(id: string): MaybePromise<string>;
     /** Raw bytes, for the module types whose loader cannot go through text: `base64`, `binary` and
      *  `dataurl`. rolldown splits its read the same way — `StrOrBytes::Bytes` for exactly those
@@ -19,6 +29,13 @@ export type Fs = {
      *  `read`, which is right for text-shaped input and lossy for anything else. */
     readBytes?(id: string): MaybePromise<Uint8Array | null>;
 };
+
+/** `Fs.isFile` where the Fs has it, `Fs.exists` where it does not — see {@link Fs.isFile}. Every
+ *  "load as file" probe in either resolver goes through this, because node's algorithm tries X as a
+ *  FILE before X.js and X/index.js and a bare `exists` cannot tell a directory apart. */
+export async function fileExists(fs: Fs, id: string): Promise<boolean> {
+    return fs.isFile === undefined ? await fs.exists(id) : await fs.isFile(id);
+}
 
 /** In-memory Fs over a map of id -> source; the browser default. A `Uint8Array` value is a binary
  *  file: `read` decodes it as UTF-8 and `readBytes` hands it back untouched. */
@@ -30,6 +47,8 @@ export function createMemoryFs(files: Map<string, string | Uint8Array> | Record<
             return v === undefined ? null : typeof v === 'string' ? v : new TextDecoder().decode(v);
         },
         exists: (id) => map.has(id),
+        // Every entry is a file — there are no directories in a memory fs.
+        isFile: (id) => map.has(id),
         readBytes: (id) => {
             const v = map.get(id);
             return v === undefined ? null : typeof v === 'string' ? new TextEncoder().encode(v) : v;

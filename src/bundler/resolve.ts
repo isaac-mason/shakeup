@@ -1,5 +1,5 @@
 import type { CompressMode } from '../passes/compress/index.ts';
-import { dirnameOf, type Fs, joinPath, type MaybePromise } from './fs.ts';
+import { dirnameOf, type Fs, fileExists, joinPath, type MaybePromise } from './fs.ts';
 import type { ParseCache } from './graph-types.ts';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
 import type { ModuleType, Plugin } from './plugin.ts';
@@ -238,20 +238,23 @@ async function defaultResolve(
             const stem = base.slice(0, base.length - ext.length);
             for (const alt of alts) {
                 const candidate = stem + alt;
-                if (await fs.exists(candidate)) return candidate;
+                if (await fileExists(fs, candidate)) return candidate;
             }
         }
     }
 
-    // Direct hit, then each extension, then directory-index (mainFiles × extensions).
-    if (await fs.exists(base)) return base;
+    // Direct hit, then each extension, then directory-index (mainFiles × extensions) — node's
+    // LOAD_AS_FILE before LOAD_AS_DIRECTORY. The direct hit must be a FILE: `consistent-renaming-c`
+    // has a directory `one/` beside a file `one.js`, and an `exists` that answers for directories
+    // resolved `./one` to the directory, which then could not be loaded.
+    if (await fileExists(fs, base)) return base;
     for (const ext of resolve.extensions) {
-        if (await fs.exists(base + ext)) return base + ext;
+        if (await fileExists(fs, base + ext)) return base + ext;
     }
     for (const main of resolve.mainFiles) {
         for (const ext of resolve.extensions) {
             const candidate = `${base}/${main}${ext}`;
-            if (await fs.exists(candidate)) return candidate;
+            if (await fileExists(fs, candidate)) return candidate;
         }
     }
     return null;

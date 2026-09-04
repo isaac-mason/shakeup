@@ -1,4 +1,4 @@
-import { existsSync, watch as fsWatch, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, watch as fsWatch, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { type BundleOptions, type BundleResult, bundle, createBuildContext } from './bundler/bundle.ts';
 import { type Fs, normalizePath } from './bundler/fs.ts';
@@ -15,6 +15,13 @@ export function createNodeFs(): Fs {
             }
         },
         exists: (id) => existsSync(id),
+        isFile: (id) => {
+            try {
+                return statSync(id).isFile();
+            } catch {
+                return false;
+            }
+        },
         readBytes: (id) => {
             try {
                 // `readFileSync` with no encoding hands back a Buffer, which IS a Uint8Array — but

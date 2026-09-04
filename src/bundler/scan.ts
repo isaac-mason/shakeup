@@ -836,15 +836,31 @@ function memoBuildFs(fs: Fs): Fs {
     // Cache the MaybePromise: an async fs's Promise is cached + shared, so repeat/concurrent probes
     // of the same path await ONE underlying call. A sync fs caches the plain value as before.
     const exists = new Map<string, MaybePromise<boolean>>();
+    const isFileCache = fs.isFile === undefined ? undefined : new Map<string, MaybePromise<boolean>>();
     const realpath = fs.realpath === undefined ? undefined : new Map<string, MaybePromise<string>>();
     const rp = fs.realpath;
     // Every capability of the wrapped fs has to be forwarded, INCLUDING the optional ones: this
     // wrapper silently dropped `readBytes`, so a `binary`/`dataurl` module read back the lossy
     // UTF-8 decoding of its own bytes and every byte above 0x7F became U+FFFD.
     const readBytes = fs.readBytes;
+    const isFile = fs.isFile;
     return {
         read: (id) => fs.read(id),
         readBytes: readBytes === undefined ? undefined : (id) => readBytes.call(fs, id),
+        // `isFile` is probed on the same candidate paths as `exists`, so it is memoized the same way.
+        // It is also the SECOND optional capability this wrapper has silently dropped — see the note
+        // above about `readBytes`. Anything added to `Fs` has to be forwarded here.
+        isFile:
+            isFile === undefined
+                ? undefined
+                : (id) => {
+                      let v = isFileCache!.get(id);
+                      if (v === undefined) {
+                          v = isFile.call(fs, id);
+                          isFileCache!.set(id, v);
+                      }
+                      return v;
+                  },
         exists: (id) => {
             let v = exists.get(id);
             if (v === undefined) {

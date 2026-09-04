@@ -1,4 +1,4 @@
-import { dirnameOf, type Fs, joinPath, normalizePath } from './fs.ts';
+import { dirnameOf, type Fs, fileExists, joinPath, normalizePath } from './fs.ts';
 import type { ModuleDefFormat } from './graph-types.ts';
 
 /** The minimal context the resolver needs: a diagnostics sink. */
@@ -58,7 +58,7 @@ type PackageJson = {
  *  `dist/a.css`). oxc-resolver implements this in `PackageJson::check_side_effects_for`, which is not
  *  vendored under `llm/libs`, so this follows the spec rather than that source — hence the tests. */
 function sideEffectGlobMatches(pattern: string, relPath: string): boolean {
-    let pat = pattern.startsWith('./') ? pattern.slice(2) : pattern;
+    const pat = pattern.startsWith('./') ? pattern.slice(2) : pattern;
     // A bare pattern (no separator) matches the basename at any depth.
     const target = pat.includes('/') ? relPath : baseName(relPath);
     let re = '';
@@ -87,7 +87,10 @@ function sideEffectGlobMatches(pattern: string, relPath: string): boolean {
  *  Mirrors oxc-resolver's per-module check: the path is taken RELATIVE TO THE PACKAGE DIRECTORY
  *  (rolldown `ecma_module_view_factory.rs:237` computes it against the package.json's realpath
  *  parent for exactly this reason). */
-export function packageSideEffectsFor(pkg: { dir: string; sideEffects: boolean | string[] | undefined }, id: string): boolean | undefined {
+export function packageSideEffectsFor(
+    pkg: { dir: string; sideEffects: boolean | string[] | undefined },
+    id: string,
+): boolean | undefined {
     const se = pkg.sideEffects;
     if (se === undefined) return undefined;
     if (typeof se === 'boolean') return se;
@@ -457,10 +460,13 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
         return pkg;
     };
 
+    // node's LOAD_AS_FILE: X as a FILE first, then X + each extension. The file test matters — a
+    // directory `one/` beside a file `one.js` must not answer `import './one'`, which is
+    // `consistent-renaming-c`. See {@link Fs.isFile}.
     const loadAsFile = async (path: string): Promise<string | null> => {
-        if (await fs.exists(path)) return path;
+        if (await fileExists(fs, path)) return path;
         for (const ext of extensions) {
-            if (await fs.exists(path + ext)) return path + ext;
+            if (await fileExists(fs, path + ext)) return path + ext;
         }
         return null;
     };
@@ -468,7 +474,7 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
     const loadAsIndex = async (dir: string): Promise<string | null> => {
         for (const ext of extensions) {
             const cand = `${dir}/index${ext}`;
-            if (await fs.exists(cand)) return cand;
+            if (await fileExists(fs, cand)) return cand;
         }
         return null;
     };
@@ -534,7 +540,7 @@ export function createNodeResolver(options: NodeResolverOptions): NodeResolver {
     ): Promise<string | null> => {
         switch (r.status) {
             case 'exact': {
-                if (await fs.exists(r.value)) return r.value;
+                if (await fileExists(fs, r.value)) return r.value;
                 warn(ctx, spec, `The module "${relativeForMsg(pkg, r.value)}" was not found on the file system`);
                 return null;
             }

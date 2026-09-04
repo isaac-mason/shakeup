@@ -79,6 +79,8 @@ const ONLY = onlyIdx >= 0 ? args[onlyIdx + 1] : null;
 const diskFs = {
     read: (id: string) => (existsSync(id) && statSync(id).isFile() ? readFileSync(id, 'utf8') : null),
     exists: (id: string) => existsSync(id),
+    // A directory must not answer `import './one'` — see `Fs.isFile`.
+    isFile: (id: string) => existsSync(id) && statSync(id).isFile(),
 };
 
 type Config = {

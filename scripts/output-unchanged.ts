@@ -13,7 +13,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -22,7 +22,11 @@ const root = join(import.meta.dirname, '..');
 const dir = mkdtempSync(join(tmpdir(), `shakeup-${ref.replace(/[^\w]/g, '')}-`));
 execFileSync('bash', ['-c', `git -C ${root} archive ${ref} src | tar -x -C ${dir}`]);
 
-const diskFs = { read: (i: string) => (existsSync(i) ? readFileSync(i, 'utf8') : null), exists: (i: string) => existsSync(i) };
+const diskFs = {
+    read: (i: string) => (existsSync(i) ? readFileSync(i, 'utf8') : null),
+    exists: (i: string) => existsSync(i),
+    isFile: (i: string) => existsSync(i) && statSync(i).isFile(),
+};
 const CC = '/Users/isaacmason/Development/crashcat/src/index.ts';
 const THREE = join(root, 'llm/spikes/node_modules/three/build/three.core.js');
 
