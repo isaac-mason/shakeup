@@ -1,5 +1,5 @@
 import type { Graph, ImportBind, Linked, Module } from './graph-types.ts';
-import { isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
+import { emittedSpecifier, isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
 
 type LinkCtx = {
     graph: Graph;
@@ -24,7 +24,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
     if (exp !== undefined) {
         if (exp.rec >= 0) {
             const rec = module.importRecords[exp.rec];
-            if (rec.external) return { kind: 'external', specifier: rec.specifier, name: exp.sourceName };
+            if (rec.external) return { kind: 'external', specifier: emittedSpecifier(rec), name: exp.sourceName };
             const target = graph.modules[rec.resolved];
             // A one-statement re-export FROM a wrapped CommonJS module — `export { v } from './d.cjs'`
             // (and `export * as ns from`). Recursing would look for a named export the CJS module
@@ -87,7 +87,7 @@ function matchImport(ctx: LinkCtx, module: Module, name: string, seen: Set<numbe
         for (const recIdx of module.starExports) {
             const rec = module.importRecords[recIdx];
             if (rec.external) {
-                externalFallback ??= { kind: 'external', specifier: rec.specifier, name };
+                externalFallback ??= { kind: 'external', specifier: emittedSpecifier(rec), name };
                 continue;
             }
             if (ctx.linked.cjsWrap.has(rec.resolved)) {
@@ -413,7 +413,8 @@ export function linkGraph(graph: Graph): Linked {
 
     for (const mod of graph.modules) {
         for (const rec of mod.importRecords) {
-            if (rec.external && rec.attributes !== undefined) linked.externalAttributes.set(rec.specifier, rec.attributes);
+            if (rec.external && rec.attributes !== undefined)
+                linked.externalAttributes.set(emittedSpecifier(rec), rec.attributes);
         }
     }
 
@@ -521,7 +522,7 @@ export function linkGraph(graph: Graph): Linked {
             const rec = mod.importRecords[imp.rec];
             let bind: ImportBind;
             if (rec.external) {
-                bind = { kind: 'external', specifier: rec.specifier, name: imp.name };
+                bind = { kind: 'external', specifier: emittedSpecifier(rec), name: imp.name };
             } else if (ctx.linked.cjsWrap.has(rec.resolved)) {
                 // A wrapped CommonJS target: `import * as ns` gets the whole interop namespace,
                 // every other form a member read off it. `default` included — `__toESM` synthesizes

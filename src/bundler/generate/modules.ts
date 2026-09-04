@@ -16,6 +16,7 @@ import type { Mappings } from '../../util/sourcemap.ts';
 import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
 import type { Chunk } from '../chunk-graph.ts';
 import {
+    emittedSpecifier,
     type Graph,
     type ImportBind,
     type ImportRecord,
@@ -287,6 +288,14 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
             if (source.type === N.StringLiteral) {
                 const spec = mod.source.slice(source.start + 1, source.end - 1);
                 const rec = mod.importRecords.find((r) => r.specifier === spec);
+                // An EXTERNAL dynamic import keeps its `import()`, but under the id the resolution
+                // gave it — `resolveDynamicImport` returning `'asdf'` for `'./asdf'` has to emit
+                // `import('asdf')`, or the runtime resolves the original relative path.
+                if (rec !== undefined && rec.external) {
+                    const emitted = emittedSpecifier(rec);
+                    if (emitted !== spec) map.set(source, `'${emitted}'`);
+                    return;
+                }
                 if (rec !== undefined && !rec.external && rec.resolved >= 0) {
                     // Through the FACADE when the target has one — `chunkByModule` names the chunk
                     // that HOLDS the module, which for a faced dynamic entry exports more than the

@@ -1038,7 +1038,16 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         extra: ResolveIdExtra,
         skipped: readonly ResolveSkip[] = [],
     ): Promise<string | false | null> => {
-        const hit = await runResolveId(pipe, ctxFor, specifier, importer, extra, skipped);
+        // A DYNAMIC import tries `resolveDynamicImport` first and falls through to the ordinary
+        // chain when every hook declines. rolldown's `resolve_id_with_plugins` has exactly this
+        // shape — `if matches!(import_kind, ImportKind::DynamicImport) { if let Some(r) =
+        // plugin_driver.resolve_dynamic_import(...) { return … } }` before the `resolve_id` call —
+        // and Rollup's hook is `first` with the same fallback.
+        const dynamicHit =
+            extra.kind === 'dynamic-import' && pipe.resolveDynamicImport.length > 0
+                ? await runResolveId(pipe, ctxFor, specifier, importer, extra, skipped, 'resolveDynamicImport')
+                : null;
+        const hit = dynamicHit ?? (await runResolveId(pipe, ctxFor, specifier, importer, extra, skipped));
         if (hit === false) {
             pluginExternals.add(specifier);
             return false;
@@ -1749,7 +1758,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             }
             if (isExternal(options, rec.specifier, id) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
-                rec.specifier = noteExternal(rec.specifier, id, rec.kind);
+                rec.externalSpecifier = noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             const resolved = await resolveFn(rec.specifier, id, {
@@ -1758,7 +1767,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             });
             if (resolved === false || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
-                rec.specifier = noteExternal(rec.specifier, id, rec.kind);
+                rec.externalSpecifier = noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             if (resolved === null) {

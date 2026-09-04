@@ -242,6 +242,15 @@ export type Plugin = {
     resolveId?: WithFilter<
         (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
     >;
+    /** Resolve a DYNAMIC import (`import('x')`). Tried before {@link Plugin.resolveId} and falling
+     *  through to it when every hook declines — rolldown's `resolve_id_with_plugins` runs
+     *  `plugin_driver.resolve_dynamic_import(...)` first for `ImportKind::DynamicImport` and only
+     *  then the ordinary chain, and Rollup's hook is `first` with the same fallback. Same result
+     *  shape as `resolveId`. rolldown declines only the variant that hands the hook an AST node for a
+     *  non-literal specifier; the string form is supported and this is it. */
+    resolveDynamicImport?: WithFilter<
+        (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+    >;
     load?: WithFilter<(this: PluginCtx, id: string) => MaybePromise<LoadResult>>;
     transform?: WithFilter<(this: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
     moduleParsed?: (this: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
@@ -294,6 +303,7 @@ export type CtxFor = (pluginIdx: number | null, skipped: readonly ResolveSkip[])
 export type Pipeline = {
     buildStart: Compiled<NonNullable<Plugin['buildStart']>>[];
     resolveId: Compiled<Extract<NonNullable<Plugin['resolveId']>, (...a: never[]) => unknown>>[];
+    resolveDynamicImport: Compiled<Extract<NonNullable<Plugin['resolveDynamicImport']>, (...a: never[]) => unknown>>[];
     load: Compiled<Extract<NonNullable<Plugin['load']>, (...a: never[]) => unknown>>[];
     transform: Compiled<Extract<NonNullable<Plugin['transform']>, (...a: never[]) => unknown>>[];
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
@@ -382,6 +392,7 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
     const pipeline: Pipeline = {
         buildStart: [],
         resolveId: [],
+        resolveDynamicImport: [],
         load: [],
         transform: [],
         generateBundle: [],
@@ -394,6 +405,8 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         if (bs !== null) pipeline.buildStart.push(bs);
         const ri = normalize(p.name, pluginIdx, p.resolveId);
         if (ri !== null) pipeline.resolveId.push(ri as Pipeline['resolveId'][number]);
+        const rd = normalize(p.name, pluginIdx, p.resolveDynamicImport);
+        if (rd !== null) pipeline.resolveDynamicImport.push(rd as Pipeline['resolveId'][number]);
         const ld = normalize(p.name, pluginIdx, p.load);
         if (ld !== null) pipeline.load.push(ld as Pipeline['load'][number]);
         const tr = normalize(p.name, pluginIdx, p.transform);
@@ -427,8 +440,11 @@ export function runResolveId(
     extra: ResolveIdExtra = DEFAULT_RESOLVE_EXTRA,
     /** The `skipSelf` set in force, accumulated down a chain of nested `this.resolve` calls. */
     skipped: readonly ResolveSkip[] = EMPTY_SKIPS,
+    /** Which chain to run. `resolveDynamicImport` is tried first for a dynamic import and falls
+     *  through to `resolveId` when every hook declines — see {@link Plugin.resolveDynamicImport}. */
+    which: 'resolveId' | 'resolveDynamicImport' = 'resolveId',
 ): MaybePromise<ResolveIdResult> {
-    const hooks = pipeline.resolveId;
+    const hooks = pipeline[which];
     let i = 0;
     const step = (): MaybePromise<ResolveIdResult> => {
         while (i < hooks.length) {

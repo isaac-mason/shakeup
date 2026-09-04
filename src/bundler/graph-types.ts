@@ -8,6 +8,11 @@ import type { CompressMode } from '../passes/compress/index.ts';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin.ts';
 import type { Platform } from './resolve.ts';
 
+/** The id an import is EMITTED under: the resolution's id where one renamed it, else the specifier
+ *  as written. See {@link ImportRecord.externalSpecifier}. */
+export const emittedSpecifier = (rec: { specifier: string; externalSpecifier?: string }): string =>
+    rec.externalSpecifier ?? rec.specifier;
+
 /** Imported name for `import * as ns` / `export * as ns`. */
 export const NAME_NAMESPACE = '*';
 
@@ -59,7 +64,20 @@ export type ExportsKind = 'esm' | 'commonjs' | 'none';
 
 /** A resolved edge to another module (deduped per specifier for `static`/`dynamic`). */
 export type ImportRecord = {
+    /** The specifier AS WRITTEN in the source. An identity: emit looks records up by the text it
+     *  reads out of the AST (`mod.importRecords.find((r) => r.specifier === spec)`), so this must
+     *  keep matching the source. The id an EXTERNAL is imported UNDER can differ — see
+     *  {@link externalSpecifier}. */
     specifier: string;
+    /** For an EXTERNAL record whose resolution renamed it, the id to emit the import under.
+     *  `resolveId` may map `'./dep.js'` to `'path'` (Rollup's `external-normalization`), and the
+     *  bundle then has to say `from 'path'`. Absent when it is just {@link specifier}.
+     *
+     *  A SEPARATE field rather than a rewrite of `specifier`, which is what this first was: emit
+     *  finds a dynamic import's record by the source text, and overwriting `specifier` made that
+     *  lookup miss, so `import('./asdf')` resolved to an external `'asdf'` and was still emitted as
+     *  `'./asdf'`. */
+    externalSpecifier?: string;
     resolved: number;
     external: boolean;
     /** The edge's origin. `dynamic` means it comes ONLY from `import()` (no static import of the
