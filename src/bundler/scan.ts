@@ -55,6 +55,7 @@ import {
     type GraphOptions,
     type InputOption,
     isExternal,
+    isExternalSpecifier,
     makeBaseResolve,
     normalizeResolve,
     resolveJSXOptions,
@@ -956,12 +957,41 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
      *  external's `ModuleInfo` by its RESOLVED id, and `resolveId` may rewrite it. */
     const externalIdOf = new Map<string, string>();
 
+    /** The id an external should be IMPORTED under. Rollup emits the resolved id verbatim, except
+     *  where `makeAbsoluteExternalsRelative` applies — its default `'ifRelativeSource'` renormalizes
+     *  an ABSOLUTE id back to a path relative to the output file, but only when the SOURCE specifier
+     *  was relative (`isNotAbsoluteExternal`). Measured against rollup 4.63 on four shapes:
+     *
+     *      'abs-lib'      -> { id: '/abs/abs-lib', external: 'absolute' }   =>  '/abs/abs-lib'
+     *      'abs-lib'      -> { id: '/abs/abs-lib', external: true }         =>  '/abs/abs-lib'
+     *      './rel-lib.js' -> { id: '<abs>/rel-lib.js', external: true }     =>  './rel-lib.js'
+     *      './dep.js'     -> 'path'  (external OPTION)                      =>  'path'
+     *
+     *  APPROXIMATION, stated rather than hidden: shakeup has no output directory at scan time, so the
+     *  renormalized case keeps the SOURCE specifier instead of recomputing the path against the
+     *  output file. That is right whenever the external sits beside the entry — the shape every
+     *  fixture here has — and wrong for a deeper output tree. The other three cases are exact. */
+    const externalRenderId = (specifier: string, resolvedId: string, declared: unknown): string => {
+        const sourceRelative = specifier.startsWith('./') || specifier.startsWith('../');
+        const idAbsolute = resolvedId.startsWith('/');
+        if (sourceRelative && idAbsolute && declared !== 'absolute') return specifier;
+        return resolvedId;
+    };
+
     /** Register an external import edge in {@link Graph.externals}. Called from every site that sets
      *  `rec.external`, so the `external` option, a plugin verdict and an unresolvable bare specifier
      *  all produce the same record. Keyed by the plugin-supplied id where there is one, since that is
      *  the id `getModuleInfo` will be asked about. */
-    const noteExternal = (specifier: string, importer: string, kind: ImportRecordKind): void => {
+    const noteExternal = (specifier: string, importer: string, kind: ImportRecordKind): string => {
         const id = externalIdOf.get(specifier) ?? specifier;
+        // The emitted import must name the RESOLVED id, not the specifier the source wrote — that is
+        // the whole point of `external-normalization`, where `'./dep.js'` resolves to `'path'` and
+        // the bundle has to `import … from 'path'`. Everything downstream keys externals by the
+        // record's specifier, so carry the side-effect flag across to the new key as well.
+        if (id !== specifier) {
+            const se = graph.externalSideEffects.get(specifier);
+            if (se !== undefined) graph.externalSideEffects.set(id, se);
+        }
         let rec = graph.externals.get(id);
         if (rec === undefined) {
             rec = {
@@ -974,6 +1004,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             graph.externals.set(id, rec);
         }
         (kind === 'dynamic' ? rec.dynamicImporters : rec.importers).add(importer);
+        return id;
     };
 
     /** The shared resolve path used by both the graph walk and `ctx.resolve`. Runs the
@@ -992,10 +1023,34 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             pluginExternals.add(specifier);
             return false;
         }
-        if (typeof hit === 'string') return hit;
+        // A plugin may resolve a specifier TO something the `external` option covers — Rollup's
+        // `external-normalization` (#633) maps `'./dep.js'` to `'path'` with `external: ['path']`.
+        // Both oracles re-run the matcher over the RESOLVED id, with `isResolved: true`: Rollup's
+        // `normalizeResolveIdResult` does it for the string and object forms alike, and rolldown's
+        // `resolve_id_check_external.rs` does `external.call(resolved_id.id, importer, true)` for any
+        // result that did not declare `external` itself. Without it the resolved id is loaded as a
+        // module, which for `'path'` means "cannot load module 'path'".
+        const externalByOption = (resolvedId: string): boolean =>
+            isExternalSpecifier(options.external, resolvedId, importer ?? undefined, true);
+        if (typeof hit === 'string') {
+            if (!externalByOption(hit)) return hit;
+            pluginExternals.add(specifier);
+            graph.externalIds.add(hit);
+            externalIdOf.set(specifier, externalRenderId(specifier, hit, undefined));
+            return false;
+        }
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
             const partial = hit as PartialResolvedId;
-            if (partial.external !== undefined && partial.external !== false) {
+            const declaredExternal = partial.external !== undefined && partial.external !== false;
+            if (!declaredExternal && typeof partial.id === 'string' && externalByOption(partial.id)) {
+                pluginExternals.add(specifier);
+                graph.externalIds.add(partial.id);
+                externalIdOf.set(specifier, externalRenderId(specifier, partial.id, undefined));
+                if (partial.meta !== undefined) externalMeta.set(specifier, partial.meta);
+                if (partial.moduleSideEffects === false) graph.externalSideEffects.set(specifier, false);
+                return false;
+            }
+            if (declaredExternal) {
                 // true | 'absolute' | 'relative' → external. Treated alike (keep verbatim).
                 pluginExternals.add(specifier);
                 // Keep the RESOLVED id too — `manualChunks` lists ids, and this is the only place an
@@ -1006,7 +1061,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // `buildEnd`). The external branch returns before `mergeOptions`, which is where a
                 // RESOLVED id's options are recorded, so keep them here instead.
                 if (partial.meta !== undefined) externalMeta.set(specifier, partial.meta);
-                if (typeof partial.id === 'string') externalIdOf.set(specifier, partial.id);
+                if (typeof partial.id === 'string')
+                    externalIdOf.set(specifier, externalRenderId(specifier, partial.id, partial.external));
                 // A plugin may declare the external side-effect-free (rolldown `moduleSideEffects`),
                 // letting an unreferenced import of it drop entirely.
                 if (partial.moduleSideEffects === false) graph.externalSideEffects.set(specifier, false);
@@ -1673,7 +1729,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             }
             if (isExternal(options, rec.specifier, id) || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
-                noteExternal(rec.specifier, id, rec.kind);
+                rec.specifier = noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             const resolved = await resolveFn(rec.specifier, id, {
@@ -1682,7 +1738,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             });
             if (resolved === false || pluginExternals.has(rec.specifier)) {
                 rec.external = true;
-                noteExternal(rec.specifier, id, rec.kind);
+                rec.specifier = noteExternal(rec.specifier, id, rec.kind);
                 continue;
             }
             if (resolved === null) {
