@@ -85,13 +85,50 @@ type Config = {
 (globalThis as Record<string, unknown>).defineTest = (t: unknown) => t;
 const req = createRequire(resolve('scripts/rollup-suite.ts'));
 
+/**
+ * Samples that fail on a feature ROLLDOWN ITSELF does not implement, read from rolldown's own list of
+ * Rollup tests it ignores (`packages/rollup-tests/src/ignored-by-unsupported-features.md`, 49
+ * categories).
+ *
+ * shakeup's bundler targets rolldown, so a Rollup feature rolldown declines is a non-goal here too —
+ * `syntheticNamedExports` is the clean case: rolldown says outright it is not supported, and four of
+ * our failures are its samples. Counting those as shakeup gaps overstated the deficit by HALF: 38 of
+ * 74 failures were in this file.
+ *
+ * They still RUN, and still count in `ran`. This only re-LABELS a failure, so nothing is hidden and
+ * no coverage is lost — the day shakeup passes one it simply leaves the bucket. Skipping them would
+ * have been the easy version and the dishonest one.
+ *
+ * Degrades to empty when the vendored rolldown is absent.
+ */
+function rolldownNonGoals(): Map<string, string> {
+    const out = new Map<string, string>();
+    const md = 'llm/libs/rolldown/packages/rollup-tests/src/ignored-by-unsupported-features.md';
+    if (!existsSync(md)) return out;
+    let section = '';
+    for (const line of readFileSync(md, 'utf8').split('\n')) {
+        if (line.startsWith('### ')) section = line.slice(4).trim();
+        const m = /^\s*-\s*rollup@(?:form|function)@(.+?):/.exec(line);
+        // The last `@` segment is the sample directory; earlier ones are Rollup's own grouping.
+        if (m !== null && section !== '') out.set(m[1].split('@').pop() as string, section);
+    }
+    return out;
+}
+const NON_GOALS = rolldownNonGoals();
+let nonGoal = 0;
+
 type Bucket = { count: number; samples: string[] };
 const buckets = new Map<string, Bucket>();
 const bump = (key: string, sample: string) => {
-    const b = buckets.get(key) ?? { count: 0, samples: [] };
+    // A failure on a feature ROLLDOWN ITSELF declines is re-labelled, not hidden: it still ran, still
+    // counts in `ran`, and leaves this bucket the day shakeup passes it. See {@link rolldownNonGoals}.
+    const nonGoalReason = NON_GOALS.get(sample);
+    const k = nonGoalReason === undefined ? key : `ROLLDOWN NON-GOAL — ${nonGoalReason}`;
+    if (nonGoalReason !== undefined) nonGoal++;
+    const b = buckets.get(k) ?? { count: 0, samples: [] };
     b.count++;
     if (b.samples.length < 200) b.samples.push(sample);
-    buckets.set(key, b);
+    buckets.set(k, b);
 };
 const skips = new Map<string, Bucket>();
 const skip = (reason: string, sample: string) => {
@@ -349,8 +386,16 @@ if (LIST !== null) {
 const skipped = [...skips.values()].reduce((n, b) => n + b.count, 0);
 const ran = pass + buildFail + runFail;
 console.log(`\nrollup function suite — ${selected.length} samples, ${skipped} skipped`);
+// TWO rates, because they answer different questions. The first is against every sample that ran;
+// the second excludes the failures on features rolldown itself does not implement, which is the
+// honest measure of shakeup against its actual alignment target. Both are printed so neither can be
+// quoted without the other.
+const attempted = Math.max(ran - nonGoal, 1);
 console.log(
-    `ran ${ran} · PASS ${pass} (${((pass / Math.max(ran, 1)) * 100).toFixed(1)}%) · build-fail ${buildFail} · run-fail ${runFail}\n`,
+    `ran ${ran} · PASS ${pass} (${((pass / Math.max(ran, 1)) * 100).toFixed(1)}%) · build-fail ${buildFail} · run-fail ${runFail}`,
+);
+console.log(
+    `  of the failures, ${nonGoal} are features ROLLDOWN does not support either — against the rest: ${pass}/${attempted} (${((pass / attempted) * 100).toFixed(1)}%)\n`,
 );
 console.log('SKIPPED, by reason:');
 for (const [k, b] of [...skips.entries()].sort((a, c) => c[1].count - a[1].count))
