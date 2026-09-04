@@ -45,7 +45,12 @@ export type OutputOptionsNaming = {
     sourcemap?: boolean | 'inline' | 'hidden';
     sourcemapExcludeSources?: boolean;
     sourcemapIgnoreList?: SourcemapIgnoreList;
-    keepNames?: boolean; // not implemented — needs printer/name-preservation
+    /** Preserve a class's `.name` when deconfliction renames its binding: `class foo {}` emitted as
+     *  `class foo$1 {}` would otherwise answer `'foo$1'`. Off by default, as in rolldown and esbuild
+     *  — Rollup does it unconditionally. Implemented with Rollup's zero-runtime mechanism
+     *  (`let foo$1 = class foo {}`), not rolldown's `__name` helper. Classes only so far; a renamed
+     *  FUNCTION still loses its name, because the same rewrite would change hoisting. */
+    keepNames?: boolean;
     topLevelVar?: boolean; // not implemented — needs module-init wrapping
     /** `true` = full minify (whitespace + mangle + compress). The object form opts into each
      *  sub-stage independently (esbuild's `minifyWhitespace`/`minifyIdentifiers`/`minifySyntax`):
@@ -137,6 +142,8 @@ export type NormalizedOutputNaming = {
     sourcemapExcludeSources: boolean;
     sourcemapIgnoreList: (source: string, mapPath: string) => boolean;
     minify: boolean;
+    /** See {@link OutputOptions.keepNames}. */
+    keepNames: boolean;
 };
 
 // biome-ignore lint/suspicious/noControlCharactersInRegex: RFC2396 invalid-char class, verbatim from rollup.
@@ -289,8 +296,6 @@ export function normalizeOutputOptions(
     warnings: string[],
 ): NormalizedOutputNaming {
     const o = output ?? {};
-    if (o.keepNames === true)
-        warnings.push('output.keepNames is not implemented (needs a name-preservation printer pass) — ignored.');
     if (o.topLevelVar === true) warnings.push('output.topLevelVar is not implemented (needs module-init wrapping) — ignored.');
     if (o.file !== undefined && multiChunk) {
         throw new Error('"output.file" is only valid for a single-chunk build. Use "output.dir" for multiple chunks.');
@@ -357,6 +362,7 @@ export function normalizeOutputOptions(
         sourcemapExcludeSources: o.sourcemapExcludeSources ?? false,
         sourcemapIgnoreList: ignore,
         minify: resolveMinify(o.minify).whitespace, // printer whitespace/syntactic gate
+        keepNames: o.keepNames === true,
         comments: normalizeComments(o.comments),
     };
 }

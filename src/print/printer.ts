@@ -14,6 +14,9 @@ import { addLine, addSegment, type Mappings, newMappings } from '../util/sourcem
  *  (`llm/libs/oxc/crates/oxc_codegen/src/options.rs:16`). */
 export type PrintOptions = {
     minify: boolean;
+    /** Preserve a class's `.name` when deconfliction renamed its binding — see
+     *  {@link Printer.originalNameSym}. Off by default, as in rolldown and esbuild. */
+    keepNames?: boolean;
 };
 
 /** Resolve an identifier node to its final output name. In a full bundle this wraps
@@ -77,6 +80,14 @@ export type Printer = {
     indent: number;
     /** Rename resolver for identifiers. */
     nameOf: NameResolver;
+    /** While a preserved-name class body is being emitted, THIS symbol prints its ORIGINAL name
+     *  rather than its deconflicted one — Rollup's `useOriginalName` (`ClassDeclaration.render`).
+     *
+     *  Not cosmetic. `let C$1 = class C { static x = C$1; }` throws `ReferenceError: Cannot access
+     *  'C$1' before initialization`: a static initialiser runs while the class is being defined,
+     *  BEFORE the outer `let` is assigned. Only the class's own binding is in scope there. Verified
+     *  against node; a method body would have been fine either way. 0 ⇒ no override. */
+    originalNameSym: number;
     /** Bundle link mode (see {@link PrinterConfig.linkModule}). */
     linkModule: boolean;
     /** See {@link PrinterConfig.initCalls}. */
@@ -165,6 +176,7 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         opts,
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
+        originalNameSym: 0,
         linkModule: cfg.linkModule ?? false,
         initCalls: cfg.initCalls ?? null,
         defaultName: cfg.defaultName ?? null,

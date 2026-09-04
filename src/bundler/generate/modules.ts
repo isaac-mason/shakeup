@@ -590,7 +590,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
             // its own printer. Everything else makes exactly one.
             const makePrinter = (liveOverride: typeof live = live) =>
                 createPrinter(
-                    { minify: deferMinify ? false : naming.minify },
+                    { minify: deferMinify ? false : naming.minify, keepNames: naming.keepNames },
                     {
                         // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
                         // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted

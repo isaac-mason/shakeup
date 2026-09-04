@@ -316,7 +316,7 @@ describe('output — exports mode & stubs', () => {
         expect(code).toContain(' as x'); // public export name preserved via alias
     });
 
-    it('keepNames / topLevelVar are accepted with a not-implemented warning', async () => {
+    it('topLevelVar is accepted with a not-implemented warning; keepNames no longer warns', async () => {
         const r = await bundle({
             input: '/main.ts',
             fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
@@ -324,7 +324,10 @@ describe('output — exports mode & stubs', () => {
             output: { keepNames: true, topLevelVar: true },
         });
         expect(r.errors).toEqual([]);
-        expect(r.warnings.some((w) => /keepNames is not implemented/.test(w))).toBe(true);
+        // `keepNames` is implemented for CLASSES — see `tst/keep-names-classes.test.ts`. A renamed
+        // FUNCTION still loses its name, but that is documented on the option rather than warned
+        // about on every build that sets it.
+        expect(r.warnings.some((w) => /keepNames/.test(w))).toBe(false);
         expect(r.warnings.some((w) => /topLevelVar is not implemented/.test(w))).toBe(true);
     });
 });

@@ -1,10 +1,10 @@
-import { N, type Node, TYPE_COUNT, TYPE_NAME } from '../ast/index.ts';
+import { N, type Node, TYPE_COUNT, TYPE_NAME, walk } from '../ast/index.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
 import {
     dropTrailingSemi,
     mark,
-    parens,
     type Printer,
+    parens,
     printLeadingComments,
     semi,
     softNewline,
@@ -395,7 +395,9 @@ function emitExpr(p: Printer, n: Node): void {
     switch (n.type) {
         case N.IdentifierReference:
         case N.BindingIdentifier:
-            write(p, p.nameOf(n));
+            // `originalNameSym` overrides the deconflicted name inside a preserved-name class body —
+            // Rollup's `useOriginalName`. See {@link Printer.originalNameSym} for why it is required.
+            write(p, n.sym !== 0 && n.sym === p.originalNameSym ? n.name : p.nameOf(n));
             return;
         case N.IdentifierName:
         case N.LabelIdentifier:
@@ -680,11 +682,45 @@ function emitClassMember(p: Printer, n: Node): void {
     emitFunctionTail(p, vd);
 }
 
-function emitClass(p: Printer, n: Node): void {
+/** The ORIGINAL name of a class whose binding deconfliction renamed, when `keepNames` asks for it to
+ *  be preserved — else null. A renamed class loses its `.name`: `class foo {}` emitted as
+ *  `class foo$1 {}` answers `'foo$1'`. Rollup fixes this by DEFAULT by moving the original name onto
+ *  the class itself (`let foo$1 = class foo {}`, verified on rollup 4.63); rolldown makes it opt-in
+ *  as `keepNames` and injects a `__name` helper instead. shakeup takes rolldown's option and default
+ *  with Rollup's zero-runtime mechanism. */
+function preservedClassName(p: Printer, id: Node | null, classNode: Node): string | null {
+    if (p.opts.keepNames !== true || id === null) return null;
+    const original = id.name as string;
+    if (p.nameOf(id) === original) return null; // not renamed: `.name` is already right
+    // THE CAPTURE GUARD. Naming the class introduces a binding INSIDE its scope, and anything in the
+    // heritage clause or body that was printing that same name now resolves to the class instead.
+    // rollupsuite's `class-name-conflict-2` is titled "does not shadow variables when preserving
+    // class names", and without this it emitted `let bar$1 = class bar extends bar` — self-inheriting
+    // where it meant the outer `bar`.
+    //
+    // Rollup prevents it further upstream, by forbidding the original name for every variable the
+    // class reaches (`accessedVariable.forbidName(name)`), so the renamer never produces the clash.
+    // shakeup decides at emit instead: the deconflicted names are final by then, so the question
+    // "does anything else in here print this name" is directly answerable, and the fallback is
+    // simply not preserving — never a wrong program, only a `.name` this option could not save.
+    const classSym = id.sym;
+    let captured = false;
+    walk(classNode, (m) => {
+        if (captured) return false;
+        if (m.type === N.IdentifierReference && m.sym !== 0 && m.sym !== classSym && p.nameOf(m) === original) captured = true;
+        return captured ? false : undefined;
+    });
+    return captured ? null : original;
+}
+
+function emitClass(p: Printer, n: Node, preserveName: string | null = null): void {
     const d = data(n);
     write(p, 'class');
     const id = d.id as Node | null;
-    if (id) {
+    if (preserveName !== null) {
+        space(p);
+        write(p, preserveName);
+    } else if (id) {
         space(p);
         write(p, p.nameOf(id));
     }
@@ -702,12 +738,17 @@ function emitClass(p: Printer, n: Node): void {
         write(p, '}');
         return;
     }
+    // Inside a preserved-name body the class's own symbol prints its ORIGINAL name — the outer `let`
+    // is still in TDZ while a static initialiser runs. See {@link Printer.originalNameSym}.
+    const prevOriginal = p.originalNameSym;
+    if (preserveName !== null && id !== null) p.originalNameSym = id.sym;
     p.indent++;
     for (const m of members) {
         softNewline(p);
         emitClassMember(p, m);
     }
     p.indent--;
+    p.originalNameSym = prevOriginal;
     softNewline(p);
     write(p, '}');
 }
@@ -763,7 +804,16 @@ function printVarDecl(p: Printer, n: Node, withSemi: boolean): void {
             softSpace(p);
             write(p, '=');
             softSpace(p);
-            printExpr(p, init, Prec.Assign);
+            // `let foo = class {}` with `foo` renamed loses `.name` too, and the fix is to NAME the
+            // anonymous class: `let foo$1 = class foo {}`. Rollup's `VariableDeclarator.render`
+            // inserts the id right after `class`. No `originalNameSym` here — the injected binding
+            // shadows the outer one and holds the same object, which is what Rollup relies on.
+            const idNode = dd.id as Node;
+            const anonClass =
+                init.type === N.ClassExpression && (data(init).id as Node | null) === null && idNode.type === N.BindingIdentifier;
+            const original = anonClass ? preservedClassName(p, idNode, init) : null;
+            if (original !== null) emitClass(p, init, original);
+            else printExpr(p, init, Prec.Assign);
         }
     }
     if (withSemi) semi(p);
@@ -1178,9 +1228,25 @@ export function printStmt(p: Printer, n: Node): void {
         case N.FunctionDeclaration:
             emitFunction(p, n);
             return;
-        case N.ClassDeclaration:
+        case N.ClassDeclaration: {
+            // A RENAMED class declaration becomes `let <new> = class <original> { … }`, which keeps
+            // `.name`. Rollup's `ClassDeclaration.render` does exactly this. The `let` is safe: a
+            // class declaration is TDZ-bound like `let`, not hoisted-initialised like a function.
+            const original = preservedClassName(p, (data(n).id as Node | null) ?? null, n);
+            if (original !== null) {
+                write(p, 'let');
+                space(p);
+                write(p, p.nameOf(data(n).id as Node));
+                softSpace(p);
+                write(p, '=');
+                softSpace(p);
+                emitClass(p, n, original);
+                semi(p);
+                return;
+            }
             emitClass(p, n);
             return;
+        }
         case N.ImportDeclaration:
             emitImportDeclaration(p, n);
             return;

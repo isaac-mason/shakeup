@@ -291,6 +291,11 @@ for (const { d, c } of selected) {
             // shakeup. A sample that sets the option itself still wins.
             output: {
                 generatedCode: { symbols: false },
+                // `keepNames` is OFF by default in shakeup, as in rolldown and esbuild — Rollup does
+                // it unconditionally. rolldown's own Rollup-test harness force-enables the option for
+                // exactly these samples ("avoid other tests snapshot changed",
+                // `packages/rollup-tests/test/function/index.js:106`), and so does this.
+                ...(d.includes('class-name-conflict') ? { keepNames: true } : {}),
                 ...((o.output ?? {}) as Record<string, unknown>),
             } as never,
             // Rollup's own runner does `process.chdir(directory)` before each sample
