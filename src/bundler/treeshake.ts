@@ -245,7 +245,14 @@ const NS_MARKER = 0x1fffff;
  *  these forces the whole surface instead: it's an entry, it's re-exported as a namespace
  *  (`export * as ns` — opaque downstream), or some consumer escapes. A dead target is dropped
  *  outright. Returns target idx → the union of member names read across all its consumers. */
-function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynamic: Set<number>): Map<number, Set<string>> {
+function computeNsUsage(
+    graph: Graph,
+    dynUsage: Map<number, NsUsage>,
+    deadDynamic: Set<number>,
+    /** Out-param: target → member names that would be CAPTURED by a nested binding if the namespace
+     *  were elided. Collected here because it rides on the same accumulator. */
+    captured: Map<number, Set<string>>,
+): Map<number, Set<string>> {
     const forceWhole = new Set<number>();
     for (const { module } of graph.entries) forceWhole.add(module);
     // `export * as ns from './m'` re-exports m's whole namespace opaquely.
@@ -263,11 +270,12 @@ function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynami
     const fold = (target: number, u: NsUsage): void => {
         let a = acc.get(target);
         if (a === undefined) {
-            a = { escapes: false, members: new Set() };
+            a = { escapes: false, members: new Set(), captured: new Set() };
             acc.set(target, a);
         }
         if (u.escapes) a.escapes = true;
         for (const m of u.members) a.members.add(m);
+        for (const m of u.captured) a.captured.add(m);
     };
     for (const mod of graph.modules) {
         const nsSyms = new Map<number, number>(); // local ns symbol → target module idx
@@ -289,13 +297,19 @@ function computeNsUsage(graph: Graph, dynUsage: Map<number, NsUsage>, deadDynami
         // targets need their whole surface.
         if (a.escapes || forceWhole.has(target) || deadDynamic.has(target)) continue;
         narrowable.set(target, a.members);
+        if (a.captured.size > 0) captured.set(target, a.captured);
     }
     return narrowable;
 }
 
 /** {@link TreeshakeResult.elidableNs}. Runs off the SAME accumulator narrowing uses, then removes
  *  everything narrowing tolerates but elision cannot. */
-function computeElidableNs(graph: Graph, linked: Linked, narrowable: Map<number, Set<string>>): Set<number> {
+function computeElidableNs(
+    graph: Graph,
+    linked: Linked,
+    narrowable: Map<number, Set<string>>,
+    captured: Map<number, Set<string>>,
+): Set<number> {
     // A dynamically imported module's namespace is a real runtime value — `import()` resolves TO it —
     // so it must exist however statically its members are read. `hasDynamicLiteral` and not just
     // `kind === 'dynamic'`: a specifier imported both ways is deduped into one static record and the
@@ -305,19 +319,6 @@ function computeElidableNs(graph: Graph, linked: Linked, narrowable: Map<number,
         for (const rec of mod.importRecords)
             if ((rec.kind === 'dynamic' || rec.hasDynamicLiteral) && !rec.external && rec.resolved >= 0)
                 dynamicTargets.add(rec.resolved);
-
-    // Which modules namespace-import each target — the consumers whose scopes the rewritten names
-    // have to survive.
-    const consumers = new Map<number, Module[]>();
-    for (const mod of graph.modules)
-        for (const [, imp] of mod.namedImports) {
-            if (imp.name !== NAME_NAMESPACE) continue;
-            const rec = mod.importRecords[imp.rec];
-            if (rec.external || rec.resolved < 0) continue;
-            const list = consumers.get(rec.resolved);
-            if (list === undefined) consumers.set(rec.resolved, [mod]);
-            else list.push(mod);
-        }
 
     const out = new Set<number>();
     for (const [target, members] of narrowable) {
@@ -340,30 +341,21 @@ function computeElidableNs(graph: Graph, linked: Linked, narrowable: Map<number,
         // the parameter wins. An ordinary `import { mutate }` would not have this problem — the
         // reference is in the graph before deconfliction, which renames one of the two — but this
         // rewrite happens at EMIT time, after deconfliction has already run and cannot learn about
-        // it. So refuse the target outright when any consumer declares one of the read names
-        // anywhere, which is conservative and needs nothing from the renamer.
-        // Rollup's `argument-treeshaking-parameter-conflict` is exactly this shape, and it caught it.
-        let shadowed = false;
-        for (const mod of consumers.get(target) ?? []) {
-            for (const name of members) {
-                const nameId = mod.semantic.names.get(name);
-                if (nameId === undefined) continue;
-                if (mod.semantic.symbols.some((sym) => sym.nameId === nameId)) {
-                    shadowed = true;
-                    break;
-                }
-            }
-            if (shadowed) break;
-        }
-        if (!shadowed) out.add(target);
+        // it. Rollup's `argument-treeshaking-parameter-conflict` is exactly this shape, and it caught
+        // the first cut.
+        //
+        // `captured` is decided at the USE SITE, by resolving the name in the scope the read actually
+        // sits in. The first version asked instead whether any consumer declared the name ANYWHERE,
+        // which is sound but refuses far too much: on crashcat it cost 7,370 of the 12,258 bytes.
+        if (!(captured.get(target)?.size ?? 0)) out.add(target);
     }
     return out;
 }
 
 /** Aggregate how each dynamic-import target's resolved module is consumed, unioned across every
  *  `import()` site (in any module) that resolves to it. */
-function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; members: Set<string> }> {
-    const acc = new Map<number, { escapes: boolean; members: Set<string> }>();
+function computeDynamicUsage(graph: Graph): Map<number, NsUsage> {
+    const acc = new Map<number, NsUsage>();
     for (const mod of graph.modules) {
         // The scan already recorded every `import()` site, so a module with none cannot produce one —
         // checking that is O(records) against a walk of the whole module.
@@ -380,7 +372,7 @@ function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; memb
             if (rec === undefined || rec.external || rec.resolved < 0) continue;
             let a = acc.get(rec.resolved);
             if (a === undefined) {
-                a = { escapes: false, members: new Set() };
+                a = { escapes: false, members: new Set(), captured: new Set() };
                 acc.set(rec.resolved, a);
             }
             if (usage.escapes) a.escapes = true;
@@ -393,7 +385,7 @@ function computeDynamicUsage(graph: Graph): Map<number, { escapes: boolean; memb
 /** Dead pure dynamic imports: a target reached ONLY through `import()` (no static edge), never an
  *  entry, whose every `import()` result is discarded (usage is `none`), and which is declared
  *  side-effect-free — so loading it is observably a no-op and it can be dropped entirely. */
-function computeDeadDynamic(graph: Graph, dynUsage: Map<number, { escapes: boolean; members: Set<string> }>): Set<number> {
+function computeDeadDynamic(graph: Graph, dynUsage: Map<number, NsUsage>): Set<number> {
     const entrySet = new Set(graph.entries.map((e) => e.module));
     const staticTargets = new Set<number>();
     for (const mod of graph.modules) {
@@ -415,8 +407,9 @@ function computeDeadDynamic(graph: Graph, dynUsage: Map<number, { escapes: boole
 export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache): TreeshakeResult {
     const dynUsage = computeDynamicUsage(graph);
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
-    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic);
-    const elidableNs = computeElidableNs(graph, linked, nsUsage);
+    const nsCaptured = new Map<number, Set<string>>();
+    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCaptured);
+    const elidableNs = computeElidableNs(graph, linked, nsUsage, nsCaptured);
     const live: Set<number>[] = graph.modules.map(() => new Set());
     const infos: StatementInfo[][] = [];
     const declArrays: [number, [number, number]][][] = [];
