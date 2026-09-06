@@ -486,7 +486,18 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         cjsEntryDefault === null &&
         starLines.length === 0 &&
         helperLines.length === 0;
-    if (isEmpty && !chunk.isEntry) return null;
+    // A DYNAMIC entry is never dropped, empty or not: `import('./dep.js')` names this chunk by
+    // filename, and dropping it left the importer pointing at a file that was never written —
+    // `ERR_MODULE_NOT_FOUND` at runtime, from a build reporting no errors
+    // (rollup's `dynamic-import-mutate-then-return`). Nothing can statically import an empty chunk,
+    // since it has no exports, so this is the only shape that dangles.
+    //
+    // rolldown does BETTER and does not emit a chunk at all: it rewrites the call site to
+    // `Promise.resolve().then(() => Object.freeze({ __proto__: null }))` (verified on that fixture),
+    // preserving the async timing with no request. That decision has to be made before the importer
+    // is rendered, and emptiness is only known while rendering the target — so it needs emptiness
+    // predicted from liveness up front, and is left as a separate change.
+    if (isEmpty && !chunk.isEntry && !chunk.isDynamicEntry) return null;
 
     // Addons (banner/intro leading, footer/outro trailing). Sync string/fn only. Order:
     // banner, intro, imports, body, exports, outro, footer.
