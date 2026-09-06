@@ -561,12 +561,11 @@ describe('redeclaration', () => {
         expect(check('try{}catch(e){ { let e; } }')).toEqual([]);
     });
 
-    // KNOWN GAP, recorded so it is not mistaken for a passing case: oxc reports this and we do not.
-    // A function declaration hoists out of the catch block AND `declareInScope` has already entered
-    // the function's own scope by the time the binding is made, so neither scope identifies the catch
-    // body. Missing it is the SAFE direction — an error not reported, never valid code rejected.
-    it('but a function declaration in a catch block is a known gap', () => {
-        expect(check('try{}catch(e){ function e(){} }')).toEqual([]);
+    // Was a KNOWN GAP, now closed. The note said catching it needed "the appearance scope threaded
+    // through" — it was already threaded, as `appearAt`, one line above the check that was reading
+    // `state.scope` instead. See `tst/check-catch-function-redeclaration.test.ts`.
+    it('and so does a function declaration in a catch block', () => {
+        expect(check('try{}catch(e){ function e(){} }')).toEqual(['Identifier `e` has already been declared']);
     });
 });
 

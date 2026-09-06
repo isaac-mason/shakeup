@@ -848,13 +848,11 @@ function declare(
     // catch scope" identifies exactly the catch's direct body, because a nested block's parent is
     // that block. Gated on the flags first, so an ordinary `var` never pays for the lookup.
     if (ns === NS_VALUE && (flags & (SYM.LET | SYM.CONST | SYM.CLASS | SYM.FUNCTION)) !== 0) {
-        // KNOWN GAP: `catch(e){ function e(){} }` is an error oxc reports and this misses. A function
-        // declaration hoists to the enclosing function scope, AND `declareInScope` has already moved
-        // `state.scope` into the function's own scope by the time `declare` runs, so neither scope
-        // here is the catch body. Catching it needs the appearance scope threaded through, which is
-        // not worth the contortion for a shape this rare — and missing it is the SAFE direction, an
-        // error not reported rather than valid code rejected.
-        const parent = state.sem.scopes[state.scope].parent;
+        // `catch(e){ function e(){} }` reaches here too, and used to be missed. The appearance scope
+        // is what the rule is about, and `appearAt` already computes it — for a function declaration
+        // `state.scope` is the function's OWN scope, whose parent is the catch body rather than the
+        // catch clause. Reading `appearAt` instead makes both cases name the same scope.
+        const parent = state.sem.scopes[appearAt].parent;
         if (parent !== 0 && scopeKind(state.sem.scopes[parent].flags) === SCOPE.CATCH) {
             const outerSym = state.sem.bindings.get(bindingKey(parent, NS_VALUE, nameId));
             if (outerSym !== undefined)
@@ -866,7 +864,17 @@ function declare(
                     appearAt,
                     state.sem.symbols[outerSym].flags,
                     flags,
-                    false,
+                    // Every collision reaching here is lexical against the catch parameter. For
+                    // LET/CONST/CLASS the flag matrix already says so and this argument is ignored;
+                    // for a FUNCTION it does not — `CATCH | FUNCTION` is not lexical by flags alone,
+                    // so without this `catch(x){ function x(){} }` was recorded and then excused.
+                    // EXCEPT in Annex B `if`-statement position. B.3.3 makes
+                    // `catch (f) { if (true) function f(){} }` legal — the declaration is var-like
+                    // there, not lexical — and test262 asserts it directly in 20 generated fixtures
+                    // under `annexB/language/{function,global}-code`. Calling it lexical unconditionally
+                    // turned all 20 into false rejects: `test262` harmful 5 -> 25, while `checkerdiff`
+                    // over node_modules stayed clean, because real code does not write this.
+                    !annexB,
                 );
         }
     }
