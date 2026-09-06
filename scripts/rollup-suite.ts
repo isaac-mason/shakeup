@@ -50,6 +50,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { bundle } from '../src/bundler/bundle.ts';
+import { createNodeFs } from '../src/node.ts';
 
 // ABSOLUTE, as Rollup's own runner is: its fixtures build ids with `path.join(__dirname, …)` and
 // compare plugin arguments against them, so a relative root silently fails those comparisons. Four
@@ -85,12 +86,11 @@ const SHAKEUP_MEANS_SOMETHING_ELSE = new Set(['cache']);
 const forwardable = (o: Record<string, unknown>): Record<string, unknown> =>
     Object.fromEntries(Object.entries(o).filter(([k]) => !SHAKEUP_MEANS_SOMETHING_ELSE.has(k)));
 
-const diskFs = {
-    read: (id: string) => (existsSync(id) && statSync(id).isFile() ? readFileSync(id, 'utf8') : null),
-    exists: (id: string) => existsSync(id),
-    // A directory must not answer `import './one'` — see `Fs.isFile`.
-    isFile: (id: string) => existsSync(id) && statSync(id).isFile(),
-};
+// The SHIPPED node filesystem, not a hand-rolled one. The three-method version this replaced had no
+// `realpath`, and shakeup's symlink handling is `fs.realpath?.(hit) ?? hit` — a no-op without it. So
+// `symlink` failed with `cannot resolve './baz.js'` and was counted as a shakeup gap, when what was
+// missing was the harness's filesystem. Run the real pipeline, including its inputs.
+const diskFs = createNodeFs();
 
 type Config = {
     description?: string;
@@ -327,7 +327,13 @@ for (const { d, c } of selected) {
             // importer and therefore resolves against the cwd — lands in the SAMPLE directory.
             // shakeup takes the same directory as an explicit option rather than mutating global
             // process state from a harness that also stages files.
-            resolve: { cwd: dir },
+            resolve: {
+                cwd: dir,
+                // Rollup spells it `preserveSymlinks`; shakeup and rolldown both spell it
+                // `resolve.symlinks` (rolldown has no `preserveSymlinks` at all), so the harness
+                // TRANSLATES rather than the product growing a third name for the same switch.
+                ...(o.preserveSymlinks === true ? { symlinks: false } : {}),
+            },
         });
         if (r.errors.length > 0) {
             if (wantsError) {
