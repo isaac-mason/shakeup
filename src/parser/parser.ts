@@ -1480,9 +1480,16 @@ function parsePrimary(state: ParserState): Node {
             case K.THIS:
                 nextToken(state);
                 return recordThis(state, create.ThisExpression(start, state.tokStart, 0));
-            case K.SUPER:
+            case K.SUPER: {
                 nextToken(state);
+                // `super` is only a SuperCall or a SuperProperty — it must be followed by `(`, `.`
+                // or `[`. A bare `super;` is a SyntaxError, and the rule is purely SYNTACTIC at this
+                // layer: oxc's parser accepts `function f() { super.x; }` and leaves "is there a
+                // home object" to its checker.
+                if (!isP(state, P.LPAREN) && !isP(state, P.DOT) && !isP(state, P.LBRACKET))
+                    raiseAt(state, start, ParseErrorCode.UnexpectedSuper);
                 return create.Super(start, state.tokStart, 0);
+            }
             case K.TRUE:
                 nextToken(state);
                 return create.BooleanLiteral(start, state.tokStart, 1);
@@ -2850,16 +2857,20 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 let arg: Ref = null;
                 if (!canInsertSemi(state) && !isP(state, P.SEMI)) arg = parseExpression(state);
                 consumeSemi(state);
-                if (state.fnDepth === 0) {
-                    // A class static block enables `new.target` but disables `return` — oxc splits
-                    // on exactly that (`js/statement.rs:712`), and the split matters because a
-                    // static block is the one non-function body where `return` is unconditionally an
-                    // error, whatever the goal says about a top-level `return`.
-                    if (state.staticBlockDepth > 0) raise(state, ParseErrorCode.ReturnInStaticBlock);
-                    else {
-                        state.sawTopLevelReturn = true;
-                        if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
-                    }
+                // A class static block enables `new.target` but disables `return` — oxc splits on
+                // exactly that (`js/statement.rs:712`), and the split matters because a static block
+                // is the one non-function body where `return` is unconditionally an error, whatever
+                // the goal says about a top-level `return`.
+                //
+                // Checked OUTSIDE the `fnDepth === 0` guard, because a class can sit inside a
+                // function: `function f() { class C { static { return; } } }` has `fnDepth === 1` and
+                // used to slip through. `staticBlockDepth` is reset at every function boundary, so a
+                // non-zero value already means the innermost body IS the static block — a `return`
+                // in a function nested inside one stays legal.
+                if (state.staticBlockDepth > 0) raise(state, ParseErrorCode.ReturnInStaticBlock);
+                else if (state.fnDepth === 0) {
+                    state.sawTopLevelReturn = true;
+                    if (!state.allowTopReturn) raise(state, ParseErrorCode.TopLevelReturn);
                 }
                 return create.ReturnStatement(start, state.tokStart, 0, arg);
             }
