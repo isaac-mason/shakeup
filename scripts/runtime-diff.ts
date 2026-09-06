@@ -120,7 +120,35 @@ process.stdout.write(JSON.stringify(state));
  * different shape of code and a different way for a bundling mistake to show. No files, no clock, no
  * randomness: every input is a literal, so the only variable is the bundle.
  */
+// It fingerprints EVERY export, not a hand-picked few — see the loop at the end.
+//
+// HONEST LIMIT, established by sabotage rather than assumed: fingerprinting all 444 exports, all 226
+// prototypes and every constructor's field list STILL does not detect the §2z47 `sideEffects`
+// miscompile. Deleted module-evaluation effects change no export's shape, so no amount of public-API
+// probing sees them — that bug was caught by comparing SIZE against rolldown, and only because the
+// fix moved the number. Behaviour gates and size gates are complementary and neither subsumes the
+// other; do not retire `standing` on the strength of this one.
 const THREE_DRIVER = `
+import { writeSync } from 'node:fs';
+// Browser stubs, applied IDENTICALLY to every arm so the differential stays fair. Constructing all
+// 226 exported classes reaches code that schedules \`requestAnimationFrame\`, and the resulting
+// UNHANDLED REJECTION kills the process from outside any try/catch — which presented as "the oracle
+// cannot run the driver" until it was traced. Stubbing is better than skipping those classes: a
+// deny-list would quietly shrink coverage every time three adds one.
+globalThis.requestAnimationFrame = () => 0;
+globalThis.cancelAnimationFrame = () => {};
+
+// Constructing 226 classes also schedules TIMERS that throw (three's probeAsync polls a WebGL context
+// that does not exist here). Those are uncaught EXCEPTIONS, not rejections, so they kill the process
+// from outside every try/catch.
+//
+// RECORDED, not swallowed. A handler that silently discarded them would hide exactly the kind of
+// runtime error this gate exists to catch, so they join the comparison: both arms failing the same way
+// is agreement, and one arm failing differently shows up as a diff.
+const asyncErrors = [];
+process.on('uncaughtException', (e) => asyncErrors.push('throw:' + String(e && e.message).slice(0, 60)));
+process.on('unhandledRejection', (e) => asyncErrors.push('reject:' + String(e).slice(0, 60)));
+
 import * as t from '__ENTRY__';
 
 for (const n of ['Vector3', 'Matrix4', 'Euler', 'Ray', 'BufferGeometry', 'Float32BufferAttribute', 'Frustum']) {
@@ -175,7 +203,45 @@ for (let i = 0; i < 12; i++) out.push(r(nrm.array[i]));
 const fr = new t.Frustum().setFromProjectionMatrix(acc);
 for (let i = 0; i < 6; i++) out.push(fr.containsPoint(new t.Vector3(i - 3, i * 0.5, 1)) ? 1 : 0);
 
-process.stdout.write(JSON.stringify(out));
+// EVERY EXPORT, not just the seven the hand-written part above happens to use. three.core.js exports
+// 444 names, 226 of them callable, and a driver that touches seven of those is a differential gate
+// over 3% of the surface — which is how the §2z47 class of bug (initialisation quietly dropped) hides.
+//
+// Fingerprints only what is DETERMINISTIC across two processes: the export's type, a function's arity,
+// whether \`new X()\` succeeds, and the instance's own enumerable KEY NAMES sorted. Key names catch a
+// field that stopped being initialised; VALUES are deliberately not compared, because three seeds
+// \`uuid\` from Math.random and \`id\` from a module-level counter, and neither says anything about the
+// bundler. A throwing constructor records its error CLASS — also a comparable observation, and stable.
+for (const name of Object.keys(t).sort()) {
+    const v = t[name];
+    const kind = typeof v;
+    if (kind !== 'function') { out.push(name + ':' + kind); continue; }
+    // The PROTOTYPE's method names come first because they need no construction at all and so are
+    // available for every export, including the ones that cannot be built in node.
+    let proto = '';
+    try {
+        proto = v.prototype === undefined ? '' : Object.getOwnPropertyNames(v.prototype).sort().join(',');
+    } catch {
+        proto = 'proto-threw';
+    }
+    let shape;
+    try {
+        const inst = new v();
+        shape = Object.keys(inst)
+            .filter((k) => k !== 'uuid' && k !== 'id')
+            .sort()
+            .join(',');
+    } catch (e) {
+        shape = 'threw:' + (e && e.constructor ? e.constructor.name : 'unknown');
+    }
+    out.push(name + ':' + v.length + ':' + proto + ':' + shape);
+}
+
+out.push('asyncErrors:' + [...new Set(asyncErrors)].sort().join('|'));
+// Written synchronously and exited at once: pending timers would otherwise keep firing and add only
+// noise, and a piped stdout is not flushed by the time process.exit runs.
+writeSync(1, JSON.stringify(out));
+process.exit(0);
 `;
 
 /**
