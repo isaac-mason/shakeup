@@ -370,11 +370,14 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
     // `default`; `'none'` demands it export nothing. We accepted either silently and then just
     // suppressed the export line, so a misconfigured build produced a chunk missing its exports
     // instead of telling the user.
-    if (
-        chunk.entryModule >= 0 &&
-        (chunk.isEntry || chunk.isDynamicEntry) &&
-        (naming.exports === 'default' || naming.exports === 'none')
-    ) {
+    //
+    // STATIC entries only. Rollup gates this on `facadeModule.info.isEntry` (`Chunk.ts:412`) — the
+    // user-declared entry flag, not `isDynamicEntry` — and rolldown agrees (probed). Including
+    // dynamic entry chunks was two bugs from one condition: it REJECTED a build both oracles accept
+    // (a static entry exporting exactly `default` beside a dynamic chunk exporting anything else),
+    // and the same condition drives `suppressEntryExports` below, so `exports: 'none'` would have
+    // stripped a dynamic chunk's exports and left `import()` resolving to an empty namespace.
+    if (chunk.entryModule >= 0 && chunk.isEntry && (naming.exports === 'default' || naming.exports === 'none')) {
         // The surface the chunk will actually EMIT, which for a CommonJS entry is not its export map.
         // A CJS entry has no ESM export map at all — its exports are `module.exports`, and the chunk
         // emits exactly `export default require_main();`. Validating against the (empty) map asked
@@ -397,7 +400,9 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
             );
         }
     }
-    const suppressEntryExports = naming.exports === 'none';
+    // Only a STATIC entry's exports are suppressed — see the validation above. A dynamic chunk keeps
+    // exporting its surface, which is what `import()` reads.
+    const suppressEntryExports = naming.exports === 'none' && chunk.isEntry;
     // Entry (and dynamic-entry) chunks export their entry module's surface.
     if (!suppressEntryExports && chunk.entryModule >= 0 && (chunk.isEntry || chunk.isDynamicEntry)) {
         // A CommonJS entry has no ESM export surface — its exports are `module.exports`, produced by
