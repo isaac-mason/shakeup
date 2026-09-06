@@ -45,6 +45,10 @@ export const runChunks = async (
     // so leaving it makes Node's loader — and vitest's — chase a file that is not there and log a
     // read error that has nothing to do with the test. Assertions read `r.code`, not the file.
     for (const c of chunks) writeFileSync(join(dir, c.fileName), c.code.replace(/^\/\/# sourceMappingURL=.*$/gm, ''));
+    // EVERY chunk must be a valid module, checked before it is run — see `chunkCheckErrors`. Running
+    // does not establish it: under vitest a chunk exporting a name nothing declares loads fine.
+    const bad = chunkCheckErrors(chunks);
+    if (bad.length > 0) throw new Error(`emitted chunk is not a valid module:\n  ${bad.join('\n  ')}`);
     const ns = (await import(pathToFileURL(join(dir, entry)).href)) as Record<string, unknown>;
     return { ns, dir, dispose: () => rmSync(dir, { recursive: true, force: true }) };
 };
