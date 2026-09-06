@@ -159,3 +159,39 @@ describe('an escaped label carries its cooked name', () => {
         expect(check('l\\u0065t: 1;')).toEqual([]);
     });
 });
+
+// The harmful direction: programs shakeup REJECTED that are valid. Worse than a missed early error,
+// because a build fails on correct input. Both shapes verified against `oxc-parser` across every
+// neighbouring position before the fix, so the NEGATIVE cases are pinned as tightly as the positive.
+describe('valid programs that were wrongly rejected', () => {
+    const ok = (src: string) => parse(src, { ts: false, jsx: false, kind: 'script' }).errors.length === 0;
+
+    it("allows `-->` after only whitespace or comments on its line", () => {
+        // Annex B B.1.1: a SingleLineHTMLCloseComment may be preceded on its line by whitespace,
+        // line terminators and comments. The test read `pos === 0`, which is only the same thing
+        // when there is no leading trivia at all — one leading space was enough to break it.
+        expect(ok('--> a comment\nvar x = 1;'), 'at position 0').toBe(true);
+        expect(ok('   --> a comment\nvar x = 1;'), 'after leading whitespace').toBe(true);
+        expect(ok('/* c */ --> a comment\nvar x = 1;'), 'after a block comment').toBe(true);
+        expect(ok('var y = 1;\n--> a comment\n'), 'on a later line').toBe(true);
+        // Still NOT a comment when real code precedes it on the same line — oxc rejects both.
+        expect(ok('var y = 1; --> a comment\n'), 'after code on the same line').toBe(false);
+        expect(ok('y --> a comment\n'), 'after an expression').toBe(false);
+    });
+
+    it('reads `get`/`set` followed by `*` as the member NAME, not an accessor keyword', () => {
+        // An accessor is never a generator, so `*` cannot begin its name: `get` is the field, and
+        // ASI supplies the `;`. Rejecting it cost two of the five harmful misses.
+        expect(ok('class A {\n  get\n  *a() {}\n}')).toBe(true);
+        expect(ok('class A {\n  set\n  *a() {}\n}')).toBe(true);
+        expect(ok('class B {\n  static get\n  *a() {}\n}')).toBe(true);
+        // On ONE line there is no ASI, so it stays an error — as oxc reports it too.
+        expect(ok('class A { get *a() {} }')).toBe(false);
+        // And `*` after every OTHER modifier is an ordinary generator method, which is why the
+        // `starEnds` opt-in is confined to the accessor sites: adding it to the shared helper broke
+        // `static *constructor(){}`, `async *g(){}` and `static async *m(){}` at once.
+        expect(ok('class C { static *constructor() {} }')).toBe(true);
+        expect(ok('class C { static async *m(a) { return a; } }')).toBe(true);
+        expect(ok('x = { async *g() {} };')).toBe(true);
+    });
+});

@@ -1628,7 +1628,7 @@ function parseObjectMember(state: ParserState): Node {
         nextToken(state);
     }
     let kind = 0;
-    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state)) {
+    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state, true)) {
         kind = isK(state, K.GET) ? 1 : 2;
         nextToken(state);
     }
@@ -1694,7 +1694,7 @@ function newlineAfterAsync(state: ParserState): boolean {
     return nl;
 }
 
-function nextIsPropertyEnd(state: ParserState): boolean {
+function nextIsPropertyEnd(state: ParserState, starEnds = false): boolean {
     const s = saveState(state);
     nextToken(state);
     const endLike =
@@ -1710,6 +1710,13 @@ function nextIsPropertyEnd(state: ParserState): boolean {
                 state.tok === P.RPAREN ||
                 state.tok === P.LT ||
                 state.tok === P.BANG ||
+                // `*` ends the property ONLY for `get`/`set`. Every other modifier this helper
+                // serves — `async`, `static`, `readonly`, `abstract`, `declare`, `override`,
+                // `accessor`, `new` — is legitimately followed by one: `static *constructor(){}`,
+                // `async *g(){}`, `static async *m(){}` all broke when `*` was added unconditionally.
+                // An ACCESSOR is the exception because it is never a generator, so a `*` after
+                // `get` means `get` was the name.
+                (starEnds && state.tok === P.STAR) ||
                 state.tok === P.RBRACKET));
     restoreState(state, s);
     return endLike;
@@ -2519,7 +2526,7 @@ function parseClassMember(state: ParserState): Node {
         nextToken(state);
     }
     let kind = 0;
-    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state)) {
+    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state, true)) {
         kind = isK(state, K.GET) ? 1 : 2;
         nextToken(state);
     }
@@ -4571,7 +4578,7 @@ function parseTypeMember(state: ParserState): Node {
         return create.TSPropertySignature(start, state.tokStart, mflags, key, ann);
     }
     let kind = 0;
-    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state)) {
+    if ((isK(state, K.GET) || isK(state, K.SET)) && !nextIsPropertyEnd(state, true)) {
         kind = isK(state, K.GET) ? 1 : 2;
         nextToken(state);
     }

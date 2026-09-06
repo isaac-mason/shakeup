@@ -483,6 +483,11 @@ export function nextToken(state: ParserState): void {
     const src = state.src,
         srcLen = state.srcLen;
     let pos = state.pos;
+    /** Where THIS scan began — i.e. the end of the previous token, or 0 when there is none. Zero
+     *  means nothing but whitespace and comments can precede whatever we are about to read, which is
+     *  what Annex B's `-->` needs to know and what `pos === 0` failed to say once a single leading
+     *  space had been skipped. */
+    const scanStart = pos;
     const commentsAt = state.commentsLen;
     let nl = 0;
     let sawPure = false;
@@ -568,7 +573,12 @@ export function nextToken(state: ParserState): void {
             // Keyed on NOT-A-MODULE. This read `state.allowTopReturn`, which was the same test only
             // because that flag happened to be false for modules alone — the third place that flag
             // was doing duty as "is a module", and adding the `script` goal broke all three.
-            if ((c === 60 || c === 45) && !state.goalIsModule && isHtmlComment(src, pos, c, nl !== 0 || pos === 0)) {
+            // `lineStart` is "only whitespace or comments precede this on its line": either this
+            // scan crossed a newline, or it began at the start of input. It read `pos === 0`, which
+            // is the same thing ONLY when there is no leading trivia at all — `   --> x` and
+            // `/* c */ --> x` on the first line were both rejected, and both are valid Script
+            // (verified against oxc, which also rejects `var y = 1; --> x`, as this still does).
+            if ((c === 60 || c === 45) && !state.goalIsModule && isHtmlComment(src, pos, c, nl !== 0 || scanStart === 0)) {
                 const nlPos = src.indexOf('\n', pos);
                 pos = nlPos < 0 ? srcLen : nlPos;
                 continue;
