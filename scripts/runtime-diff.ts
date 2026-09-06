@@ -204,6 +204,28 @@ out.push(typeof panel);
 process.stdout.write(JSON.stringify(out));
 `;
 
+/**
+ * The LIBRARY-CONSUMER driver. This corpus imports 8 names from three's 650KB ESM build and drops the
+ * rest, so it is the one where a tree-shaking mistake does the most damage — and it is where the
+ * `sideEffects` miscompile of §2z47 hid, showing up as shakeup being 22KB SMALLER than rolldown and
+ * being read as superior tree-shaking rather than as deleted side effects.
+ *
+ * The entry already computes its exports, so the driver only has to read them back: a transform
+ * chain, a bounding box built from a real mesh, and a colour.
+ *
+ * HONEST LIMIT, measured rather than assumed: this driver does NOT detect the §2z47 miscompile that
+ * made the corpus famous. Reinstating that bug leaves all four exports identical — the side effects
+ * it deleted from three's modules do not influence these eight classes on this path, so the damage
+ * shows up as 22KB of SIZE and not as a wrong number. Use `standing consumer` for that. It DOES
+ * catch a mangler slot-liveness break (verified), so it is real coverage of the tree-shaking-heavy
+ * path — just not of everything this corpus can express.
+ */
+const CONSUMER_DRIVER = `
+import * as m from '__ENTRY__';
+const r = (n) => (Object.is(n, -0) ? 0 : Number(n.toFixed(6)));
+process.stdout.write(JSON.stringify([m.origin.map(r), r(m.radius), m.centre.map(r), m.hex]));
+`;
+
 type Corpus = { entry: string; external: string[]; driver: string; nodeModules: string; blurb: string };
 const CORPORA: Record<string, Corpus> = {
     crashcat: {
@@ -219,6 +241,13 @@ const CORPORA: Record<string, Corpus> = {
         driver: THREE_DRIVER,
         nodeModules: '',
         blurb: 'matrix/vector/geometry math over a fixed sweep',
+    },
+    consumer: {
+        entry: join(import.meta.dirname, '..', 'llm', 'spikes', 'three-consumer-entry.js'),
+        external: [],
+        driver: CONSUMER_DRIVER,
+        nodeModules: '',
+        blurb: '8 names out of three — the tree-shaking-sensitive workload',
     },
     split: {
         entry: join(import.meta.dirname, 'corpora', 'split', 'main.js'),
