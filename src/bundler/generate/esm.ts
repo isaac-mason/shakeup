@@ -313,7 +313,19 @@ export function helpersNeededBy(graph: Graph, linked: Linked, chunk: Chunk): Set
     // that declares the init function, which may wrap nothing and require nothing itself.
     const needsEsm = has((i) => linked.esmInit.has(i));
     if (needsCjs) wanted.add('__commonJS');
-    if (has((i) => linked.cjsNamespace.has(i) || linked.cjsNamespaceNode.has(i))) for (const d of TO_ESM_DEPS) wanted.add(d);
+    // A module in THIS chunk that dynamically imports a CommonJS target also needs `__toESM`: the
+    // import site converts the target chunk's `default` into a namespace (`generate/modules.ts`).
+    // The check above cannot see that — it asks whether a module in this chunk IS a CJS target, and
+    // for a cross-chunk dynamic import the target lives elsewhere, so the helper went missing and the
+    // chunk referenced an undeclared `__toESM`.
+    const dynamicCjs = has((i) =>
+        graph.modules[i].importRecords.some(
+            (r) =>
+                (r.kind === 'dynamic' || r.hasDynamicLiteral) && !r.external && r.resolved >= 0 && linked.cjsWrap.has(r.resolved),
+        ),
+    );
+    if (dynamicCjs || has((i) => linked.cjsNamespace.has(i) || linked.cjsNamespaceNode.has(i)))
+        for (const d of TO_ESM_DEPS) wanted.add(d);
     if (needsEsm) wanted.add('__esm');
     if (has((i) => linked.dynamicExports.has(i))) for (const d of EXPORT_ALL_DEPS) wanted.add(d);
     if (needsToCjs) for (const d of TO_CJS_DEPS) wanted.add(d);

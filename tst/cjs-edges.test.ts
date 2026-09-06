@@ -405,3 +405,50 @@ describe('dynamic import() of a CommonJS module under "type": "module"', () => {
         ).toEqual(['B', 'B']);
     });
 });
+
+// A twelfth never-run configuration: a CommonJS module reached by NOTHING but a dynamic `import()`,
+// so it becomes its own chunk and the CROSS-chunk branch runs rather than the one above.
+//
+// That chunk exports only `export default require_dep();` — a CJS module has no named ESM surface —
+// so a bare `import()` of it answers a namespace whose every named member is `undefined`. Both
+// oracles convert at the SITE; rolldown emits
+// `import("./dep.js").then((m) => __toESM(m.default, 1)).then((m) => m.beta)`.
+//
+// The helper had to follow: `helpersNeededBy` asked whether a module in the chunk IS a CJS target,
+// and for a cross-chunk dynamic import the target lives elsewhere — so `__toESM` went missing and the
+// chunk referenced an undeclared name.
+describe('a CommonJS module reached only by dynamic import()', () => {
+    const dyn = "export const x = import('./dep.cjs').then((m) => m.beta);";
+    const dep = { '/dep.cjs': "exports.beta = 'B';\n" };
+
+    it('converts at the import site', async () => {
+        expect(await run({ ...dep, '/main.js': dyn })).toBe('B');
+    });
+
+    it('and in node mode under "type": "module"', async () => {
+        expect(await run({ ...dep, '/package.json': '{"name":"x","type":"module"}', '/main.js': dyn })).toBe('B');
+    });
+
+    it('picks the node-mode flag from the importer, not a constant', async () => {
+        const plain = await build({ ...dep, '/main.js': dyn });
+        const node = await build({ ...dep, '/package.json': '{"name":"x","type":"module"}', '/main.js': dyn });
+        const site = (r: { chunks: { code: string }[] }) =>
+            (/import\([^)]*\)\.then\(\(m\) => __toESM\([^)]*\)\)/.exec(r.chunks.map((c) => c.code).join('\n')) ?? [''])[0];
+        expect(site(plain), 'no importer package.json — the plain flavour').toContain('__toESM(m.default)');
+        expect(site(node), '"type": "module" — node mode').toContain('__toESM(m.default, 1)');
+    });
+
+    it('leaves the SAME-chunk case alone', async () => {
+        // The falsification arm. When the target is in this chunk there is already an interop
+        // binding to name, and the site must keep using it rather than re-converting a `default`
+        // that is not on a chunk boundary at all.
+        const r = await build({
+            ...dep,
+            '/main.js':
+                "import d from './dep.cjs';\nexport const x = Promise.all([d.beta, import('./dep.cjs').then((m) => m.beta)]);",
+        });
+        const code = r.chunks.map((c) => c.code).join('\n');
+        expect(code, 'same chunk: resolve to the interop binding').toMatch(/Promise\.resolve\(\)\.then\(\(\) => import_dep\b/);
+        expect(code, 'and not through a cross-chunk conversion').not.toContain('__toESM(m.default');
+    });
+});

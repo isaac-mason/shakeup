@@ -372,6 +372,19 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                             // because `rec.external` short-circuits above.
                             map.set(n, `import('${path}')`);
                         } else map.set(source, `'${path}'`);
+                        // A CommonJS target in ANOTHER chunk. That chunk exports only
+                        // `export default require_dep();` — a CJS module has no named ESM surface —
+                        // so a bare `import()` of it answers a namespace whose every named member is
+                        // `undefined`. Convert at the SITE, which is what rolldown emits:
+                        // `import("./dep.js").then((m) => __toESM(m.default, 1))`. Node-mode picked
+                        // from the importer's own format, as at the same-chunk case above.
+                        //
+                        // A mode-2 target returned already (its chunk exports the runtime object
+                        // under one name), and an EXTERNAL never reaches here.
+                        if (ctx.linked.cjsWrap.has(rec.resolved)) {
+                            const nodeMode = isEsmFormat(mod.defFormat) ? ', 1' : '';
+                            map.set(n, `import('${path}').then((m) => __toESM(m.default${nodeMode}))`);
+                        }
                     }
                 }
             }
