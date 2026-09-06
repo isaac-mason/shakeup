@@ -719,6 +719,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 warnings,
                 naming,
                 symbols: options.output?.generatedCode?.symbols !== false,
+                context: options.context ?? null,
                 wantMap: want,
                 // Emit-glue spacing and module printing both stay readable when the chunk pass will
                 // minify: it re-parses this text, and minified printing loses `@__PURE__`.

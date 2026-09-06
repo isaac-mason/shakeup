@@ -159,6 +159,16 @@ export type TreeshakeOptions = {
 };
 
 export type GraphOptions = CommonOptions & {
+    /** The value of `this` at the TOP LEVEL of each module — rolldown's `context?: string`, Rollup's
+     *  `context`. Emitted as raw text where the module's top-level `this` was, so
+     *  `context: 'globalThis'` turns `this.x` into `globalThis.x`.
+     *
+     *  Unset is NOT the same as `'undefined'` and the difference does not matter here: rolldown
+     *  rewrites an unset ESM top-level `this` to `void 0`, shakeup leaves the `this` in place, and
+     *  the two agree because shakeup only ever emits ESM chunks — whose top-level `this` IS
+     *  `undefined`, and whose lazy wrapper is an arrow that inherits rather than rebinds. A COMMONJS
+     *  module's top-level `this` means `module.exports` and is unaffected by this option. */
+    context?: string;
     /** `false` disables tree-shaking entirely; an object configures it. */
     treeshake?: boolean | TreeshakeOptions;
     /** Compile-time global replacement (esbuild/Vite `define`). Keys are a bare identifier

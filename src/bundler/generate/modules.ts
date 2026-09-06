@@ -91,6 +91,15 @@ function collectRequireOverrides(ctx: EmitCtx, map: Map<Node, string>): void {
     // Top-level `this` means `module.exports` in CommonJS (cjs.md §2.4). Only meaningful once the
     // body is a wrapper closure, which is where `exports` is bound.
     if (linked.cjsWrap.has(mod.idx)) for (const n of mod.topLevelThis) map.set(n, 'exports');
+    // ESM: `options.context` decides what a module's top-level `this` becomes — rolldown's
+    // `ThisExprReplaceKind::Context`, the sibling of the CommonJS case above. Unset leaves the `this`
+    // alone, which is equivalent to rolldown's `void 0` for ESM-only output (see `GraphOptions.context`).
+    //
+    // Raw TEXT, like every other entry in this map, so deconfliction cannot see it: a chunk-local
+    // named `globalThis` would shadow the replacement. rolldown has the same exposure — it mints the
+    // identifier in its finalizer, after names are settled — and the option exists to name a GLOBAL,
+    // which a bundle should not be shadowing anyway.
+    else if (ctx.context !== null) for (const n of mod.topLevelThis) map.set(n, ctx.context);
     for (const n of freeRequireRefs(mod)) map.set(n, '__require');
     if (!mod.hasRequire) return;
     walk(mod.program, (n) => {
@@ -632,6 +641,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 pathToChunk,
                 interopOwners,
                 elidableNs: ctx.elidedNs,
+                context: ctx.context,
                 rewrittenNs: ctx.rewrittenNs,
             };
             trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);

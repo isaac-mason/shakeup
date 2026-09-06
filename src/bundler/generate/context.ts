@@ -43,6 +43,8 @@ export type EmitCtx = {
      *  {@link elidableNs}: a materialised namespace still gets its reads resolved, and a name that
      *  does not resolve is simply left as a member read of the object that is still there. */
     rewrittenNs: Set<number>;
+    /** `options.context` — what a module's top-level `this` becomes. `null` leaves it alone. */
+    context: string | null;
 };
 
 /** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
@@ -116,6 +118,8 @@ export type RenderCtx = {
     /** `output.generatedCode.symbols` — whether a namespace object gets its `Symbol.toStringTag`
      *  stamp. rolldown's default is TRUE; Rollup's is false. See {@link OutputOptions.generatedCode}. */
     symbols: boolean;
+    /** `options.context` — see {@link EmitCtx.context}. */
+    context: string | null;
     wantMap: boolean;
     tight: boolean;
     /** The cosmetic tier runs later over the assembled chunk, so this render must stay READABLE.
