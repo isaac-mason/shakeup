@@ -16,6 +16,7 @@ import {
 } from './generate/chunks.ts';
 import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
 import {
+    type EmittedRecord,
     externalKey,
     type Graph,
     type ImportBind,
@@ -47,15 +48,7 @@ import {
 } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
-import {
-    buildGraph,
-    externalModuleInfo,
-    fileNameOfRef,
-    hashSource,
-    registerEmitted,
-    resolveEmittedFileName,
-    toModuleInfo,
-} from './scan.ts';
+import { buildGraph, externalModuleInfo, fileNameOfRef, hashSource, registerEmitted, toModuleInfo } from './scan.ts';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake.ts';
 import type { FileEvent } from './watch.ts';
 
@@ -142,6 +135,7 @@ export type BundleOptions = GraphOptions & {
 };
 
 export type OutputChunk = {
+    type: 'chunk';
     fileName: string;
     /** Logical name (entry name, group name, or derived). */
     name: string;
@@ -167,7 +161,42 @@ export type OutputChunk = {
 
 /** A non-chunk output file: a `.map` sidecar, or an asset a plugin emitted via `ctx.emitFile`
  *  (bytes for a binary asset, a string for text). */
-export type OutputAsset = { fileName: string; source: string | Uint8Array };
+/**
+ * A non-chunk output file, in the shape both oracles hand to `generateBundle` and return from
+ * `generate`. Every field below was measured against a real rolldown build rather than inferred:
+ *
+ *     emitFile({ name })              name: 'x.txt'  names: ['x.txt']  originalFileName: null
+ *     emitFile({ name, originalFileName })           …               originalFileName: '<path>'
+ *     emitFile({ fileName })          name absent    names: []        originalFileName: null
+ *     a `.map` sidecar                name absent    names: []        originalFileName: null
+ *
+ * The plurals are the real fields and the singulars are deprecated aliases for their FIRST element,
+ * because dedupe unions: the same bytes emitted twice under different names is one file listing both.
+ */
+export type OutputAsset = {
+    type: 'asset';
+    fileName: string;
+    source: string | Uint8Array;
+    /** @deprecated `names[0]`, absent when nothing named it. */
+    name?: string;
+    names: string[];
+    /** @deprecated `originalFileNames[0]`, `null` when there is no source file. */
+    originalFileName: string | null;
+    originalFileNames: string[];
+};
+
+/** Project a {@link Graph.emitted} record into the output shape. */
+function outputAsset(fileName: string, rec: EmittedRecord): OutputAsset {
+    return {
+        type: 'asset',
+        fileName,
+        source: rec.source,
+        name: rec.names[0],
+        names: rec.names,
+        originalFileName: rec.originalFileNames[0] ?? null,
+        originalFileNames: rec.originalFileNames,
+    };
+}
 
 /** `map` is present iff `sourcemap` was set (and no `renderChunk` plugin rewrote the chunk). */
 export type BundleResult = {
@@ -207,9 +236,13 @@ async function emitAssets(graph: Graph, fs: Fs): Promise<void> {
                 continue;
             }
             const name = rec.assetPath.slice(rec.assetPath.lastIndexOf('/') + 1);
-            const fileName = resolveEmittedFileName({ type: 'asset', name, source: bytes });
-            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, bytes);
-            rec.assetFileName = fileName;
+            // Through `registerEmitted` like any other emit, so the dedupe union and the reference-id
+            // bookkeeping are in ONE place. `originalFileName` is the point of the exercise here: a
+            // `new URL()` asset is the case where the output file has a real source file behind it.
+            // Read BACK through the reference id rather than recomputing the name: with content
+            // dedupe the registered file may already exist under a different asset's name.
+            const ref = registerEmitted(graph, { type: 'asset', name, originalFileName: rec.assetPath, source: bytes });
+            rec.assetFileName = fileNameOfRef(graph, ref);
         }
     }
 }
@@ -724,9 +757,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     await Promise.all(pipeline.buildEnd.map((hook) => hook.handler.call(pluginCtx)));
     warnings.push(...warningsOut.splice(0));
 
-    // plugin ctx.emitFile assets (content-hashed fileName → source), collected across graph build +
+    // plugin ctx.emitFile assets (content-hashed fileName → record), collected across graph build +
     // renderChunk/buildEnd. Appended after buildEnd so a late emit still lands in the output.
-    for (const [fileName, source] of graph.emitted) assets.push({ fileName, source });
+    for (const [fileName, rec] of graph.emitted) assets.push(outputAsset(fileName, rec));
 
     // `generateBundle` — the last hook, and the only one that can MUTATE the finished output. rollup
     // hands over a fileName-keyed object; plugins add entries (emitting a file), delete them and
@@ -750,10 +783,10 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         const surfaced = new Set(graph.emitted.keys());
         for (const hook of pipeline.generateBundle) {
             await hook.handler.call(pluginCtx, naming as never, bundleObj, false);
-            for (const [fileName, source] of graph.emitted) {
+            for (const [fileName, rec] of graph.emitted) {
                 if (surfaced.has(fileName)) continue;
                 surfaced.add(fileName);
-                bundleObj[fileName] = { type: 'asset', fileName, source } as GenerateBundleEntry;
+                bundleObj[fileName] = outputAsset(fileName, rec) as unknown as GenerateBundleEntry;
             }
         }
         outputChunks = [];

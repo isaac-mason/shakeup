@@ -913,8 +913,30 @@ export function registerEmitted(graph: Graph, file: EmittedFile): string {
         graph.emittedChunks.push({ ref, id: file.id, importer: file.importer, name: file.name, module: -1 });
         return ref;
     }
-    const fileName = resolveEmittedFileName(file);
-    if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
+    // CONTENT is the dedupe key for a name-based emit, not (name, content). Keying on the resolved
+    // fileName instead meant `dup1.txt` and `dup2.txt` with identical bytes became TWO files, where
+    // rolldown emits one named after the first — and it also made the `names` union below
+    // unreachable, since two emits could only collide when they already shared a name.
+    //
+    // An explicit `fileName` is exempt: that is a demand for a specific path, not a suggestion.
+    const contentKey = file.fileName === undefined ? hashSourceHex(file.source) : null;
+    const fileName = (contentKey !== null ? graph.emittedByContent.get(contentKey) : undefined) ?? resolveEmittedFileName(file);
+    if (contentKey !== null && !graph.emittedByContent.has(contentKey)) graph.emittedByContent.set(contentKey, fileName);
+    // DEDUPE UNIONS the metadata. Two emits of the same bytes under different names are ONE file that
+    // lists both — measured against rolldown, which answers `names: ["dup1.txt","dup2.txt"]` and
+    // `originalFileNames` with both paths, while the deprecated singulars keep the FIRST.
+    const rec = graph.emitted.get(fileName);
+    if (rec === undefined) {
+        graph.emitted.set(fileName, {
+            source: file.source,
+            names: file.name === undefined ? [] : [file.name],
+            originalFileNames: file.originalFileName === undefined ? [] : [file.originalFileName],
+        });
+    } else {
+        if (file.name !== undefined && !rec.names.includes(file.name)) rec.names.push(file.name);
+        if (file.originalFileName !== undefined && !rec.originalFileNames.includes(file.originalFileName))
+            rec.originalFileNames.push(file.originalFileName);
+    }
     graph.emittedRefs.set(ref, fileName);
     return ref;
 }
@@ -952,6 +974,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         errors: [],
         warnings: [],
         emitted: new Map(),
+        emittedByContent: new Map(),
         emittedRefs: new Map(),
         emittedChunks: [],
         parseStats: { parsed: 0, reused: 0 },

@@ -327,6 +327,69 @@ describe('plugin pipeline', () => {
         expect(unknown).toMatch(/Unknown file reference id/);
     });
 
+    it('an output asset carries the full rollup/rolldown shape', async () => {
+        // Every expectation here was read off a real rolldown build of the same four emits before it
+        // was written — including the two that are easy to get backwards: `name` is ABSENT (not
+        // `null`) when nothing named the file, while `originalFileName` is `null` (not absent) when
+        // there is no source file behind it.
+        const p: Plugin = {
+            name: 'emit',
+            buildStart: function () {
+                this.emitFile({ type: 'asset', name: 'named.txt', source: 'NAMED' });
+                this.emitFile({ type: 'asset', fileName: 'exact.txt', source: 'EXACT' });
+                // SAME BYTES, two names, two source files. rolldown emits ONE file listing both.
+                this.emitFile({ type: 'asset', name: 'dup1.txt', originalFileName: '/one.txt', source: 'DUPE' });
+                this.emitFile({ type: 'asset', name: 'dup2.txt', originalFileName: '/two.txt', source: 'DUPE' });
+            },
+        };
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
+            external: [],
+            output: { sourcemap: true },
+            plugins: [p],
+        });
+        expect(r.errors).toEqual([]);
+        const by = (m: (a: { fileName: string }) => boolean) => (r.assets ?? []).find(m)!;
+        const shape = (a: Record<string, unknown>) => {
+            const { source: _s, ...rest } = a;
+            return rest;
+        };
+
+        // A `.map` sidecar: no name, no source file.
+        expect(shape(by((a) => a.fileName === 'main.js.map'))).toEqual({
+            type: 'asset',
+            fileName: 'main.js.map',
+            names: [],
+            originalFileName: null,
+            originalFileNames: [],
+        });
+        // An explicit `fileName` keeps the exact path AND gets no name.
+        expect(shape(by((a) => a.fileName === 'exact.txt'))).toEqual({
+            type: 'asset',
+            fileName: 'exact.txt',
+            names: [],
+            originalFileName: null,
+            originalFileNames: [],
+        });
+        const named = by((a) => a.fileName.startsWith('assets/named-'));
+        expect(named.name).toBe('named.txt');
+        expect(named.names).toEqual(['named.txt']);
+        expect(named.originalFileName).toBeNull();
+
+        // The dedupe: ONE file, named after the FIRST emit, listing both — and the deprecated
+        // singulars are the first element of their plural, which is the whole reason plurals exist.
+        const dupes = (r.assets ?? []).filter((a) => a.fileName.startsWith('assets/dup'));
+        expect(dupes, 'identical bytes are one file, not two').toHaveLength(1);
+        expect(dupes[0].fileName).toMatch(/^assets\/dup1-/);
+        expect(dupes[0].names).toEqual(['dup1.txt', 'dup2.txt']);
+        expect(dupes[0].originalFileNames).toEqual(['/one.txt', '/two.txt']);
+        expect(dupes[0].name).toBe('dup1.txt');
+        expect(dupes[0].originalFileName).toBe('/one.txt');
+        // The chunk carries its discriminant too.
+        expect(r.chunks[0].type).toBe('chunk');
+    });
+
     it('a file emitted from inside generateBundle reaches the output', async () => {
         // It did not. `graph.emitted` was drained once, before the hook ran, so the file vanished
         // with no error at all. rolldown emits it (probed on the same input: `late.txt` is in its

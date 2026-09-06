@@ -62,6 +62,15 @@ export const isCommonJsFormat = (f: ModuleDefFormat): boolean => f === 'cjs' || 
  *  which lives in another file. The per-file facts it is derived from are cacheable; this is not. */
 export type ExportsKind = 'esm' | 'commonjs' | 'none';
 
+/** One entry of {@link Graph.emitted}: the bytes plus the names every emit of them supplied. */
+export type EmittedRecord = {
+    source: string | Uint8Array;
+    /** Every `name` given, in emit order. The singular `name` on the output asset is `names[0]`. */
+    names: string[];
+    /** Every `originalFileName` given, in emit order. The singular is `originalFileNames[0] ?? null`. */
+    originalFileNames: string[];
+};
+
 /** A resolved edge to another module (deduped per specifier for `static`/`dynamic`). */
 export type ImportRecord = {
     /** The specifier AS WRITTEN in the source. An identity: emit looks records up by the text it
@@ -216,8 +225,18 @@ export type Graph = {
     errors: string[];
     warnings: string[];
     /** Files a plugin emitted via `ctx.emitFile`, deduped by content-hashed fileName. Merged into
-     *  {@link BundleResult.assets} by `bundle()`. */
-    emitted: Map<string, string | Uint8Array>;
+     *  {@link BundleResult.assets} by `bundle()`.
+     *
+     *  The value carries the METADATA, not just the bytes, because dedupe UNIONS it: two emits of the
+     *  same content under different names collapse to one file that lists both. Measured against
+     *  rolldown, which answers `names: ["dup1.txt","dup2.txt"]` for exactly that case while the
+     *  deprecated singular `name` keeps the first. */
+    emitted: Map<string, EmittedRecord>;
+    /** content hash -> the fileName that content was first registered under. Assets dedupe on
+     *  CONTENT, not on (name, content): two emits of the same bytes under different names are one
+     *  file, named after the first, listing both names. Measured against rolldown. Only NAME-based
+     *  emits participate — an explicit `fileName` is a demand, not a suggestion. */
+    emittedByContent: Map<string, string>;
     /** REFERENCE ID -> fileName. `emitFile` hands back a reference id, not a name (both oracles do;
      *  see `PluginCtx.getFileName`), and this is what resolves one. Every call gets its own id, so
      *  two emits of the same bytes share a fileName and not an id — which is Rollup's behaviour. */

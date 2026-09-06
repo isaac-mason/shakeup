@@ -42,7 +42,11 @@ export function asset(options: AssetOptions = {}): Plugin {
                 const source = await this.fs.read(path);
                 if (source === null) return this.error(`asset not found: ${path}`);
                 // `emitFile` answers a REFERENCE ID, not a name — see `PluginCtx.emitFile`.
-                const fileName = this.getFileName(this.emitFile({ type: 'asset', name: baseName(path), source }));
+                const fileName = this.getFileName(
+                    // `originalFileName`: this asset HAS a source file, and reporting it is what lets a
+                    // consumer map the output back to the import that produced it.
+                    this.emitFile({ type: 'asset', name: baseName(path), originalFileName: path, source }),
+                );
                 return { code: `export default ${JSON.stringify(fileName)};`, moduleType: 'js' };
             },
         },

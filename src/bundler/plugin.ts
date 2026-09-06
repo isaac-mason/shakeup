@@ -126,6 +126,10 @@ export type EmittedAsset = {
     type: 'asset';
     name?: string;
     fileName?: string;
+    /** The SOURCE file this asset came from, when there is one — an imported image, a `new URL()`
+     *  target. Reported back on the output asset so a consumer can map output to input; that is the
+     *  whole point of the field, and it is what a size visualiser reads. */
+    originalFileName?: string;
     source: string | Uint8Array;
 };
 

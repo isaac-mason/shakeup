@@ -13,7 +13,7 @@ import {
     type Part,
     type SourceMap,
 } from '../../util/sourcemap.ts';
-import type { OutputChunk } from '../bundle.ts';
+import type { OutputAsset, OutputChunk } from '../bundle.ts';
 import { compressChunk } from '../chunk-compress.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
 import { basenameOf, dirnameOf, relativePath } from '../fs.ts';
@@ -227,7 +227,7 @@ export function renderChunks(
     /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
     chunkMangle: boolean,
     inc?: RenderIncremental,
-): { chunks: OutputChunk[]; assets: { fileName: string; source: string }[] } {
+): { chunks: OutputChunk[]; assets: OutputAsset[] } {
     const chunks = chunkGraph.chunks;
     const wantMap = naming.sourcemap !== false;
     const genPlaceholder = getHashPlaceholderGenerator();
@@ -390,7 +390,7 @@ export function renderChunks(
     // the sourcemap variant. Order: hashed chunks then non-hashed (both need substitution since
     // a non-hashed chunk's import paths may point at hashed chunks).
     const outChunks: OutputChunk[] = [];
-    const assets: { fileName: string; source: string }[] = [];
+    const assets: OutputAsset[] = [];
     for (const rc of rendered) {
         let code = hashesByPlaceholder.size > 0 ? replacePlaceholders(rc.code, hashesByPlaceholder) : rc.code;
         const fileName =
@@ -420,12 +420,24 @@ export function renderChunks(
             if (naming.sourcemap === 'inline') {
                 code += `${inlineSourceMapComment(map)}\n`;
             } else {
-                assets.push({ fileName: mapFileName, source: JSON.stringify(map) });
+                // A `.map` sidecar has no `name` and no source file — both oracles report exactly
+                // this shape for one (measured), so it is spelled out rather than defaulted.
+                assets.push({
+                    type: 'asset',
+                    fileName: mapFileName,
+                    source: JSON.stringify(map),
+                    names: [],
+                    originalFileName: null,
+                    originalFileNames: [],
+                });
                 if (naming.sourcemap !== 'hidden') code += `//# sourceMappingURL=${basenameOf(mapFileName)}\n`;
             }
         }
 
         outChunks.push({
+            // Discriminant, as on `OutputAsset` — both oracles carry it, and `generateBundle` used to
+            // stamp it on a copy, which meant the value the CALLER got back had no `type` at all.
+            type: 'chunk',
             fileName,
             name: rc.name,
             isEntry: rc.isEntry,

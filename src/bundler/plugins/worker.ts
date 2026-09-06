@@ -64,7 +64,12 @@ export function worker(options: WorkerOptions = {}): Plugin {
                     // server has no output sink (emitFile throws), so fall back to an inline blob.
                     try {
                         // `emitFile` answers a REFERENCE ID, not a name — see `PluginCtx.emitFile`.
-                        const ref = this.emitFile({ type: 'asset', name: workerName(path), source: result.chunks[0].code });
+                        const ref = this.emitFile({
+                            type: 'asset',
+                            name: workerName(path),
+                            originalFileName: path,
+                            source: result.chunks[0].code,
+                        });
                         const fileName = this.getFileName(ref);
                         wrapper = urlWrapperModule(fileName);
                     } catch {
