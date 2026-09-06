@@ -458,6 +458,22 @@ for (const { d, c } of selected) {
         // EXTERNAL ONLY. The identical error against a relative specifier means one of OUR chunks
         // failed to export something another chunk imports, which is a real miscompile and has to
         // stay a failure.
+        // A `deepStrictEqual` whose ONLY difference is the PROTOTYPE: a real ES Module namespace is
+        // null-prototype, and rollup's CJS harness hands `import()` a plain `module.exports`, so
+        // fixtures compare namespaces against object literals. Verified on
+        // `dynamic-imports-shared-exports`, where rolldown's ESM output fails with the identical
+        // `[Module: null prototype] { sharedDynamic: true }` vs `{ sharedDynamic: true }`.
+        //
+        // The CONTENTS must match exactly — the inspect strings are compared after stripping the
+        // prefix — so a namespace that really holds the wrong exports stays a failure. A multi-line
+        // inspect does not match this at all, which errs toward keeping the failure.
+        const proto = /\n\s*actual: \[Module: null prototype\] (.*),\n\s*expected: (.*),\n\s*operator: 'deepStrictEqual'/.exec(
+            err,
+        );
+        if (proto !== null && proto[1] === proto[2]) {
+            skip('fixture deepStrictEquals a Module namespace against a plain object — CJS-only shape', d);
+            continue;
+        }
         const missing = /SyntaxError: The requested module '([^']*)' does not provide an export named/.exec(err);
         if (missing !== null && !missing[1].startsWith('.') && !missing[1].startsWith('/')) {
             skip(`fixture imports a name '${missing[1]}' does not export — runnable only as CJS`, d);
