@@ -2478,7 +2478,12 @@ function parseClassMember(state: ParserState): Node {
                 // already recorded for the expression half.
                 state.staticBlockDepth++;
                 const outerCtx = state.ctx;
-                state.ctx &= ~CTX.Await;
+                // `[~Yield, +Await]`: a static block is its own parameter environment, so an
+                // enclosing GENERATOR does not reach into it. Leaving `CTX.Yield` set let
+                // `function * g() { class C { static { yield; } } }` parse the `yield` as a
+                // YieldExpression, which walked straight past the strict-mode reserved-word rule
+                // that already rejected the same code at top level (a class body is always strict).
+                state.ctx &= ~(CTX.Await | CTX.Yield);
                 const b = parseBlock(state);
                 state.ctx = outerCtx;
                 state.staticBlockDepth--;

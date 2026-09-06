@@ -385,7 +385,17 @@ export function checkRedeclarations(sem: Semantic, errors: CheckError[]): void {
                 (r.prevFlags & SYM.PARAM) !== 0 &&
                 (r.flags & SYM.PARAM) !== 0 &&
                 (isStrictScope(sem, r.scope) || hasUniqueParams(sem, r.scope));
-            if (!lexical && !dupParam) continue;
+            // Two bindings of the SAME NAME inside one catch parameter — `catch ([x, x])`,
+            // `catch ({a: x, b: x})`. A catch scope holds exactly one parameter, so a second
+            // `SYM.CATCH` declaration of a name can only have come from that one pattern, which
+            // makes this test as narrow as the shape it describes.
+            //
+            // `SYM.CATCH` is deliberately NOT in `isLexical`, and must not be: Annex B B.3.5 lets a
+            // `var` redeclare a SIMPLE catch parameter (`catch (e) { var e; }`), and that pair is
+            // CATCH + VAR, which this leaves alone. The destructuring form of that same pair is an
+            // error and is already caught by the hoist-past walk (`crossed`).
+            const dupCatch = (r.prevFlags & SYM.CATCH) !== 0 && (r.flags & SYM.CATCH) !== 0;
+            if (!lexical && !dupParam && !dupCatch) continue;
             errors.push({ pos: r.pos, msg: `Identifier \`${r.name}\` has already been declared` });
         }
 }

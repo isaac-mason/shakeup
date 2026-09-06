@@ -1794,6 +1794,22 @@ function visit(state: AnalyseState, node: Node | null): void {
             state.cont = c;
             return;
         }
+        case N.WithStatement:
+            visit(state, node.data.object);
+            // `with` is the OTHER single-statement position Annex B never reaches, so it carries the
+            // same classification as a loop body — which is what `STMT_POS_LOOP` means here, not the
+            // literal node type. Verified against oxc: `with ({}) function f(){}` is an "Invalid
+            // function declaration" in every mode, while the `if` and label forms are accepted in
+            // sloppy script.
+            //
+            // There was no `WithStatement` case at all, so the body fell through the generic visit
+            // with `stmtPos` still NONE and the checker returned before reaching its rule. The rule
+            // itself was already correct and is untouched — this is the classification it was
+            // missing, not a second copy of it in the parser.
+            state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
+            visit(state, node.data.body);
+            state.stmtPos = STMT_POS_NONE;
+            return;
         case N.SwitchStatement: {
             // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
             const b = state.brk;
