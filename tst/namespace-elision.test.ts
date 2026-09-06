@@ -65,6 +65,30 @@ describe('a namespace object nothing can observe is not built', () => {
         expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn got;`)()).toEqual([41, 1]);
     });
 
+    it('keeps it when a member is ASSIGNED to, so the getter is still there to throw', async () => {
+        // `ns.v = 9` is not a read. ESM renders a live member as a getter with no setter, so the
+        // assignment throws — behaviour that exists only if the OBJECT does. Eliding here would emit
+        // `v = 9`, quietly assigning the producer's binding instead of throwing, and every use in
+        // this fixture IS a static member read, so nothing else refuses it.
+        //
+        // rolldown never reaches the question: it REFUSES the program with `[ASSIGN_TO_IMPORT]
+        // Cannot assign to import 'v'` (verified). shakeup accepts it and lets the getter throw,
+        // which `tst/bundle.test.ts` pins deliberately — so the object has to survive.
+        const code = await build({
+            '/dep.js': 'export let v = 1;\n',
+            '/main.js': [
+                "import * as ns from './dep.js';",
+                'let threw = false;',
+                'try { ns.v = 9 } catch { threw = true }',
+                'export const got = [threw, ns.v];',
+            ].join('\n'),
+        });
+        expect(code, 'the object survives to carry the getter').toContain('__proto__: null');
+        // Executed as a real module, so the assignment is in strict mode and actually throws.
+        const mod = await import(`data:text/javascript,${encodeURIComponent(code)}`);
+        expect(mod.got).toEqual([true, 1]);
+    });
+
     it('keeps it for a dynamic import, whose namespace is a real runtime value', async () => {
         const code = await build({
             '/dep.js': dep,

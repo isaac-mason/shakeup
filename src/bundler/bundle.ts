@@ -27,7 +27,7 @@ import {
     refSym,
 } from './graph-types.ts';
 import { computeInteropOwners } from './init-obligations.ts';
-import { linkGraph } from './link.ts';
+import { linkGraph, namespaceTargets } from './link.ts';
 import {
     type NormalizedOutputNaming,
     normalizeOutputOptions,
@@ -506,7 +506,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // `buildChunkGraph` is what produces. So this is the wider candidate set, and deconfliction may
     // rename a nested local guarding an elision that the partition then declines. That direction is
     // safe: the cost is an occasional `$1` on a local, never a capture.
-    if (shaken !== null) linked.elidableNs = shaken.elidableNs;
+    linked.rewritableNs = namespaceTargets(graph, linked);
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
@@ -542,26 +542,38 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // involved at all. That is the whole of a single-chunk bundle, which is the shape the size gap was
     // measured on. Extending it across chunks means teaching `wireBind` to import the members instead
     // — a separate change, with the wiring as its subject.
+    //
+    // REWRITING a read is a SEPARATE question from BUILDING the object, and same-chunk is the only
+    // condition the two share. rolldown keeps them apart: `resolve_member_expr_refs` fires whenever
+    // the member expression's object is a namespace symbol and the property resolves unambiguously
+    // to a non-CommonJS export, with no reference at all to whether the object gets materialised
+    // (`bind_imports_and_exports.rs:616`). crashcat's 43 `export * as` namespaces are exactly that
+    // case — the object is public API and must exist, and the 433 internal `ns.foo` reads of it
+    // should still name the binding directly.
     const elidedNs = new Set<number>();
-    if (shaken !== null)
-        for (const target of shaken.elidableNs) {
-            const home = chunkGraph.chunkByModule[target];
-            if (home < 0) continue;
-            let sameChunk = true;
-            for (const mod of graph.modules) {
-                if (chunkGraph.chunkByModule[mod.idx] === home) continue;
-                for (const [, imp] of mod.namedImports) {
-                    if (imp.name !== NAME_NAMESPACE) continue;
-                    const rec = mod.importRecords[imp.rec];
-                    if (!rec.external && rec.resolved === target) {
-                        sameChunk = false;
-                        break;
-                    }
+    const rewrittenNs = new Set<number>();
+    for (const target of linked.rewritableNs) {
+        const home = chunkGraph.chunkByModule[target];
+        if (home < 0) continue;
+        let sameChunk = true;
+        for (const mod of graph.modules) {
+            if (chunkGraph.chunkByModule[mod.idx] === home) continue;
+            for (const [, imp] of mod.namedImports) {
+                if (imp.name !== NAME_NAMESPACE) continue;
+                const rec = mod.importRecords[imp.rec];
+                if (!rec.external && rec.resolved === target) {
+                    sameChunk = false;
+                    break;
                 }
-                if (!sameChunk) break;
             }
-            if (sameChunk) elidedNs.add(target);
+            if (!sameChunk) break;
         }
+        if (!sameChunk) continue;
+        rewrittenNs.add(target);
+        // Elision needs everything rewriting needs AND proof the object is unobservable, which is
+        // what `treeshake` establishes.
+        if (shaken?.elidableNs.has(target) === true) elidedNs.add(target);
+    }
     // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
     // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
     // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the
@@ -617,6 +629,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 chunkIdx: ci,
                 shaken,
                 elidedNs,
+                rewrittenNs,
                 interopOwners,
                 warnings,
                 naming,

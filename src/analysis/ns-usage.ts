@@ -31,7 +31,29 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
         return nsSyms.has(s) ? s : 0;
     };
 
+    /** Mark every namespace member expression in an assignment TARGET as an escape.
+     *
+     *  `ns.foo = 1` is not a read. ESM renders a live member as a getter with no setter, so the
+     *  assignment throws — behaviour that only exists if the OBJECT does, which means the namespace
+     *  cannot be elided and the read cannot be rewritten to `foo = 1` (that would quietly assign the
+     *  producer's binding instead of throwing). Over-marks a read nested in a computed key
+     *  (`ns.a[ns.b] = 1`), which costs an optimisation and never correctness.
+     *
+     *  rolldown never reaches this question: it REFUSES the program, `[ASSIGN_TO_IMPORT] Cannot
+     *  assign to import 'v'` (verified). shakeup accepts it and lets the getter throw at runtime —
+     *  `tst/bundle.test.ts` pins that deliberately — so the object has to survive. */
+    const markTarget = (node: Node): void => {
+        if (node.type === N.StaticMemberExpression || node.type === N.ComputedMemberExpression) {
+            const s = nsSymOf((node.data as { object: Node }).object);
+            if (s !== 0) out.get(s)!.escapes = true;
+        }
+        walkChildren(node, markTarget);
+    };
+
     const visit = (node: Node): void => {
+        if (node.type === N.AssignmentExpression) markTarget(node.data.left);
+        else if (node.type === N.UpdateExpression) markTarget(node.data.argument);
+        else if (node.type === N.ForInStatement || node.type === N.ForOfStatement) markTarget(node.data.left);
         // `ns.foo()` hands the NAMESPACE to the callee as `this`, so the callee may read any member —
         // including ones nothing names here. Only FLAGGED here; the member read (and its capture
         // test) is still recorded by the ordinary member-expression case below, which this falls

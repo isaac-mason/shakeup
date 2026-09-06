@@ -269,6 +269,36 @@ function sortModules(graph: Graph): number[] {
 /** LINK stage (rolldown `link_stage`): bind imports/exports across `graph` + order modules into a
  *  {@link Linked}. **Metadata only — no AST mutation, no naming.** Deconfliction (a generate-stage
  *  concern) runs per-chunk in buildChunkGraph; single-scope callers run {@link deconflictWholeBundle}. */
+/**
+ * Targets of an `import * as ns` whose `ns.foo` reads may be REWRITTEN to name `foo`'s own binding.
+ *
+ * Deliberately says NOTHING about whether the namespace OBJECT is built — that is
+ * `TreeshakeResult.elidableNs`, a strictly stronger condition. rolldown draws the line in the same
+ * place: `resolve_member_expr_refs` resolves a member expression whenever its object is a namespace
+ * symbol and the property names a non-CommonJS export, and never consults materialisation
+ * (`bind_imports_and_exports.rs:616`). A namespace that must exist because it is re-exported as
+ * `export * as` still has its internal reads resolved.
+ *
+ * The exclusions match rolldown's. A `dynamicExports` target (`export *` from CommonJS) has a
+ * surface that is only known once `__reExport` has run, and a `cjsWrap` target's exports are
+ * `came_from_commonjs` — neither can be resolved statically. Whether an INDIVIDUAL name resolves is
+ * left to the read site, again as rolldown does: a miss on a materialised namespace is simply left
+ * as a member read of the object that is still there.
+ */
+export function namespaceTargets(graph: Graph, linked: Linked): Set<number> {
+    const out = new Set<number>();
+    for (const mod of graph.modules)
+        for (const [, imp] of mod.namedImports) {
+            if (imp.name !== NAME_NAMESPACE) continue;
+            const rec = mod.importRecords[imp.rec];
+            if (rec.external || rec.resolved < 0) continue;
+            if (linked.dynamicExports.has(rec.resolved) || linked.cjsWrap.has(rec.resolved)) continue;
+            if (!linked.exportMaps.has(rec.resolved)) continue;
+            out.add(rec.resolved);
+        }
+    return out;
+}
+
 export function linkGraph(graph: Graph): Linked {
     const linked: Linked = {
         graph,
@@ -277,7 +307,7 @@ export function linkGraph(graph: Graph): Linked {
         finalNames: new Map(),
         namespaceOf: new Map(),
         exportMaps: new Map(),
-        elidableNs: new Set(),
+        rewritableNs: new Set(),
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),

@@ -7,7 +7,7 @@
 // printing are one unit. That is deliberate: the module AST is reused across builds through
 // `options.cache`, and mutating it during render would poison the next build.
 import { SYM, symbolOf } from '../../analysis/semantic.ts';
-import { N, type Node, walk } from '../../ast/index.ts';
+import { N, type Node, walk, walkChildren } from '../../ast/index.ts';
 import { lazySplit } from '../../passes/lazy-split.ts';
 import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../passes/wrap-module.ts';
 import { printModule } from '../../print/print-js.ts';
@@ -231,16 +231,21 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunkGraph } = ctx;
     const map = new Map<Node, string>();
-    // `import * as ns` bindings in THIS module whose target's namespace object is being elided
-    // (`TreeshakeResult.elidableNs`): every `ns.foo` becomes `foo`'s own binding. Built first because
-    // it has its own reason to walk — a module can have namespace imports and no `import()` at all.
+    // `import * as ns` bindings in THIS module whose `ns.foo` reads name the member's own binding
+    // instead of going through the object. Built first because it has its own reason to walk — a
+    // module can have namespace imports and no `import()` at all.
+    //
+    // NOT the same question as whether the object is built. `ctx.elidableNs` is the subset whose
+    // object is gone, and its only role here is that a read of one MUST resolve; for the rest the
+    // object is still there to fall back on. rolldown splits it the same way — see
+    // {@link namespaceTargets}.
     const elidedNs = new Map<number, number>(); // local ns symbol → target module idx
-    if (ctx.elidableNs.size > 0)
+    if (ctx.rewrittenNs.size > 0)
         for (const [localSym, imp] of mod.namedImports) {
             if (imp.name !== NAME_NAMESPACE) continue;
             const rec = mod.importRecords[imp.rec];
             if (rec.external || rec.resolved < 0) continue;
-            if (ctx.elidableNs.has(rec.resolved)) elidedNs.set(localSym, rec.resolved);
+            if (ctx.rewrittenNs.has(rec.resolved)) elidedNs.set(localSym, rec.resolved);
         }
     // Only `import()` and `new URL(...)` produce the OTHER overrides, and the scan already recorded
     // both as import records — so a module with neither, and no elided namespace, cannot contribute
@@ -255,7 +260,19 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
         !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)
     )
         return map;
+    /** Member expressions standing in an assignment TARGET. `ns.foo = 1` is not a read: ESM renders
+     *  a live member as a getter with no setter, so it must stay an assignment TO THE OBJECT and
+     *  throw. Rewriting it to `foo = 1` would silently assign the producer's binding instead.
+     *  Populated as the walk descends — `walk` visits a parent before its children. */
+    const writeTargets = new Set<Node>();
+    const markTarget = (n: Node): void => {
+        if (n.type === N.StaticMemberExpression) writeTargets.add(n);
+        walkChildren(n, markTarget);
+    };
     walk(mod.program, (n) => {
+        if (n.type === N.AssignmentExpression) markTarget(n.data.left);
+        else if (n.type === N.UpdateExpression) markTarget(n.data.argument);
+        else if (n.type === N.ForInStatement || n.type === N.ForOfStatement) markTarget(n.data.left);
         if (n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
             // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the
             // other bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not
@@ -266,7 +283,12 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                 return;
             }
         }
-        if (elidedNs.size > 0 && n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
+        if (
+            elidedNs.size > 0 &&
+            n.type === N.StaticMemberExpression &&
+            n.data.object.type === N.IdentifierReference &&
+            !writeTargets.has(n)
+        ) {
             const target = elidedNs.get(symbolOf(mod.semantic, n.data.object));
             if (target !== undefined) {
                 // `analyzeNsUsage` already proved every appearance of this binding is exactly this
@@ -275,10 +297,18 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                 // namespace that no longer exists. Fail loudly instead.
                 const bind = ctx.linked.exportMaps.get(target)?.get(n.data.property.name as string);
                 const local = bind === undefined ? null : nameOfBind(ctx.linked, bind, ctx.chunk);
-                if (local === null)
+                if (local === null) {
+                    // A materialised namespace still has the object, so an unresolvable name is left
+                    // alone to read off it — rolldown does the same, warning rather than failing.
+                    if (!ctx.elidableNs.has(target)) return;
+                    // ELIDED, so there is nothing left to read: `analyzeNsUsage` proved every
+                    // appearance is this shape and `computeElidableNs` proved every name resolves,
+                    // so a miss is a bug in one of them and emitting a reference to a namespace that
+                    // no longer exists would hide it. Fail loudly instead.
                     throw new Error(
                         `namespace elision: ${mod.id} reads '${n.data.property.name}' off an elided namespace with no binding`,
                     );
+                }
                 map.set(n, local);
                 return;
             }
@@ -578,6 +608,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 pathToChunk,
                 interopOwners,
                 elidableNs: ctx.elidedNs,
+                rewrittenNs: ctx.rewrittenNs,
             };
             trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);
             const overrides = collectLinkOverrides(emit);

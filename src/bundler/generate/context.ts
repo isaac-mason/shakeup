@@ -36,9 +36,13 @@ export type EmitCtx = {
     pathToChunk: (targetChunkIdx: number) => string;
     /** Which statement owns each wrapped-CommonJS interop namespace — see `computeInteropOwners`. */
     interopOwners: Map<number, InteropOwner>;
-    /** {@link TreeshakeResult.elidableNs} — targets whose namespace object is not built, so this
-     *  module's `ns.foo` reads are rewritten to `foo`'s own binding. Empty when tree-shaking is off. */
+    /** Targets whose namespace object is NOT built, so a `ns.foo` read of one MUST resolve — there
+     *  is no object left to fall back to. Empty when tree-shaking is off. */
     elidableNs: Set<number>;
+    /** Targets whose `ns.foo` reads are rewritten to the member's own binding. Superset of
+     *  {@link elidableNs}: a materialised namespace still gets its reads resolved, and a name that
+     *  does not resolve is simply left as a member read of the object that is still there. */
+    rewrittenNs: Set<number>;
 };
 
 /** Resolve a bind to the identifier it renders as, in the perspective of `chunk` (the
@@ -106,6 +110,9 @@ export type RenderCtx = {
     /** Targets whose namespace object is NOT built — {@link TreeshakeResult.elidableNs} narrowed to
      *  those whose every consumer shares the target's chunk. See the note at its computation. */
     elidedNs: Set<number>;
+    /** Targets whose `ns.foo` reads are rewritten to the member's own binding — a SUPERSET of
+     *  {@link elidedNs}, since a namespace that must be materialised still has its reads resolved. */
+    rewrittenNs: Set<number>;
     /** `output.generatedCode.symbols` — whether a namespace object gets its `Symbol.toStringTag`
      *  stamp. rolldown's default is TRUE; Rollup's is false. See {@link OutputOptions.generatedCode}. */
     symbols: boolean;

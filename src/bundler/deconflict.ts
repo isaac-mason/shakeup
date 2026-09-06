@@ -271,17 +271,17 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         if (memberSet !== null && !memberSet.has(mod.idx)) continue;
         if (mod.external) continue;
         const sem = mod.semantic;
-        /** This module's `import * as ns` locals whose target is having its namespace object elided,
-         *  mapped to that target. Every `ns.foo` on one of these is emitted as the PRODUCER's name,
-         *  so it is a read of the producer from whatever scope it sits in — the reference the
-         *  renamer would otherwise never see. Same table `collectLinkOverrides` builds at emit. */
+        /** This module's `import * as ns` locals whose `ns.foo` reads get rewritten to the producer's
+         *  binding, mapped to that target. Each such read is a reference to the producer from
+         *  whatever scope it sits in — the reference the renamer would otherwise never see. Same
+         *  table `collectLinkOverrides` builds at emit. */
         const elidedLocal = new Map<number, number>();
-        if (linked.elidableNs.size > 0)
+        if (linked.rewritableNs.size > 0)
             for (const [localSym, imp] of mod.namedImports) {
                 if (imp.name !== NAME_NAMESPACE) continue;
                 const rec = mod.importRecords[imp.rec];
                 if (rec.external || rec.resolved < 0) continue;
-                if (linked.elidableNs.has(rec.resolved)) elidedLocal.set(localSym, rec.resolved);
+                if (linked.rewritableNs.has(rec.resolved)) elidedLocal.set(localSym, rec.resolved);
             }
         /**
          * The name the PRINTER will emit for a symbol — which for an import is NOT `finalNameOf` on
