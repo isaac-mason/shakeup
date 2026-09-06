@@ -27,6 +27,7 @@
         "misslayers": "tsx scripts/miss-layers.ts",
         "checkerdiff": "tsx scripts/checker-diff.ts",
         "sizeattrib": "tsx scripts/size-attrib.ts",
+        "runtimediff": "tsx scripts/runtime-diff.ts",
         "unchanged": "tsx scripts/output-unchanged.ts",
         "evalorder": "tsx scripts/eval-order.ts"
     },
