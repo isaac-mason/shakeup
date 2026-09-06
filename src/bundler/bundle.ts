@@ -18,8 +18,8 @@ import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/con
 import {
     externalKey,
     type Graph,
+    type ImportBind,
     type Linked,
-    NAME_NAMESPACE,
     type ParseCache,
     type ParseStats,
     packRef,
@@ -513,6 +513,58 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // safe: the cost is an occasional `$1` on a local, never a capture.
     linked.rewritableNs = namespaceTargets(graph, linked);
 
+    // NAMESPACE ELISION, decided HERE — before the chunk partition exists, because it no longer
+    // depends on one.
+    //
+    // The previous rule elided only where every consumer shared the target's chunk, since eliding
+    // changes what a chunk IMPORTS — one namespace binding becomes the individual members — and the
+    // cross-chunk wiring had already run by the time the emitter saw any of this.
+    // `preserve-modules-namespace` caught the unwired version as a `ReferenceError`, not a diff.
+    //
+    // But the same-chunk test only ever existed to serve that ordering. Both inputs are known now,
+    // so the decision moves ahead of `buildChunkGraph` and the wiring is TOLD what was elided —
+    // `nsMemberBinds` below is exactly the member set the object literal would have named, so a
+    // consumer in another chunk imports those instead of the object. rolldown does the same
+    // (`resolve_member_expr_refs` never consults the chunk assignment) and answers this repro with
+    // no namespace object at all.
+    //
+    // REWRITING a read is a SEPARATE question from BUILDING the object. rolldown keeps them apart:
+    // `resolve_member_expr_refs` fires whenever the member expression's object is a namespace symbol
+    // and the property resolves unambiguously to a non-CommonJS export, with no reference at all to
+    // whether the object gets materialised (`bind_imports_and_exports.rs:616`). crashcat's 43
+    // `export * as` namespaces are exactly that case — the object is public API and must exist, and
+    // the 433 internal `ns.foo` reads of it should still name the binding directly.
+    const rewrittenNs = new Set<number>();
+    const elidedNs = new Set<number>();
+    // The members a consumer chunk must import in the object's place. Taken from the SAME narrowed
+    // set the object literal is built from (`renderNamespaceObject`'s `nsMembers`), which is the only
+    // set that is neither too small — a member nothing wired is a dangling reference — nor too large:
+    // an absent set means the whole surface, and a shaken-away binding must not be exported.
+    const nsMemberBinds = new Map<number, ImportBind[]>();
+    for (const target of linked.rewritableNs) {
+        const map = linked.exportMaps.get(target);
+        if (map === undefined) continue;
+        // `nsUsage` for an ELIDED target — the object's own member set, which is exactly what its
+        // reads resolve to. `nsRead` for one that is only REWRITTEN: it has no narrowed surface (that
+        // is why it is not elidable), and wiring its whole export map imports members nothing names —
+        // an escaping namespace under `preserveModules` did that, emitting a dead `import { v }`
+        // beside the `import * as ns` it still needs.
+        //
+        // `treeshake: false` has neither, and gets the whole surface: nothing was shaken, so every
+        // member exists and over-importing costs bytes rather than correctness. A target we cannot
+        // name the members of is NOT rewritten at all — rewriting a read whose member no chunk
+        // imports is the dangling reference this whole change has to avoid.
+        const members = shaken === null ? new Set(map.keys()) : (shaken.nsUsage.get(target) ?? shaken.nsRead.get(target));
+        if (members === undefined) continue;
+        const binds: ImportBind[] = [];
+        for (const [name, bind] of map) if (members.has(name)) binds.push(bind);
+        nsMemberBinds.set(target, binds);
+        rewrittenNs.add(target);
+        // Elision needs everything rewriting needs AND proof the object is unobservable, which is
+        // what `treeshake` establishes.
+        if (shaken?.elidableNs.has(target) === true) elidedNs.add(target);
+    }
+
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
     // Option validation reports through `errors` like every other build failure, rather than
@@ -533,52 +585,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic);
-    // NAMESPACE ELISION, narrowed to what the chunk partition permits.
-    //
-    // `treeshake` proves the object is unobservable — every appearance of the binding is a static
-    // member read. That is necessary and not sufficient: eliding it changes what a chunk IMPORTS,
-    // from one namespace binding to the individual members, and the cross-chunk wiring has already
-    // run by the time the emitter sees any of this. A consumer in another chunk would have its
-    // `ns.foo` rewritten to a name nothing imported — `preserve-modules-namespace` caught exactly
-    // that, as a `ReferenceError` rather than a diff.
-    //
-    // So: elide only where every consumer sits in the target's own chunk, which is where no wiring is
-    // involved at all. That is the whole of a single-chunk bundle, which is the shape the size gap was
-    // measured on. Extending it across chunks means teaching `wireBind` to import the members instead
-    // — a separate change, with the wiring as its subject.
-    //
-    // REWRITING a read is a SEPARATE question from BUILDING the object, and same-chunk is the only
-    // condition the two share. rolldown keeps them apart: `resolve_member_expr_refs` fires whenever
-    // the member expression's object is a namespace symbol and the property resolves unambiguously
-    // to a non-CommonJS export, with no reference at all to whether the object gets materialised
-    // (`bind_imports_and_exports.rs:616`). crashcat's 43 `export * as` namespaces are exactly that
-    // case — the object is public API and must exist, and the 433 internal `ns.foo` reads of it
-    // should still name the binding directly.
-    const elidedNs = new Set<number>();
-    const rewrittenNs = new Set<number>();
-    for (const target of linked.rewritableNs) {
-        const home = chunkGraph.chunkByModule[target];
-        if (home < 0) continue;
-        let sameChunk = true;
-        for (const mod of graph.modules) {
-            if (chunkGraph.chunkByModule[mod.idx] === home) continue;
-            for (const [, imp] of mod.namedImports) {
-                if (imp.name !== NAME_NAMESPACE) continue;
-                const rec = mod.importRecords[imp.rec];
-                if (!rec.external && rec.resolved === target) {
-                    sameChunk = false;
-                    break;
-                }
-            }
-            if (!sameChunk) break;
-        }
-        if (!sameChunk) continue;
-        rewrittenNs.add(target);
-        // Elision needs everything rewriting needs AND proof the object is unobservable, which is
-        // what `treeshake` establishes.
-        if (shaken?.elidableNs.has(target) === true) elidedNs.add(target);
-    }
+    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, { elidedNs, nsMemberBinds });
     // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
     // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
     // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the

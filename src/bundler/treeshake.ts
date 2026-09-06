@@ -14,6 +14,12 @@ export type TreeshakeResult = {
      *  is an entry, is dynamically imported, or is re-exported as a namespace). Consumed by the
      *  emit so the namespace object lists only these members. */
     nsUsage: Map<number, Set<string>>;
+    /** target → the member names some LIVE statement reads off it, for EVERY namespace-import
+     *  target — including the ones {@link nsUsage} has no entry for because their whole surface is
+     *  required (escaping, entry, `require`d). Those reads are still RESOLVED to the member's own
+     *  binding, and across a chunk boundary the member has to be imported; this is the set to wire.
+     *  Only static `ns.foo` reads are attributed here — `import()` usage has no statement to place. */
+    nsRead: Map<number, Set<string>>;
     /** Dead pure dynamic-import targets: modules reached ONLY via `import()` whose result is never
      *  used and that have no side effects. Not rooted, not promoted to a chunk; their `import()`
      *  sites are rewritten to `Promise.resolve({})`. Consumed by chunk-graph and the emit. */
@@ -357,14 +363,9 @@ type NsRead = { mod: number; target: number; name: string; at: number };
  * direction, and it is what carries members contributed by `import()` usage (`dynUsage`), whose
  * reads are not attributed to a unit here.
  */
-function computeNsSites(
-    reads: NsRead[],
-    infos: StatementInfo[][],
-    narrowable: Map<number, Set<string>>,
-): Map<number, Map<string, [number, number][]>> {
+function computeNsSites(reads: NsRead[], infos: StatementInfo[][]): Map<number, Map<string, [number, number][]>> {
     const out = new Map<number, Map<string, [number, number][]>>();
     for (const { mod, target, name, at } of reads) {
-        if (!narrowable.has(target)) continue;
         // Units tile the module in source order and never overlap, so the one containing a read is
         // the last whose span starts at or before it. A read that lands in NO unit (between two, or
         // in a construct `shakeUnits` does not yield) records no site and is therefore kept.
@@ -647,7 +648,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     }
 
     // Provenance for the narrowed namespace surfaces, now that there are units to attribute reads to.
-    const nsSites = computeNsSites(nsReads, infos, nsUsage);
+    const nsSites = computeNsSites(nsReads, infos);
     /** Does any unit that reads `target.name` survive? No recorded site means "not attributed" —
      *  `import()` usage, most of it — and those are kept unconditionally. */
     const nsMemberLive = (target: number, name: string): boolean => {
@@ -829,6 +830,19 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         for (const name of names) if (!nsMemberLive(target, name)) names.delete(name);
     }
 
+    // The same question for a target that is NOT narrowed — one whose whole surface is required
+    // because it escapes, or is an entry, or is `require`d. Its `ns.foo` reads still get RESOLVED to
+    // the member's own binding (`rewrittenNs`), and across a chunk boundary that member has to be
+    // imported. `nsUsage` cannot answer for those: they were dropped from it precisely because they
+    // are not narrowable. So report the live READS for every target, and let `bundle.ts` wire from
+    // whichever of the two applies.
+    const nsRead = new Map<number, Set<string>>();
+    for (const [target, byName] of nsSites) {
+        const live_ = new Set<string>();
+        for (const [name, sites] of byName) if (sites.some(([m, i]) => live[m].has(infos[m][i].statement.id))) live_.add(name);
+        nsRead.set(target, live_);
+    }
+
     const dropped: [number, Node][] = [];
     for (const mod of graph.modules) {
         for (const info of infos[mod.idx]) {
@@ -850,5 +864,5 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped, nsUsage, deadDynamic, liveRefs, elidableNs };
+    return { live, dropped, nsUsage, nsRead, deadDynamic, liveRefs, elidableNs };
 }

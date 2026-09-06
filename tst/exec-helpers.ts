@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { analyze, createSemantic } from '../src/analysis/semantic.ts';
+import { parse } from '../src/parser/index.ts';
 
 /** Helpers for tests that EXECUTE bundled output and compare the results of two builds. */
 
@@ -45,4 +47,31 @@ export const runChunks = async (
     for (const c of chunks) writeFileSync(join(dir, c.fileName), c.code.replace(/^\/\/# sourceMappingURL=.*$/gm, ''));
     const ns = (await import(pathToFileURL(join(dir, entry)).href)) as Record<string, unknown>;
     return { ns, dir, dispose: () => rmSync(dir, { recursive: true, force: true }) };
+};
+
+/**
+ * Every emitted chunk, re-parsed and run through shakeup's OWN checker as a module.
+ *
+ * The failure this exists for is a DANGLING EXPORT — `export { x }` where nothing declares `x`,
+ * which is what a cross-chunk binding that was referenced but never wired produces. Node refuses
+ * such a module outright (`SyntaxError: Export 'x' is not defined in module`), so it looks like
+ * {@link runChunks} would catch it. **It does not, under vitest.** vitest imports through its own
+ * module runner, which rewrites ESM into an SSR form where exports are lazy properties — an
+ * undeclared one throws only if something READS it, and a consumer that merely imports the name
+ * never does. Verified by sabotage: removing the member wiring made all six cross-chunk fixtures
+ * throw under plain `tsx` while the same fixtures stayed green under vitest.
+ *
+ * The checker sees it without executing anything: `Export 'X' is not defined` is already one of its
+ * rules (`semantic.ts`), for the same reason oxc reports it and rolldown fails the build on it.
+ */
+export const chunkCheckErrors = (chunks: readonly { fileName: string; code: string }[]): string[] => {
+    const out: string[] = [];
+    for (const c of chunks) {
+        const { program, errors } = parse(c.code, { ts: false, jsx: false });
+        for (const e of errors) out.push(`${c.fileName}: parse: ${e.msg}`);
+        const sem = createSemantic();
+        analyze(sem, program, true, true);
+        for (const e of sem.errors) out.push(`${c.fileName}: ${e.msg}`);
+    }
+    return out;
 };

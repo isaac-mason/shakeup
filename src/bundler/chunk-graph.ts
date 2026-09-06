@@ -1,5 +1,5 @@
-import { helpersNeededBy } from './generate/esm.ts';
 import { deconflictChunk } from './deconflict.ts';
+import { helpersNeededBy } from './generate/esm.ts';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
 import { initRefForRecord } from './init-obligations.ts';
 import { finalNameOf, reprName } from './link.ts';
@@ -420,18 +420,42 @@ function addRuntimeChunk(graph: Graph, linked: Linked, chunks: Chunk[]): void {
     }
 }
 
+/** What the namespace-elision decision (made in `bundle.ts`, ahead of the partition) tells the
+ *  wiring. A consumer of an ELIDED target imports the MEMBERS in the object's place, because the
+ *  object it would otherwise import is never emitted. */
+export type NsElision = {
+    /** Targets whose namespace object is NOT built. Their `{kind:'namespace'}` bind must not be
+     *  wired — wiring it would have the producer export a name nothing declares. */
+    elidedNs: Set<number>;
+    /** target → the member binds to wire instead. Exactly the set `renderNamespaceObject` would have
+     *  named, so it is neither short of a member (a dangling reference) nor carrying one the shaker
+     *  removed (an export of a declaration that is gone). */
+    nsMemberBinds: Map<number, ImportBind[]>;
+};
+
+const NO_NS_ELISION: NsElision = { elidedNs: new Set(), nsMemberBinds: new Map() };
+
 export function buildChunkGraph(
     graph: Graph,
     linked: Linked,
     options: ChunkOptions,
     deadDynamic: Set<number> = new Set(),
+    nsElision: NsElision = NO_NS_ELISION,
 ): ChunkGraph {
     const N = graph.modules.length;
 
     if (options.preserveModules) {
         const formed = formPreserveModulesChunks(graph, linked);
         const color: bigint[] = graph.modules.map(() => ZERO);
-        wireAndDeconflict(graph, linked, formed.chunks, formed.chunkByModule, formed.entryChunkOf, options.keepNames === true);
+        wireAndDeconflict(
+            graph,
+            linked,
+            formed.chunks,
+            formed.chunkByModule,
+            formed.entryChunkOf,
+            options.keepNames === true,
+            nsElision,
+        );
         addRuntimeChunk(graph, linked, formed.chunks);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
@@ -513,7 +537,7 @@ export function buildChunkGraph(
         groupNames,
     );
 
-    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true);
+    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true, nsElision);
     addRuntimeChunk(graph, linked, chunks);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
@@ -527,6 +551,7 @@ function wireAndDeconflict(
     chunkByModule: Int32Array,
     entryChunkOf: Map<number, number>,
     keepNames = false,
+    nsElision: NsElision = NO_NS_ELISION,
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
@@ -567,6 +592,21 @@ function wireAndDeconflict(
                 void imp;
                 const bind = linked.binds.get(packRef(idx, localSym));
                 if (bind === undefined) continue;
+                // `import * as ns` whose reads are RESOLVED to the members: this chunk needs the
+                // members, not the object. Wired here rather than left to the object's own wiring
+                // because an elided target has no object for a cross-chunk consumer to import — that
+                // shape used to be refused outright, and refusing it is what kept every code-split
+                // bundle building a namespace rolldown does not.
+                if (bind.kind === 'namespace') {
+                    const members = nsElision.nsMemberBinds.get(bind.module);
+                    if (members !== undefined) {
+                        for (const m of members) wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, m);
+                        // The object is not emitted, so wiring it would make the producer export a
+                        // name nothing declares. A target that is only REWRITTEN still has one, and
+                        // still needs it — the escaping use is what kept it alive.
+                        if (nsElision.elidedNs.has(bind.module)) continue;
+                    }
+                }
                 wireBind(graph, linked, chunks, chunkByModule, chunkClaim, c, bind);
             }
             // `require('./x')` references the target's WRAPPER, and that reference is not a named

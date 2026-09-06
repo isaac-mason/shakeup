@@ -108,15 +108,22 @@ describe('a namespace object nothing can observe is not built', () => {
 // inside a dropped statement is not one — it emits neither the member nor its declaration. Isolated
 // in `llm/repro/expandns`; ROADMAP §2z52.
 //
-// The shape needs the object to actually exist, so these fixtures put a consumer in ANOTHER chunk:
-// elision is refused across chunks (the wiring imports the namespace, not the members), which is
-// exactly when the narrowed surface becomes something the emitter writes out.
+// The shape needs the object to actually EXIST, or there is no surface to narrow. A DYNAMIC-import
+// target is what supplies one: `import()` resolves to a real Module namespace, so the object is
+// materialised whatever the static reads look like, while the static `import * as ns` still narrows
+// it. The result is DISCARDED deliberately — returning it makes the namespace escape, and an
+// escaping target keeps its whole surface for an unrelated reason.
+//
+// (These fixtures used a cross-chunk consumer until §2z54 taught the wiring to import the members.
+// That elided the object, and the tests were then asserting nothing.)
 describe('the narrowed surface follows liveness', () => {
     const files = (body: string) => ({
         '/dep.js': "export const kept = 1;\nexport function deadOnly() { return 'DEADCODE_MARKER'; }\n",
-        '/panel.js': `import * as ns from './dep.js';\n${body}\nexport const render = () => ns.kept;\n`,
         '/main.js':
-            "import * as ns from './dep.js';\nexport const load = () => import('./panel.js');\nexport const seed = ns.kept;\n",
+            "import * as ns from './dep.js';\n" +
+            "export const load = () => { import('./dep.js'); };\n" +
+            `${body}\n` +
+            'export const render = () => ns.kept;\n',
     });
 
     it('drops a member whose only read is in a statement that gets shaken', async () => {

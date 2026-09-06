@@ -231,8 +231,17 @@ describe('require() of an ES module across a chunk boundary', () => {
 
     it('a producer chunk still surfaces a NATIVE namespace when the module is not lazy', async () => {
         // Guard on the exclusion added to `nativeNsEligible`: it must only fire for lazy modules.
+        //
+        // The namespace has to ESCAPE. `ns.v` alone is a static member read, and since §2z54 that is
+        // elided across chunks too — `preserveModules` puts every module in its own chunk, so the old
+        // fixture stopped producing a namespace at all and the guard was asserting nothing. Rollup
+        // emits `import { v } from './a.js'` for it and rolldown folds it to `1`, so the elision is
+        // the aligned answer and the fixture is what had to change.
         const r = await build(
-            { '/a.js': 'export const v = 1;', '/main.js': "import * as ns from './a.js';\nexport const x = ns.v;" },
+            {
+                '/a.js': 'export const v = 1;',
+                '/main.js': "import * as ns from './a.js';\nexport const x = Object.keys(ns).length;",
+            },
             '/main.js',
             {
                 preserveModules: true,
