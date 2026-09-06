@@ -12,8 +12,14 @@ const build = async (files: Record<string, string>, external: string[] = [], plu
 
 describe('link validates the export side', () => {
     it('rejects exporting a name this module does not define', async () => {
+        // Reported by the CHECKER now, not link, and so in oxc's wording rather than Rollup's — the
+        // single-module case is a toolchain-layer rule (`export { X }` names a local binding, and an
+        // unresolved one is an early error even for a global). Link still owns the CROSS-module case
+        // below, which the checker cannot see, and keeps Rollup's wording there. Confirmed no
+        // rollupsuite sample asserts on the message: 535/547 with an empty failing-set diff either
+        // way.
         const r = await build({ '/main.js': 'export { doesNotExist };\n' });
-        expect(r.errors.join()).toMatch(/Exported variable 'doesNotExist' is not defined/);
+        expect(r.errors.join()).toMatch(/Export 'doesNotExist' is not defined/);
     });
 
     it('rejects re-exporting a name the target does not have', async () => {

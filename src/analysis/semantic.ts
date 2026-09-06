@@ -1048,7 +1048,17 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
         // now. Mirrors `computePrelude` exactly, including its quirks: a compound assignment and an
         // update count as BOTH a read and a write, while `uses` counts the reference NODE once.
         const sym = node.sym;
-        if (sym === 0) continue;
+        if (sym === 0) {
+            // `export { X }` names a LOCAL binding, so an unresolved one is an early error even when
+            // the name is a global: `export { Number }` is "Export 'Number' is not defined", not a
+            // re-export of the intrinsic. oxc reports it from its checker, and shakeup's own LINK
+            // stage already rejects the same thing for a bundle — this is that rule for a module
+            // checked on its own. Only the bare `export { X }` form sets REF_EXPORTED; a
+            // re-export with a `from` names the OTHER module's surface and never reaches here.
+            if (state.check && out.isModule && (state.pendFlags[i] & REF_EXPORTED) !== 0)
+                out.errors.push({ pos: node.start, msg: `Export '${node.name}' is not defined` });
+            continue;
+        }
         if (out.refPairs !== null) (out.refPairs[sym] ??= []).push(node.id, state.scope);
         const f = state.pendFlags[i];
         if ((f & (REF_READ | REF_WRITE)) !== 0) {
