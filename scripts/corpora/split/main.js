@@ -13,6 +13,10 @@ export async function load(which, rows) {
     return which === 'panel' ? mod.render(rows) : mod.build(rows);
 }
 
+// Surfaces the panel chunk's cross-chunk NAMESPACE read (§2z54) through the entry, because the
+// runtime driver only has the entry's exports to work with.
+export const midpoint = async () => (await import('./panel.js')).midpoint();
+
 // `shared-dynamic.js` is deliberately NOT reachable from here. Reached only from the two dynamic
 // branches, it is the module the already-loaded optimisation folds into whichever branch it can —
 // leaving the OTHER branch importing it across the chunk boundary, which is what makes that branch's

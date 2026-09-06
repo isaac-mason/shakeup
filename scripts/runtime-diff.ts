@@ -267,6 +267,11 @@ out.push(await m.load('report', rows));
 const panel = await import('__ENTRY__').then((x) => x.load('panel', rows));
 out.push(typeof panel);
 
+// The cross-chunk NAMESPACE reads (§2z54): each dynamic branch reads a member of a module that
+// lives in the entry chunk, under a name it imports no other way. A miscompile here is a dangling
+// reference, so the value has to be READ, not just the chunk loaded.
+out.push(await m.midpoint());
+
 process.stdout.write(JSON.stringify(out));
 `;
 
