@@ -277,6 +277,21 @@ function computeNsUsage(
             if (!rec.external && rec.resolved >= 0) forceWhole.add(rec.resolved);
         }
     }
+    // A `require()` of an ES MODULE reads its whole namespace object: the emitter lowers the call to
+    // `(init_X(), __toCommonJS(x_ns))` (`generate/modules.ts`), and the requiring code can then do
+    // anything to the result — `Object.keys(all)` in the repro. `analyzeNsUsage` cannot see that: it
+    // classifies `import * as ns` BINDINGS, and a `require` site has none.
+    //
+    // Left out, this was TWO miscompiles in sequence. Narrowing the surface answered `"alpha"` where
+    // node and rolldown both answer `"alpha,beta"`; eliding the object outright emitted
+    // `__toCommonJS(dep_ns)` against a local nothing declared, a `ReferenceError` at runtime rather
+    // than a diff — which is why it survived every gate. `forceWhole` fixes both at once, since a
+    // target that never enters `narrowable` is never a candidate for elision either.
+    for (const mod of graph.modules) {
+        for (const rec of mod.importRecords) {
+            if (rec.kind === 'require' && !rec.external && rec.resolved >= 0) forceWhole.add(rec.resolved);
+        }
+    }
 
     // Accumulate member reads (and escape) per target across BOTH `import * as ns` consumers and
     // `import()` consumers — a module's namespace surface is the union of everything read of it.

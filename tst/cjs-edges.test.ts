@@ -252,3 +252,38 @@ describe('a CommonJS module that throws re-runs on the next require', () => {
         expect(ns.x).toEqual(['boom1', 'boom1']);
     });
 });
+
+// An eighth configuration that had never been RUN: one module `require()`s an ES module while
+// ANOTHER imports the same module as a namespace. The namespace analysis only classifies
+// `import * as ns` BINDINGS, so the `require` — which the emitter lowers to
+// `(init_dep(), __toCommonJS(dep_ns))` and whose result the requiring code may do anything to — was
+// invisible to it, and the object was narrowed to `main.js`'s reads and then elided outright.
+//
+// Both failures are silent at build time. node and rolldown agree on the answer below.
+describe('require() of an ES module that a sibling also imports as a namespace', () => {
+    const files = {
+        '/dep.js': "export const alpha = 'ALPHA';\nexport const beta = 'BETA';\n",
+        '/mid.cjs': "const all = require('./dep.js');\nmodule.exports.keys = Object.keys(all).join(',');\n",
+        '/main.js': "import * as ns from './dep.js';\nimport mid from './mid.cjs';\nexport const x = [ns.alpha, mid.keys];\n",
+    };
+
+    it('keeps the WHOLE surface — the require reads keys nothing names statically', async () => {
+        // Narrowed to `main.js`'s single read, this answered `'alpha'`. `beta` is exported and never
+        // named by any `ns.` read, which is exactly the member narrowing would drop.
+        expect(await run(files)).toEqual(['ALPHA', 'alpha,beta']);
+    });
+
+    it('builds the object at all — eliding it left `__toCommonJS` naming an undeclared local', async () => {
+        // The elision arm of the same cause, and the louder one: `ReferenceError: dep_ns is not
+        // defined` at load. Asserted on the TEXT as well as by running, because a future change that
+        // reintroduces the elision would fail this with a message that names the cause.
+        const r = await build(files);
+        expect(r.errors).toEqual([]);
+        const code = r.chunks.map((c) => c.code).join('\n');
+        const named = /__toCommonJS\((\w+)\)/.exec(code);
+        expect(named, 'the require should still lower through __toCommonJS').not.toBeNull();
+        expect(code, 'the namespace object it names must be declared').toMatch(
+            new RegExp(`(?:var|const|let) ${named?.[1]} = \\{`),
+        );
+    });
+});
