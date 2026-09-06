@@ -69,12 +69,18 @@ export type ChunkRenderer = (
     wantMap: boolean,
 ) => RenderedChunk | null;
 
-const preRenderedInfo = (chunk: Chunk, moduleIdOf: (i: number) => string): PreRenderedChunk => ({
+const preRenderedInfo = (
+    chunk: Chunk,
+    moduleIdOf: (i: number) => string,
+    /** INCLUDED module ids — see `includedModuleIds`. Separate from `moduleIdOf`, which still answers
+     *  for every ASSIGNED module because `chunkKeyOf` and dirty-tracking need all of them. */
+    moduleIdsOf: (c: Chunk) => string[],
+): PreRenderedChunk => ({
     name: chunk.name,
     isEntry: chunk.isEntry,
     isDynamicEntry: chunk.isDynamicEntry,
     facadeModuleId: chunk.entryModule >= 0 ? moduleIdOf(chunk.entryModule) : null,
-    moduleIds: chunk.modules.map(moduleIdOf),
+    moduleIds: moduleIdsOf(chunk),
     exports: [...chunk.exports.keys()].sort(),
     type: 'chunk',
 });
@@ -222,6 +228,7 @@ export function renderChunks(
     naming: NormalizedOutputNaming,
     render: ChunkRenderer,
     moduleIdOf: (i: number) => string,
+    moduleIdsOf: (c: Chunk) => string[],
     /** Resolved compress mode. `'full'` runs the cosmetic tier over each assembled chunk. */
     compressMode: CompressMode | false,
     /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
@@ -234,7 +241,7 @@ export function renderChunks(
     const reserved = new Set<string>();
 
     // Pre-render info (needed for pattern functions) computed once.
-    const infos = chunks.map((c) => preRenderedInfo(c, moduleIdOf));
+    const infos = chunks.map((c) => preRenderedInfo(c, moduleIdOf, moduleIdsOf));
 
     // Pass 0a — reserve ENTRY chunk names first so no-hash `[name].js` names get stable,
     // un-suffixed reservation before shared/dynamic chunks.

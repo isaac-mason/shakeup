@@ -146,6 +146,30 @@ export type RenderedModules = {
     modules: Record<string, RenderedModule>;
 };
 
+/**
+ * The module ids a chunk REPORTS — its included modules, not every module assigned to it.
+ *
+ * Both oracles omit a module that contributes nothing: a pure re-exporter renders no code and appears
+ * in neither `moduleIds` nor `modules` (measured — Rollup and rolldown both answer
+ * `["lib.js","main.js"]` for a three-module re-export chain). shakeup listed all three in `moduleIds`
+ * while §2z57 had already fixed `modules`, so the two disagreed with each other.
+ *
+ * Decided from LIVENESS, not from rendered text, because the preliminary filename pass asks this
+ * question before anything is rendered — and `chunkFileNames` may be a function reading `moduleIds`,
+ * so the two passes have to give the same answer. The chunk's own entry counts regardless: it is why
+ * the chunk exists, and both oracles list it even when it renders nothing.
+ *
+ * NOT the same question as `chunkKeyOf`/dirty-tracking, which key on every ASSIGNED module and must
+ * keep doing so — a cache key that ignored a module would miss its edits.
+ */
+export function includedModuleIds(graph: Graph, shaken: TreeshakeResult | null, chunk: Chunk): string[] {
+    const out: string[] = [];
+    for (const i of chunk.modules) {
+        if (shaken === null || i === chunk.entryModule || shaken.live[i].size > 0) out.push(graph.modules[i].id);
+    }
+    return out;
+}
+
 export const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
 
 /** Emit-layer spacing. The AST printer is whitespace-aware, but this hand-built glue (import and

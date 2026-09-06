@@ -14,6 +14,7 @@ import type { PreRenderedChunk } from '../output-options.ts';
 import { isAnyRequireCall } from '../scan.ts';
 import {
     clauseSep,
+    includedModuleIds,
     isIdentName,
     nameOfBind,
     type PreliminaryFileName,
@@ -506,7 +507,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         isEntry: chunk.isEntry,
         isDynamicEntry: chunk.isDynamicEntry,
         facadeModuleId: chunk.entryModule >= 0 ? graph.modules[chunk.entryModule].id : null,
-        moduleIds: chunk.modules.map((i) => graph.modules[i].id),
+        moduleIds: includedModuleIds(graph, shaken, chunk),
         exports: [...chunk.exports.keys()].sort(),
         type: 'chunk',
     };
@@ -559,7 +560,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         name: chunk.name,
         isEntry: chunk.isEntry,
         isDynamicEntry: chunk.isDynamicEntry,
-        moduleIds: chunk.modules.map((i) => graph.modules[i].id),
+        moduleIds: includedModuleIds(graph, shaken, chunk),
         imports: importNames,
         dynamicImports: dynamicImportNames,
         exports: exportedNames,

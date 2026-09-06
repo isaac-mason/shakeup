@@ -327,6 +327,46 @@ describe('plugin pipeline', () => {
         expect(unknown).toMatch(/Unknown file reference id/);
     });
 
+    it('moduleIds lists the INCLUDED modules, matching OutputChunk.modules', async () => {
+        // A pure re-exporter renders no code. Both oracles omit it from `moduleIds` AND from
+        // `modules` — measured: Rollup and rolldown both answer `["lib.js","main.js"]` for this
+        // three-module chain. shakeup listed all three in `moduleIds` while §2z57 had already fixed
+        // `modules`, so its own two reports of the same fact disagreed.
+        const { chunks } = await build({
+            '/lib.ts': 'export const foo = 42;',
+            '/reexporter.ts': "export { foo } from './lib';",
+            '/main.ts': "export { foo } from './reexporter';",
+        });
+        expect(chunks[0].moduleIds).toEqual(['/lib.ts', '/main.ts']);
+        // The two reports must AGREE — that is the invariant, not just the value.
+        expect(chunks[0].moduleIds).toEqual(Object.keys(chunks[0].modules));
+    });
+
+    it('but a filename function still sees the same list', async () => {
+        // `moduleIds` reaches `chunkFileNames`/`entryFileNames` through `PreRenderedChunk`, and that
+        // pass runs BEFORE anything is rendered — which is why inclusion is decided from LIVENESS
+        // rather than from rendered text. If the two passes disagreed, a name computed from
+        // `moduleIds` would shift between them.
+        let seen: string[] = [];
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({
+                '/lib.ts': 'export const foo = 42;',
+                '/reexporter.ts': "export { foo } from './lib';",
+                '/main.ts': "export { foo } from './reexporter';",
+            }),
+            external: [],
+            output: {
+                entryFileNames: (chunk) => {
+                    seen = chunk.moduleIds;
+                    return '[name].js';
+                },
+            },
+        });
+        expect(r.errors).toEqual([]);
+        expect(seen).toEqual(['/lib.ts', '/main.ts']);
+    });
+
     it('renderStart fires before rendering, and output.plugins contribute only generate hooks', async () => {
         // `renderStart(outputOptions, inputOptions)` is the first generate-phase hook, once the output
         // options are settled. It takes the INPUT options too, which is the point rolldown's docs

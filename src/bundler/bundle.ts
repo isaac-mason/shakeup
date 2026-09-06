@@ -14,7 +14,7 @@ import {
     renderChunk,
     renderChunks,
 } from './generate/chunks.ts';
-import type { ModuleRenderCache, ModuleReuse, RenderStats } from './generate/context.ts';
+import { includedModuleIds, type ModuleRenderCache, type ModuleReuse, type RenderStats } from './generate/context.ts';
 import {
     type EmittedRecord,
     externalKey,
@@ -734,7 +734,16 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(chunkGraph, naming, renderer, (i) => graph.modules[i].id, min.compress, min.mangle, inc);
+        const r = renderChunks(
+            chunkGraph,
+            naming,
+            renderer,
+            (i) => graph.modules[i].id,
+            (c) => includedModuleIds(graph, shaken, c),
+            min.compress,
+            min.mangle,
+            inc,
+        );
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
