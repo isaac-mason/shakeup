@@ -653,21 +653,70 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     }
     for (const modIdx of linked.namespaceOf.keys()) markRef(packRef(modIdx, NS_MARKER));
 
-    while (worklist.length > 0) {
-        const ref = worklist.pop()!;
-        if (refSym(ref) === NS_MARKER) {
-            expandNs(refMod(ref));
-            continue;
+    const drain = (): void => {
+        while (worklist.length > 0) {
+            const ref = worklist.pop() as number;
+            if (refSym(ref) === NS_MARKER) {
+                expandNs(refMod(ref));
+                continue;
+            }
+            const decl = declToStatement.get(ref);
+            if (decl !== undefined) includeStatement(decl[0], decl[1]);
+            // Every OTHER declaration of the same symbol too — see `extraDecls`.
+            const extra = extraDecls.get(ref);
+            if (extra !== undefined) for (const [m, i] of extra) includeStatement(m, i);
+            // A live binding drags in the statements that augment it. Their own refs are marked in
+            // turn by `includeStatement`, so `Object3D.DEFAULT_UP = new Vector3(0,1,0)` keeps
+            // `Vector3` alive.
+            const aug = augmentsOf.get(ref);
+            if (aug !== undefined) for (const [m, i] of aug) includeStatement(m, i);
         }
-        const decl = declToStatement.get(ref);
-        if (decl !== undefined) includeStatement(decl[0], decl[1]);
-        // Every OTHER declaration of the same symbol too — see `extraDecls`.
-        const extra = extraDecls.get(ref);
-        if (extra !== undefined) for (const [m, i] of extra) includeStatement(m, i);
-        // A live binding drags in the statements that augment it. Their own refs are marked in turn
-        // by `includeStatement`, so `Object3D.DEFAULT_UP = new Vector3(0,1,0)` keeps `Vector3` alive.
-        const aug = augmentsOf.get(ref);
-        if (aug !== undefined) for (const [m, i] of aug) includeStatement(m, i);
+    };
+    drain();
+
+    // `sideEffects: false` says the MODULE MAY BE OMITTED when nothing needs it. It does NOT license
+    // deleting the effects of a module that IS included — and reading it that way silently deleted
+    // `registry.set(…)`, `arr.push(…)`, `deep.inner.m.add(…)` and even `console.log(…)`, leaving a
+    // program that computes the wrong answer. Only `X.a = …` survived, because `augmentedByAssignment`
+    // happens to root that one shape.
+    //
+    // rolldown's behaviour, mapped by probe rather than assumed (ROADMAP §2z47): a module reached
+    // ONLY for its effects is dropped whole (so the flag does work), but once ANY binding of it is
+    // needed, its top-level effects are kept — including effects unrelated to the binding that pulled
+    // it in. A module whose only export gets constant-folded away is simply not included, which is
+    // what made this look like a granularity rule and is not one.
+    //
+    // So: rooted AFTER the fixpoint, and only for a module something already reached. Rooting these
+    // can make more modules reachable, hence the loop.
+    for (;;) {
+        let added = false;
+        for (const mod of graph.modules) {
+            if (mod.sideEffects !== false) continue;
+            const list = infos[mod.idx];
+            if (!list.some((info) => live[mod.idx].has(info.statement.id))) continue;
+            for (let i = 0; i < list.length; i++) {
+                const st = list[i].statement;
+                if (list[i].pure || live[mod.idx].has(st.id)) continue;
+                // BARE effects only. A DECLARATION's fate stays governed by its binding, which is
+                // precisely what the flag licenses: rolldown drops `var b = mk('BBB')` when `b` is
+                // dead even though the initialiser is an impure call, while keeping a free-standing
+                // `console.log(…)` in the same module (both measured). Rooting declarations too kept
+                // every dead declarator alive and broke six existing tests — the granularity the
+                // `treeshake-declarators` suite exists to pin.
+                if (
+                    st.type === N.VariableDeclaration ||
+                    st.type === N.FunctionDeclaration ||
+                    st.type === N.ClassDeclaration ||
+                    st.type === N.ExportNamedDeclaration ||
+                    st.type === N.ExportDefaultDeclaration
+                )
+                    continue;
+                includeStatement(mod.idx, i);
+                added = true;
+            }
+        }
+        if (!added) break;
+        drain();
     }
 
     const dropped: [number, Node][] = [];

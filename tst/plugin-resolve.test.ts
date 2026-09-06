@@ -212,8 +212,17 @@ describe('plugin resolve/load contract (R1)', () => {
         } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
         const mod = await run(code);
         expect(mod.v).toBe(7);
-        // The side-effect assignment is droppable (module marked false, only `d` is used).
-        expect(code).not.toContain('__D__');
+        // The assignment is KEPT, and this assertion was inverted on 2026-09-06. `moduleSideEffects:
+        // false` says the module may be OMITTED when nothing needs it — not that the effects of a
+        // module that IS emitted may be deleted. This chunk still contains `const d = 7`, so dropping
+        // `globalThis.__D__ = 1` from it was a silent behaviour change, the same bug that deleted
+        // `registry.set(…)` and `console.log(…)` elsewhere (ROADMAP §2z47).
+        //
+        // rolldown emits neither: it constant-folds `d` into the consumer and then drops the module
+        // WHOLE, which is a stronger result reached by cross-module inlining rather than by a
+        // different side-effect rule. Give it a non-inlinable export and it keeps the effect exactly
+        // as this now does (measured). Closing that gap is an inlining change, not this one.
+        expect(code).toContain('__D__');
         expect(sideEffects).toBe(false);
     });
 });

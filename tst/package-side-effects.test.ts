@@ -98,3 +98,63 @@ describe('bindings keep their augmentations under sideEffects: false', () => {
         expect((await run(lib, false)).v).toBe(1);
     });
 });
+
+// `sideEffects: false` says the MODULE MAY BE OMITTED when nothing needs it. Reading it as "the
+// effects inside it may be deleted" silently produced wrong programs: `registry.set(…)`,
+// `arr.push(…)` and even `console.log(…)` vanished from a module that WAS included, so a counter read
+// back 0 instead of 1 and logging disappeared. Only `X.a = …` survived, because `augmentedByAssignment`
+// happens to root that one shape.
+//
+// rolldown's behaviour was mapped by probe before this rule was written (ROADMAP §2z47): a module
+// reached ONLY for its effects is dropped whole — so the flag does work — but once any binding of it
+// is needed, its top-level effects are kept, including effects unrelated to the binding that pulled
+// it in.
+describe('`sideEffects: false` omits a module; it does not delete an included one\'s effects', () => {
+    const build = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/app/main.js', fs: createMemoryFs(files), external: [] });
+        expect(r.errors).toEqual([]);
+        return r.chunks.map((c) => c.code).join('\n');
+    };
+    const pkg = { '/app/package.json': JSON.stringify({ name: 'app', sideEffects: false }) };
+
+    it('keeps a method call that mutates a live binding', async () => {
+        const code = await build({
+            ...pkg,
+            '/app/dep.js': "export const registry = new Map();\nregistry.set('a', 1);\n",
+            '/app/main.js': "import { registry } from './dep.js';\nexport const size = () => registry.size;\n",
+        });
+        // The whole point: without the effect, `size()` answers 0 rather than 1.
+        expect(code).toContain("registry.set('a', 1)");
+        expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn size();`)()).toBe(1);
+    });
+
+    it.each([
+        ['a push onto a live array', "export const arr = [];\narr.push(9);\n", 'arr.push(9)'],
+        ['a nested mutation', "export const deep = { m: new Set() };\ndeep.m.add(3);\n", 'deep.m.add(3)'],
+        ['a bare console call', "export const v = 1;\nconsole.log('hi');\n", "console.log('hi')"],
+    ])('keeps %s', async (_n, dep, needle) => {
+        const code = await build({
+            ...pkg,
+            '/app/dep.js': dep,
+            '/app/main.js': "export * from './dep.js';\n",
+        });
+        expect(code).toContain(needle);
+    });
+
+    it('STILL omits a module reached only for its effects — the flag has to keep working', async () => {
+        const code = await build({
+            ...pkg,
+            '/app/dep.js': "console.log('SIDE EFFECT ONLY');\nexport const unused = 1;\n",
+            '/app/main.js': "import './dep.js';\nexport const out = 1;\n",
+        });
+        expect(code, 'the module is dropped whole').not.toContain('SIDE EFFECT ONLY');
+    });
+
+    it('and a module WITHOUT the flag is unaffected', async () => {
+        const code = await build({
+            '/app/dep.js': "console.log('kept');\nexport const unused = 1;\n",
+            '/app/main.js': "import './dep.js';\nexport const out = 1;\n",
+        });
+        expect(code).toContain("console.log('kept')");
+    });
+});

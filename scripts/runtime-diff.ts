@@ -305,13 +305,9 @@ function run(c: Corpus, label: string, arm: Arm, i: number): { ok: true; state: 
 
 rmSync(OUT, { recursive: true, force: true });
 
-/** Corpora NOT run by default. `split` is held back because it currently FAILS — and the failure is
- *  a real shakeup bug, not a driver problem: under `package.json#sideEffects: false` the entry chunk
- *  emits `export { …, registry, … }` for a binding whose declaration tree-shaking dropped, so the
- *  bundle does not load at all (`SyntaxError: Export 'registry' is not defined in module`). rolldown
- *  keeps the declaration. Reproduce with `pnpm runtimediff --corpus split`; see ROADMAP §2z47. It
- *  joins the default set with the fix, so this list should be empty again. */
-const HELD_BACK = new Set(['split']);
+/** Corpora not run by default. Empty: `split` was held back while it failed on the `sideEffects`
+ *  miscompile it found (ROADMAP §2z47), and rejoined the default set with the fix. */
+const HELD_BACK = new Set<string>();
 
 const only = process.argv.includes('--corpus') ? process.argv[process.argv.indexOf('--corpus') + 1] : null;
 const names = only === null ? Object.keys(CORPORA).filter((n) => !HELD_BACK.has(n)) : [only];
