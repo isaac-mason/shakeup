@@ -31,8 +31,6 @@ import { join } from 'node:path';
 import { bundle as shakeupBundle } from '../src/bundler/bundle.ts';
 
 const CRASHCAT = '/Users/isaacmason/Development/crashcat';
-const ENTRY = `${CRASHCAT}/src/index.ts`;
-const EXTERNAL = ['math', 'math/shapes', 'three'];
 const OUT = join(import.meta.dirname, '..', 'llm', '.runtimediff');
 
 const diskFs = {
@@ -116,39 +114,121 @@ const state = bodies.map((b) => {
 process.stdout.write(JSON.stringify(state));
 `;
 
+/**
+ * The `three` driver — pure MATH, and deliberately so. crashcat exercises a large stateful engine;
+ * this exercises a library of small classes whose methods are called in long chains, which is a
+ * different shape of code and a different way for a bundling mistake to show. No files, no clock, no
+ * randomness: every input is a literal, so the only variable is the bundle.
+ */
+const THREE_DRIVER = `
+import * as t from './bundle.mjs';
+
+for (const n of ['Vector3', 'Matrix4', 'Euler', 'Ray', 'BufferGeometry', 'Float32BufferAttribute', 'Frustum']) {
+    if (t[n] === undefined) throw new Error('export missing from the bundle: ' + n);
+}
+
+const out = [];
+const r = (n) => (Object.is(n, -0) ? 0 : Number(n.toFixed(6)));
+
+// Matrix composition, inversion and determinant over a deterministic sweep of Euler rotations.
+const acc = new t.Matrix4();
+for (let i = 0; i < 24; i++) {
+    const e = new t.Euler(i * 0.13, i * 0.29, i * 0.07, 'XYZ');
+    const m = new t.Matrix4().makeRotationFromEuler(e);
+    m.setPosition(new t.Vector3(i * 0.5, -i * 0.25, i * 0.125));
+    acc.multiply(m);
+    if (i % 6 === 5) out.push(r(acc.determinant()));
+}
+out.push(...acc.elements.map(r));
+
+const inv = acc.clone().invert();
+out.push(...inv.elements.map(r));
+
+// Vector transforms through the composed matrix and its inverse — a round trip that must land back.
+for (let i = 0; i < 8; i++) {
+    const v = new t.Vector3(i - 4, i * 0.5, 3 - i);
+    const there = v.clone().applyMatrix4(acc);
+    const back = there.clone().applyMatrix4(inv);
+    out.push(r(there.x), r(there.y), r(there.z), r(back.length() - v.length()));
+}
+
+// Ray/plane style arithmetic.
+const ray = new t.Ray(new t.Vector3(0, 5, 0), new t.Vector3(0.3, -1, 0.2).normalize());
+for (const d of [0.5, 2, 7.25]) {
+    const at = ray.at(d, new t.Vector3());
+    out.push(r(at.x), r(at.y), r(at.z));
+}
+
+// A real BufferGeometry: attributes in, computed normals and bounds out.
+const geom = new t.BufferGeometry();
+const pos = [];
+for (let i = 0; i < 60; i++) pos.push(Math.cos(i) * 2, Math.sin(i * 0.5) * 3, (i % 7) - 3);
+geom.setAttribute('position', new t.Float32BufferAttribute(pos, 3));
+geom.computeVertexNormals();
+geom.computeBoundingBox();
+const bb = geom.boundingBox;
+out.push(r(bb.min.x), r(bb.min.y), r(bb.min.z), r(bb.max.x), r(bb.max.y), r(bb.max.z));
+const nrm = geom.getAttribute('normal');
+for (let i = 0; i < 12; i++) out.push(r(nrm.array[i]));
+
+// Frustum culling against the composed matrix.
+const fr = new t.Frustum().setFromProjectionMatrix(acc);
+for (let i = 0; i < 6; i++) out.push(fr.containsPoint(new t.Vector3(i - 3, i * 0.5, 1)) ? 1 : 0);
+
+process.stdout.write(JSON.stringify(out));
+`;
+
+type Corpus = { entry: string; external: string[]; driver: string; nodeModules: string; blurb: string };
+const CORPORA: Record<string, Corpus> = {
+    crashcat: {
+        entry: `${CRASHCAT}/src/index.ts`,
+        external: ['math', 'math/shapes', 'three'],
+        driver: DRIVER,
+        nodeModules: join(CRASHCAT, 'node_modules'),
+        blurb: '18 bodies, 240 frames, woken mid-run',
+    },
+    three: {
+        entry: join(import.meta.dirname, '..', 'llm', 'spikes', 'node_modules', 'three', 'build', 'three.core.js'),
+        external: [],
+        driver: THREE_DRIVER,
+        nodeModules: '',
+        blurb: 'matrix/vector/geometry math over a fixed sweep',
+    },
+};
+
 type Arm = { name: string; code: string };
 
-async function buildArms(): Promise<Arm[]> {
+async function buildArms(c: Corpus): Promise<Arm[]> {
     const arms: Arm[] = [];
     for (const [name, output] of [
         ['shakeup plain', {}],
         ['shakeup minify+optimize', { minify: true, optimize: true }],
     ] as const) {
-        const r = (await shakeupBundle({ entry: ENTRY, fs: diskFs, external: EXTERNAL, output } as never)) as {
+        const r = (await shakeupBundle({ entry: c.entry, fs: diskFs, external: c.external, output } as never)) as {
             errors: string[];
             chunks: { code: string }[];
         };
         if (r.errors.length > 0) throw new Error(`${name} failed: ${r.errors.join(', ')}`);
-        arms.push({ name, code: r.chunks.map((c) => c.code).join('\n') });
+        arms.push({ name, code: r.chunks.map((x) => x.code).join('\n') });
     }
     const { rolldown } = await import('rolldown');
-    const b = await rolldown({ input: ENTRY, external: EXTERNAL, logLevel: 'silent' });
+    const b = await rolldown({ input: c.entry, external: c.external, logLevel: 'silent' });
     const out = await b.generate({ format: 'esm' });
     await b.close?.();
     arms.push({ name: 'rolldown (oracle)', code: out.output.map((o: { code?: string }) => o.code ?? '').join('\n') });
     return arms;
 }
 
-function run(arm: Arm, i: number): { ok: true; state: string } | { ok: false; err: string } {
-    const dir = join(OUT, `arm${i}`);
+function run(c: Corpus, label: string, arm: Arm, i: number): { ok: true; state: string } | { ok: false; err: string } {
+    const dir = join(OUT, `${label}-arm${i}`);
     mkdirSync(dir, { recursive: true });
-    // `math` and `three` are EXTERNAL, so the driver resolves them the way crashcat itself does.
-    // A symlink rather than a copy — node walks up for `node_modules`, but this directory is not
-    // under crashcat, so it needs one of its own.
+    // An EXTERNAL specifier has to resolve the way the corpus itself resolves it. A symlink rather
+    // than a copy — node walks up for `node_modules`, but this directory is not under the corpus, so
+    // it needs one of its own. A corpus with no externals needs none.
     const nm = join(dir, 'node_modules');
-    if (!existsSync(nm)) symlinkSync(join(CRASHCAT, 'node_modules'), nm, 'dir');
+    if (c.nodeModules !== '' && !existsSync(nm)) symlinkSync(c.nodeModules, nm, 'dir');
     writeFileSync(join(dir, 'bundle.mjs'), arm.code);
-    writeFileSync(join(dir, 'run.mjs'), DRIVER);
+    writeFileSync(join(dir, 'run.mjs'), c.driver);
     try {
         const out = execFileSync(process.execPath, [join(dir, 'run.mjs')], {
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -168,35 +248,47 @@ function run(arm: Arm, i: number): { ok: true; state: string } | { ok: false; er
 }
 
 rmSync(OUT, { recursive: true, force: true });
-const arms = await buildArms();
-const results = arms.map((a, i) => ({ arm: a, res: run(a, i) }));
 
-console.log(`\ndifferential EXECUTION — crashcat, 18 bodies, 240 frames, woken mid-run\n`);
+const only = process.argv.includes('--corpus') ? process.argv[process.argv.indexOf('--corpus') + 1] : null;
+const names = only === null ? Object.keys(CORPORA) : [only];
 let failed = false;
-const oracle = results[results.length - 1];
-if (!oracle.res.ok) {
-    console.log(`  ORACLE FAILED TO RUN — ${oracle.arm.name}\n      ${oracle.res.err}`);
-    failed = true;
-}
-for (const { arm, res } of results) {
-    if (!res.ok) {
-        console.log(`  ${arm.name.padEnd(26)} DID NOT RUN\n      ${res.err}`);
+
+for (const label of names) {
+    const c = CORPORA[label];
+    if (c === undefined) throw new Error(`unknown corpus '${label}' — try ${Object.keys(CORPORA).join(' | ')}`);
+    const arms = await buildArms(c);
+    const results = arms.map((a, i) => ({ arm: a, res: run(c, label, a, i) }));
+
+    console.log(`\ndifferential EXECUTION — ${label}, ${c.blurb}\n`);
+    // The ORACLE is the last arm. If rolldown's own bundle cannot run the driver, the driver is
+    // wrong and nothing below means anything — say so rather than reporting shakeup "diverging".
+    const oracle = results[results.length - 1];
+    if (!oracle.res.ok) {
+        console.log(`  ORACLE FAILED TO RUN — ${oracle.arm.name}\n      ${oracle.res.err}`);
+        console.log('  (the driver, not shakeup, is at fault; the rest of this corpus is unjudged)');
         failed = true;
         continue;
     }
-    if (!oracle.res.ok) continue;
-    const same = res.state === oracle.res.state;
-    if (!same) failed = true;
-    console.log(`  ${arm.name.padEnd(26)} ${same ? 'agrees with the oracle' : 'DIVERGES from the oracle'}`);
-    if (!same) {
-        const a = JSON.parse(res.state) as number[][];
-        const b = JSON.parse(oracle.res.state) as number[][];
-        for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    for (const { arm, res } of results) {
+        if (!res.ok) {
+            console.log(`  ${arm.name.padEnd(26)} DID NOT RUN\n      ${res.err}`);
+            failed = true;
+            continue;
+        }
+        const same = res.state === oracle.res.state;
+        if (!same) failed = true;
+        console.log(`  ${arm.name.padEnd(26)} ${same ? 'agrees with the oracle' : 'DIVERGES from the oracle'}`);
+        if (same) continue;
+        const a = JSON.parse(res.state) as unknown[];
+        const b = JSON.parse(oracle.res.state) as unknown[];
+        let shown = 0;
+        for (let i = 0; i < Math.max(a.length, b.length) && shown < 3; i++) {
             if (JSON.stringify(a[i]) === JSON.stringify(b[i])) continue;
-            console.log(`      body ${i}: ${JSON.stringify(a[i])}\n         vs ${JSON.stringify(b[i])}`);
-            break;
+            console.log(`      [${i}] ${JSON.stringify(a[i])}\n       vs ${JSON.stringify(b[i])}`);
+            shown++;
         }
     }
 }
-console.log(failed ? '\nRUNTIME DIFFERENTIAL FAILED\n' : '\nAll arms agree.\n');
+
+console.log(failed ? '\nRUNTIME DIFFERENTIAL FAILED\n' : '\nAll arms agree, on every corpus.\n');
 process.exit(failed ? 1 : 0);
