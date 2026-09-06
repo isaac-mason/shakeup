@@ -99,3 +99,40 @@ describe('a namespace object nothing can observe is not built', () => {
         expect(code).toContain('import(');
     });
 });
+
+// A namespace that IS materialised gets its members narrowed to what consumers read. That set was
+// unioned across the whole consumer MODULE, which made it independent of liveness: a member named
+// only by code the shaker drops stayed in the bundle and got stamped onto the object.
+//
+// rolldown resolves member-expr refs per REFERENCE (`bind_imports_and_exports.rs`), and a reference
+// inside a dropped statement is not one — it emits neither the member nor its declaration. Isolated
+// in `llm/repro/expandns`; ROADMAP §2z52.
+//
+// The shape needs the object to actually exist, so these fixtures put a consumer in ANOTHER chunk:
+// elision is refused across chunks (the wiring imports the namespace, not the members), which is
+// exactly when the narrowed surface becomes something the emitter writes out.
+describe('the narrowed surface follows liveness', () => {
+    const files = (body: string) => ({
+        '/dep.js': "export const kept = 1;\nexport function deadOnly() { return 'DEADCODE_MARKER'; }\n",
+        '/panel.js': `import * as ns from './dep.js';\n${body}\nexport const render = () => ns.kept;\n`,
+        '/main.js':
+            "import * as ns from './dep.js';\nexport const load = () => import('./panel.js');\nexport const seed = ns.kept;\n",
+    });
+
+    it('drops a member whose only read is in a statement that gets shaken', async () => {
+        const code = await build(files('function neverUsed() { return ns.deadOnly(); }'));
+        expect(code, 'the fixture must MATERIALISE the object, or it tests nothing').toContain('__proto__: null');
+        expect(code, 'the only read of it was dropped').not.toContain('DEADCODE_MARKER');
+        expect(code, 'so it is not stamped onto the namespace either').not.toContain('deadOnly');
+        expect(code, 'the live member survives').toContain('kept');
+    });
+
+    // The falsification arm. One reference away from the test above — if this went green too, the
+    // assertions above would be pinning "we never emit it", not "we drop it when it is dead".
+    it('keeps that same member as soon as one live statement reads it', async () => {
+        const code = await build(files('export function used() { return ns.deadOnly(); }'));
+        expect(code).toContain('__proto__: null');
+        expect(code).toContain('DEADCODE_MARKER');
+        expect(code).toContain('deadOnly');
+    });
+});

@@ -20,7 +20,16 @@ export type NsUsage = {
  *  `ns.foo` / `ns?.foo` records member `foo`; any other appearance — bare reference, call,
  *  computed access `ns[x]`, passed as an argument, destructured, reassigned — sets `escapes`.
  *  One walk classifies all of a module's namespace bindings at once. */
-export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<number>): Map<number, NsUsage> {
+export function analyzeNsUsage(
+    program: Node,
+    semantic: Semantic,
+    nsSyms: Set<number>,
+    /** Called at each `ns.foo` READ with the position it was read at. The narrowed surface has to
+     *  follow LIVENESS — a member read only from a statement that gets shaken is not read at all —
+     *  and that means the shaker needs to know WHERE each read was, not just that there was one.
+     *  Reported from here rather than re-walked: this walk already visits every one of them. */
+    onRead?: (nsSym: number, name: string, at: number) => void,
+): Map<number, NsUsage> {
     const out = new Map<number, NsUsage>();
     for (const s of nsSyms) out.set(s, { escapes: false, called: new Set(), members: new Set() });
 
@@ -79,6 +88,7 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
                 // not recurse into the object (that would re-see the `ns` ident as a bare use).
                 const name = node.data.property.name as string;
                 out.get(s)!.members.add(name);
+                onRead?.(s, name, node.start);
                 return;
             }
         } else if (node.type === N.ComputedMemberExpression) {

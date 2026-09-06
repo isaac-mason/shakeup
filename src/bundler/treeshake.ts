@@ -264,6 +264,8 @@ function computeNsUsage(
     deadDynamic: Set<number>,
     /** Out-param: target → the member names some consumer CALLED off it. */
     called: Map<number, Set<string>>,
+    /** Out-param: every `ns.foo` read, positioned — see {@link computeNsSites}. */
+    reads: NsRead[],
 ): Map<number, Set<string>> {
     const forceWhole = new Set<number>();
     for (const { module } of graph.entries) forceWhole.add(module);
@@ -298,7 +300,9 @@ function computeNsUsage(
             nsSyms.set(localSym, rec.resolved);
         }
         if (nsSyms.size === 0) continue;
-        const usage = analyzeNsUsage(mod.program, mod.semantic, new Set(nsSyms.keys()));
+        const usage = analyzeNsUsage(mod.program, mod.semantic, new Set(nsSyms.keys()), (sym, name, at) =>
+            reads.push({ mod: mod.idx, target: nsSyms.get(sym) as number, name, at }),
+        );
         for (const [localSym, target] of nsSyms) fold(target, usage.get(localSym)!);
     }
     for (const [target, u] of dynUsage) fold(target, u);
@@ -312,6 +316,62 @@ function computeNsUsage(
         if (a.called.size > 0) called.set(target, a.called);
     }
     return narrowable;
+}
+
+/** One `ns.foo` READ: which module it is in, which target's member it names, and where. */
+type NsRead = { mod: number; target: number; name: string; at: number };
+
+/**
+ * WHICH TOP-LEVEL UNITS READ EACH NAMESPACE MEMBER.
+ *
+ * {@link computeNsUsage} unions the member reads across a whole consumer MODULE, which made the
+ * narrowed surface independent of liveness: a member named only by code the shaker drops survived,
+ * and — when the object is materialised — was still stamped onto it. Isolated in
+ * `llm/repro/expandns`: `function neverUsed(){ return ns.onlyInDeadCode() }` is dropped from the
+ * chunk that contains it while `onlyInDeadCode` stays in the bundle. rolldown emits neither, because
+ * its member-expr refs are resolved per REFERENCE (`bind_imports_and_exports.rs`) and a reference
+ * inside a dropped statement is not one.
+ *
+ * The provenance has to be recorded against the same thing `live` is keyed by, and that is the UNIT
+ * — a DECLARATOR for a split declaration — which does not exist yet when the reads are collected.
+ * So the reads are collected by POSITION during the walk `computeNsUsage` already does, and bound to
+ * units here by binary search over their spans. Re-walking each unit instead cost 7.2ms on crashcat
+ * for the same answer; this reuses the walk and costs one array of `{mod,target,name,at}`.
+ *
+ * A member with NO recorded site is treated as live by {@link treeshake}. That is the sound
+ * direction, and it is what carries members contributed by `import()` usage (`dynUsage`), whose
+ * reads are not attributed to a unit here.
+ */
+function computeNsSites(
+    reads: NsRead[],
+    infos: StatementInfo[][],
+    narrowable: Map<number, Set<string>>,
+): Map<number, Map<string, [number, number][]>> {
+    const out = new Map<number, Map<string, [number, number][]>>();
+    for (const { mod, target, name, at } of reads) {
+        if (!narrowable.has(target)) continue;
+        // Units tile the module in source order and never overlap, so the one containing a read is
+        // the last whose span starts at or before it. A read that lands in NO unit (between two, or
+        // in a construct `shakeUnits` does not yield) records no site and is therefore kept.
+        const list = infos[mod];
+        let lo = 0;
+        let hi = list.length - 1;
+        let found = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (list[mid].statement.start <= at) {
+                found = mid;
+                lo = mid + 1;
+            } else hi = mid - 1;
+        }
+        if (found < 0 || list[found].statement.end < at) continue;
+        let byName = out.get(target);
+        if (byName === undefined) out.set(target, (byName = new Map()));
+        let sites = byName.get(name);
+        if (sites === undefined) byName.set(name, (sites = []));
+        sites.push([mod, found]);
+    }
+    return out;
 }
 
 /** Does this module contain a `this` anywhere? The over-approximation behind the namespace-method
@@ -431,7 +491,8 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
     const thisCache = new Map<number, boolean>();
     const nsCalled = new Map<number, Set<string>>();
-    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCalled);
+    const nsReads: NsRead[] = [];
+    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCalled, nsReads);
     const elidableNs = computeElidableNs(graph, linked, nsUsage);
     // A namespace some consumer CALLS a member off (`ns.foo()`) and that still gets built keeps its
     // WHOLE surface: the callee receives the object as `this`, so `this.other` must find `other`.
@@ -570,6 +631,17 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         declArrays.push(localDecls);
     }
 
+    // Provenance for the narrowed namespace surfaces, now that there are units to attribute reads to.
+    const nsSites = computeNsSites(nsReads, infos, nsUsage);
+    /** Does any unit that reads `target.name` survive? No recorded site means "not attributed" —
+     *  `import()` usage, most of it — and those are kept unconditionally. */
+    const nsMemberLive = (target: number, name: string): boolean => {
+        const sites = nsSites.get(target)?.get(name);
+        if (sites === undefined) return true;
+        for (const [m, i] of sites) if (live[m].has(infos[m][i].statement.id)) return true;
+        return false;
+    };
+
     const worklist: number[] = [];
     const liveRefs = new Set<number>();
     const markRef = (ref: number): void => {
@@ -623,6 +695,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     };
     /** Expand a live NS_MARKER: mark the target's export surface — narrowed to just the members its
      *  consumers read when the target is narrowable, otherwise the whole surface. */
+    const nsExpanded = new Set<number>();
     const expandNs = (modIdx: number): void => {
         const map = linked.exportMaps.get(modIdx);
         if (map === undefined) return;
@@ -631,7 +704,12 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             for (const bind of map.values()) markBind(bind);
             return;
         }
+        // A narrowed surface is liveness-DEPENDENT, so this is not a one-shot: a member whose only
+        // reader is dead now may have a live reader later, once something else roots that unit.
+        // Remember the target and re-run below until nothing moves.
+        nsExpanded.add(modIdx);
         for (const name of narrow) {
+            if (!nsMemberLive(modIdx, name)) continue;
             const bind = map.get(name);
             if (bind !== undefined) markBind(bind);
         }
@@ -715,8 +793,25 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
                 added = true;
             }
         }
+        // A unit that just went live may be the only reader of a namespace member nothing had marked.
+        // Monotone in both directions — liveness only grows, and so does each narrowed surface — so
+        // this terminates for the same reason the rooting above does.
+        for (const modIdx of nsExpanded) expandNs(modIdx);
+        if (worklist.length > 0) added = true;
         if (!added) break;
         drain();
+    }
+
+    // The narrowed surfaces are what the EMITTER builds the namespace object from
+    // (`generate/modules.ts`) and what a dynamic-entry chunk exports (`generate/esm.ts`). Marking and
+    // emission have to agree: leaving the union here would stamp a property whose binding was just
+    // shaken, which is a dangling reference, not a wasted byte.
+    //
+    // PRUNED IN PLACE, never deleted: an ABSENT entry means "no narrowing, emit the whole surface"
+    // to both of those readers and to `expandNs`, so dropping a surface that narrowed to nothing
+    // would widen it back to everything.
+    for (const [target, names] of nsUsage) {
+        for (const name of names) if (!nsMemberLive(target, name)) names.delete(name);
     }
 
     const dropped: [number, Node][] = [];
