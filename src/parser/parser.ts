@@ -807,6 +807,10 @@ function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
         const prec = precedenceOf(tok);
         nextToken(state);
         const right = parseBinary(state, tok === P.STARSTAR ? prec - 1 : prec, noIn);
+        // `#name` is legal as the LEFT operand of `in` and nowhere else. Being the RIGHT operand is
+        // what `#f in #f in this` does — it parses as `(#f in #f) in this` — and the lookahead test
+        // at the primary site cannot see it, because that inner `#f` IS followed by `in`.
+        if (right.type === N.PrivateIdentifier) raiseAt(state, right.start, ParseErrorCode.UnexpectedPrivateName);
         const op = opTextOf(tok);
         // `??` may not be mixed with `||`/`&&` without parentheses, in either order — the grammar
         // gives `CoalesceExpression` its own production rather than a precedence level, so
@@ -1431,7 +1435,16 @@ function parsePrimary(state: ParserState): Node {
         case T_TEMPLATE_HEAD:
             return parseTemplate(state, false);
         case T_PRIVATE:
-            return parsePrivate(state);
+            {
+                // A bare `#name` is only ever the LEFT operand of `in` (the ergonomic brand check),
+                // so the very next token has to be `in`. `#f;` and `x in #f;` both used to parse.
+                // The RHS case needs a second test in `parseBinary` — `#f in #f in this` gets here
+                // with `in` genuinely next, because the second `#f` is the right operand of the
+                // first `in`.
+                const priv = parsePrivate(state);
+                if (!isK(state, K.IN)) raiseAt(state, priv.start, ParseErrorCode.UnexpectedPrivateName);
+                return priv;
+            }
         case T_IDENT:
             return parseIdent(state, R_REF);
     }
