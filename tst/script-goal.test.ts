@@ -129,3 +129,33 @@ describe('the last of the checker porting queue', () => {
         expect(check('try {} catch ([e]) { var e; }')).toEqual(['Identifier `e` has already been declared']);
     });
 });
+
+// An escaped identifier used as a LABEL. Not just a missed diagnostic: the label's NAME in the AST
+// was the raw source slice, so `yield:` and `yield:` were two different labels — a duplicate
+// went unreported and a `break` could fail to match its label. Node treats them as one (verified
+// with `new Function`), and so does oxc.
+describe('an escaped label carries its cooked name', () => {
+    const check = (src: string, strict = false) => {
+        const r = parse(`${strict ? '"use strict";\n' : ''}${src}`, { ts: false, jsx: false, kind: 'script' });
+        if (r.errors.length > 0) return r.errors.map((e) => e.msg);
+        const sem = createSemantic();
+        analyze(sem, r.program, false, true);
+        return sem.errors.map((e) => e.msg);
+    };
+
+    it('is the SAME label as its unescaped spelling', () => {
+        // Both directions, because the bug made the label and the `break` disagree either way.
+        expect(check('yi\\u0065ld: { break yield; }')).toEqual([]);
+        expect(check('yield: { break yi\\u0065ld; }')).toEqual([]);
+        // The pair collides, exactly as node reports it.
+        expect(check('yield: yi\\u0065ld: 1;')).toEqual(['Label `yield` has already been declared']);
+    });
+
+    it('is held to the strict-mode reserved-word rule the unescaped spelling is', () => {
+        expect(check('yi\\u0065ld: 1;', true)).toEqual(["The keyword 'yield' is reserved"]);
+        expect(check('l\\u0065t: 1;', true)).toEqual(["The keyword 'let' is reserved"]);
+        // Sloppy code reserves neither, escaped or not.
+        expect(check('yi\\u0065ld: 1;')).toEqual([]);
+        expect(check('l\\u0065t: 1;')).toEqual([]);
+    });
+});

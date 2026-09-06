@@ -3106,7 +3106,13 @@ function parseStatement(state: ParserState, single: boolean): Node {
     if (expr.type === N.IdentifierReference && isP(state, P.COLON)) {
         nextToken(state);
         const body = parseStatement(state, true);
-        const label = ident(state, R_LABEL, expr.start, expr.end);
+        // `identNamed`, not `ident`: the label node is built AFTER the body has been parsed, so
+        // `ident`'s escape-cooking branch — which only fires while the escaped token is still the
+        // current one — is long past, and it would intern the RAW slice. `yi\u0065ld: 1;` then
+        // carried the name `yi\u0065ld` and walked past the strict-mode reserved-word rule that
+        // rejects the unescaped `yield:`. Same bug the shorthand-property case documents above; the
+        // expression already holds the cooked name.
+        const label = identNamed(state, R_LABEL, expr.start, expr.end, expr.name as string);
         return create.LabeledStatement(start, body.end, 0, label, body);
     }
     consumeSemi(state);
