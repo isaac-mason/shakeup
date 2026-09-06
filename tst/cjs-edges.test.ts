@@ -347,3 +347,40 @@ describe('re-exporting a CommonJS binding on a chunk`s export clause', () => {
         expect(await run({ ...dep, '/main.js': main })).toBe('A');
     });
 });
+
+// A tenth never-run configuration: `output.exports` crossed with a CommonJS entry.
+//
+// The validation asked `linked.exportMaps` what the entry exports. A CJS entry has no ESM export map
+// at all — its surface is `module.exports`, and the chunk emits exactly `export default
+// require_main();`. So both answers came out backwards, and the `'none'` one silently: `'default'`
+// was REJECTED as exporting nothing, and `'none'` was ACCEPTED and then dropped the entry's only
+// export, from a build reporting success. rolldown answers the opposite on both (probed).
+describe('output.exports crossed with a CommonJS entry', () => {
+    const cjs = { '/main.cjs': "module.exports = { d: 'DEFAULT' };\n" };
+    // `build` defaults to `/main.js`; the spread lets a case name its own entry.
+    const CJS_ENTRY = { entry: '/main.cjs' };
+
+    it("accepts 'default' — a CJS entry's emitted surface IS exactly `default`", async () => {
+        const r = await build(cjs, { ...CJS_ENTRY, output: { exports: 'default' } });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toContain('export default require_main();');
+    });
+
+    it("rejects 'none', naming the export it would have dropped", async () => {
+        const r = await build(cjs, { ...CJS_ENTRY, output: { exports: 'none' } });
+        expect(r.errors.join(' ')).toContain('"none" was specified for "output.exports"');
+        expect(r.errors.join(' '), 'the message names the surface, not an empty list').toContain('"default"');
+    });
+
+    // The falsification arm: the fix must not be "CJS entries always pass". An ESM entry is still
+    // validated against its real surface, in both directions.
+    it('still validates an ESM entry against its own surface', async () => {
+        const onlyDefault = { '/main.js': 'export default 1;\n' };
+        expect((await build(onlyDefault, { output: { exports: 'default' } })).errors).toEqual([]);
+        expect((await build(onlyDefault, { output: { exports: 'none' } })).errors.join(' ')).toContain('"default"');
+
+        const named = { '/main.js': 'export const a = 1;\n' };
+        expect((await build(named, { output: { exports: 'default' } })).errors.join(' ')).toContain('"a"');
+        expect((await build({ '/main.js': 'console.log(1);\n' }, { output: { exports: 'none' } })).errors).toEqual([]);
+    });
+});

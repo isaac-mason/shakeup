@@ -375,7 +375,16 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         (chunk.isEntry || chunk.isDynamicEntry) &&
         (naming.exports === 'default' || naming.exports === 'none')
     ) {
-        const keys = [...(linked.exportMaps.get(chunk.entryModule)?.keys() ?? [])];
+        // The surface the chunk will actually EMIT, which for a CommonJS entry is not its export map.
+        // A CJS entry has no ESM export map at all — its exports are `module.exports`, and the chunk
+        // emits exactly `export default require_main();`. Validating against the (empty) map asked
+        // the wrong question and got both answers backwards: `'default'` was REJECTED as exporting
+        // nothing, and `'none'` was ACCEPTED and then silently dropped the entry's only export,
+        // producing a module that exports nothing from a build reporting success. rolldown answers
+        // the opposite on both (probed), which is the correct pair.
+        const keys = linked.cjsWrap.has(chunk.entryModule)
+            ? [NAME_DEFAULT]
+            : [...(linked.exportMaps.get(chunk.entryModule)?.keys() ?? [])];
         const bad = naming.exports === 'default' ? !(keys.length === 1 && keys[0] === NAME_DEFAULT) : keys.length > 0;
         if (bad) {
             // rollup's `printQuotedStringList`: one item bare, otherwise `"a", "b" and "c"`.
