@@ -64,13 +64,35 @@ describe('constant enum members are inlined at the read', () => {
         ).toContain('E.E');
     });
 
-    it('leaves a member whose value is not a literal', async () => {
+    it('leaves a member whose value is not STATICALLY KNOWN, but evaluates one that is', async () => {
         const code = await build({
             '/k.ts': 'declare const f: () => number;\nexport enum E { A = f(), B = -1 }\n',
             '/main.ts': "import { E } from './k.ts';\nexport const v = E.A + E.B;\n",
         });
-        expect(code).toContain('E.A');
-        expect(code).toContain('E.B'); // `-1` is a unary expression, not a literal — conservative
+        expect(code, 'a call is not a constant enum expression').toContain('E.A');
+        // `-1` is a unary expression rather than a literal, which used to be enough to refuse it.
+        // oxc evaluates unary `-`/`+`/`~` (`ts_enum/eval.rs`), so it is a constant like any other.
+        // PARENTHESISED: the substitution replaces a member expression, which binds tighter than
+        // unary minus, so a bare `-1` would depend on the printer to space `E.A + -1` correctly.
+        expect(code).toContain('(-1)');
+        expect(code).not.toContain('E.B');
+    });
+
+    it('evaluates the constant enum expressions a BIT-FLAG enum is written with', async () => {
+        // The shape that motivated this and the one the literal-only test was worst at: crashcat's
+        // `ClampedAxis` is six `1 << n` members, and because a BinaryExpression recorded no value AND
+        // cleared the auto-increment sequence, one non-literal member used to take the whole enum
+        // with it — 20 names and 77 reads inlined by rolldown and not by us.
+        const code = await build({
+            '/f.ts': 'export enum F { A = 1 << 0, B = 1 << 1, C = A | B, D = ~0, E = 3 * 4, G }\n',
+            '/main.ts': "import { F } from './f.ts';\nexport const got = [F.A, F.B, F.C, F.D, F.E, F.G];\n",
+        });
+        // Not a bare `F.` search: `qualifyMemberRefs` leaves `_F.A | _F.B` INSIDE the enum body,
+        // which contains `F.A` as a substring. The consumer's own line is what this is about.
+        expect(code, 'no member read survives at the use site').toContain('const got = [1,2,3,(-1),12,13]');
+        // Executed, because the POINT is the arithmetic: `C` reads two earlier members of its own
+        // enum, `D` is `~0`, and `G` resumes auto-increment from `E`'s computed 12.
+        expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn got;`)()).toEqual([1, 2, 3, -1, 12, 13]);
     });
 
     it('leaves a COMPUTED read, and so keeps the object it needs', async () => {

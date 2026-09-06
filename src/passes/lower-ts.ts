@@ -146,6 +146,9 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
     const pRef = (): Node => boundRef(param.name, param.sym);
 
     const prior = new Set<string>();
+    /** Members of THIS enum already evaluated, for `B = A << 1`. Names, because that is what a
+     *  reference in an initializer resolves to and what `qualifyMemberRefs` rewrites. */
+    const vals = new Map<string, number>();
     const stmts: Node[] = [];
     let autoNext = 0;
     let autoOk = true;
@@ -157,11 +160,18 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
         const init = md.initializer;
         if (init === null) {
             // auto: `_E[_E["A"]=n]="A"`
-            if (autoOk) recordEnumConst(enumSym, key, String(autoNext));
+            if (autoOk) {
+                recordEnumConst(enumSym, key, String(autoNext));
+                vals.set(key, autoNext);
+            }
             stmts.push(exprStmt(assign(computed(pRef(), assign(computed(pRef(), str(key)), num(autoNext))), str(key))));
             autoNext++;
         } else {
             if (init.type === N.NewExpression || init.type === N.CallExpression) sideEffect = true;
+            // BEFORE `qualifyMemberRefs` rewrites `A` to `_E.A` in place: the evaluator resolves a
+            // bare member reference through `vals`, and after the rewrite there is no bare reference
+            // left to resolve.
+            const constVal = init.type === N.StringLiteral ? null : constEnumValue(init, vals);
             // `qualifyMemberRefs` rewrites `A` -> `_E.A` IN PLACE, inside a subtree the enclosing
             // `ctx.replaceWith` will later walk as its `prev`. That walk assumes `prev` is the tree
             // the semantic still describes, so mutating first makes it decrement the NEW `_E`
@@ -179,13 +189,13 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
             } else {
                 // `_E[_E["A"]=<init>]="A"`
                 stmts.push(exprStmt(assign(computed(pRef(), assign(computed(pRef(), str(key)), init)), str(key))));
-                if (init.type === N.NumericLiteral) {
-                    const v = Number(init.name);
-                    if (Number.isFinite(v)) {
-                        recordEnumConst(enumSym, key, init.name);
-                        autoNext = v + 1;
-                        autoOk = true;
-                    } else autoOk = false;
+                // Any constant enum expression, not just a bare literal — `1 << 4`, `A | B`, `~0`.
+                const text = constVal === null ? null : enumConstText(constVal);
+                if (constVal !== null && text !== null) {
+                    recordEnumConst(enumSym, key, text);
+                    vals.set(key, constVal);
+                    autoNext = constVal + 1;
+                    autoOk = true;
                 } else autoOk = false;
             }
         }
@@ -359,6 +369,110 @@ function isPureNsStmt(stmt: Node): boolean {
  * constant.
  */
 let ENUM_CONSTS: Map<number, Map<string, string>> | null = null;
+
+/**
+ * A TypeScript CONSTANT ENUM EXPRESSION, evaluated to its number — the rule set in oxc's
+ * `oxc_semantic/src/ts_enum/eval.rs`, which is where oxc computes member values (the transformer
+ * only reads them back off `Scoping`). Returns null for anything not statically known, which leaves
+ * the member absent from {@link ENUM_CONSTS} and its reads going through the object, as before.
+ *
+ * This is why a bit-flag enum used to inline nothing. `TWIST_MIN = 1 << 0` is a BinaryExpression, so
+ * the old literal-only test recorded no value AND cleared `autoOk`, taking the rest of the enum with
+ * it — 20 names and 77 reads on crashcat, where rolldown inlines every one and then drops the enum
+ * object as unused.
+ *
+ * JS gives the operator semantics for free: `<<`, `>>`, `&`, `|`, `^`, `~` coerce to int32 in the
+ * language exactly as oxc's `to_int_32`/`wrapping_shl` do, and `>>>` to uint32.
+ *
+ * NUMBERS ONLY, deliberately narrower than oxc, which also folds string concatenation. A string
+ * member still records through the StringLiteral path below with its quotes intact; computing one
+ * here would mean re-quoting a value that never appears in practice.
+ *
+ * @param vals members of THIS enum already evaluated, by name — oxc resolves the same references
+ *   through the enum's own scope, and `qualifyMemberRefs` rewrites exactly this set of names.
+ */
+function constEnumValue(node: Node, vals: Map<string, number>): number | null {
+    switch (node.type) {
+        case N.NumericLiteral: {
+            const v = Number(node.name);
+            return Number.isFinite(v) ? v : null;
+        }
+        case N.IdentifierReference:
+            return vals.get(node.name) ?? null;
+        case N.StaticMemberExpression: {
+            // `Other.MEMBER` — a member of an enum lowered EARLIER in this module, whose values are
+            // already in `ENUM_CONSTS`. oxc's `find_in_enum_body_scopes` is the same lookup.
+            const d = node.data as { object: Node; property: Node };
+            if (d.object.type !== N.IdentifierReference) return null;
+            const text = ENUM_CONSTS?.get((d.object as { sym: number }).sym)?.get(d.property.name as string);
+            if (text === undefined) return null;
+            const v = Number(text);
+            return Number.isFinite(v) ? v : null;
+        }
+        case N.UnaryExpression: {
+            const d = node.data as { operator: string; argument: Node };
+            const v = constEnumValue(d.argument, vals);
+            if (v === null) return null;
+            switch (d.operator) {
+                case '+':
+                    return v;
+                case '-':
+                    return -v;
+                case '~':
+                    return ~v;
+                default:
+                    return null;
+            }
+        }
+        case N.BinaryExpression: {
+            const d = node.data as { operator: string; left: Node; right: Node };
+            const l = constEnumValue(d.left, vals);
+            if (l === null) return null;
+            const r = constEnumValue(d.right, vals);
+            if (r === null) return null;
+            switch (d.operator) {
+                case '<<':
+                    return l << r;
+                case '>>':
+                    return l >> r;
+                case '>>>':
+                    return l >>> r;
+                case '&':
+                    return l & r;
+                case '|':
+                    return l | r;
+                case '^':
+                    return l ^ r;
+                case '*':
+                    return l * r;
+                case '/':
+                    return l / r;
+                case '+':
+                    return l + r;
+                case '-':
+                    return l - r;
+                case '%':
+                    return l % r;
+                case '**':
+                    return l ** r;
+                default:
+                    return null;
+            }
+        }
+        default:
+            return null;
+    }
+}
+
+/** The source text to substitute for a computed member value. A NEGATIVE number is parenthesised:
+ *  the override replaces a member expression, which binds tighter than unary minus, and `a -
+ *  E.X` becoming `a - -1` is a shape the printer would have to reason about. Two bytes on a rare
+ *  member buys not having to. */
+function enumConstText(v: number): string | null {
+    if (!Number.isFinite(v)) return null;
+    const text = String(v);
+    return text.startsWith('-') ? `(${text})` : text;
+}
 
 function recordEnumConst(enumSym: number, key: string, text: string): void {
     if (enumSym === 0) return;
