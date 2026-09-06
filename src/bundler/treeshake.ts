@@ -249,9 +249,6 @@ function computeNsUsage(
     graph: Graph,
     dynUsage: Map<number, NsUsage>,
     deadDynamic: Set<number>,
-    /** Out-param: target → member names that would be CAPTURED by a nested binding if the namespace
-     *  were elided. Collected here because it rides on the same accumulator. */
-    captured: Map<number, Set<string>>,
     /** Out-param: target → the member names some consumer CALLED off it. */
     called: Map<number, Set<string>>,
 ): Map<number, Set<string>> {
@@ -272,13 +269,12 @@ function computeNsUsage(
     const fold = (target: number, u: NsUsage): void => {
         let a = acc.get(target);
         if (a === undefined) {
-            a = { escapes: false, called: new Set(), members: new Set(), captured: new Set() };
+            a = { escapes: false, called: new Set(), members: new Set() };
             acc.set(target, a);
         }
         if (u.escapes) a.escapes = true;
         for (const m of u.called) a.called.add(m);
         for (const m of u.members) a.members.add(m);
-        for (const m of u.captured) a.captured.add(m);
     };
     for (const mod of graph.modules) {
         const nsSyms = new Map<number, number>(); // local ns symbol → target module idx
@@ -301,7 +297,6 @@ function computeNsUsage(
         if (a.escapes || forceWhole.has(target) || deadDynamic.has(target)) continue;
         narrowable.set(target, a.members);
         if (a.called.size > 0) called.set(target, a.called);
-        if (a.captured.size > 0) captured.set(target, a.captured);
     }
     return narrowable;
 }
@@ -324,12 +319,7 @@ function moduleMentionsThis(graph: Graph, modIdx: number, cache: Map<number, boo
 
 /** {@link TreeshakeResult.elidableNs}. Runs off the SAME accumulator narrowing uses, then removes
  *  everything narrowing tolerates but elision cannot. */
-function computeElidableNs(
-    graph: Graph,
-    linked: Linked,
-    narrowable: Map<number, Set<string>>,
-    captured: Map<number, Set<string>>,
-): Set<number> {
+function computeElidableNs(graph: Graph, linked: Linked, narrowable: Map<number, Set<string>>): Set<number> {
     // A dynamically imported module's namespace is a real runtime value — `import()` resolves TO it —
     // so it must exist however statically its members are read. `hasDynamicLiteral` and not just
     // `kind === 'dynamic'`: a specifier imported both ways is deduped into one static record and the
@@ -357,17 +347,15 @@ function computeElidableNs(
                 break;
             }
         if (!allResolve) continue;
-        // SHADOWING. `dep.mutate(…)` inside `function test(mutate){…}` cannot become `mutate(…)`:
-        // the parameter wins. An ordinary `import { mutate }` would not have this problem — the
-        // reference is in the graph before deconfliction, which renames one of the two — but this
-        // rewrite happens at EMIT time, after deconfliction has already run and cannot learn about
-        // it. Rollup's `argument-treeshaking-parameter-conflict` is exactly this shape, and it caught
-        // the first cut.
+        // SHADOWING is NOT decided here. `dep.mutate(…)` inside `function test(mutate){…}` cannot be
+        // emitted as `mutate(…)` — the parameter wins — but the answer is to RENAME THE PARAMETER,
+        // which is deconfliction's job and not a reason to refuse the elision. `linked.elidableNs`
+        // carries this set into `deshadowLocals`, which already does exactly that for ordinary
+        // imports; rolldown likewise resolves member-expr refs in link_stage and deconflicts after.
         //
-        // `captured` is decided at the USE SITE, by resolving the name in the scope the read actually
-        // sits in. The first version asked instead whether any consumer declared the name ANYWHERE,
-        // which is sound but refuses far too much: on crashcat it cost 7,370 of the 12,258 bytes.
-        if (!(captured.get(target)?.size ?? 0)) out.add(target);
+        // Refusing instead was worth 7,362 raw / 431 brotli on crashcat, and 122 of its 129 refusals
+        // were a top-level binding that could not have captured anything in the first place.
+        out.add(target);
     }
     return out;
 }
@@ -392,7 +380,7 @@ function computeDynamicUsage(graph: Graph): Map<number, NsUsage> {
             if (rec === undefined || rec.external || rec.resolved < 0) continue;
             let a = acc.get(rec.resolved);
             if (a === undefined) {
-                a = { escapes: false, called: new Set(), members: new Set(), captured: new Set() };
+                a = { escapes: false, called: new Set(), members: new Set() };
                 acc.set(rec.resolved, a);
             }
             if (usage.escapes) a.escapes = true;
@@ -428,11 +416,10 @@ function computeDeadDynamic(graph: Graph, dynUsage: Map<number, NsUsage>): Set<n
 export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache): TreeshakeResult {
     const dynUsage = computeDynamicUsage(graph);
     const deadDynamic = computeDeadDynamic(graph, dynUsage);
-    const nsCaptured = new Map<number, Set<string>>();
     const thisCache = new Map<number, boolean>();
     const nsCalled = new Map<number, Set<string>>();
-    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCaptured, nsCalled);
-    const elidableNs = computeElidableNs(graph, linked, nsUsage, nsCaptured);
+    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCalled);
+    const elidableNs = computeElidableNs(graph, linked, nsUsage);
     // A namespace some consumer CALLS a member off (`ns.foo()`) and that still gets built keeps its
     // WHOLE surface: the callee receives the object as `this`, so `this.other` must find `other`.
     //

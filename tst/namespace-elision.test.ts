@@ -44,18 +44,25 @@ describe('a namespace object nothing can observe is not built', () => {
         expect(code, 'the object is still needed').toContain('__proto__: null');
     });
 
-    it('refuses when a consumer declares one of the read names — the rewrite would be captured', async () => {
-        // `dep.mutate(…)` inside `function test(mutate){…}` cannot become `mutate(…)`: the parameter
-        // wins. An ordinary `import { mutate }` would not have this problem, because the reference is
-        // in the graph before deconfliction and the renamer separates the two; this rewrite happens
-        // at EMIT time, after deconfliction. Rollup's `argument-treeshaking-parameter-conflict` is
-        // this exact shape and it caught the first cut of the elision.
+    it('renames a consumer binding that would capture the rewrite, rather than refusing', async () => {
+        // `dep.mutate(…)` inside `function test(mutate){…}` cannot be EMITTED as `mutate(…)` — the
+        // parameter wins. An ordinary `import { mutate }` never has this problem: the reference is in
+        // the graph before deconfliction, and `deshadowLocals` renames the parameter off it.
+        //
+        // So does this one. `linked.elidableNs` hands the decision to deconfliction, which is why
+        // the answer is to rename the PARAMETER and keep the elision — the direction rollup takes in
+        // `ChildScope.deconflict`. Refusing the elision instead (the first cut, which Rollup's
+        // `argument-treeshaking-parameter-conflict` caught) cost 7,362 raw bytes on crashcat.
         const code = await build({
             '/dep.js': 'export let value = 0;\nexport const mutate = () => value++;\n',
             '/main.js':
-                "import * as dep from './dep.js';\nfunction test(mutate) { dep.mutate(); }\ntest();\nexport const got = dep.value;\n",
+                "import * as dep from './dep.js';\nfunction test(mutate) { dep.mutate(); return mutate; }\nexport const got = [test(41), dep.value];\n",
         });
-        expect(code, 'the object survives rather than risk capture').toContain('__proto__: null');
+        expect(code, 'no namespace object').not.toContain('__proto__: null');
+        expect(code, 'the capturing parameter moved aside').toMatch(/function test\(mutate\$1\)/);
+        // The point of the rename, asserted by RUNNING it: `mutate()` has to reach the import and
+        // `return mutate$1` has to reach the parameter. Reinstating the capture makes this `[fn, 0]`.
+        expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn got;`)()).toEqual([41, 1]);
     });
 
     it('keeps it for a dynamic import, whose namespace is a real runtime value', async () => {

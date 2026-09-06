@@ -357,6 +357,18 @@ export type Linked = {
     finalNames: Map<number, string>;
     namespaceOf: Map<number, string>;
     exportMaps: Map<number, Map<string, ImportBind>>;
+    /** Targets whose namespace object is not built, so every `ns.foo` reading them is emitted as
+     *  `foo`'s own binding — {@link TreeshakeResult.elidableNs}, parked here so DECONFLICT can see
+     *  it. That is the whole point: an elided read is a reference to the producer that exists in no
+     *  AST, and `deshadowLocals` has to rename a nested binding that would capture it.
+     *
+     *  rolldown holds the same fact in link-stage module meta (`resolved_member_expr_refs`, set in
+     *  `bind_imports_and_exports.rs`) and reads it in generate-stage `deconflict_chunk_symbols`.
+     *  DIVERGENCE, deliberate: shakeup decides elidability in TREESHAKE, which needs the usage
+     *  analysis, so `bundle` fills this in after that pass rather than `linkGraph` computing it.
+     *  Empty for a caller that never treeshakes, which is why single-scope deconfliction is
+     *  unaffected. */
+    elidableNs: Set<number>;
     syntheticNames: Map<number, string>;
     /** Modules lowered to a `__commonJS` wrapper, mapped to the name of the wrapper function
      *  (`require_foo`). rolldown's `WrapKind::Cjs`. A wrapped module is NOT concatenated as

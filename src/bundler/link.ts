@@ -277,6 +277,7 @@ export function linkGraph(graph: Graph): Linked {
         finalNames: new Map(),
         namespaceOf: new Map(),
         exportMaps: new Map(),
+        elidableNs: new Set(),
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),

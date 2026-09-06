@@ -497,6 +497,16 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     Timer.start(timer, 'treeshake');
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, options.treeshakeCache);
     Timer.end(timer, 'treeshake');
+    // Hand elidability to DECONFLICT, which runs inside `buildChunkGraph` below. An elided `ns.foo`
+    // is a reference to the producer that appears in no AST, so the renamer cannot see it and a
+    // nested binding of the same name silently captures it. rolldown resolves member-expr refs in
+    // link_stage for exactly this reason and deconflicts afterwards, in generate_stage.
+    //
+    // The CHUNK narrowing (`elidedNs`, below) has not happened yet — it needs `chunkByModule`, which
+    // `buildChunkGraph` is what produces. So this is the wider candidate set, and deconfliction may
+    // rename a nested local guarding an elision that the partition then declines. That direction is
+    // safe: the cost is an occasional `$1` on a local, never a capture.
+    if (shaken !== null) linked.elidableNs = shaken.elidableNs;
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');

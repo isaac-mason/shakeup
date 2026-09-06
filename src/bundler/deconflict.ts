@@ -3,9 +3,19 @@
 // side-maps (`linked.finalNames`/`namespaceOf`/`externalLocals`) — NO AST mutation; the printer
 // applies them via `nameOf`. Kept OUT of link (rolldown link_stage names nothing). Consumed by
 // chunk-graph.ts (per-chunk) + single-scope callers (deconflictWholeBundle).
-import { SCOPE, scopeKind, scopeOf } from '../analysis/semantic.ts';
+import { SCOPE, scopeKind, scopeOf, symbolOf } from '../analysis/semantic.ts';
 import { N, type Node, walk, walkChildren } from '../ast/index.ts';
-import { externalKey, type Graph, type Linked, type Module, packRef, refMod, refSym } from './graph-types.ts';
+import {
+    externalKey,
+    type Graph,
+    type ImportBind,
+    type Linked,
+    type Module,
+    NAME_NAMESPACE,
+    packRef,
+    refMod,
+    refSym,
+} from './graph-types.ts';
 import { finalNameOf } from './link.ts';
 
 export const RESERVED = new Set([
@@ -261,6 +271,18 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         if (memberSet !== null && !memberSet.has(mod.idx)) continue;
         if (mod.external) continue;
         const sem = mod.semantic;
+        /** This module's `import * as ns` locals whose target is having its namespace object elided,
+         *  mapped to that target. Every `ns.foo` on one of these is emitted as the PRODUCER's name,
+         *  so it is a read of the producer from whatever scope it sits in — the reference the
+         *  renamer would otherwise never see. Same table `collectLinkOverrides` builds at emit. */
+        const elidedLocal = new Map<number, number>();
+        if (linked.elidableNs.size > 0)
+            for (const [localSym, imp] of mod.namedImports) {
+                if (imp.name !== NAME_NAMESPACE) continue;
+                const rec = mod.importRecords[imp.rec];
+                if (rec.external || rec.resolved < 0) continue;
+                if (linked.elidableNs.has(rec.resolved)) elidedLocal.set(localSym, rec.resolved);
+            }
         /**
          * The name the PRINTER will emit for a symbol — which for an import is NOT `finalNameOf` on
          * the local. `import { foo as _foo }` keeps the local symbol `_foo`, and the printer resolves
@@ -271,10 +293,7 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
          * renders as a chunk-local alias instead; missing that under-detects, which is the previous
          * behaviour rather than a regression.
          */
-        const outerName = (modIdx: number, sym: number): string | null => {
-            if (mod.namedImports.get(sym) === undefined) return finalNameOf(linked, packRef(modIdx, sym));
-            const bind = linked.binds.get(packRef(modIdx, sym));
-            if (bind === undefined) return null;
+        const nameOfBind = (bind: ImportBind): string | null => {
             switch (bind.kind) {
                 case 'found':
                     return finalNameOf(linked, bind.ref);
@@ -288,8 +307,25 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
                     return null;
             }
         };
+        const outerName = (modIdx: number, sym: number): string | null => {
+            if (mod.namedImports.get(sym) === undefined) return finalNameOf(linked, packRef(modIdx, sym));
+            const bind = linked.binds.get(packRef(modIdx, sym));
+            return bind === undefined ? null : nameOfBind(bind);
+        };
         /** Per scope: names read inside it that resolve OUTSIDE it, so a local of that name captures. */
         const captured = new Map<number, Set<string>>();
+        /** Mark every scope from the READ up to (not including) the one holding the DECLARATION: a
+         *  binding anywhere on that chain would capture the reference. */
+        const mark = (from: number, stop: number, name: string): void => {
+            for (let s = from; s !== 0 && s !== stop; s = sem.scopes[s].parent) {
+                let set = captured.get(s);
+                if (set === undefined) captured.set(s, (set = new Set()));
+                set.add(name);
+            }
+        };
+        /** Where an elided read's producer lands: the top level of the bundle, which from this
+         *  module's side is its own top level — the same stopping point an ordinary import gets. */
+        const moduleScope = scopeOf(sem, mod.program);
         // Explicit stack, not recursion: this descends one frame per AST level, and a deeply nested
         // program (300 blocks is enough) overflowed the call stack. The budget also shrank whenever a
         // node type was added, because `walkChildren` is generated from the schema and a bigger
@@ -305,14 +341,23 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
                 const rec = sem.symbols[n.sym];
                 if (rec !== undefined && rec.scope !== cur) {
                     const name = outerName(mod.idx, n.sym);
-                    // Mark every scope between the READ and the DECLARATION: a binding anywhere on
-                    // that chain would capture the reference.
-                    if (name !== null)
-                        for (let s = cur; s !== 0 && s !== rec.scope; s = sem.scopes[s].parent) {
-                            let set = captured.get(s);
-                            if (set === undefined) captured.set(s, (set = new Set()));
-                            set.add(name);
-                        }
+                    if (name !== null) mark(cur, rec.scope, name);
+                }
+            }
+            if (elidedLocal.size > 0 && n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
+                const target = elidedLocal.get(symbolOf(sem, n.data.object));
+                if (target !== undefined) {
+                    // A miss is not the bug here that it is at emit: this runs over the WIDER
+                    // candidate set, before the chunk partition has vetoed anything, so a target
+                    // that never gets elided can turn up with a name that does not resolve. Emit is
+                    // where that has to be loud; deshadowing simply has nothing to protect.
+                    const bind = linked.exportMaps.get(target)?.get(n.data.property.name as string);
+                    const name = bind === undefined ? null : nameOfBind(bind);
+                    if (name !== null) mark(cur, moduleScope, name);
+                    // Do NOT descend. The rewrite REPLACES the whole expression, so the `ns`
+                    // identifier is never emitted, and reserving the namespace's own name against a
+                    // nested binding would rename a local to dodge a collision that cannot happen.
+                    continue;
                 }
             }
             walkChildren(n, (c) => {

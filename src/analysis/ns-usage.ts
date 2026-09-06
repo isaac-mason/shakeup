@@ -1,5 +1,5 @@
 import { N, type Node, walk, walkChildren } from '../ast/index.ts';
-import { lookupValue, type Semantic, symbolOf } from './semantic.ts';
+import { type Semantic, symbolOf } from './semantic.ts';
 
 /** How a namespace-import binding (`import * as ns`) is consumed within one module.
  *  `escapes` = the binding appears anywhere other than a static member read (`ns.foo`), so the
@@ -14,14 +14,6 @@ export type NsUsage = {
      *  to read off — `ns.foo()` becomes `foo()` and loses `this`, which is what Rollup does too
      *  (verified: it emits `const r = test()` for `ns.test()`). Always a subset of {@link members}. */
     called: Set<string>;
-    /** Members whose name resolves to a NESTED binding at some `ns.foo` site, so rewriting the read
-     *  to that name would be captured by it. `function test(mutate) { dep.mutate(); }` is the shape.
-     *
-     *  Only nested bindings count. A module-level collision is not a problem: both are module-level
-     *  after bundling, and deconflict has already given them distinct names — which is exactly what
-     *  it cannot do for a parameter, since the reference it would have to see does not exist until
-     *  the namespace is elided. Empty unless something is actually shadowed. */
-    captured: Set<string>;
 };
 
 /** Classify every namespace-import symbol in `nsSyms` by how it's used across `program`:
@@ -30,10 +22,7 @@ export type NsUsage = {
  *  One walk classifies all of a module's namespace bindings at once. */
 export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<number>): Map<number, NsUsage> {
     const out = new Map<number, NsUsage>();
-    for (const s of nsSyms) out.set(s, { escapes: false, called: new Set(), members: new Set(), captured: new Set() });
-    // The scope the walk is currently inside, for the capture test. Scope-owning nodes carry their
-    // id on `data.scopeId`; everything else inherits its parent's.
-    let scope = 0;
+    for (const s of nsSyms) out.set(s, { escapes: false, called: new Set(), members: new Set() });
 
     /** The namespace symbol an identifier node resolves to, or 0 if it isn't one we track. */
     const nsSymOf = (node: Node): number => {
@@ -67,10 +56,7 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
                 // `ns.foo` — a narrow member read. Property is an IdentifierName (no symbol); do
                 // not recurse into the object (that would re-see the `ns` ident as a bare use).
                 const name = node.data.property.name as string;
-                const u = out.get(s)!;
-                u.members.add(name);
-                const hit = lookupValue(semantic, scope, name);
-                if (hit !== 0 && semantic.symbols[hit] !== undefined && semantic.symbols[hit].scope !== 0) u.captured.add(name);
+                out.get(s)!.members.add(name);
                 return;
             }
         } else if (node.type === N.ComputedMemberExpression) {
@@ -88,22 +74,14 @@ export function analyzeNsUsage(program: Node, semantic: Semantic, nsSyms: Set<nu
             if (s !== 0) out.get(s)!.escapes = true;
             return;
         }
-        const own = (node.data as { scopeId?: number } | null)?.scopeId ?? 0;
-        if (own === 0) {
-            walkChildren(node, visit);
-            return;
-        }
-        const outer = scope;
-        scope = own;
         walkChildren(node, visit);
-        scope = outer;
     };
     visit(program);
     return out;
 }
 
-const allUsage = (): NsUsage => ({ escapes: true, called: new Set(), members: new Set(), captured: new Set() });
-const noUsage = (): NsUsage => ({ escapes: false, called: new Set(), members: new Set(), captured: new Set() });
+const allUsage = (): NsUsage => ({ escapes: true, called: new Set(), members: new Set() });
+const noUsage = (): NsUsage => ({ escapes: false, called: new Set(), members: new Set() });
 
 /** Members read by an object-destructuring pattern (`const { a, b } = …`). A rest element,
  *  computed key, or non-identifier key means the whole surface may be observed → escape. */
@@ -116,7 +94,7 @@ function membersFromPattern(pattern: Node): NsUsage {
         if (key.type !== N.IdentifierName) return allUsage();
         members.add(key.name);
     }
-    return { escapes: false, called: new Set(), members, captured: new Set() };
+    return { escapes: false, called: new Set(), members };
 }
 
 /** Usage of a namespace-valued binding (an `await import()` result or a `.then` callback param):
@@ -151,7 +129,7 @@ function awaitedUsage(awaitNode: Node, parentOf: Map<Node, Node>, program: Node,
     }
     // `(await import(x)).foo`
     if (q.type === N.StaticMemberExpression && q.data.object === awaitNode) {
-        return { escapes: false, called: new Set(), members: new Set([q.data.property.name]), captured: new Set() };
+        return { escapes: false, called: new Set(), members: new Set([q.data.property.name]) };
     }
     if (q.type === N.ExpressionStatement) return noUsage(); // `await import(x);` — result discarded
     return allUsage();
