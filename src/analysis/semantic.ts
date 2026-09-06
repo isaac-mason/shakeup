@@ -116,6 +116,15 @@ export const SYM = {
      * across the whole matrix; the flag exists because the exemption has to inspect BOTH sides.
      */
     FN_PLAIN: 1 << 12,
+    /**
+     * A catch parameter that is a DESTRUCTURING pattern rather than a plain identifier.
+     *
+     * Annex B B.3.5 lets a `var` redeclare a catch parameter — but only "if CatchParameter is
+     * CatchParameter:BindingIdentifier". `catch (e) { var e; }` is legal and `catch ([e]) { var e; }`
+     * is an error, and the two are indistinguishable once the pattern's names have been bound. Both
+     * oracles agree, node included.
+     */
+    CATCH_PATTERN: 1 << 13,
 } as const;
 
 /** namespace selector for binding/resolution */
@@ -677,6 +686,9 @@ function declare(
                 const throughFlags = state.sem.symbols[through].flags;
                 if (
                     (throughFlags & (SYM.LET | SYM.CONST | SYM.CLASS)) !== 0 ||
+                    // Annex B B.3.5 excuses a `var` over a catch parameter only when that parameter
+                    // is a plain `BindingIdentifier`; a destructuring one still collides.
+                    (throughFlags & SYM.CATCH_PATTERN) !== 0 ||
                     ((throughFlags & SYM.FUNCTION) !== 0 && !state.sem.isTs)
                 ) {
                     if (state.check)
@@ -1801,7 +1813,11 @@ function visit(state: AnalyseState, node: Node | null): void {
         }
         case N.CatchClause:
             declareInScope(state, SCOPE.CATCH, node, () => {
-                declarePattern(state, node.data.param, SYM.CATCH, state.scope);
+                // A DESTRUCTURING catch parameter is flagged, because Annex B's `var` exemption
+                // below applies only to the `BindingIdentifier` form. See {@link SYM.CATCH_PATTERN}.
+                const param = node.data.param as Node | null;
+                const catchFlags = param !== null && param.type !== N.BindingIdentifier ? SYM.CATCH | SYM.CATCH_PATTERN : SYM.CATCH;
+                declarePattern(state, node.data.param, catchFlags, state.scope);
                 collectPattern(state, node.data.param);
                 visit(state, node.data.body);
             });
