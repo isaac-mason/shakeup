@@ -27,7 +27,7 @@ import {
     refSym,
 } from './graph-types.ts';
 import { computeInteropOwners } from './init-obligations.ts';
-import { linkGraph, namespaceTargets } from './link.ts';
+import { computeEnumInlines, linkGraph, namespaceTargets } from './link.ts';
 import {
     type NormalizedOutputNaming,
     normalizeOutputOptions,
@@ -494,6 +494,11 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // `runCompress` cannot see across module boundaries — scan analyses each module before link binds
     // them together — so this is the point where the interprocedural answer becomes available.
     stampPureCallsGraph(graph, linked);
+    // BEFORE treeshake, which is the point: an `Enum.MEMBER` read that becomes a constant is not a
+    // reference to the enum, and counting it as one is why the lowered object could never be
+    // dropped. On crashcat that object is 231 string literals (3,903 bytes against rolldown's 2) —
+    // the single largest item left in the size gap, and rolldown drops every one of them.
+    linked.enumInlines = computeEnumInlines(graph, linked);
     Timer.start(timer, 'treeshake');
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, options.treeshakeCache);
     Timer.end(timer, 'treeshake');

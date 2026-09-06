@@ -369,6 +369,10 @@ export type Linked = {
      *  Empty for a caller that never reaches `bundle`, which is why single-scope deconfliction is
      *  unaffected. */
     rewritableNs: Set<number>;
+    /** Per module, the `Enum.MEMBER` reads that are emitted as constants — {@link enumInlines}.
+     *  Shared so TREESHAKE can decline to count them as references to the enum (letting the lowered
+     *  object drop when nothing else reads it) and EMIT can substitute exactly the same set. */
+    enumInlines: Map<number, Map<Node, string>>;
     syntheticNames: Map<number, string>;
     /** Modules lowered to a `__commonJS` wrapper, mapped to the name of the wrapper function
      *  (`require_foo`). rolldown's `WrapKind::Cjs`. A wrapped module is NOT concatenated as

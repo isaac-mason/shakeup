@@ -1,3 +1,5 @@
+import { symbolOf } from '../analysis/semantic.ts';
+import { N, type Node, walk, walkChildren } from '../ast/index.ts';
 import type { Graph, ImportBind, Linked, Module } from './graph-types.ts';
 import { emittedSpecifier, isEsmFormat, NAME_DEFAULT, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
 
@@ -285,6 +287,73 @@ function sortModules(graph: Graph): number[] {
  * left to the read site, again as rolldown does: a miss on a materialised namespace is simply left
  * as a member read of the object that is still there.
  */
+/**
+ * Every `Enum.MEMBER` read in `mod` that will be emitted as its CONSTANT, mapped to that constant's
+ * source text.
+ *
+ * THE ONE PREDICATE. Both the emitter (which performs the substitution) and TREESHAKE (which must
+ * not count the read as a reference to the enum, or the object can never be dropped) answer this
+ * question from this map, because the two answering it separately is a miscompile: treeshake
+ * dropping a reference that emit then declines to inline leaves the output naming a symbol that is
+ * gone. rolldown has the same coupling and the same fix — one `resolved_member_expr_refs` map, built
+ * in link_stage, read by everything downstream.
+ *
+ * NOT an assignment target: the lowered enum is an ordinary mutable object, so `E.A = 5` is legal
+ * JavaScript, and substituting there emitted `1 = 5` — output that did not parse. Only the OUTERMOST
+ * member expression is a write; `a[E.X] = v` writes `a[…]` and READS `E.X`.
+ */
+export function enumInlines(mod: Module, linked: Linked): Map<Node, string> {
+    const out = new Map<Node, string>();
+    const writeTargets = new Set<Node>();
+    const markTarget = (n: Node): void => {
+        if (n.type === N.StaticMemberExpression) {
+            writeTargets.add(n);
+            return;
+        }
+        if (n.type === N.ComputedMemberExpression) return;
+        walkChildren(n, markTarget);
+    };
+    walk(mod.program, (n) => {
+        if (n.type === N.AssignmentExpression) markTarget(n.data.left);
+        else if (n.type === N.UpdateExpression) markTarget(n.data.argument);
+        else if (n.type === N.ForInStatement || n.type === N.ForOfStatement) markTarget(n.data.left);
+        if (n.type !== N.StaticMemberExpression || n.data.object.type !== N.IdentifierReference) return;
+        if (writeTargets.has(n)) return;
+        const text = enumConstFor(mod, linked, n.data.object, n.data.property.name as string);
+        if (text !== null) out.set(n, text);
+    });
+    return out;
+}
+
+/** The recorded constant for `object.member`, resolving `object` through an import to the module
+ *  that declared the enum. `tsLower` published these on the owning module at SCAN. */
+function enumConstFor(mod: Module, linked: Linked, objectNode: Node, member: string): string | null {
+    const sym = symbolOf(mod.semantic, objectNode);
+    if (sym === 0) return null;
+    let ownerIdx = mod.idx;
+    let ownerSym = sym;
+    if (mod.namedImports.has(sym)) {
+        const bind = linked.binds.get(packRef(mod.idx, sym));
+        if (bind === undefined || bind.kind !== 'found') return null;
+        ownerIdx = refMod(bind.ref);
+        ownerSym = refSym(bind.ref);
+    }
+    return linked.graph.modules[ownerIdx]?.enumConsts.get(ownerSym)?.get(member) ?? null;
+}
+
+/** {@link enumInlines} for every module, or an empty map when the graph has no value enum at all —
+ *  the common case for plain JS, and the walk is not worth paying for to discover it. */
+export function computeEnumInlines(graph: Graph, linked: Linked): Map<number, Map<Node, string>> {
+    const out = new Map<number, Map<Node, string>>();
+    if (!graph.modules.some((m) => !m.external && m.enumConsts.size > 0)) return out;
+    for (const mod of graph.modules) {
+        if (mod.external) continue;
+        const m = enumInlines(mod, linked);
+        if (m.size > 0) out.set(mod.idx, m);
+    }
+    return out;
+}
+
 export function namespaceTargets(graph: Graph, linked: Linked): Set<number> {
     const out = new Set<number>();
     for (const mod of graph.modules)
@@ -308,6 +377,7 @@ export function linkGraph(graph: Graph): Linked {
         namespaceOf: new Map(),
         exportMaps: new Map(),
         rewritableNs: new Set(),
+        enumInlines: new Map(),
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),

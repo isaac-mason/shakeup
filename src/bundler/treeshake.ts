@@ -50,7 +50,19 @@ export type TreeshakeCache = {
     decls: [number, [number, number]][][];
 };
 
-function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[], declared: number[]): void {
+function collectRefs(
+    mod: Module,
+    linked: Linked,
+    statement: Node,
+    out: number[],
+    declared: number[],
+    /** Identifier nodes that are the OBJECT of a read the emitter replaces with an enum constant.
+     *  They are not references: `Kind.DYNAMIC` becomes `2` and names nothing. Counting them is what
+     *  kept every lowered enum object alive — 231 string literals on crashcat, where rolldown emits
+     *  2. Built from `linked.enumInlines`, the SAME map the emitter substitutes from, so the two
+     *  cannot disagree. */
+    inlinedObjects: Set<Node> | null,
+): void {
     const moduleScope = scopeOf(mod.semantic, mod.program);
     const sem = mod.semantic;
     const pushSym = (sym: number): void => {
@@ -79,6 +91,7 @@ function collectRefs(mod: Module, linked: Linked, statement: Node, out: number[]
     // `declared` when something actually references it.
     const isImport = statement.type === N.ImportDeclaration;
     walkRefIdents(statement, (ident) => {
+        if (inlinedObjects !== null && inlinedObjects.has(ident)) return;
         const sym = symbolOf(sem, ident);
         if (!isImport) pushSym(sym);
         if (ident.type === N.BindingIdentifier && sym !== 0 && sem.symbols[sym].scope === moduleScope) {
@@ -511,6 +524,14 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         }
         const list: StatementInfo[] = [];
         const localDecls: [number, [number, number]][] = [];
+        // Once per module, not per statement: the map is keyed by member-expression node and the
+        // reference walk needs the OBJECT identifiers those hang off.
+        const inlines = linked.enumInlines.get(mod.idx);
+        let inlinedObjects: Set<Node> | null = null;
+        if (inlines !== undefined) {
+            inlinedObjects = new Set<Node>();
+            for (const n of inlines.keys()) inlinedObjects.add((n.data as { object: Node }).object);
+        }
         const body = mod.program.data.body;
         for (let idx = 0; idx < body.length; idx++) {
             const statement = body[idx];
@@ -522,7 +543,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             for (const unit of shakeUnits(statement)) {
                 const refs: number[] = [];
                 const declared: number[] = [];
-                collectRefs(mod, linked, unit, refs, declared);
+                collectRefs(mod, linked, unit, refs, declared, inlinedObjects);
                 list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, linked, unit, statement) });
                 for (const ref of declared) {
                     noteDecl(ref, [mod.idx, list.length - 1]);

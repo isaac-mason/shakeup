@@ -115,13 +115,18 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
 describe('exemplar: pinned known limitations', () => {
     const buildOne = async (files: Record<string, string>) => bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [] });
 
-    it('lowered enum qualifies intra-enum member references (A | B → E.A | E.B)', async () => {
+    // RESOLVED (was: "lowered enum qualifies intra-enum member references (A | B → E.A | E.B)").
+    // `A | B` is a constant enum expression, so `E.BOTH` is now the literal `3` and the lowered
+    // object — which nothing else reads — is tree-shaken whole. That is rolldown's output too. Kept
+    // as the regression pin: the enum body's `_E.A | _E.B` qualification still has to be CORRECT for
+    // any enum that survives, which the neighbouring `enum-inline.test.ts` covers.
+    it('inlines an intra-enum member reference and drops the object nothing else reads', async () => {
         const { chunks: [{ code }] } = await buildOne({
             '/main.ts': "import { E } from './e';\nexport const both = E.BOTH;",
             '/e.ts': 'export enum E { A = 1, B = 2, BOTH = A | B }',
         });
-        // prior-member refs are qualified to the enum object, so BOTH = 1 | 2 = 3.
-        expect(code).toMatch(/\["BOTH"\]\s*=\s*\w+\.A \| \w+\.B\]/);
+        expect(code, 'the enum object has no reader left').not.toContain('BOTH');
+        expect(code).toMatch(/const both = 3;/);
         const ns = await run(code);
         expect(ns.both).toBe(3);
     });

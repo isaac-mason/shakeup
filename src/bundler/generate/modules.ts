@@ -42,30 +42,6 @@ import {
 } from './context.ts';
 import { freeRequireRefs } from './esm.ts';
 
-/**
- * The constant text for `E.MEMBER`, or null when it is not a constant enum member.
- *
- * `E` is resolved through the import graph, because an enum is almost always declared in one module
- * and read from many — `ctx.mod.enumConsts` alone would miss every cross-module read, which on
- * crashcat is nearly all 887 of them. A local enum resolves to this module's own symbol; an imported
- * one goes through `binds` to the producing module, exactly as {@link renameOf} does for names.
- *
- * Substituting a LITERAL is why this is safe where the namespace rewrite needed guards: it introduces
- * no identifier, so nothing can be shadowed by a local and nothing needs importing across a chunk.
- */
-function enumConstOf(ctx: EmitCtx, objectNode: Node, member: string): string | null {
-    const sym = symbolOf(ctx.mod.semantic, objectNode);
-    if (sym === 0) return null;
-    let ownerIdx = ctx.mod.idx;
-    let ownerSym = sym;
-    if (ctx.mod.namedImports.has(sym)) {
-        const bind = ctx.linked.binds.get(packRef(ctx.mod.idx, sym));
-        if (bind === undefined || bind.kind !== 'found') return null;
-        ownerIdx = refMod(bind.ref);
-        ownerSym = refSym(bind.ref);
-    }
-    return ctx.linked.graph.modules[ownerIdx]?.enumConsts.get(ownerSym)?.get(member) ?? null;
-}
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
 function renameOf(ctx: EmitCtx, identNode: Node): string | null {
@@ -260,6 +236,8 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
         !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)
     )
         return map;
+    /** {@link Linked.enumInlines} for this module — the enum reads decided at LINK. */
+    const enumInlined = ctx.linked.enumInlines.get(mod.idx);
     /** Member expressions standing in an assignment TARGET. `ns.foo = 1` is not a read: ESM renders
      *  a live member as a getter with no setter, so it must stay an assignment TO THE OBJECT and
      *  throw. Rewriting it to `foo = 1` would silently assign the producer's binding instead.
@@ -283,20 +261,17 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
         if (n.type === N.AssignmentExpression) markTarget(n.data.left);
         else if (n.type === N.UpdateExpression) markTarget(n.data.argument);
         else if (n.type === N.ForInStatement || n.type === N.ForOfStatement) markTarget(n.data.left);
-        if (n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference && !writeTargets.has(n)) {
-            // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the
-            // other bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not
-            // only a `const enum`, keeping the object for whatever else still reads it.
-            //
-            // NOT in an assignment target. The lowered enum object is an ordinary mutable object, so
-            // `E.A = 5` is legal JS that TypeScript merely refuses to type-check — and substituting
-            // the constant produced `1 = 5`, output that does not PARSE, from a build reporting no
-            // errors. Reads only, which is all the constant claim is about.
-            const lit = enumConstOf(ctx, n.data.object, n.data.property.name as string);
-            if (lit !== null) {
-                map.set(n, lit);
-                return;
-            }
+        // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the other
+        // bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not only a
+        // `const enum`, keeping the object for whatever else still reads it.
+        //
+        // Looked up, not recomputed. `linked.enumInlines` is the SAME map treeshake consulted to
+        // decide these reads are not references to the enum; deciding it twice is how the object
+        // ends up dropped while a read of it survives.
+        const lit = enumInlined?.get(n);
+        if (lit !== undefined) {
+            map.set(n, lit);
+            return;
         }
         if (
             elidedNs.size > 0 &&
