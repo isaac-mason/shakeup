@@ -191,8 +191,13 @@ function report(sk: Attrib, rd: Attrib): void {
         .map(([t, c]) => [t, c, rd.byType.get(t) ?? 0] as const)
         .filter(([, c, r]) => c - r !== 0)
         .sort((x, y) => y[1] - y[2] - (x[1] - x[2]));
-    for (const [t, c, r] of deltas.slice(0, 12)) console.log(`    ${pad(c - r, 7)}  ${t.padEnd(28)} ${c} vs ${r}`);
-    console.log(`    ${pad(sk.nodes - rd.nodes, 7)}  ${'TOTAL NODES'.padEnd(28)} ${sk.nodes} vs ${rd.nodes}`);
+    for (const [t, c, r] of deltas.slice(0, 10)) console.log(`    ${pad(c - r, 7)}  ${t.padEnd(28)} ${c} vs ${r}`);
+    // The DEFICITS matter more than the excesses. A construct shakeup emits FEWER of than the oracle
+    // is either a real optimisation or something quietly dropped — and the `sideEffects` miscompile
+    // (ROADMAP §2z47) looked exactly like a win until it was executed. Always ask which.
+    console.log('\n  NODE COUNTS, largest DEFICIT first (fewer than rolldown — optimisation, or LOSS?):');
+    for (const [t, c, r] of [...deltas].reverse().slice(0, 10)) console.log(`    ${pad(c - r, 7)}  ${t.padEnd(28)} ${c} vs ${r}`);
+    console.log(`\n    ${pad(sk.nodes - rd.nodes, 7)}  ${'TOTAL NODES'.padEnd(28)} ${sk.nodes} vs ${rd.nodes}`);
 }
 
 const outDir = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
