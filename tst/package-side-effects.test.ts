@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
-import { createMemoryFs } from '../src/bundler/fs.ts';
 import type { Fs } from '../src/bundler/fs.ts';
+import { createMemoryFs } from '../src/bundler/fs.ts';
 import type { Plugin } from '../src/bundler/plugin.ts';
 
 // `package.json#sideEffects`, read through the resolver (rolldown returns the owning manifest from
@@ -14,7 +14,11 @@ const REAL = `${STORE}/pkg`;
 const fsFor = (sideEffects: unknown, extra: Record<string, string> = {}): Fs => {
     const files: Record<string, string> = {
         '/app/src/index.js': "import { Widget } from 'pkg';\nexport const v = Widget();",
-        [`${REAL}/package.json`]: JSON.stringify({ name: 'pkg', main: 'index.js', ...(sideEffects === undefined ? {} : { sideEffects }) }),
+        [`${REAL}/package.json`]: JSON.stringify({
+            name: 'pkg',
+            main: 'index.js',
+            ...(sideEffects === undefined ? {} : { sideEffects }),
+        }),
         [`${REAL}/index.js`]: "import './register.js';\nimport './styles.css.js';\nexport const Widget = () => 1;",
         [`${REAL}/register.js`]: 'globalThis.__REGISTER__ = 1;',
         [`${REAL}/styles.css.js`]: 'globalThis.__STYLES__ = 1;',
@@ -56,9 +60,31 @@ describe('package.json sideEffects', () => {
         expect(code).toContain('__STYLES__');
     });
 
+    it('glob array: a NON-matching module that is INCLUDED still keeps its effects', async () => {
+        // The other direction of the same flag, and the one §2z47 changed. A file outside the glob is
+        // `false`, which omits it when nothing needs it (the test above) — but once one of its
+        // BINDINGS is used, the module is emitted and its effects must be emitted with it. Verified
+        // against rolldown on this exact shape: both keep the effect.
+        const withUsed = fsFor(['*.css.js'], {
+            [`${REAL}/index.js`]:
+                "import './register.js';\nimport './styles.css.js';\nimport { helper } from './helper.js';\nexport const Widget = () => helper();",
+            [`${REAL}/helper.js`]: 'globalThis.__HELPER__ = 1;\nexport const helper = () => 1;',
+        });
+        const r = await bundle({ entry: '/app/src/index.js', fs: withUsed });
+        expect(r.errors).toEqual([]);
+        const code = r.chunks[0].code;
+        expect(code, 'helper.js is outside the glob but its binding is used').toContain('__HELPER__');
+        // The side-effect-ONLY import outside the glob still goes.
+        expect(code, 'register.js is outside the glob and needed by nothing').not.toContain('__REGISTER__');
+    });
+
     it('a plugin outranks the manifest', async () => {
         // rolldown precedence (`normalize_side_effects`): hook, then option, then package.json.
-        const keepAll: Plugin = { name: 'keep', resolveId: (spec, imp) => (spec === './register.js' && imp ? { id: `${REAL}/register.js`, moduleSideEffects: true } : null) };
+        const keepAll: Plugin = {
+            name: 'keep',
+            resolveId: (spec, imp) =>
+                spec === './register.js' && imp ? { id: `${REAL}/register.js`, moduleSideEffects: true } : null,
+        };
         const code = await build(false, [keepAll]);
         expect(code).toContain('__REGISTER__');
     });
@@ -68,7 +94,10 @@ describe('package.json sideEffects', () => {
 // the shapes that fooled a statement-shape matcher, in the order they were discovered — `compress`
 // runs BEFORE treeshake, so by then the writes have been folded far from the top level.
 describe('bindings keep their augmentations under sideEffects: false', () => {
-    const sef: Plugin = { name: 'sef', resolveId: (spec, imp) => (spec === './lib.js' && imp ? { id: '/lib.js', moduleSideEffects: false } : null) };
+    const sef: Plugin = {
+        name: 'sef',
+        resolveId: (spec, imp) => (spec === './lib.js' && imp ? { id: '/lib.js', moduleSideEffects: false } : null),
+    };
     const run = async (lib: string, compress: boolean) => {
         const r = await bundle({
             entry: '/main.js',
@@ -86,7 +115,10 @@ describe('bindings keep their augmentations under sideEffects: false', () => {
         ['adjacent assignments (merged into a sequence)', 'export class A {}\nA.UP = 1;\nA.DOWN = 2;\nA.LEFT = 3;'],
         // …and FUSES a run into a following control statement, which `minimizeConditions` may then
         // rewrite into `test && (…)`, burying the writes in a logical operand.
-        ['assignments followed by an if (fused into its test)', 'export class A {}\nA.UP = 1;\nA.DOWN = 2;\nif (typeof window !== "undefined") { globalThis.x = 1; }'],
+        [
+            'assignments followed by an if (fused into its test)',
+            'export class A {}\nA.UP = 1;\nA.DOWN = 2;\nif (typeof window !== "undefined") { globalThis.x = 1; }',
+        ],
         ['prototype augmentation', 'export class A {}\nA.prototype.tag = "a";\nA.UP = 1;'],
     ];
 
@@ -109,7 +141,7 @@ describe('bindings keep their augmentations under sideEffects: false', () => {
 // reached ONLY for its effects is dropped whole — so the flag does work — but once any binding of it
 // is needed, its top-level effects are kept, including effects unrelated to the binding that pulled
 // it in.
-describe('`sideEffects: false` omits a module; it does not delete an included one\'s effects', () => {
+describe("`sideEffects: false` omits a module; it does not delete an included one's effects", () => {
     const build = async (files: Record<string, string>) => {
         const r = await bundle({ entry: '/app/main.js', fs: createMemoryFs(files), external: [] });
         expect(r.errors).toEqual([]);
@@ -129,8 +161,8 @@ describe('`sideEffects: false` omits a module; it does not delete an included on
     });
 
     it.each([
-        ['a push onto a live array', "export const arr = [];\narr.push(9);\n", 'arr.push(9)'],
-        ['a nested mutation', "export const deep = { m: new Set() };\ndeep.m.add(3);\n", 'deep.m.add(3)'],
+        ['a push onto a live array', 'export const arr = [];\narr.push(9);\n', 'arr.push(9)'],
+        ['a nested mutation', 'export const deep = { m: new Set() };\ndeep.m.add(3);\n', 'deep.m.add(3)'],
         ['a bare console call', "export const v = 1;\nconsole.log('hi');\n", "console.log('hi')"],
     ])('keeps %s', async (_n, dep, needle) => {
         const code = await build({
