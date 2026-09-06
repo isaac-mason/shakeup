@@ -195,3 +195,50 @@ describe('valid programs that were wrongly rejected', () => {
         expect(ok('x = { async *g() {} };')).toBe(true);
     });
 });
+
+// Annex B B.3.6 — the last harmful miss in test262, and the narrowest of the Annex B extensions.
+// It needs BOTH layers: the parser has no notion of strict mode, so it accepts the shape and the
+// checker rejects it under a directive — the split `with` already uses. Every row below was mapped
+// against `oxc-parser` before the rule was written.
+describe('Annex B allows an initializer in a for-in head, and only there', () => {
+    const check = (src: string) => {
+        const r = parse(src, { ts: false, jsx: false, kind: 'script' });
+        if (r.errors.length > 0) return r.errors.map((e) => e.msg);
+        const sem = createSemantic();
+        analyze(sem, r.program, false, true);
+        return sem.errors.map((e) => e.msg);
+    };
+    const ok = (src: string) => check(src).length === 0;
+
+    it('accepts `for (var a = 1 in obj)` in sloppy code', () => {
+        expect(ok('for (var a = 1 in {});')).toBe(true);
+        expect(ok('function f(){ for (var a = ++e in {}); }')).toBe(true);
+    });
+
+    it('rejects it under strict mode, where Annex B does not reach', () => {
+        const msg = 'for-in loop variable declaration may not have an initializer';
+        expect(check('"use strict";\nfor (var a = 1 in {});')).toEqual([msg]);
+        expect(check('function f(){ "use strict"; for (var a = 1 in {}); }')).toEqual([msg]);
+        // A MODULE is always strict, which is why the bundler — which only ever parses modules —
+        // still refuses this. oxc rejects the module form too.
+        const r = parse('for (var a = 1 in {});', { ts: false, jsx: false, kind: 'module' });
+        const sem = createSemantic();
+        if (r.errors.length === 0) analyze(sem, r.program, true, true);
+        expect(r.errors.length + sem.errors.length).toBeGreaterThan(0);
+    });
+
+    it.each([
+        ['let', 'for (let a = 1 in {});'],
+        ['const', 'for (const a = 1 in {});'],
+        ['an array pattern', 'for (var [a] = 1 in {});'],
+        ['an object pattern', 'for (var {a} = 1 in {});'],
+        ['for-of', 'for (var a = 1 of []);'],
+    ])('still rejects %s, which Annex B does not cover', (_n, src) => {
+        expect(ok(src)).toBe(false);
+    });
+
+    it('leaves an ordinary for-in and an ordinary for alone', () => {
+        expect(ok('for (var a in {});')).toBe(true);
+        expect(ok('for (var a = 1;;) break;')).toBe(true);
+    });
+});

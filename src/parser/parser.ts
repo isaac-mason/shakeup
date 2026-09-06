@@ -3356,6 +3356,23 @@ function parseFor(state: ParserState, start: number): Node {
                 }
                 checkMissingInit(state, kind, target, dinit, ds);
                 push(state, create.VariableDeclarator(ds, state.tokStart, dflags, target, typeAnn, dinit));
+                // Annex B B.3.6 — `for (var a = 1 in obj)`. The ONLY head where a declaration may
+                // carry an initializer, and the grammar is exactly this narrow: `var`, a single
+                // plain BindingIdentifier, `for-in` (never `for-of`), and sloppy mode. Everything
+                // else is "for-in loop variable declaration may not have an initializer", which is
+                // where the loop below and the checker take over.
+                //
+                // STRICTNESS IS NOT DECIDED HERE. The parser tracks no strict mode at all, so it
+                // accepts the shape and `checkAnnexBForIn` rejects it under a directive — the same
+                // parser/checker split `with` uses.
+                if (isK(state, K.IN) && dinit !== null && kind === VAR_KIND.VAR && target.type === N.BindingIdentifier) {
+                    nextToken(state);
+                    const decl = create.VariableDeclaration(ds, state.tokStart, kind, finishList(state, dFrom));
+                    const right = parseExpression(state);
+                    expectP(state, P.RPAREN, "')'");
+                    const body = parseStatement(state, true);
+                    return create.ForInStatement(start, body.end, 0, decl, right, body);
+                }
             }
             while (eatP(state, P.COMMA)) {
                 const ds2 = state.tokStart;

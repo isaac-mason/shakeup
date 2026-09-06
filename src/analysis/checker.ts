@@ -170,6 +170,19 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             if (ctx.stmtPos === STMT_POS_LOOP || isStrictScope(ctx.sem, ctx.scope))
                 errors.push({ pos: node.start, msg: 'Invalid function declaration' });
             return;
+        case N.ForInStatement: {
+            // Annex B B.3.6 — `for (var a = 1 in obj)` — is SLOPPY-ONLY. The parser accepts the
+            // shape because it tracks no strict mode; every non-Annex-B spelling (`let`/`const`, a
+            // destructuring target, `for-of`) it rejects outright, so a declaration with an
+            // initializer reaching here is always the one legal form and the only question left is
+            // the mode. Same parser/checker split `with` uses.
+            const left = node.data.left;
+            if (left.type !== N.VariableDeclaration) return;
+            if (!left.data.declarations.some((d) => d.type === N.VariableDeclarator && d.data.init !== null)) return;
+            if (isStrictScope(ctx.sem, ctx.scope))
+                errors.push({ pos: node.start, msg: 'for-in loop variable declaration may not have an initializer' });
+            return;
+        }
         case N.ObjectExpression: {
             // `({ __proto__: 1, __proto__: 2 })` sets the prototype twice and is an early error. Only
             // a plain `__proto__: value` pair counts — a COMPUTED key (`["__proto__"]`), a SHORTHAND
