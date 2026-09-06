@@ -170,6 +170,15 @@ export function checkEnter(ctx: CheckCtx, node: Node): void {
             if (ctx.stmtPos === STMT_POS_LOOP || isStrictScope(ctx.sem, ctx.scope))
                 errors.push({ pos: node.start, msg: 'Invalid function declaration' });
             return;
+        case N.WithStatement:
+            // `with` is a STRICT-MODE error, not a module one. The parser rejects it whenever the
+            // goal is a module (which is always strict) and cannot do better, because it tracks no
+            // strict mode of its own — so a strict SCRIPT reached here unchecked. oxc splits it the
+            // same way: `sourceType: 'script'` accepts `with ({}) {}` and rejects
+            // `"use strict"; with ({}) {}`, while a module rejects both.
+            if (isStrictScope(ctx.sem, ctx.scope))
+                errors.push({ pos: node.start, msg: "'with' statements are not allowed" });
+            return;
         case N.ForInStatement: {
             // Annex B B.3.6 — `for (var a = 1 in obj)` — is SLOPPY-ONLY. The parser accepts the
             // shape because it tracks no strict mode; every non-Annex-B spelling (`let`/`const`, a

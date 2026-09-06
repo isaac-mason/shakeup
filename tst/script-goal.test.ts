@@ -242,3 +242,35 @@ describe('Annex B allows an initializer in a for-in head, and only there', () =>
         expect(ok('for (var a = 1;;) break;')).toBe(true);
     });
 });
+
+// `with` is a STRICT-MODE error, not a module one — the last non-regex test262 miss. The parser
+// rejects it whenever the goal is a module (always strict) and can do no better, because it tracks
+// no strict mode; a strict SCRIPT therefore reached the checker unchecked. oxc splits it identically.
+describe('`with` is rejected by strictness, not by goal', () => {
+    const check = (src: string, kind: 'script' | 'module' = 'script') => {
+        const r = parse(src, { ts: false, jsx: false, kind });
+        if (r.errors.length > 0) return r.errors.map((e) => e.msg);
+        const sem = createSemantic();
+        analyze(sem, r.program, kind === 'module', true);
+        return sem.errors.map((e) => e.msg);
+    };
+    const msg = "'with' statements are not allowed";
+
+    it('is legal in a sloppy script, at any depth', () => {
+        expect(check('with ({}) {}')).toEqual([]);
+        expect(check('function f(){ with ({}) {} }')).toEqual([]);
+    });
+
+    it.each([
+        ['a directive at the top', '"use strict";\nwith ({}) {}'],
+        ['a directive in the enclosing function', 'function f(){ "use strict"; with ({}) {} }'],
+        ['a class body, which is always strict', 'class C { m() { with ({}) {} } }'],
+    ])('is rejected under %s', (_n, src) => {
+        expect(check(src)).toEqual([msg]);
+    });
+
+    it('is still rejected outright in a module', () => {
+        // The parser owns this one and reports its own wording; what matters is that it rejects.
+        expect(check('with ({}) {}', 'module').length).toBeGreaterThan(0);
+    });
+});
