@@ -4703,15 +4703,28 @@ function exportedNames(stmt: Node, out: [string, number][], defaults: number[]):
         case N.ExportAllDeclaration: {
             const d = stmt.data as { exported: Node | null; exportKind: string };
             if (d.exportKind === 'type' || d.exported === null) return;
-            out.push([exportedNameOf(d.exported), d.exported.start]);
+            const name = exportedNameOf(d.exported);
+            // `export * as default from 'm'` is BOTH an exported name and a default export, and oxc
+            // treats it as both: two of them are "Duplicated export 'default'", while one of them
+            // beside an `export default` is "multiple default exports". That is why the duplicate
+            // check runs FIRST below — it is the message oxc gives when both rules fire.
+            out.push([name, d.exported.start]);
+            if (name === 'default') defaults.push(d.exported.start);
             return;
         }
         case N.ExportNamedDeclaration: {
-            const d = stmt.data as { declaration: Node | null; specifiers: Node[]; exportKind: string };
+            const d = stmt.data as { declaration: Node | null; specifiers: Node[]; source: Node | null; exportKind: string };
             if (d.exportKind === 'type') return;
             for (const sp of d.specifiers) {
-                const sd = sp.data as { exported: Node; exportKind: string };
+                const sd = sp.data as { local: Node; exported: Node; exportKind: string };
                 if (sd.exportKind === 'type') continue;
+                // Without a `from`, the LOCAL half names a binding in this module, and a string is
+                // not a binding: `export { "str" }` and `export { "str" as x }` are errors while
+                // `export { x as "str" }` is fine. With a `from` every string form is legal, since
+                // both halves are then names in the OTHER module's surface. oxc:
+                // "A string literal cannot be used as an exported binding without `from`".
+                if (d.source === null && sd.local.type === N.StringLiteral)
+                    raiseAt(state, sd.local.start, ParseErrorCode.StringExportedBinding);
                 const name = exportedNameOf(sd.exported);
                 if (name === 'default') defaults.push(sd.exported.start);
                 else out.push([name, sd.exported.start]);
@@ -4781,13 +4794,12 @@ function checkDuplicateExports(state: ParserState, body: Node[]): void {
     const names: [string, number][] = [];
     const defaults: number[] = [];
     for (const stmt of body) exportedNames(stmt, names, defaults);
-    if (defaults.length > 1) raiseAt(state, defaults[1], ParseErrorCode.MultipleDefaultExports);
-    if (names.length < 2) return;
     const seen = new Set<string>();
     for (const [name, at] of names) {
         if (seen.has(name)) raiseAt(state, at, ParseErrorCode.DuplicateExport, name);
         else seen.add(name);
     }
+    if (defaults.length > 1) raiseAt(state, defaults[1], ParseErrorCode.MultipleDefaultExports);
 }
 
     // CoverInitializedName, reported LAST — the same place oxc reports it

@@ -54,6 +54,32 @@ describe('duplicate exports', () => {
             expect(accepts(src), src).toBe(true);
     });
 
+    it('counts `export * as default from` as a default AND as a name', () => {
+        // It is both, and which rule fires depends on what it collides WITH — verified against oxc:
+        // two of them is "Duplicated export 'default'", while one beside an `export default` is
+        // "multiple default exports". That is why the duplicate check has to run first.
+        expect(parse('export * as default from "m"; export default 1;').errors[0].msg).toBe(
+            'A module cannot have multiple default exports.',
+        );
+        expect(parse('export * as default from "m"; export * as default from "n";').errors[0].msg).toBe(
+            "Duplicated export 'default'",
+        );
+        expect(accepts('export * as default from "m";'), 'one on its own is fine').toBe(true);
+    });
+
+    it('rejects a STRING as the local half of an export without `from`', () => {
+        // Without a `from`, the local half names a binding in THIS module and a string is not a
+        // binding. With a `from`, both halves are names in the other module's surface, so every
+        // string form is legal.
+        for (const src of ['var x; export { "str" };', 'var x; export { "str" as x };', 'var x; export { "a" as "b" };'])
+            expect(accepts(src), src).toBe(false);
+        for (const src of ['var x; export { x as "str" };', 'export { "str" } from "m";', 'export { "a" as "b" } from "m";'])
+            expect(accepts(src), src).toBe(true);
+        expect(parse('var x; export { "str" };').errors[0].msg).toBe(
+            'A string literal cannot be used as an exported binding without `from`',
+        );
+    });
+
     it('is skipped entirely for TypeScript, as oxc skips it', () => {
         // Declaration merging makes duplicates legal in TS, so the rule does not apply there.
         expect(accepts('export const z = 1; export const z = 2;', true), 'ts').toBe(true);
