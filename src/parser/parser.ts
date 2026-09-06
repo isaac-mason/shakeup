@@ -3292,9 +3292,32 @@ function parseFor(state: ParserState, start: number): Node {
             init = create.VariableDeclaration(ds, state.tokStart, kind, finishList(state, dFrom));
             expectP(state, P.SEMI, "';'");
         } else {
+            // Two `for...of` head restrictions, both keyed on the token the head STARTS with, so they
+            // are captured before the expression is parsed. oxc does the same in
+            // `js/statement.rs:471-493`.
+            //
+            //   · `for (async of xs)` is forbidden — it would be ambiguous with `for await`. Only a
+            //     bare identifier counts, so `for (async.x of xs)` is fine.
+            //
+            //     An ESCAPED `\u0061sync` is allowed, and needs NO test here: shakeup's lexer leaves
+            //     an escaped identifier as `T_IDENT` and never the keyword kind, so `isK(K.ASYNC)` is
+            //     already false for it. oxc carries a `!cur_token().escaped()` alongside its own
+            //     `at(Kind::Async)` because ITS lexer keeps the keyword kind and flags the escape —
+            //     copying that guard here would have been a condition that can never fire.
+            //   · `for (let.x of xs)` is forbidden — a `for...of` head may not START with `let`.
+            //
+            // Neither applies to `for...in`, and the `async` one does not apply under `for await`.
+            const headIsAsync = isK(state, K.ASYNC);
+            const headIsLet = isK(state, K.LET);
+            const headStart = state.tokStart;
             init = parseExpression(state, true);
             if (isK(state, K.OF) || isK(state, K.IN)) {
                 const isOf = state.tok === K.OF;
+                if (isOf) {
+                    if (headIsAsync && (flags & FL.AWAIT) === 0 && init.type === N.IdentifierReference)
+                        raiseAt(state, headStart, ParseErrorCode.ForOfAsyncLhs);
+                    if (headIsLet) raiseAt(state, headStart, ParseErrorCode.ForOfLetLhs);
+                }
                 // A for-in/of head without a declaration is an assignment target, and takes the
                 // same cover grammar as `=` — `for (f() in {})` is a SyntaxError.
                 checkAssignTarget(state, init, false);
