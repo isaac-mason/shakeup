@@ -47,7 +47,15 @@ import {
 } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
-import { buildGraph, externalModuleInfo, hashSource, resolveEmittedFileName, toModuleInfo } from './scan.ts';
+import {
+    buildGraph,
+    externalModuleInfo,
+    fileNameOfRef,
+    hashSource,
+    registerEmitted,
+    resolveEmittedFileName,
+    toModuleInfo,
+} from './scan.ts';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake.ts';
 import type { FileEvent } from './watch.ts';
 
@@ -310,12 +318,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         parse: pluginParse,
         fs: options.fs,
         resolve: () => null,
-        emitFile: (file) => {
-            // Only reached from renderChunk/buildEnd, which run after `graph` is built.
-            const fileName = resolveEmittedFileName(file);
-            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
-            return fileName;
-        },
+        // Only reached from renderChunk/buildEnd/generateBundle, which run after `graph` is built.
+        emitFile: (file) => registerEmitted(graph, file),
+        getFileName: (referenceId) => fileNameOfRef(graph, referenceId),
         // POST-BUILD context (renderChunk / buildEnd / generateBundle): the graph is closed, so
         // `this.load` can only report what is already in it. The graph-backed load lives on the scan
         // context, which is where a plugin can still pull a module in.

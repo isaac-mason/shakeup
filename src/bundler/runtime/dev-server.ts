@@ -280,6 +280,11 @@ export function createDevServer(options: DevServerOptions): DevServer {
             // (e.g. the asset plugin's `url` option) rather than being emitted.
             throw new Error('emitFile is not supported by the dev server — configure the asset plugin with a url() strategy');
         },
+        getFileName: () => {
+            // Nothing can have been emitted, so no reference id can exist. Same message as
+            // `emitFile`: the cause is always that something tried to emit.
+            throw new Error('emitFile is not supported by the dev server — configure the asset plugin with a url() strategy');
+        },
         // The dev server serves on demand; a plugin asking to pre-load gets what the runner has seen.
         load: ({ id }) => ctx.getModuleInfo(id),
         getModuleInfo: (id) => {

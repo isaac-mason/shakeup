@@ -897,6 +897,25 @@ function hashSourceHex(source: string | Uint8Array): string {
 
 /** The output fileName for an emitted file: an explicit `fileName`, else `assets/<stem>-<hash><ext>`
  *  derived from `name` (default 'asset') and the content hash. */
+/** Register an emitted file and hand back its REFERENCE ID — see `PluginCtx.emitFile`. Shared by
+ *  the scan context and the post-build one so the two cannot drift. */
+export function registerEmitted(graph: Graph, file: EmittedFile): string {
+    const fileName = resolveEmittedFileName(file);
+    if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
+    // Opaque and per-CALL, as in both oracles: two emits of the same bytes share a fileName and get
+    // distinct ids. The counter keeps it unique; the map size is the counter.
+    const ref = `ref-${graph.emittedRefs.size.toString(36)}`;
+    graph.emittedRefs.set(ref, fileName);
+    return ref;
+}
+
+/** Resolve a reference id to its fileName, or throw — see `PluginCtx.getFileName`. */
+export function fileNameOfRef(graph: Graph, referenceId: string): string {
+    const name = graph.emittedRefs.get(referenceId);
+    if (name === undefined) throw new Error(`Unknown file reference id "${referenceId}".`);
+    return name;
+}
+
 export function resolveEmittedFileName(file: EmittedFile): string {
     if (file.fileName !== undefined) return file.fileName;
     const base = file.name ?? 'asset';
@@ -916,6 +935,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         errors: [],
         warnings: [],
         emitted: new Map(),
+        emittedRefs: new Map(),
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
         changed: new Set(),
@@ -1179,11 +1199,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 moduleType: pending?.moduleType,
             };
         },
-        emitFile: (file) => {
-            const fileName = resolveEmittedFileName(file);
-            if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
-            return fileName;
-        },
+        emitFile: (file) => registerEmitted(graph, file),
+        getFileName: (referenceId) => fileNameOfRef(graph, referenceId),
         load: async ({ id }) => {
             await addModule(id, false);
             const idx = graph.byId.get(id);

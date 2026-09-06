@@ -213,6 +213,40 @@ describe('plugin pipeline', () => {
         expect(seen['main.js']).toBe(mods);
     });
 
+    it('emitFile answers a REFERENCE ID, resolved by getFileName', async () => {
+        // Both oracles pair `emitFile(file): string` with `getFileName(referenceId): string`, and
+        // shakeup used to return the fileName straight from `emitFile`. Not a spelling difference:
+        // a fileName cannot exist at emit time for everything that can be emitted — a chunk's name is
+        // settled only after chunking and naming — which is why the indirection is there at all.
+        let refA = '';
+        let refB = '';
+        let nameA = '';
+        let unknown: unknown;
+        const p: Plugin = {
+            name: 'emitter',
+            buildEnd: function () {
+                refA = this.emitFile({ type: 'asset', name: 'a.txt', source: 'SAME' });
+                refB = this.emitFile({ type: 'asset', name: 'a.txt', source: 'SAME' });
+                nameA = this.getFileName(refA);
+                try {
+                    this.getFileName('not-a-ref');
+                } catch (e) {
+                    unknown = (e as Error).message;
+                }
+            },
+        };
+        const r = await build({ '/main.ts': 'export const x = 1;' }, [p]);
+        expect(refA, 'the id is not the name').not.toBe(nameA);
+        expect(nameA).toMatch(/^assets\/a-[0-9a-f]+\.txt$/);
+        // Same bytes: one file, two distinct ids — Rollup's behaviour, and the reason the ids are
+        // per-CALL rather than derived from the content.
+        expect(refB).not.toBe(refA);
+        expect(r.assets?.filter((a) => a.fileName === nameA)).toHaveLength(1);
+        // An unknown id THROWS rather than answering undefined, which would get embedded in code and
+        // fail somewhere much later.
+        expect(unknown).toMatch(/Unknown file reference id/);
+    });
+
     it('a file emitted from inside generateBundle reaches the output', async () => {
         // It did not. `graph.emitted` was drained once, before the hook ran, so the file vanished
         // with no error at all. rolldown emits it (probed on the same input: `late.txt` is in its
@@ -228,7 +262,7 @@ describe('plugin pipeline', () => {
         // drain happens between hooks rather than once at the end.
         const observer: Plugin = { name: 'observer', generateBundle: (_o, b) => void secondSaw.push(...Object.keys(b)) };
         const r = await build({ '/main.ts': 'export const x = 1;' }, [emitter, observer]);
-        expect(r.assets.map((a) => a.fileName)).toContain('late.txt');
+        expect(r.assets?.map((a) => a.fileName)).toContain('late.txt');
         expect(secondSaw).toContain('late.txt');
     });
 
@@ -250,7 +284,7 @@ describe('plugin pipeline', () => {
         };
         const after: Plugin = { name: 'after', generateBundle: () => {} };
         const r = await build({ '/main.ts': 'export const x = 1;' }, [emitter, deleter, after]);
-        expect(r.assets.map((a) => a.fileName)).not.toContain('early.txt');
+        expect(r.assets?.map((a) => a.fileName)).not.toContain('early.txt');
     });
 
     it('ctx.warn lands in result warnings', async () => {

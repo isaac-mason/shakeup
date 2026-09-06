@@ -218,6 +218,10 @@ export type Graph = {
     /** Files a plugin emitted via `ctx.emitFile`, deduped by content-hashed fileName. Merged into
      *  {@link BundleResult.assets} by `bundle()`. */
     emitted: Map<string, string | Uint8Array>;
+    /** REFERENCE ID -> fileName. `emitFile` hands back a reference id, not a name (both oracles do;
+     *  see `PluginCtx.getFileName`), and this is what resolves one. Every call gets its own id, so
+     *  two emits of the same bytes share a fileName and not an id — which is Rollup's behaviour. */
+    emittedRefs: Map<string, string>;
     /** Modules freshly parsed vs reused from `options.cache` this build. */
     parseStats: ParseStats;
     /** Module ids whose downstream artifacts (link/shake/render) are stale this rebuild —

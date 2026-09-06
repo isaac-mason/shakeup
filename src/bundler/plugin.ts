@@ -145,11 +145,24 @@ export type PluginCtx = {
         importer?: string | null,
         options?: { isEntry?: boolean; kind?: ImportKind; skipSelf?: boolean; custom?: CustomPluginOptions },
     ): MaybePromise<PartialResolvedId | null>;
-    /** Emit a file alongside the output; returns its final (content-hashed) fileName, which a
-     *  plugin embeds in code (e.g. a `?url` import's default export). In bundle mode the file lands
-     *  in {@link BundleResult.assets}; the dev server has no output sink, so its assets resolve via a
-     *  host `url()` strategy and calling emitFile there throws. */
+    /**
+     * Emit a file alongside the output. Returns a REFERENCE ID, not a fileName — resolve it with
+     * {@link PluginCtx.getFileName}.
+     *
+     * The reference id is what both oracles return (`emitFile(file): string` + `getFileName(
+     * referenceId): string` in rolldown's `plugin-context.ts`, and Rollup's documented pair), and
+     * shakeup used to return the fileName directly. That was not merely a different spelling: a
+     * fileName cannot exist at emit time for everything that can be emitted — a chunk's name is only
+     * settled once chunking and naming have run — which is exactly why the indirection exists.
+     *
+     * In bundle mode the file lands in {@link BundleResult.assets}; the dev server has no output
+     * sink, so its assets resolve via a host `url()` strategy and calling this there throws.
+     */
     emitFile(file: EmittedFile): string;
+    /** The output fileName for a reference id from {@link PluginCtx.emitFile}. Throws on an unknown
+     *  id rather than answering `undefined` — Rollup errors too, and a silently-undefined name gets
+     *  embedded in code and fails much later. */
+    getFileName(referenceId: string): string;
     /**
      * `this.load({ id })` — bring a module into the graph (resolve -> load -> transform -> parse) and
      * return its info. rollup's mechanism for a plugin that needs to INSPECT a module it does not

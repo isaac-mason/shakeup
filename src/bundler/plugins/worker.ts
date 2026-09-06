@@ -63,7 +63,9 @@ export function worker(options: WorkerOptions = {}): Plugin {
                     // Emit a sibling chunk + `new Worker(new URL(fileName, import.meta.url))`. The dev
                     // server has no output sink (emitFile throws), so fall back to an inline blob.
                     try {
-                        const fileName = this.emitFile({ type: 'asset', name: workerName(path), source: result.chunks[0].code });
+                        // `emitFile` answers a REFERENCE ID, not a name — see `PluginCtx.emitFile`.
+                        const ref = this.emitFile({ type: 'asset', name: workerName(path), source: result.chunks[0].code });
+                        const fileName = this.getFileName(ref);
                         wrapper = urlWrapperModule(fileName);
                     } catch {
                         wrapper = inlineWrapperModule(result.chunks[0].code);
