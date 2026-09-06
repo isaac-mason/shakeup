@@ -222,6 +222,10 @@ export type Graph = {
      *  see `PluginCtx.getFileName`), and this is what resolves one. Every call gets its own id, so
      *  two emits of the same bytes share a fileName and not an id — which is Rollup's behaviour. */
     emittedRefs: Map<string, string>;
+    /** Chunks a plugin asked for via `emitFile({ type: 'chunk' })`, in emit order. Each becomes an
+     *  extra ENTRY once the declared entries are rooted; `module` is filled in then, and the
+     *  reference id only resolves to a fileName after the chunk is named (see `bundle()`). */
+    emittedChunks: { ref: string; id: string; importer?: string; name?: string; module: number }[];
     /** Modules freshly parsed vs reused from `options.cache` this build. */
     parseStats: ParseStats;
     /** Module ids whose downstream artifacts (link/shake/render) are stale this rebuild —

@@ -213,6 +213,86 @@ describe('plugin pipeline', () => {
         expect(seen['main.js']).toBe(mods);
     });
 
+    it("emitFile({ type: 'chunk' }) adds an entry, named through getFileName once it exists", async () => {
+        // A plugin-created ENTRY. `id` goes through the build hooks like any entry, and the reference
+        // id only resolves once chunking and naming have run — which is why `emitFile` answers an id
+        // rather than a name (see the test below).
+        let ref = '';
+        let tooEarly: unknown;
+        let named = '';
+        const p: Plugin = {
+            name: 'emitter',
+            buildStart: function () {
+                ref = this.emitFile({ type: 'chunk', id: './extra.ts', importer: '/main.ts' });
+                try {
+                    this.getFileName(ref);
+                } catch (e) {
+                    tooEarly = (e as Error).message;
+                }
+            },
+            generateBundle: function () {
+                named = this.getFileName(ref);
+            },
+        };
+        const { chunks } = await build({ '/main.ts': 'export const x = 1;', '/extra.ts': "export const y = 'FROM_EXTRA';" }, [p]);
+        // Asking during the build is a sequencing mistake with its own message, not "unknown id".
+        expect(tooEarly).toMatch(/before it is generated/);
+        expect(chunks).toHaveLength(2);
+        const extra = chunks.find((c) => c.code.includes('FROM_EXTRA'));
+        expect(extra, 'the emitted chunk was bundled').toBeDefined();
+        expect(extra?.isEntry, 'and it is an ENTRY, not a dynamic chunk').toBe(true);
+        expect(named).toBe(extra?.fileName);
+    });
+
+    it('resolves an emitted chunk with no importer against the cwd', async () => {
+        // `EmittedChunk.importer` exists only so a RELATIVE id resolves against the right file; with
+        // none, "paths will be resolved relative to the current working directory" (rolldown's own
+        // wording). A bare `extra.ts` is a PATH here, not a package name.
+        const p: Plugin = {
+            name: 'emitter',
+            buildStart: function () {
+                this.emitFile({ type: 'chunk', id: 'extra.ts' });
+            },
+        };
+        // `resolve.cwd` explicitly: the memory fs is rooted at `/`, while the option defaults to the
+        // real process cwd — which is the point of the test, so it has to be stated rather than
+        // inherited.
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const x = 1;', '/extra.ts': "export const y = 'FROM_EXTRA';" }),
+            external: [],
+            plugins: [p],
+            resolve: { cwd: '/' },
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks.some((c) => c.code.includes('FROM_EXTRA'))).toBe(true);
+    });
+
+    it('this.resolve defaults isEntry to whether there is an importer', async () => {
+        // Rollup's documented rule, verbatim: the value passed "will be passed along to the
+        // `resolveId` hooks handling this call, otherwise FALSE will be passed if there is an
+        // importer and TRUE if there is not". shakeup passed a flat `false`.
+        //
+        // The importer itself must be `undefined` and not `null` — Rollup's fixtures assert
+        // `strictEqual(importer, undefined)`, and a plugin branching on `importer === undefined`
+        // took the wrong path.
+        const seen: string[] = [];
+        const p: Plugin = {
+            name: 'probe',
+            buildStart: async function () {
+                await this.resolve('./a.ts');
+                await this.resolve('./a.ts', '/main.ts');
+                await this.resolve('./a.ts', undefined, { isEntry: false });
+            },
+            resolveId: (spec, importer, extra) => {
+                if (spec === './a.ts') seen.push(`${importer === undefined ? 'noImporter' : 'importer'}:${extra.isEntry}`);
+                return null;
+            },
+        };
+        await build({ '/main.ts': 'export const x = 1;' }, [p]);
+        expect(seen).toEqual(['noImporter:true', 'importer:false', 'noImporter:false']);
+    });
+
     it('emitFile answers a REFERENCE ID, resolved by getFileName', async () => {
         // Both oracles pair `emitFile(file): string` with `getFileName(referenceId): string`, and
         // shakeup used to return the fileName straight from `emitFile`. Not a spelling difference:

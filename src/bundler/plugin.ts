@@ -121,14 +121,33 @@ export type ModuleInfo = {
 
 /** A file a plugin asks the bundler to emit alongside the output chunks. `source` is the contents;
  *  give `name` for a content-hashed fileName (`assets/<stem>-<hash><ext>`), or `fileName` to force
- *  an exact one. Only assets today; emitted chunks are a later addition. */
+ *  an exact one. */
 export type EmittedAsset = {
     type: 'asset';
     name?: string;
     fileName?: string;
     source: string | Uint8Array;
 };
-export type EmittedFile = EmittedAsset;
+
+/**
+ * A module a plugin asks to be bundled as an extra ENTRY.
+ *
+ * `id` goes through the build hooks like any entry, starting with `resolveId` — which receives
+ * `isEntry: true` whether or not an `importer` was given, since the thing being resolved IS an entry
+ * either way. `importer` exists only so a RELATIVE `id` resolves against the right file.
+ */
+export type EmittedChunk = {
+    type: 'chunk';
+    id: string;
+    importer?: string;
+    /** Feeds the `entryFileNames` pattern, like a named entry in `input`. */
+    name?: string;
+    /** NOT SUPPORTED — there is no forced-fileName channel for an entry yet, and silently ignoring
+     *  it would put the file somewhere the plugin did not ask for. Emitting one is an error. */
+    fileName?: string;
+};
+
+export type EmittedFile = EmittedAsset | EmittedChunk;
 
 /** Context passed to every plugin hook. Every method returns {@link MaybePromise}
  *  so the sync fast path holds (`assertSync` unwraps in bundle mode). */
@@ -258,7 +277,7 @@ export type Plugin = {
     ) => MaybePromise<Record<string, unknown> | null | undefined>;
     buildStart?: (this: PluginCtx) => MaybePromise<void>;
     resolveId?: WithFilter<
-        (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+        (this: PluginCtx, specifier: string, importer: string | undefined, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
     >;
     /** Resolve a DYNAMIC import (`import('x')`). Tried before {@link Plugin.resolveId} and falling
      *  through to it when every hook declines — rolldown's `resolve_id_with_plugins` runs
@@ -267,7 +286,7 @@ export type Plugin = {
      *  shape as `resolveId`. rolldown declines only the variant that hands the hook an AST node for a
      *  non-literal specifier; the string form is supported and this is it. */
     resolveDynamicImport?: WithFilter<
-        (this: PluginCtx, specifier: string, importer: string | null, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
+        (this: PluginCtx, specifier: string, importer: string | undefined, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
     >;
     load?: WithFilter<(this: PluginCtx, id: string) => MaybePromise<LoadResult>>;
     transform?: WithFilter<(this: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
@@ -475,7 +494,12 @@ export function runResolveId(
                 skipped.some((k) => k.pluginIdx === hook.pluginIdx && k.specifier === specifier && k.importer === importer)
             )
                 continue;
-            const r = hook.handler.call(ctxFor(hook.pluginIdx, skipped), specifier, importer, extra);
+            // `undefined`, not `null`, when there is no importer. Rollup's fixtures assert
+            // `strictEqual(importer, undefined)` for an entry and for a `this.resolve(spec)` with no
+            // importer, and a plugin written against that contract sees `null` here and takes the
+            // wrong branch. Internally the absence stays `null` — that is what the resolver and the
+            // skip-matching are keyed on; only the plugin-facing argument changes.
+            const r = hook.handler.call(ctxFor(hook.pluginIdx, skipped), specifier, importer ?? undefined, extra);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as ResolveIdResult) : step()));
             if (r !== null && r !== undefined) return r;
         }

@@ -679,6 +679,18 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
     Timer.end(timer, 'render');
 
+    // EMITTED-CHUNK reference ids become resolvable now, and not before: a chunk's fileName exists
+    // only once chunking and naming have run, which is the whole reason `emitFile` answers a
+    // reference id (§2z61). Matched by FACADE MODULE — the emitted chunk is an entry, so the chunk
+    // that fronts it is the one whose facade is that module. Placed ahead of `renderChunk`, so every
+    // hook from there on can call `getFileName` on it.
+    for (const emitted of graph.emittedChunks) {
+        if (emitted.module < 0) continue;
+        const id = graph.modules[emitted.module].id;
+        const own = outputChunks.find((c) => c.moduleIds.length > 0 && c.isEntry && c.moduleIds.includes(id));
+        if (own !== undefined) graph.emittedRefs.set(emitted.ref, own.fileName);
+    }
+
     // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
     for (let i = 0; i < outputChunks.length; i++) {
         const oc = outputChunks[i];

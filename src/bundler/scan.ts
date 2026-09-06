@@ -15,7 +15,7 @@ import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
 import { unrollLoops } from '../passes/optimize/unroll.ts';
 import { tsStrip } from '../passes/strip-ts.ts';
 import { applyRefDelta, type RefDelta, setHookConflictCheck, traverse, type Visitor } from '../passes/traverse.ts';
-import type { Fs, MaybePromise } from './fs.ts';
+import { basenameOf, type Fs, type MaybePromise } from './fs.ts';
 import {
     type CachedParse,
     type ExportsKind,
@@ -36,6 +36,7 @@ import {
     type CtxFor,
     type CustomPluginOptions,
     compilePipeline,
+    type EmittedAsset,
     type EmittedFile,
     type ModuleInfo,
     type ModuleOptions,
@@ -900,11 +901,20 @@ function hashSourceHex(source: string | Uint8Array): string {
 /** Register an emitted file and hand back its REFERENCE ID — see `PluginCtx.emitFile`. Shared by
  *  the scan context and the post-build one so the two cannot drift. */
 export function registerEmitted(graph: Graph, file: EmittedFile): string {
+    // Opaque and per-CALL, as in both oracles: two emits of the same bytes share a fileName and get
+    // distinct ids. The counter keeps it unique.
+    const ref = `ref-${(graph.emittedRefs.size + graph.emittedChunks.length).toString(36)}`;
+    if (file.type === 'chunk') {
+        // A CHUNK has no fileName yet — chunking and naming have not run — so it is QUEUED and the
+        // reference id stays unresolved until `bundle()` names it. That gap is the whole reason both
+        // oracles hand back a reference id instead of a name.
+        if (file.fileName !== undefined)
+            throw new Error('emitFile: `fileName` is not supported for an emitted chunk (use `name`).');
+        graph.emittedChunks.push({ ref, id: file.id, importer: file.importer, name: file.name, module: -1 });
+        return ref;
+    }
     const fileName = resolveEmittedFileName(file);
     if (!graph.emitted.has(fileName)) graph.emitted.set(fileName, file.source);
-    // Opaque and per-CALL, as in both oracles: two emits of the same bytes share a fileName and get
-    // distinct ids. The counter keeps it unique; the map size is the counter.
-    const ref = `ref-${graph.emittedRefs.size.toString(36)}`;
     graph.emittedRefs.set(ref, fileName);
     return ref;
 }
@@ -912,11 +922,18 @@ export function registerEmitted(graph: Graph, file: EmittedFile): string {
 /** Resolve a reference id to its fileName, or throw — see `PluginCtx.getFileName`. */
 export function fileNameOfRef(graph: Graph, referenceId: string): string {
     const name = graph.emittedRefs.get(referenceId);
-    if (name === undefined) throw new Error(`Unknown file reference id "${referenceId}".`);
-    return name;
+    if (name !== undefined) return name;
+    // Distinguish "not yet" from "never". A chunk's name exists only once chunking and naming have
+    // run, so asking during the build is a sequencing mistake with its own message; Rollup says the
+    // same thing ("ensure that the emitted chunk is finished").
+    if (graph.emittedChunks.some((c) => c.ref === referenceId))
+        throw new Error(
+            `Cannot get the file name of an emitted chunk before it is generated — reference id "${referenceId}". Ask for it from renderChunk, generateBundle or later.`,
+        );
+    throw new Error(`Unknown file reference id "${referenceId}".`);
 }
 
-export function resolveEmittedFileName(file: EmittedFile): string {
+export function resolveEmittedFileName(file: EmittedAsset): string {
     if (file.fileName !== undefined) return file.fileName;
     const base = file.name ?? 'asset';
     const dot = base.lastIndexOf('.');
@@ -936,6 +953,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         warnings: [],
         emitted: new Map(),
         emittedRefs: new Map(),
+        emittedChunks: [],
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
         changed: new Set(),
@@ -1160,7 +1178,13 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         fs: options.fs,
         resolve: async (source, importer = null, opts) => {
             const extra: ResolveIdExtra = {
-                isEntry: opts?.isEntry ?? false,
+                // Rollup's documented default, verbatim: "The value for `isEntry` you pass here will
+                // be passed along to the `resolveId` hooks handling this call, otherwise FALSE will
+                // be passed if there is an importer and TRUE if there is not"
+                // (`docs/plugin-development/index.md`). A flat `false` told every hook that a
+                // `this.resolve(spec)` with no importer was an ordinary import, which is the one case
+                // where it is certainly an entry.
+                isEntry: opts?.isEntry ?? importer === null,
                 kind: opts?.kind ?? 'import-statement',
                 custom: opts?.custom,
             };
@@ -1876,6 +1900,38 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             graph.entries.push({ module: idx, name });
         }
     }
+    // PLUGIN-EMITTED CHUNKS become extra entries, rooted after the declared ones.
+    //
+    // An INDEX, not `for…of`: rooting one runs its whole load/transform/moduleParsed pipeline, and a
+    // hook in there may emit another. Reading the array by index picks those up in the same pass.
+    //
+    // `isEntry: true` regardless of `importer` — the thing being resolved IS an entry either way, and
+    // `importer` exists only so a relative `id` resolves against the right file. That is exactly what
+    // Rollup's `resolveid-is-entry` asserts, one case per (importer present/absent) pair.
+    for (let i = 0; i < graph.emittedChunks.length; i++) {
+        const emitted = graph.emittedChunks[i];
+        const resolved = await resolveFn(emitted.id, emitted.importer ?? null, { isEntry: true, kind: 'entry' });
+        if (resolved === false) {
+            graph.errors.push(`Emitted chunk '${emitted.id}' cannot be external.`);
+            continue;
+        }
+        if (resolved === null) {
+            graph.errors.push(`Could not resolve emitted chunk '${emitted.id}'.`);
+            continue;
+        }
+        const idx = await addModule(resolved, true);
+        if (idx < 0) continue; // addModule already pushed a load error
+        emitted.module = idx;
+        const mod = graph.modules[idx];
+        mod.isEntry = true;
+        const name = emitted.name ?? basenameOf(resolved).replace(/\.[^.]+$/, '');
+        if (mod.entryName === null) mod.entryName = name;
+        if (!seen.has(idx)) {
+            seen.add(idx);
+            graph.entries.push({ module: idx, name });
+        }
+    }
+
     elideTypeOnlyImports(graph);
     // Importers are now complete — propagate export-surface changes to the affected-set.
     if (changedExports.size > 0) graph.affected = computeAffected(graph, changedExports);

@@ -226,7 +226,15 @@ async function defaultResolve(
     importer: string | null,
 ): Promise<string | null> {
     const aliased = applyAlias(specifier, resolve.alias);
-    if (!aliased.startsWith('./') && !aliased.startsWith('../') && !aliased.startsWith('/')) return null;
+    const pathLike = aliased.startsWith('./') || aliased.startsWith('../') || aliased.startsWith('/');
+    // With NO IMPORTER — an entry, a plugin's `this.resolve(spec)`, an emitted chunk — a BARE
+    // specifier is a path relative to the cwd, not a package name. `input: 'src/main.js'` is how
+    // entries are normally written and both oracles accept it (probed); shakeup answered
+    // `cannot load module 'main.js'` and only took `./main.js`.
+    //
+    // Bare-specifier resolution still runs when this finds nothing, so `input: 'some-package'` keeps
+    // working — this only adds a cwd-relative probe ahead of it.
+    if (!pathLike && importer !== null) return null;
     // No importer — a plugin's `this.resolve('./x')` or a relative entry — resolves against the cwd,
     // which is what both Rollup and rolldown do. Returning the specifier untouched left
     // `custom-resolve-options` with `id: './main.js'` where Rollup gives an absolute path, and made
