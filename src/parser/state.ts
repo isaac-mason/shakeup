@@ -210,6 +210,18 @@ export type ParserState = {
     coverInit: number[];
     /** Offsets from {@link coverInit} that a destructuring target check legitimised. */
     coverInitOk: number[];
+    /**
+     * Start offsets of OBJECT and ARRAY literals that were written inside parentheses.
+     *
+     * `({} = 1)` is a destructuring assignment; `({}) = 1` is a SyntaxError, because the parentheses
+     * stop the cover grammar from reinterpreting the literal as a pattern. A parenthesised IDENTIFIER
+     * or member is unaffected — `(x) = 1` and `(x.y) = 1` are both fine — which is why only these two
+     * literal kinds are recorded and the list stays tiny enough to scan linearly.
+     *
+     * Recorded here rather than on the node because parentheses are not kept in the AST and `Node`
+     * has no flags word; its shape is fixed deliberately.
+     */
+    parenLiteral: number[];
     errors: ParseError[];
     baseId: number;
     itKeys: (string | undefined)[];

@@ -178,6 +178,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         topLevelThis: [],
         coverInit: [],
         coverInitOk: [],
+        parenLiteral: [],
         sawImportSyntax: false,
         chainSawOptional: false,
     };
@@ -387,7 +388,7 @@ function consumeSemi(state: ParserState): void {
 
 // No line-table field to save/restore: the line table is built once, deferred, so nothing
 // mutates it during (speculative) parsing.
-type LexState = [number, number, number, number, number, number, number, boolean, number, number, number, number, number];
+type LexState = [number, number, number, number, number, number, number, boolean, number, number, number, number, number, number];
 const saveState = (state: ParserState): LexState => [
     state.pos,
     state.tok,
@@ -406,6 +407,7 @@ const saveState = (state: ParserState): LexState => [
     state.topLevelThis.length,
     state.coverInit.length,
     state.coverInitOk.length,
+    state.parenLiteral.length,
 ];
 function restoreState(state: ParserState, s: LexState): void {
     state.pos = s[0];
@@ -423,6 +425,7 @@ function restoreState(state: ParserState, s: LexState): void {
     state.topLevelThis.length = s[9];
     state.coverInit.length = s[11];
     state.coverInitOk.length = s[12];
+    state.parenLiteral.length = s[13];
 }
 
 function push(state: ParserState, v: Ref): void {
@@ -488,6 +491,16 @@ function parseExpression(state: ParserState, noIn = false): Node {
  * `simple` distinguishes the two positions: `++x` and `x += 1` take a SimpleAssignmentTarget only,
  * while `x = 1` and a for-in/of head also accept a destructuring pattern.
  */
+/** Was this object/array literal written inside parentheses? `({} = 1)` is a destructuring
+ *  assignment and `({}) = 1` is a SyntaxError: the parentheses stop the cover grammar reinterpreting
+ *  the literal as a pattern. A linear scan because {@link ParserState.parenLiteral} only ever holds
+ *  parenthesised object and array literals, of which real code has almost none. */
+function wasParenthesised(state: ParserState, node: Node): boolean {
+    const list = state.parenLiteral;
+    for (let i = 0; i < list.length; i++) if (list[i] === node.start) return true;
+    return false;
+}
+
 function checkAssignTarget(state: ParserState, node: Node, simple: boolean): void {
     switch (node.type) {
         case N.IdentifierReference:
@@ -509,11 +522,11 @@ function checkAssignTarget(state: ParserState, node: Node, simple: boolean): voi
             checkAssignTarget(state, node.data.expression as Node, true);
             return;
         case N.ArrayExpression:
-            if (simple) break;
+            if (simple || wasParenthesised(state, node)) break;
             checkArrayTarget(state, node);
             return;
         case N.ObjectExpression:
-            if (simple) break;
+            if (simple || wasParenthesised(state, node)) break;
             checkObjectTarget(state, node);
             return;
     }
@@ -1420,6 +1433,9 @@ function parsePrimary(state: ParserState): Node {
                 nextToken(state);
                 const e = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
+                // Parentheses are not kept in the AST, but they DO decide whether an object or array
+                // literal can still become a destructuring pattern. See {@link parenLiteral}.
+                if (e.type === N.ObjectExpression || e.type === N.ArrayExpression) state.parenLiteral.push(e.start);
                 return e;
             }
             case P.LBRACKET: {
