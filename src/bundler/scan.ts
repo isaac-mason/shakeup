@@ -1734,19 +1734,22 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 defFormat,
             });
         }
-        for (const hook of pipe.moduleParsed) {
-            hook.handler.call(ctx, {
-                id,
-                source,
-                program,
-                nodeCount,
-                semantic,
-                moduleSideEffects: sideEffects,
-                meta: mod.meta,
-                moduleType: mod.moduleType,
-            });
-        }
-        for (const rec of mod.importRecords) {
+        // DEPENDENCY RESOLUTION, in two passes with `moduleParsed` between them.
+        //
+        // Rollup's contract, which rolldown documents in the same words: `importedIds` and
+        // `dynamicallyImportedIds` "are available when a module has been parsed and its dependencies
+        // have been RESOLVED. This is the case in the `moduleParsed` hook." Resolved, not loaded —
+        // so the ids exist by then and nothing has been pulled in.
+        //
+        // One pass could not honour that. `rec.resolved = await addModule(depId)` LOADS the
+        // dependency and its whole subtree before the next record is even resolved, so a hook firing
+        // before the loop sees no ids at all (it did: `module-parsed-imported-ids` asserted two and
+        // got `undefined`) and one firing after it would see every transitive module's `moduleParsed`
+        // already gone by. Splitting resolution from loading gives the documented state at the
+        // documented moment and keeps parent-before-child ordering.
+        const depIds: (string | null)[] = mod.importRecords.map(() => null);
+        for (let ri = 0; ri < mod.importRecords.length; ri++) {
+            const rec = mod.importRecords[ri];
             // `new URL('./x', import.meta.url)` asset: SCAN only resolves the target to a real path
             // (resolution is scan's job); the generate-stage `emitAssets` pass reads + content-hashes
             // + emits it. It is NOT a JS module — no parse, no chunk, no graph edge.
@@ -1791,6 +1794,35 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (rec.attributeType !== undefined && graph.byId.get(depId) === undefined) {
                 mergeOptions(pendingFor(depId), { moduleType: ATTRIBUTE_TYPES[rec.attributeType] ?? rec.attributeType });
             }
+            depIds[ri] = depId;
+        }
+
+        for (const hook of pipe.moduleParsed) {
+            const importedIds: string[] = [];
+            const dynamicallyImportedIds: string[] = [];
+            for (let ri = 0; ri < depIds.length; ri++) {
+                const depId = depIds[ri];
+                if (depId === null) continue;
+                (mod.importRecords[ri].kind === 'dynamic' ? dynamicallyImportedIds : importedIds).push(depId);
+            }
+            hook.handler.call(ctx, {
+                id,
+                source,
+                program,
+                nodeCount,
+                semantic,
+                moduleSideEffects: sideEffects,
+                meta: mod.meta,
+                moduleType: mod.moduleType,
+                importedIds,
+                dynamicallyImportedIds,
+            });
+        }
+
+        for (let ri = 0; ri < depIds.length; ri++) {
+            const depId = depIds[ri];
+            if (depId === null) continue;
+            const rec = mod.importRecords[ri];
             rec.resolved = await addModule(depId, false);
             if (rec.resolved >= 0) graph.modules[rec.resolved].importers.add(id);
         }

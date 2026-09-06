@@ -416,7 +416,24 @@ export function createDevServer(options: DevServerOptions): DevServer {
         perf.transformMs += performance.now() - tTransform;
 
         const tDev = performance.now();
+        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: wantSourcemap(id) });
+        perf.devTransformMs += performance.now() - tDev;
+        if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
+        const tResolve = performance.now();
+        const deps = await resolveDeps(id, result.deps);
+        const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
+        // resolve accepted-dep specifiers to ids so the graph walk matches `deps`.
+        const hmr: HmrInfo = {
+            selfAccepts: result.hmr.selfAccepts,
+            acceptedDeps: await resolveDeps(id, result.hmr.acceptedDeps),
+        };
+        perf.resolveMs += performance.now() - tResolve;
+
         // read-only moduleParsed: only pay a parse when a plugin needs it.
+        //
+        // AFTER `resolveDeps`, so `importedIds`/`dynamicallyImportedIds` carry the resolved ids the
+        // hook's contract promises — the same state the bundle path hands it. It used to run before
+        // the dev transform, which is where the specifiers come from, so there was nothing to report.
         if (pipeline.moduleParsed.length > 0) {
             const isx = id.endsWith('.tsx') || id.endsWith('.jsx');
             const { program, nodeCount } = parse(patched, { ts: true, jsx: isx });
@@ -431,21 +448,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
                 moduleSideEffects: true,
                 meta: {},
                 moduleType: 'js',
+                importedIds: deps,
+                dynamicallyImportedIds: dynamicDeps,
             });
         }
-
-        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: wantSourcemap(id) });
-        perf.devTransformMs += performance.now() - tDev;
-        if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
-        const tResolve = performance.now();
-        const deps = await resolveDeps(id, result.deps);
-        const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
-        // resolve accepted-dep specifiers to ids so the graph walk matches `deps`.
-        const hmr: HmrInfo = {
-            selfAccepts: result.hmr.selfAccepts,
-            acceptedDeps: await resolveDeps(id, result.hmr.acceptedDeps),
-        };
-        perf.resolveMs += performance.now() - tResolve;
 
         const prev = graph.get(id);
         if (prev !== undefined) {

@@ -20,9 +20,9 @@ describe('plugin pipeline', () => {
             resolveId: (spec) => (spec === 'virtual:config' ? '\0virtual:config' : null),
             load: (id) => (id === '\0virtual:config' ? 'export const version = "9.9.9";' : null),
         };
-        const { chunks: [{ code }] } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [
-            virtual,
-        ]);
+        const {
+            chunks: [{ code }],
+        } = await build({ '/main.ts': "import { version } from 'virtual:config';\nexport const v = version;" }, [virtual]);
         const mod = await run(code);
         expect(mod.v).toBe('9.9.9');
     });
@@ -39,10 +39,9 @@ describe('plugin pipeline', () => {
                 return at < 0 ? null : [{ start: at, end: at + 4, text: 'PATCHED' }];
             },
         };
-        const { chunks: [{ code }] } = await build({ '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' }, [
-            replacer,
-            patcher,
-        ]);
+        const {
+            chunks: [{ code }],
+        } = await build({ '/main.ts': 'export const build = __BUILD__;\nexport const mark = "MARK";' }, [replacer, patcher]);
         const mod = await run(code);
         expect(mod.build).toBe('1.2.3');
         expect(mod.mark).toBe('PATCHED');
@@ -71,7 +70,9 @@ describe('plugin pipeline', () => {
     });
 
     it('json plugin: import a .json file, tree-shaking friendly', async () => {
-        const { chunks: [{ code }] } = await build(
+        const {
+            chunks: [{ code }],
+        } = await build(
             {
                 '/main.ts': "import cfg from './config.json';\nexport const name = cfg.name;",
                 '/config.json': '{ "name": "puddle", "unused": [1, 2, 3] }',
@@ -87,10 +88,11 @@ describe('plugin pipeline', () => {
             name: 'externalize-lodash',
             resolveId: (spec) => (spec === 'lodash-esque' ? false : null),
         };
-        const { chunks: [{ code }] } = await build(
-            { '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" },
-            [externalize],
-        );
+        const {
+            chunks: [{ code }],
+        } = await build({ '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" }, [
+            externalize,
+        ]);
         expect(code).toContain("from 'lodash-esque'");
     });
 
@@ -109,7 +111,9 @@ describe('plugin pipeline', () => {
                 order.push('end');
             },
         };
-        const { chunks: [{ code }] } = await build({ '/main.ts': 'export const x = 1;' }, [banner]);
+        const {
+            chunks: [{ code }],
+        } = await build({ '/main.ts': 'export const x = 1;' }, [banner]);
         expect(code.startsWith('/* built by shakeup */')).toBe(true);
         expect(order).toEqual(['start', 'render', 'end']);
     });
@@ -132,6 +136,47 @@ describe('plugin pipeline', () => {
             [spy],
         );
         expect(seen.sort()).toEqual(['/a.ts', '/main.ts']);
+    });
+
+    it('moduleParsed reports its dependency ids; load and transform report none', async () => {
+        // Rollup's contract, which rolldown documents in the same words: the ids "are available when
+        // a module has been parsed and its dependencies have been RESOLVED. This is the case in the
+        // `moduleParsed` hook", and `this.load` without `resolveDependencies` deliberately sees them
+        // empty. Both halves matter — a hook that reported them everywhere would be as wrong as one
+        // that reported them nowhere.
+        //
+        // shakeup used to hand `moduleParsed` an info object with neither field at all
+        // (`undefined`), because the hook fired before scan resolved a single record.
+        const at: string[] = [];
+        const spy: Plugin = {
+            name: 'ids',
+            load: function (id) {
+                const i = this.getModuleInfo(id);
+                at.push(`load ${id} ${JSON.stringify(i?.importedIds)} ${JSON.stringify(i?.dynamicallyImportedIds)}`);
+                return null;
+            },
+            transform: function (_code, id) {
+                const i = this.getModuleInfo(id);
+                at.push(`transform ${id} ${JSON.stringify(i?.importedIds)} ${JSON.stringify(i?.dynamicallyImportedIds)}`);
+                return null;
+            },
+            moduleParsed: (info) => {
+                at.push(`parsed ${info.id} ${JSON.stringify(info.importedIds)} ${JSON.stringify(info.dynamicallyImportedIds)}`);
+            },
+        };
+        await build(
+            {
+                '/main.ts': "import { a } from './a';\nexport const out = [a, import('./d')];",
+                '/a.ts': 'export const a = 1;',
+                '/d.ts': 'export const d = 2;',
+            },
+            [spy],
+        );
+        expect(at.filter((l) => l.startsWith('parsed /main.ts'))).toEqual(['parsed /main.ts ["/a.ts"] ["/d.ts"]']);
+        expect(at.filter((l) => l.startsWith('parsed /a.ts'))).toEqual(['parsed /a.ts [] []']);
+        // Empty in the earlier hooks — nothing has been resolved when they run.
+        expect(at.filter((l) => l.startsWith('load /main.ts'))).toEqual(['load /main.ts [] []']);
+        expect(at.filter((l) => l.startsWith('transform /main.ts'))).toEqual(['transform /main.ts [] []']);
     });
 
     it('ctx.warn lands in result warnings', async () => {

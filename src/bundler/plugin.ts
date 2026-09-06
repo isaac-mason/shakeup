@@ -210,6 +210,11 @@ export type ModuleParsedInfo = {
     moduleSideEffects: ModuleSideEffects;
     meta: CustomPluginOptions;
     moduleType: ModuleType;
+    /** This module's own dependencies, RESOLVED to ids and not yet loaded — the state Rollup and
+     *  rolldown both document for this hook, and the reason it fires between scan's two resolution
+     *  passes. `[]` inside `load`/`transform`, where nothing has been resolved yet. */
+    importedIds: string[];
+    dynamicallyImportedIds: string[];
 };
 
 /** A value or a promise of it. Hooks may be sync or async; the drivers below stay
