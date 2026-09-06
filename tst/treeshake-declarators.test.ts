@@ -135,3 +135,48 @@ describe('a symbol declared more than once keeps EVERY declaration', () => {
         expect(out).toEqual([0, 0]);
     });
 });
+
+// CHUNK-LEVEL drop-unused. Per-module the pass must not touch module-scope bindings, because
+// treeshake has not run yet and another module may still reach them. In an assembled chunk treeshake
+// HAS run, the chunk is one closed program, and nothing downstream removes a top-level binding again
+// — so cross-module constant folding, which only happens once both modules are in one text, strands
+// its source declarations there. rolldown emits neither; shakeup emitted both until `chunk-compress`
+// enabled the pass for module scope.
+describe('a chunk drops the declarations cross-module folding stranded', () => {
+    const buildMin = async (files: Record<string, string>) => {
+        const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [], output: { minify: true, optimize: true } });
+        expect(r.errors).toEqual([]);
+        return r.chunks.map((c) => c.code).join('\n');
+    };
+
+    it('drops a const whose only uses folded away', async () => {
+        const code = await buildMin({
+            '/consts.js': 'export const LIMIT = 20;\nexport const NAME = "x";\n',
+            '/main.js': "import { LIMIT, NAME } from './consts.js';\nexport const out = () => LIMIT + NAME.length;\n",
+        });
+        // rolldown emits exactly `let e=()=>21;export{e as out}` for this input (measured).
+        expect(code).toContain('21');
+        expect(code, 'the folded-away consts are gone').not.toContain('20');
+        // Imported as a real module: minification renames the local, so the export name is the only
+        // handle on it — `new Function` plus a stripped export clause cannot reach it.
+        const mod = await import(`data:text/javascript,${encodeURIComponent(code)}`);
+        expect((mod.out as () => number)()).toBe(21);
+    });
+
+    it('keeps an EXPORTED binding, which has no reference of its own to protect it', async () => {
+        // `export const c = 3` carries no IdentifierReference, so the zero-uses test alone would drop
+        // it. It is excluded structurally instead.
+        const code = await buildMin({ '/main.js': 'export const c = 3;\nexport const d = () => 1;\n' });
+        const mod = await import(`data:text/javascript,${encodeURIComponent(code)}`);
+        expect([typeof mod.c, typeof mod.d]).toEqual(['number', 'function']);
+        expect(mod.c).toBe(3);
+    });
+
+    it('keeps an IMPURE initialiser even when the binding is dead', async () => {
+        const code = await buildMin({
+            '/dep.js': "export const mk = (s) => { globalThis.__SEEN__ = s; return s; };\n",
+            '/main.js': "import { mk } from './dep.js';\nconst unused = mk('EFFECT');\nexport const out = 1;\n",
+        });
+        expect(code, 'the binding may go, the effect may not').toContain('EFFECT');
+    });
+});

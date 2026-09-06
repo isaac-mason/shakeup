@@ -39,6 +39,43 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 let USES: number[] | null = null;
 let SEM: Semantic | null = null;
 
+/**
+ * May this pass touch MODULE-SCOPE bindings? Off by default, and that default is the whole reason the
+ * header above says treeshake owns them: per-module, compress runs BEFORE treeshake, so a top-level
+ * binding that looks dead here may still be reached from another module.
+ *
+ * At CHUNK level that is no longer true — treeshake has already run, the chunk is one closed program,
+ * and nothing else will ever remove a top-level binding again. Cross-module constant folding happens
+ * in that same chunk pass (`LIMIT + NAME.length` becomes `21` only once both modules are in one
+ * text), so the declarations it strands are left behind by construction: 47 of them on crashcat,
+ * every one a folded-away numeric constant.
+ *
+ * Enabled ONLY from `chunk-compress.ts`. An exported binding is still safe: `export { a }` registers
+ * a real IdentifierReference on `a`, so the zero-uses test protects it — with the exception of an
+ * INLINE `export const c = 3`, whose declarator carries no reference at all. That one is excluded
+ * structurally by {@link EXPORTED_DECLS}.
+ */
+let ALLOW_MODULE_SCOPE = false;
+export const setDropUnusedTopLevel = (on: boolean): void => {
+    ALLOW_MODULE_SCOPE = on;
+};
+
+/**
+ * `VariableDeclaration`s that ARE an export (`export const c = 3`). Recorded by the export hook
+ * immediately before its own declaration is descended into, the same exactness `LOOP_HEADS` relies
+ * on, and rebuilt per traversal for the same reason.
+ *
+ * DEFENSIVE, AND CURRENTLY UNREACHABLE — stated rather than left for someone to discover. The chunk
+ * printer emits the SPECIFIER form (`const c = 3; export { c };`), and a specifier is a real
+ * IdentifierReference, so the zero-uses test already protects those. Deleting this guard passes the
+ * whole suite, which is exactly why it is worth a comment instead of silence.
+ *
+ * It is kept because the hazard is real and measured: an inline `export const c = 3` carries NO
+ * reference to `c`, so if any path ever routes that shape into a chunk, the zero-uses test would drop
+ * an exported binding. Four lines against a miscompile that no existing test could catch.
+ */
+let EXPORTED_DECLS = new Set<Node>();
+
 /** Tally, per SymbolId, how many `IdentifierReference` nodes resolve to it across the whole module.
  *  Declarations are `BindingIdentifier` nodes (a distinct type) and are intentionally excluded, so a
  *  binding with no *reference* uses lands at 0 here even though its declaration ident exists.
@@ -73,7 +110,7 @@ function classify(decl: Node, sem: Semantic, uses: number[]): number {
     if (id.type !== N.BindingIdentifier) return KEEP;
     const sym = id.sym;
     if (sym === 0) return KEEP; // no resolved symbol — bail
-    if (inModuleScope(sem, sym)) return KEEP; // treeshake owns module-scope bindings
+    if (!ALLOW_MODULE_SCOPE && inModuleScope(sem, sym)) return KEEP; // per-module: treeshake owns these
     if ((uses[sym] ?? 0) !== 0) return KEEP; // ≥1 reference (incl. a self-ref in its own init)
     // Dead binding in a function/block scope. Pure init → drop; impure init → keep the effect.
     return isPureExpr(decl.data.init) ? DROP_PURE : DROP_IMPURE;
@@ -176,6 +213,7 @@ function onForInOf(n: Node, _ctx: TransformCtx): void {
 function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
     if (n.type !== N.VariableDeclaration) return;
     if (LOOP_HEADS.has(n)) return; // a loop head — see LOOP_HEADS
+    if (EXPORTED_DECLS.has(n)) return; // `export const c = 3` — the binding is observable
     if (n.data.kind === 'var') return; // HARD BAIL: `var` hoists / can redeclare
     // HARD BAIL on `using` / `await using`: the BINDING is the observable thing. Dropping an unused
     // one and keeping its initializer for side effects — correct for `let`/`const` — deletes the
@@ -243,6 +281,17 @@ export const dropUnused: Visitor = {
             // module, and a stale entry would silently protect a declaration that is no longer a
             // loop head.
             LOOP_HEADS = new Set();
+            EXPORTED_DECLS = new Set();
+        },
+        [N.ExportNamedDeclaration]: (n: Node) => {
+            if (n.type !== N.ExportNamedDeclaration) return;
+            const d = n.data.declaration;
+            if (d !== null && d.type === N.VariableDeclaration) EXPORTED_DECLS.add(d);
+        },
+        [N.ExportDefaultDeclaration]: (n: Node) => {
+            if (n.type !== N.ExportDefaultDeclaration) return;
+            const d = n.data.declaration as Node | null;
+            if (d !== null && d.type === N.VariableDeclaration) EXPORTED_DECLS.add(d);
         },
         // These fire before their own head is descended into, which is what makes the record exact.
         [N.ForStatement]: onForStatement,

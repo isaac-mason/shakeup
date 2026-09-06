@@ -46,6 +46,7 @@ import { analyze, createSemantic } from '../analysis/semantic.ts';
 import type { Node } from '../ast/index.ts';
 import { mangleProgram } from '../mangle/program.ts';
 import { parse } from '../parser/index.ts';
+import { setDropUnusedTopLevel } from '../passes/compress/drop-unused.ts';
 import { runCompress } from '../passes/compress/index.ts';
 import { printModule } from '../print/print-js.ts';
 import type { PrinterConfig, PrintOptions } from '../print/printer.ts';
@@ -78,7 +79,23 @@ export function compressChunk(
     if (parsed.errors !== undefined && parsed.errors.length > 0) return { code, map: null };
     const semantic = createSemantic();
     analyze(semantic, parsed.program);
-    if (compress) runCompress(parsed.program, semantic, 'full');
+    // TOP-LEVEL drop-unused, enabled HERE and nowhere else. Per-module, `drop-unused` must not touch
+    // module-scope bindings because treeshake has not run yet and another module may still reach
+    // them. In this chunk it HAS run, the chunk is one closed program, and nothing downstream will
+    // remove a top-level binding again — so the declarations that cross-module constant folding
+    // strands (`let t=20,n="x",e=()=>21`, where rolldown emits just `const out=()=>21`) would
+    // otherwise ship. Worth 243 raw / 146 brotli on crashcat, all of it provably dead.
+    if (compress) {
+        setDropUnusedTopLevel(true);
+        try {
+            runCompress(parsed.program, semantic, 'full');
+        } finally {
+            // Restored even if compress throws: the flag is module state shared with the per-module
+            // pass, and leaking it there would let a top-level binding be dropped before treeshake
+            // has had its say.
+            setDropUnusedTopLevel(false);
+        }
+    }
     // A SECOND, FRESH semantic for the mangler — oxc's `Minifier::build` verbatim: one
     // `SemanticBuilder::build` for the compressor (`oxc_minifier/src/lib.rs:131`) and another for the
     // mangler (`:157`). Compress maintains reference COUNTS as it mutates, but nothing maintains the
