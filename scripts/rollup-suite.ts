@@ -447,8 +447,23 @@ for (const { d, c } of selected) {
         execFileSync(process.execPath, [join(out, '__run.mjs')], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10_000 });
         pass++;
     } catch (e) {
-        runFail++;
         const err = String((e as { stderr?: Buffer }).stderr ?? '');
+        // A named import an EXTERNAL module does not actually provide. Rollup's harness generates
+        // these fixtures as `format: 'cjs'` (see the note above), where `require('path').bar` is
+        // simply `undefined` and a guarded call never runs; ES modules check the export at LINK
+        // time, so the same fixture cannot start. Not something shakeup can fix by being more
+        // correct — verified on `class-methods-not-renamed`, where rolldown's ESM output is
+        // `import { bar } from "path";` too, byte-for-byte the same failure.
+        //
+        // EXTERNAL ONLY. The identical error against a relative specifier means one of OUR chunks
+        // failed to export something another chunk imports, which is a real miscompile and has to
+        // stay a failure.
+        const missing = /SyntaxError: The requested module '([^']*)' does not provide an export named/.exec(err);
+        if (missing !== null && !missing[1].startsWith('.') && !missing[1].startsWith('/')) {
+            skip(`fixture imports a name '${missing[1]}' does not export — runnable only as CJS`, d);
+            continue;
+        }
+        runFail++;
         bump(`RUN ${(/(?:AssertionError|\w*Error)[^\n]*/.exec(err)?.[0] ?? 'unknown').slice(0, 52)}`, d);
     }
 }
