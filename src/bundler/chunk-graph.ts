@@ -51,6 +51,13 @@ export type Chunk = {
     runtimeHelpers?: Set<string>;
     /** This chunk takes its helpers from the shared runtime chunk instead of defining them. */
     importsRuntime?: boolean;
+    /** exportedName -> a chunk-local `var` to surface it under, for an entry export whose binding
+     *  renders as a MEMBER EXPRESSION rather than an identifier (`export { default as t } from
+     *  './x.cjs'` resolves to `import_x.default`). An export specifier's local must be an
+     *  identifier, so the chunk declares `var t = import_x.default;` and exports `t` — which is
+     *  exactly what rolldown emits. Claimed during wiring because that is where names can be
+     *  deconflicted; the emitter only reads it. */
+    exportAliasOf?: Map<string, string>;
 };
 
 /** The full chunk partition + lookup structures. */
@@ -580,6 +587,32 @@ function wireAndDeconflict(
     for (let c = 0; c < chunks.length; c++) {
         const taken = new Set<string>();
         chunkClaim.push(deconflictChunk(graph, linked, chunks[c].modules, memberSets[c], [], taken, keepNames));
+    }
+
+    // An ENTRY chunk's export clause surfaces its entry module's whole export map, and a binding
+    // that resolves to a CommonJS member renders as `import_x.default` — not an identifier, so
+    // `export { import_x.default as t }` is a SyntaxError and the chunk does not parse at all.
+    // Claim a real local for each one here, where `chunkClaim` can deconflict it; `renderEsm`
+    // declares it and exports that instead. rolldown does the same (`var thing = import_dep.default;
+    // export { got, thing }`).
+    //
+    // Only a NAMED member needs this. `export * as ns from './x.cjs'` binds the namespace itself,
+    // which is already an identifier, and a cross-chunk consumer imports the namespace and does its
+    // own member read — both verified to emit valid code before this was written.
+    //
+    // The `NAME_NAMESPACE` half is BELT-AND-BRACES, said plainly because a sabotage proved it:
+    // dropping it leaves the output byte-identical, since `renderEsm` only uses an alias when the
+    // rendered local is not an identifier and a namespace always is. It stays because claiming a
+    // name nobody uses still consumes deconfliction pressure and would rename a colliding local for
+    // nothing — but no test covers it, and none can without a fixture where that rename shows.
+    for (let c = 0; c < chunks.length; c++) {
+        const chunk = chunks[c];
+        if (chunk.entryModule < 0 || !(chunk.isEntry || chunk.isDynamicEntry)) continue;
+        for (const [name, bind] of linked.exportMaps.get(chunk.entryModule) ?? []) {
+            if (bind.kind !== 'cjs-member' || bind.name === NAME_NAMESPACE) continue;
+            chunk.exportAliasOf ??= new Map();
+            if (!chunk.exportAliasOf.has(name)) chunk.exportAliasOf.set(name, chunkClaim[c](name));
+        }
     }
 
     // Wire imports/exports. For every imported binding whose producer lands in another chunk,

@@ -360,6 +360,8 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
     // pure ESM — cross-chunk producer exports still emit so shared chunks keep working). For a
     // shared/producer chunk it is `chunk.exports`.
     const exportSpecs: string[] = [];
+    /** `var <alias> = <memberExpr>;` lines that must precede the export clause — see below. */
+    const exportAliasLines: string[] = [];
     const exportedNames: string[] = [];
     let cjsEntryDefault: string | null = null;
     const seenExport = new Set<string>();
@@ -412,10 +414,19 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         if (entryMap !== undefined) {
             for (const [name, bind] of entryMap) {
                 if (narrow !== undefined && !narrow.has(name)) continue;
-                const local = nameOfBind(linked, bind, chunk);
+                let local = nameOfBind(linked, bind, chunk);
                 if (local === null) continue;
                 if (seenExport.has(name)) continue;
                 seenExport.add(name);
+                // A CommonJS member renders as `import_x.default`, and an export specifier's local
+                // MUST be an identifier — `export { import_x.default as t }` is a SyntaxError, so the
+                // chunk did not parse at all. Declare the deconflicted local claimed during wiring
+                // and export that. rolldown emits the same two lines.
+                const alias = chunk.exportAliasOf?.get(name);
+                if (alias !== undefined && !isIdentName(local)) {
+                    exportAliasLines.push(`var ${alias} = ${local};`);
+                    local = alias;
+                }
                 const exported = isIdentName(name) ? name : JSON.stringify(name);
                 exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
                 exportedNames.push(name);
@@ -536,6 +547,9 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
     for (const s of extImports) parts.push({ code: s });
     for (const s of helperLines) parts.push({ code: s });
     parts.push(...moduleParts);
+    // AFTER the module bodies: the member expression these read (`import_x.default`) is declared by
+    // the CommonJS interop line inside them, so an alias hoisted above would snapshot `undefined`.
+    for (const s of exportAliasLines) parts.push({ code: s });
     if (exportLine !== null) parts.push({ code: exportLine });
     if (cjsEntryDefault !== null) parts.push({ code: cjsEntryDefault });
     for (const s of starLines) parts.push({ code: s });

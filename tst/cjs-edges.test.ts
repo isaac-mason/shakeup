@@ -287,3 +287,63 @@ describe('require() of an ES module that a sibling also imports as a namespace',
         );
     });
 });
+
+// A ninth never-run configuration, and the loudest: the emitted chunk did not PARSE.
+//
+// `export { default as t } from './x.cjs'` binds `t` to a CommonJS member, which renders as
+// `import_x.default`. That is valid wherever a bare name is — except an export specifier, whose local
+// MUST be an identifier. The chunk came out as `export { import_x.default as thing }`, a SyntaxError,
+// from a build that reported no errors at all.
+//
+// rolldown declares a local and exports that (`var thing = import_dep.default; export { got, thing }`)
+// and this does the same, with the name deconflicted during wiring.
+describe('re-exporting a CommonJS binding on a chunk`s export clause', () => {
+    const dep = { '/dep.cjs': "module.exports = { d: 'DEFAULT' };\nmodule.exports.alpha = 'A';\n" };
+
+    // The re-export is a PURE one: `export { X } from './y'` creates no local binding, so `x` is
+    // computed through a separate `import` rather than by naming `thing`. Both fixtures were run
+    // under node first — naming `thing` here is a `ReferenceError` in real JS too, and would have
+    // been read as a shakeup bug.
+    it.each([
+        [
+            'the entry re-exports `default`',
+            "export { default as thing } from './dep.cjs';\nimport dep from './dep.cjs';\nexport const x = dep.d;",
+            'DEFAULT',
+        ],
+        [
+            'the entry re-exports a NAMED member',
+            "export { alpha as thing } from './dep.cjs';\nimport dep from './dep.cjs';\nexport const x = dep.alpha;",
+            'A',
+        ],
+    ])('%s', async (_name, main, want) => {
+        // `run` executes through `runChunks`, which since §2z54 also runs shakeup's own checker over
+        // every chunk — so an unparseable export clause fails here rather than silently shipping.
+        expect(await run({ ...dep, '/main.js': main })).toBe(want);
+    });
+
+    it('a DYNAMIC chunk re-exporting `default` gets the same treatment', async () => {
+        expect(
+            await run({
+                ...dep,
+                '/mid.js': "export { default as thing } from './dep.cjs';",
+                '/main.js': "export const x = import('./mid.js').then((m) => m.thing.d);",
+            }),
+        ).toBe('DEFAULT');
+    });
+
+    it('but a whole-namespace re-export needs no alias — it is already an identifier', async () => {
+        // The falsification arm: without it, the assertions above would be pinning "we never emit an
+        // export clause" rather than "we alias only what has to be aliased".
+        //
+        // It does NOT cover the `bind.name !== NAME_NAMESPACE` condition in `chunk-graph.ts`, and
+        // sabotaging that condition proves it — the output is byte-identical, because the emitter
+        // gates on `!isIdentName(local)` and a namespace local always is one. That condition is
+        // documented there as belt-and-braces rather than left looking load-bearing.
+        const main = "export * as ns from './dep.cjs';\nimport * as ns2 from './dep.cjs';\nexport const x = ns2.alpha;";
+        const r = await build({ ...dep, '/main.js': main });
+        expect(r.errors).toEqual([]);
+        const code = r.chunks.map((c) => c.code).join('\n');
+        expect(code, 'the namespace is exported directly, with no `var ns = …` line').toMatch(/export \{[^}]*\bas ns\b/);
+        expect(await run({ ...dep, '/main.js': main })).toBe('A');
+    });
+});
