@@ -132,14 +132,38 @@ const req = createRequire(resolve('scripts/rollup-suite.ts'));
  */
 function rolldownNonGoals(): Map<string, string> {
     const out = new Map<string, string>();
-    const md = 'llm/libs/rolldown/packages/rollup-tests/src/ignored-by-unsupported-features.md';
-    if (!existsSync(md)) return out;
     let section = '';
-    for (const line of readFileSync(md, 'utf8').split('\n')) {
-        if (line.startsWith('### ')) section = line.slice(4).trim();
-        const m = /^\s*-\s*rollup@(?:form|function)@(.+?):/.exec(line);
-        // The last `@` segment is the sample directory; earlier ones are Rollup's own grouping.
-        if (m !== null && section !== '') out.set(m[1].split('@').pop() as string, section);
+    const md = 'llm/libs/rolldown/packages/rollup-tests/src/ignored-by-unsupported-features.md';
+    if (existsSync(md)) {
+        for (const line of readFileSync(md, 'utf8').split('\n')) {
+            if (line.startsWith('### ')) section = line.slice(4).trim();
+            const m = /^\s*-\s*rollup@(?:form|function)@(.+?):/.exec(line);
+            // The last `@` segment is the sample directory; earlier ones are Rollup's own grouping.
+            if (m !== null && section !== '') out.set(m[1].split('@').pop() as string, section);
+        }
+    }
+    // The SECOND list, and reading only the first was under-counting. `ignored-tests.js` is where
+    // rolldown records the behavioural differences it has DECIDED on rather than the features it has
+    // not built — "Rollup treats non-js-extensions module as js module, but Rolldown will guess the
+    // module type from the extension" is the entry for `error-parse-json`, which shakeup was
+    // reporting as its own missing validation. It is not: rolldown builds that fixture too (probed),
+    // because both have native JSON support and Rollup wants `@rollup/plugin-json`.
+    //
+    // Same discipline as the markdown list: this only RE-LABELS a failure. The sample still runs and
+    // still leaves the bucket the day shakeup passes it.
+    const js = 'llm/libs/rolldown/packages/rollup-tests/src/ignored-tests.js';
+    if (existsSync(js)) {
+        section = '';
+        for (const line of readFileSync(js, 'utf8').split('\n')) {
+            // Headings nest `//`, `// ##`, `// ###`; the deepest one seen is the reason.
+            const h = /^\s*\/\/\s*#+\s*(.+?)\s*$/.exec(line);
+            if (h !== null) {
+                section = h[1];
+                continue;
+            }
+            const m = /^\s*"rollup@function@(.+?):/.exec(line);
+            if (m !== null && section !== '') out.set(m[1].split('@').pop() as string, section);
+        }
     }
     return out;
 }
