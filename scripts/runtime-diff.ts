@@ -51,7 +51,7 @@ const diskFs = {
  */
 const DRIVER = `
 import { readFileSync } from 'node:fs';
-import * as cc from './bundle.mjs';
+import * as cc from '__ENTRY__';
 
 cc.registerAll();
 
@@ -121,7 +121,7 @@ process.stdout.write(JSON.stringify(state));
  * randomness: every input is a literal, so the only variable is the bundle.
  */
 const THREE_DRIVER = `
-import * as t from './bundle.mjs';
+import * as t from '__ENTRY__';
 
 for (const n of ['Vector3', 'Matrix4', 'Euler', 'Ray', 'BufferGeometry', 'Float32BufferAttribute', 'Frustum']) {
     if (t[n] === undefined) throw new Error('export missing from the bundle: ' + n);
@@ -178,6 +178,32 @@ for (let i = 0; i < 6; i++) out.push(fr.containsPoint(new t.Vector3(i - 3, i * 0
 process.stdout.write(JSON.stringify(out));
 `;
 
+/**
+ * The MULTI-CHUNK driver. Both other corpora build to a single chunk, so the entire chunk graph —
+ * colouring, the already-loaded optimisation, facades, cross-chunk export wiring, chunk file naming
+ * and the `import()` rewrite — had no EXECUTION gate at all. `unchanged` pins its bytes; nothing ran
+ * it. That is the half of the bundler where a mistake shows up as `ERR_MODULE_NOT_FOUND` or a
+ * missing export rather than a wrong number, which is exactly what `dynamic-import-mutate-then-return`
+ * was.
+ *
+ * Both dynamic branches are taken, and `panel` re-exports a nested `import()` of its own, so the
+ * already-loaded optimisation and the facade case are both executed rather than merely emitted.
+ */
+const SPLIT_DRIVER = `
+import * as m from '__ENTRY__';
+
+const rows = [{ weight: 2 }, { weight: 3.5 }, { weight: -1 }];
+const out = [m.label];
+out.push(await m.load('panel', rows));
+out.push(await m.load('report', rows));
+
+// Reach the nested dynamic import inside the panel chunk.
+const panel = await import('__ENTRY__').then((x) => x.load('panel', rows));
+out.push(typeof panel);
+
+process.stdout.write(JSON.stringify(out));
+`;
+
 type Corpus = { entry: string; external: string[]; driver: string; nodeModules: string; blurb: string };
 const CORPORA: Record<string, Corpus> = {
     crashcat: {
@@ -194,9 +220,28 @@ const CORPORA: Record<string, Corpus> = {
         nodeModules: '',
         blurb: 'matrix/vector/geometry math over a fixed sweep',
     },
+    split: {
+        entry: join(import.meta.dirname, 'corpora', 'split', 'main.js'),
+        external: [],
+        driver: SPLIT_DRIVER,
+        nodeModules: '',
+        blurb: 'multi-chunk — both dynamic branches, a shared chunk and a facade',
+    },
 };
 
-type Arm = { name: string; code: string };
+/** A built bundle: every CHUNK, plus which one is the entry. Not a concatenation — a multi-chunk
+ *  bundle is N separate ES modules that import each other by FILENAME, and joining them yields
+ *  duplicate imports and dead specifiers. The runner writes each chunk under its own name. */
+type Arm = { name: string; chunks: { fileName: string; code: string }[]; entry: string };
+
+/** The chunk the driver imports. `isEntry` when the bundler says so; otherwise the only chunk, and
+ *  an explicit failure rather than a guess if neither holds. */
+function entryOf(chunks: { fileName: string; isEntry?: boolean }[]): string {
+    const flagged = chunks.filter((c) => c.isEntry === true);
+    if (flagged.length === 1) return flagged[0].fileName;
+    if (chunks.length === 1) return chunks[0].fileName;
+    throw new Error(`cannot identify the entry chunk among ${chunks.map((c) => c.fileName).join(', ')}`);
+}
 
 async function buildArms(c: Corpus): Promise<Arm[]> {
     const arms: Arm[] = [];
@@ -206,16 +251,19 @@ async function buildArms(c: Corpus): Promise<Arm[]> {
     ] as const) {
         const r = (await shakeupBundle({ entry: c.entry, fs: diskFs, external: c.external, output } as never)) as {
             errors: string[];
-            chunks: { code: string }[];
+            chunks: { fileName: string; code: string; isEntry?: boolean }[];
         };
         if (r.errors.length > 0) throw new Error(`${name} failed: ${r.errors.join(', ')}`);
-        arms.push({ name, code: r.chunks.map((x) => x.code).join('\n') });
+        arms.push({ name, chunks: r.chunks, entry: entryOf(r.chunks) });
     }
     const { rolldown } = await import('rolldown');
     const b = await rolldown({ input: c.entry, external: c.external, logLevel: 'silent' });
     const out = await b.generate({ format: 'esm' });
     await b.close?.();
-    arms.push({ name: 'rolldown (oracle)', code: out.output.map((o: { code?: string }) => o.code ?? '').join('\n') });
+    const rc = (out.output as { fileName: string; code?: string; isEntry?: boolean }[])
+        .filter((o) => o.code !== undefined)
+        .map((o) => ({ fileName: o.fileName, code: o.code as string, isEntry: o.isEntry }));
+    arms.push({ name: 'rolldown (oracle)', chunks: rc, entry: entryOf(rc) });
     return arms;
 }
 
@@ -227,8 +275,16 @@ function run(c: Corpus, label: string, arm: Arm, i: number): { ok: true; state: 
     // it needs one of its own. A corpus with no externals needs none.
     const nm = join(dir, 'node_modules');
     if (c.nodeModules !== '' && !existsSync(nm)) symlinkSync(c.nodeModules, nm, 'dir');
-    writeFileSync(join(dir, 'bundle.mjs'), arm.code);
-    writeFileSync(join(dir, 'run.mjs'), c.driver);
+    // Every chunk under its OWN name, so the cross-chunk `import './panel-HASH.js'` specifiers the
+    // bundler wrote actually resolve — and `type: module`, because those names end in `.js` and node
+    // would otherwise read them as CommonJS.
+    writeFileSync(join(dir, 'package.json'), '{"type":"module"}');
+    for (const ch of arm.chunks) {
+        const dest = join(dir, ch.fileName);
+        mkdirSync(join(dest, '..'), { recursive: true });
+        writeFileSync(dest, ch.code);
+    }
+    writeFileSync(join(dir, 'run.mjs'), c.driver.replace(/__ENTRY__/g, `./${arm.entry}`));
     try {
         const out = execFileSync(process.execPath, [join(dir, 'run.mjs')], {
             stdio: ['ignore', 'pipe', 'pipe'],
@@ -249,8 +305,16 @@ function run(c: Corpus, label: string, arm: Arm, i: number): { ok: true; state: 
 
 rmSync(OUT, { recursive: true, force: true });
 
+/** Corpora NOT run by default. `split` is held back because it currently FAILS — and the failure is
+ *  a real shakeup bug, not a driver problem: under `package.json#sideEffects: false` the entry chunk
+ *  emits `export { …, registry, … }` for a binding whose declaration tree-shaking dropped, so the
+ *  bundle does not load at all (`SyntaxError: Export 'registry' is not defined in module`). rolldown
+ *  keeps the declaration. Reproduce with `pnpm runtimediff --corpus split`; see ROADMAP §2z47. It
+ *  joins the default set with the fix, so this list should be empty again. */
+const HELD_BACK = new Set(['split']);
+
 const only = process.argv.includes('--corpus') ? process.argv[process.argv.indexOf('--corpus') + 1] : null;
-const names = only === null ? Object.keys(CORPORA) : [only];
+const names = only === null ? Object.keys(CORPORA).filter((n) => !HELD_BACK.has(n)) : [only];
 let failed = false;
 
 for (const label of names) {
