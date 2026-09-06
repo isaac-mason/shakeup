@@ -421,8 +421,13 @@ function restoreState(state: ParserState, s: LexState): void {
     // not leave the parse latched.
     state.fatal = s[7];
     state.nseAt.length = s[8];
-    state.commentsLen = s[10];
-    state.topLevelThis.length = s[9];
+    // These two were SWAPPED — `commentsLen` was restored from the `topLevelThis` length and vice
+    // versa. Both directions did damage: every speculative rewind truncated the comment table to the
+    // number of top-level `this` nodes (so comments were silently dropped — 22.5KB of JSDoc on
+    // three.core.js), and `topLevelThis` was RESIZED to the comment count, filling it with undefined
+    // holes and inflating a length that `link.ts` reads as "this module looks like CommonJS".
+    state.commentsLen = s[9];
+    state.topLevelThis.length = s[10];
     state.coverInit.length = s[11];
     state.coverInitOk.length = s[12];
     state.parenLiteral.length = s[13];
@@ -1007,7 +1012,17 @@ function parseNew(state: ParserState): Node {
     nextToken(state);
     if (isP(state, P.DOT)) {
         nextToken(state);
-        parseNameAsIdent(state, R_NAME);
+        // `new.` admits exactly one meta property, spelled `target` with no escapes. Both were
+        // accepted: `new.foo` and `new.t\u0061rget` parsed as `new.target`, because the name was
+        // consumed without being looked at. The escape test is needed HERE even though shakeup's
+        // lexer leaves an escaped identifier as `T_IDENT` (see the `for...of` head) — `target` is not
+        // a keyword, so the name arrives as an ordinary identifier either way and only the flag
+        // distinguishes the two spellings.
+        const metaEscaped = (state.tokFlags & F_ESCAPED) !== 0;
+        const metaStart = state.tokStart;
+        const meta = parseNameAsIdent(state, R_NAME);
+        if (metaEscaped) raiseAt(state, metaStart, ParseErrorCode.EscapedKeyword);
+        else if (meta.name !== 'target') raiseAt(state, metaStart, ParseErrorCode.InvalidNewMetaProperty);
         if (state.newTargetDepth === 0 && !state.allowTopNewTarget) raise(state, ParseErrorCode.TopLevelNewTarget);
         // Chained, exactly like the NewExpression path below. `new.target` is an ordinary expression
         // and `new.target.value` / `new.target?.name` are legal — returning it unchained stopped the
@@ -1584,7 +1599,7 @@ function parseObjectMember(state: ParserState): Node {
     let flags = 0;
     let async = false;
     let generator = false;
-    if (isK(state, K.ASYNC) && !nextIsPropertyEnd(state)) {
+    if (isK(state, K.ASYNC) && !nextIsPropertyEnd(state) && !newlineAfterAsync(state)) {
         async = true;
         nextToken(state);
     }
@@ -1644,6 +1659,19 @@ function parseObjectMember(state: ParserState): Node {
         return create.ObjectProperty(start, right.end, flags | FL.SHORTHAND, key, value);
     }
     return create.ObjectProperty(start, key.end, flags | FL.SHORTHAND, key, shorthandRef);
+}
+
+/** Is the token after `async` on a NEW LINE? The grammar is `async [no LineTerminator here]
+ *  ClassElementName` / `PropertyName`, so a newline means `async` was never a modifier — it is an
+ *  ordinary property name, and whatever follows is then unexpected. Letting the ordinary
+ *  object/class-body error report that is what oxc does too ("Expected `,` or `}` but found
+ *  `Identifier`"); the rule here is only about NOT consuming `async` as a modifier. */
+function newlineAfterAsync(state: ParserState): boolean {
+    const s = saveState(state);
+    nextToken(state);
+    const nl = (state.tokFlags & F_NL) !== 0;
+    restoreState(state, s);
+    return nl;
 }
 
 function nextIsPropertyEnd(state: ParserState): boolean {
@@ -2457,7 +2485,7 @@ function parseClassMember(state: ParserState): Node {
         else if (isK(state, K.ACCESSOR) && !nextIsPropertyEnd(state)) nextToken(state);
         else break;
     }
-    if (isK(state, K.ASYNC) && !nextIsPropertyEnd(state)) {
+    if (isK(state, K.ASYNC) && !nextIsPropertyEnd(state) && !newlineAfterAsync(state)) {
         async = true;
         nextToken(state);
     }
