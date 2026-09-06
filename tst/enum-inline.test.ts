@@ -95,6 +95,20 @@ describe('constant enum members are inlined at the read', () => {
         expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn got;`)()).toEqual([1, 2, 3, -1, 12, 13]);
     });
 
+    it('leaves an ASSIGNMENT TARGET alone — substituting there does not even parse', async () => {
+        // The lowered enum is an ordinary mutable object, so `E.A = 5` is legal JavaScript that
+        // TypeScript merely refuses to type-check. Inlining it produced `1 = 5` — output that does
+        // not PARSE, from a build reporting no errors at all.
+        const code = await build({
+            '/k.ts': 'export enum E { A = 1, B = 2 }\n',
+            '/main.ts': "import { E } from './k.ts';\n(E as any).A = 5;\nexport const v = E.B;\n",
+        });
+        expect(code).toContain('E.A = 5');
+        expect(code, 'the READ is still inlined').toMatch(/const v = 2;/);
+        // The assertion that actually caught it: `new Function` throws a SyntaxError on `1 = 5`.
+        expect(() => new Function(code.replace(/export .*$/gm, ''))).not.toThrow();
+    });
+
     it('leaves a COMPUTED read, and so keeps the object it needs', async () => {
         const code = await build({
             '/kind.ts': kind,

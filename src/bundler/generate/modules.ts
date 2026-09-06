@@ -266,17 +266,32 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
      *  Populated as the walk descends — `walk` visits a parent before its children. */
     const writeTargets = new Set<Node>();
     const markTarget = (n: Node): void => {
-        if (n.type === N.StaticMemberExpression) writeTargets.add(n);
+        // The TARGET is the outermost member expression, and nothing inside it. `a[E.X] = v` writes
+        // `a[…]` and READS `E.X`; `a.b.c = v` writes `a.b.c` and reads `a.b`. Marking the subtree
+        // instead cost 48 bytes of crashcat in enum reads sitting in index positions — conservative
+        // in the safe direction, but conservative for no reason.
+        if (n.type === N.StaticMemberExpression) {
+            writeTargets.add(n);
+            return;
+        }
+        if (n.type === N.ComputedMemberExpression) return;
+        // Otherwise a destructuring pattern, whose structure has to be descended to reach the
+        // member expressions nested in it (`[a.b, { k: c.d }] = v`).
         walkChildren(n, markTarget);
     };
     walk(mod.program, (n) => {
         if (n.type === N.AssignmentExpression) markTarget(n.data.left);
         else if (n.type === N.UpdateExpression) markTarget(n.data.argument);
         else if (n.type === N.ForInStatement || n.type === N.ForOfStatement) markTarget(n.data.left);
-        if (n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference) {
+        if (n.type === N.StaticMemberExpression && n.data.object.type === N.IdentifierReference && !writeTargets.has(n)) {
             // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the
             // other bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not
             // only a `const enum`, keeping the object for whatever else still reads it.
+            //
+            // NOT in an assignment target. The lowered enum object is an ordinary mutable object, so
+            // `E.A = 5` is legal JS that TypeScript merely refuses to type-check — and substituting
+            // the constant produced `1 = 5`, output that does not PARSE, from a build reporting no
+            // errors. Reads only, which is all the constant claim is about.
             const lit = enumConstOf(ctx, n.data.object, n.data.property.name as string);
             if (lit !== null) {
                 map.set(n, lit);
