@@ -561,8 +561,14 @@ export function nextToken(state: ParserState): void {
             }
             // Annex B.1.1 HTML-like comments. `<!--` opens one anywhere; `-->` only where it is the
             // first token on its line. Both are Script-only — in a real module goal they stay
-            // ordinary punctuation and the parser rejects them. oxc `lexer/punctuation.rs:21-80`.
-            if ((c === 60 || c === 45) && state.allowTopReturn && isHtmlComment(src, pos, c, nl !== 0 || pos === 0)) {
+            // ordinary punctuation and the parser rejects them. oxc `lexer/punctuation.rs:21-80`,
+            // verified: `script` accepts both, `module` rejects with "HTML comments are not allowed
+            // in modules".
+            //
+            // Keyed on NOT-A-MODULE. This read `state.allowTopReturn`, which was the same test only
+            // because that flag happened to be false for modules alone — the third place that flag
+            // was doing duty as "is a module", and adding the `script` goal broke all three.
+            if ((c === 60 || c === 45) && !state.goalIsModule && isHtmlComment(src, pos, c, nl !== 0 || pos === 0)) {
                 const nlPos = src.indexOf('\n', pos);
                 pos = nlPos < 0 ? srcLen : nlPos;
                 continue;

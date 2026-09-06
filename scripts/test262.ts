@@ -94,7 +94,13 @@ const files: string[] = [];
  * this figure could not have reached. Same failure as `checkerdiff`'s phantom backlog — a gate that
  * did not measure the thing it was being read as measuring.
  */
-const accepts = (src: string, kind: 'module' | 'unambiguous') => {
+// SCRIPT, not `unambiguous`. test262 means GOAL: SCRIPT by "not a module", and that is what oxc is
+// asked for on the other side of this comparison (`sourceType: 'script'`) — handing shakeup
+// `unambiguous` instead compared two different languages. A Script rejects a top-level `return`,
+// `new.target` outside a function, and `import.meta`; `unambiguous` must accept all three, because
+// under that goal a top-level `return` is EVIDENCE of CommonJS. 18 of the 31 remaining misses were
+// this one mismatch.
+const accepts = (src: string, kind: 'module' | 'script') => {
     try {
         const r = parseWithDiagnostics(src, { ts: false, jsx: false, kind });
         if (r.errors.length > 0) return false;
@@ -145,9 +151,9 @@ for (const p of files) {
     // in BOTH modes, so it is run twice and only counts as a pass if both agree.
     let got: boolean;
     if (meta.flags.has('module')) got = accepts(code, 'module');
-    else if (meta.flags.has('onlyStrict')) got = accepts(`"use strict";\n${code}`, 'unambiguous');
-    else if (meta.flags.has('noStrict') || meta.flags.has('raw')) got = accepts(code, 'unambiguous');
-    else got = accepts(code, 'unambiguous') && accepts(`"use strict";\n${code}`, 'unambiguous');
+    else if (meta.flags.has('onlyStrict')) got = accepts(`"use strict";\n${code}`, 'script');
+    else if (meta.flags.has('noStrict') || meta.flags.has('raw')) got = accepts(code, 'script');
+    else got = accepts(code, 'script') && accepts(`"use strict";\n${code}`, 'script');
 
     if (got === !shouldFail) {
         pass++;

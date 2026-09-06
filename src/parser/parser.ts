@@ -132,7 +132,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         comments: new Int32Array(256 * COMMENT_STRIDE),
         commentsLen: 0,
         keepComments: options.comments !== false,
-        goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs',
+        goalUnknown: options.kind !== 'module' && options.kind !== 'commonjs' && options.kind !== 'script',
         sawUnbundlable: false,
         staticBlockDepth: 0,
         tokHash: 0,
@@ -144,8 +144,14 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // `unambiguous` (the default) stays permissive, so adopting the goal gate is NOT a breaking
         // change: only a file with an explicit signal — `.cjs`/`.mjs`/`.cts`/`.mts` or a declared
         // `package.json#type` — is held to it. Mirrors oxc's `ModuleKind::Unambiguous`.
-        allowTopReturn: options.kind !== 'module',
-        allowTopNewTarget: options.kind !== 'module',
+        //
+        // `script` is the goal a `<script>` tag has and the one test262 means by "not a module":
+        // oxc's `SourceType::script()`. It is NOT CommonJS. A top-level `return` is legal in CJS
+        // only because Node wraps the body in a function, and `unambiguous` reads one as EVIDENCE of
+        // CJS (see `sawTopLevelReturn`) — but a Script has no wrapper, so the spec rejects it, and
+        // so does oxc for both `script` and `module` (verified on both).
+        allowTopReturn: options.kind !== 'module' && options.kind !== 'script',
+        allowTopNewTarget: options.kind !== 'module' && options.kind !== 'script',
         goalIsModule: options.kind === 'module',
         deferredScriptErrors: [],
         restComma: null,
@@ -2849,7 +2855,13 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 const object = parseExpression(state);
                 expectP(state, P.RPAREN, "')'");
                 const withBody = parseStatement(state, true);
-                if (!state.allowTopReturn) raise(state, ParseErrorCode.WithStatement);
+                // Keyed on the goal being a MODULE, which is what the message says. It used to read
+                // `!state.allowTopReturn`, which was the same test only because that flag was false
+                // for modules alone — adding the `script` goal broke the coupling and rejected 297
+                // valid sloppy-mode test262 programs. The real rule is STRICT MODE, not module
+                // (oxc: `script` sloppy ACCEPTS `with`, `script` strict rejects it, `module` always
+                // rejects); the strict case belongs to the checker, which already owns it.
+                if (state.goalIsModule) raise(state, ParseErrorCode.WithStatement);
                 state.sawUnbundlable = true;
                 return create.WithStatement(start, withBody.end, 0, object, withBody);
             }
@@ -4729,7 +4741,7 @@ export type ParseResult = {
 };
 /** Module goal, mirroring oxc's `ModuleKind` (`oxc_span/src/source_type.rs:56-75`). `unambiguous`
  *  is the permissive default and is parser-input only — it never describes a finished AST. */
-export type ParseKind = 'module' | 'commonjs' | 'unambiguous';
+export type ParseKind = 'module' | 'commonjs' | 'script' | 'unambiguous';
 
 export type ParseOptions = {
     ts: boolean;
