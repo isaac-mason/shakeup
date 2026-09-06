@@ -26,6 +26,9 @@ export const ParseErrorCode = enumeration(
     'NewDynamicImport',
     'InvalidImportProperty',
     'ImportMetaOutsideModule',
+    'ImportOutsideModule',
+    'ExportOutsideModule',
+    'UsingAtScriptTopLevel',
     'ImportRequiresSpecifier',
     'ImportArguments',
     'DynamicImportSpread',
@@ -139,6 +142,11 @@ const TEMPLATE: Record<number, string> = {
     [ParseErrorCode.InvalidImportProperty]:
         'The only valid property accesses on import are `import.meta`, `import.source()`, and `import.defer()`',
     [ParseErrorCode.ImportMetaOutsideModule]: 'Unexpected import.meta expression',
+    // SCRIPT goal only. A bundler parses ESM whatever the goal, so these fire for `kind: 'script'`
+    // and nothing else — oxc's wording, verified against `sourceType: 'script'`.
+    [ParseErrorCode.ImportOutsideModule]: 'Cannot use import statement outside a module',
+    [ParseErrorCode.ExportOutsideModule]: 'Cannot use export statement outside a module',
+    [ParseErrorCode.UsingAtScriptTopLevel]: "'using' declarations are not allowed at the top level of a script",
     [ParseErrorCode.ImportRequiresSpecifier]: 'import() requires a specifier.',
     [ParseErrorCode.ImportArguments]:
         'Dynamic imports can only accept a module specifier and an optional set of attributes as arguments',

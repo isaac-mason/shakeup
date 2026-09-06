@@ -153,6 +153,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         allowTopReturn: options.kind !== 'module' && options.kind !== 'script',
         allowTopNewTarget: options.kind !== 'module' && options.kind !== 'script',
         goalIsModule: options.kind === 'module',
+        goalIsScript: options.kind === 'script',
         deferredScriptErrors: [],
         restComma: null,
         topLogical: 0,
@@ -2717,6 +2718,9 @@ function parseStatement(state: ParserState, single: boolean): Node {
         restoreState(state, save);
         if (isDecl) {
             if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
+            // TOP LEVEL of a Script only — nested is fine, in a block or a function, and a module
+            // permits it anywhere. oxc draws exactly this line (verified all four positions).
+            if (atModuleScope && state.goalIsScript) raise(state, ParseErrorCode.UsingAtScriptTopLevel);
             return parseVarDecl(state, VAR_KIND.USING, 0);
         }
     }
@@ -2734,6 +2738,7 @@ function parseStatement(state: ParserState, single: boolean): Node {
         restoreState(state, save);
         if (isDecl) {
             if (single) raise(state, ParseErrorCode.LexicalDeclSingleStatement);
+            if (atModuleScope && state.goalIsScript) raise(state, ParseErrorCode.UsingAtScriptTopLevel);
             nextToken(state); // consume `await`; `parseVarDecl` consumes `using`
             return parseVarDecl(state, VAR_KIND.AWAIT_USING, 0);
         }
@@ -2964,10 +2969,15 @@ function parseStatement(state: ParserState, single: boolean): Node {
                 // DECLARATION is a module item and legal only at the top level. The two are
                 // separated above, so this check lands only on the declaration.
                 if (!atModuleScope) raise(state, ParseErrorCode.ImportExportNotTopLevel);
+                // A Script has no module items at all. `import(…)` and `import.meta` were split off
+                // above, so only the DECLARATION reaches here — which is what oxc rejects too, while
+                // still accepting the call (verified on `sourceType: 'script'`).
+                else if (state.goalIsScript) raise(state, ParseErrorCode.ImportOutsideModule);
                 return parseImport(state);
             }
             case K.EXPORT:
                 if (!atModuleScope) raise(state, ParseErrorCode.ImportExportNotTopLevel);
+                else if (state.goalIsScript) raise(state, ParseErrorCode.ExportOutsideModule);
                 return parseExport(state);
             case K.INTERFACE:
                 if (state.tsMode) return parseInterface(state, start, 0);

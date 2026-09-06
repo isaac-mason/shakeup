@@ -129,6 +129,10 @@ export type ParserState = {
     /** The goal is declared MODULE. `import.meta` and top-level `await` are legal only here (or,
      *  pending resolution, under `unambiguous`). */
     goalIsModule: boolean;
+    /** The SCRIPT goal — oxc's `SourceType::script()`. Distinct from `goalIsModule === false`, which
+     *  is also true for CommonJS and for `unambiguous`: only a Script rejects `import`/`export`
+     *  statements and a top-level `using`. */
+    goalIsScript: boolean;
     /**
      * Errors that only hold if the file turns out to be a SCRIPT.
      *

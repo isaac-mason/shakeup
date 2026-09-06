@@ -49,3 +49,38 @@ describe('the script goal keeps what only a MODULE may not contain', () => {
         expect(accepts(src, 'unambiguous'), 'unambiguous is unchanged').toBe(true);
     });
 });
+
+describe('the script goal has no module items, and no top-level using', () => {
+    // A Script's grammar has no ImportDeclaration or ExportDeclaration at all, and Annex-B aside,
+    // `using` is a module-or-nested form. shakeup parses ESM under EVERY goal because it is a
+    // bundler, so these are the first rules it has ever had for the shape — they fire for `script`
+    // and nothing else. All four positions verified against `oxc-parser`.
+    it.each([
+        ['an import declaration', "import x from 'y';"],
+        ['an export declaration', 'export var x = 1;'],
+        ['an export default', 'export default 1;'],
+        ['a top-level using', 'using x = null;'],
+        ['a top-level await using', 'await using x = null;'],
+    ])('rejects %s', (_name, src) => {
+        expect(accepts(src, 'script'), 'script rejects it').toBe(false);
+        expect(accepts(src, 'module'), 'a module does not').toBe(true);
+        expect(accepts(src, 'unambiguous'), 'unambiguous is unchanged').toBe(true);
+    });
+
+    it.each([
+        ['a dynamic import CALL, which is an expression', "import('y');"],
+        ['using inside a block', '{ using x = null; }'],
+        ['using inside a function', 'function f(){ using x = null; }'],
+        ['await using inside an async function', 'async function f(){ await using x = null; }'],
+    ])('still accepts %s', (_name, src) => {
+        expect(accepts(src, 'script')).toBe(true);
+    });
+
+    it('reports the message oxc reports', () => {
+        expect(errs("import x from 'y';", 'script')[0].msg).toBe('Cannot use import statement outside a module');
+        expect(errs('export var x = 1;', 'script')[0].msg).toBe('Cannot use export statement outside a module');
+        expect(errs('using x = null;', 'script')[0].msg).toBe(
+            "'using' declarations are not allowed at the top level of a script",
+        );
+    });
+});
