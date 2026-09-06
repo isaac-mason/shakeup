@@ -213,6 +213,46 @@ describe('plugin pipeline', () => {
         expect(seen['main.js']).toBe(mods);
     });
 
+    it('a file emitted from inside generateBundle reaches the output', async () => {
+        // It did not. `graph.emitted` was drained once, before the hook ran, so the file vanished
+        // with no error at all. rolldown emits it (probed on the same input: `late.txt` is in its
+        // output), and so does Rollup.
+        const secondSaw: string[] = [];
+        const emitter: Plugin = {
+            name: 'emitter',
+            generateBundle: function () {
+                this.emitFile({ type: 'asset', fileName: 'late.txt', source: 'LATE' });
+            },
+        };
+        // A LATER hook must see what an earlier one emitted — Rollup's behaviour, and the reason the
+        // drain happens between hooks rather than once at the end.
+        const observer: Plugin = { name: 'observer', generateBundle: (_o, b) => void secondSaw.push(...Object.keys(b)) };
+        const r = await build({ '/main.ts': 'export const x = 1;' }, [emitter, observer]);
+        expect(r.assets.map((a) => a.fileName)).toContain('late.txt');
+        expect(secondSaw).toContain('late.txt');
+    });
+
+    it('but a deleted entry stays deleted', async () => {
+        // The falsification arm. Re-reading `graph.emitted` after every hook could resurrect an entry
+        // a plugin had just removed; seeding the seen-set with what is already in the object is what
+        // stops that, and without this test that seeding would look like belt-and-braces.
+        const emitter: Plugin = {
+            name: 'emitter',
+            buildEnd: function () {
+                this.emitFile({ type: 'asset', fileName: 'early.txt', source: 'EARLY' });
+            },
+        };
+        const deleter: Plugin = {
+            name: 'deleter',
+            generateBundle: (_o, b) => {
+                delete b['early.txt'];
+            },
+        };
+        const after: Plugin = { name: 'after', generateBundle: () => {} };
+        const r = await build({ '/main.ts': 'export const x = 1;' }, [emitter, deleter, after]);
+        expect(r.assets.map((a) => a.fileName)).not.toContain('early.txt');
+    });
+
     it('ctx.warn lands in result warnings', async () => {
         const warner: Plugin = {
             name: 'warner',

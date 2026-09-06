@@ -721,7 +721,24 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         const bundleObj: Record<string, GenerateBundleEntry> = {};
         for (const c of outputChunks) bundleObj[c.fileName] = { ...c, type: 'chunk' } as GenerateBundleEntry;
         for (const a of assets) bundleObj[a.fileName] = { ...a, type: 'asset' } as GenerateBundleEntry;
-        for (const hook of pipeline.generateBundle) await hook.handler.call(pluginCtx, naming as never, bundleObj, false);
+        // A hook may also `this.emitFile(...)`, and that file has to become part of the bundle —
+        // rolldown emits it (probed: `late.txt` appears in its output), while shakeup dropped it
+        // WITHOUT AN ERROR, because the collection loop above had already run and nothing read
+        // `graph.emitted` again. Surfaced between hooks so a later one sees what an earlier one
+        // emitted, which is Rollup's behaviour.
+        //
+        // `surfaced` is seeded with everything already in the object, so this only ever ADDS a new
+        // emission — a hook that DELETES an entry keeps it deleted rather than having it reappear on
+        // the next iteration.
+        const surfaced = new Set(graph.emitted.keys());
+        for (const hook of pipeline.generateBundle) {
+            await hook.handler.call(pluginCtx, naming as never, bundleObj, false);
+            for (const [fileName, source] of graph.emitted) {
+                if (surfaced.has(fileName)) continue;
+                surfaced.add(fileName);
+                bundleObj[fileName] = { type: 'asset', fileName, source } as GenerateBundleEntry;
+            }
+        }
         outputChunks = [];
         assets = [];
         for (const [key, entry] of Object.entries(bundleObj)) {
