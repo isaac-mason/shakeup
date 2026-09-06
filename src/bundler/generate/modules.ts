@@ -335,7 +335,17 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
                         // A CommonJS target resolves to its INTEROP namespace (which carries
                         // `default`), not to `namespaceOf` — same object a static `import` of it
                         // gets. Chunk-local alias first, as everywhere else.
-                        const cjsNs = ctx.linked.cjsNamespace.get(rec.resolved);
+                        // The interop namespace comes in TWO flavours — `__toESM(x)` and node-mode
+                        // `__toESM(x, 1)` — and which one an importer gets is decided by its own
+                        // `defFormat`, exactly as `collectRequireOverrides` and `init-obligations`
+                        // decide it. This site read only the non-node map, so under a
+                        // `"type": "module"` package.json the lookup MISSED and fell through to
+                        // `namespaceOf` — an empty synthesized object for a CommonJS target, whose
+                        // export map has nothing in it. `(await import('./dep.cjs')).beta` was
+                        // `undefined`, from a build reporting no errors.
+                        const cjsNs = (isEsmFormat(mod.defFormat) ? ctx.linked.cjsNamespaceNode : ctx.linked.cjsNamespace).get(
+                            rec.resolved,
+                        );
                         const nsName =
                             cjsNs !== undefined
                                 ? (ctx.chunk.importLocalOf.get(cjsNs) ?? finalNameOf(ctx.linked, cjsNs))

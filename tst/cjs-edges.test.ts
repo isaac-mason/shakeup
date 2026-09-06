@@ -347,3 +347,61 @@ describe('re-exporting a CommonJS binding on a chunk`s export clause', () => {
         expect(await run({ ...dep, '/main.js': main })).toBe('A');
     });
 });
+
+// An eleventh never-run configuration: a dynamic `import()` of a CommonJS module, from a package
+// whose `package.json` says `"type": "module"`.
+//
+// The interop namespace comes in two flavours — `__toESM(x)` and node-mode `__toESM(x, 1)` — and an
+// importer gets one or the other by its own `defFormat`. Every consumer of that pair picks with
+// `isEsmFormat(mod.defFormat) ? cjsNamespaceNode : cjsNamespace`; the dynamic-import rewrite read
+// only the non-node map. So under `"type": "module"` the lookup missed and fell through to
+// `namespaceOf` — which for a CommonJS target is an EMPTY object, because a CJS module has no ESM
+// export map. `(await import('./dep.cjs')).beta` came out `undefined`, from a build with no errors.
+//
+// The `package.json` is load-bearing: without it these same fixtures pass, which is why the crossing
+// had never been run.
+describe('dynamic import() of a CommonJS module under "type": "module"', () => {
+    const pkg = { '/package.json': '{"name":"x","type":"module"}' };
+
+    it('resolves to the interop namespace, not an empty synthesized one', async () => {
+        expect(
+            await run({
+                ...pkg,
+                '/dep.cjs': "exports.alpha = 'A';\nexports.beta = 'B';\n",
+                '/mid.cjs': "const d = require('./dep.cjs');\nmodule.exports.viaRequire = d.alpha;\n",
+                '/main.js':
+                    "import mid from './mid.cjs';\n" +
+                    "export const x = Promise.all([mid.viaRequire, import('./dep.cjs').then((m) => m.beta)]);",
+            }),
+        ).toEqual(['A', 'B']);
+    });
+
+    it('and the SAME instance each time, so a mutation between imports is visible', async () => {
+        expect(
+            await run({
+                ...pkg,
+                '/dep.cjs': 'exports.n = 1;\nexports.bump = () => { exports.n += 1; };\n',
+                '/main.js':
+                    "import d from './dep.cjs';\n" +
+                    'export const x = (async () => {\n' +
+                    "  (await import('./dep.cjs')).default.bump();\n" +
+                    "  return [d.n, (await import('./dep.cjs')).default.n];\n" +
+                    '})();',
+            }),
+        ).toEqual([2, 2]);
+    });
+
+    it('still works WITHOUT the package.json — the non-node flavour', async () => {
+        // The falsification arm: the fix picks a map by `defFormat`, so it must not have simply
+        // swapped one hard-coded map for the other. Same shape, no `package.json`, and the target is
+        // statically imported too so it stays in THIS chunk — the branch the fix is in.
+        expect(
+            await run({
+                '/dep.cjs': "exports.beta = 'B';\n",
+                '/main.js':
+                    "import d from './dep.cjs';\n" +
+                    "export const x = Promise.all([d.beta, import('./dep.cjs').then((m) => m.beta)]);",
+            }),
+        ).toEqual(['B', 'B']);
+    });
+});
