@@ -179,6 +179,40 @@ describe('plugin pipeline', () => {
         expect(at.filter((l) => l.startsWith('transform /main.ts'))).toEqual(['transform /main.ts [] []']);
     });
 
+    it("OutputChunk.modules reports each module's rendered contribution", async () => {
+        // Rollup's and rolldown's `OutputChunk.modules`, which plugins like size visualizers read.
+        // Every value below was compared against a real rolldown build of the same input before it
+        // was written: `renderedExports` matches name-for-name, and `renderedLength` differs only by
+        // the `//#region` banner comments rolldown renders and shakeup does not.
+        const seen: Record<string, unknown> = {};
+        const spy: Plugin = {
+            name: 'mods',
+            generateBundle: (_o, b) => {
+                for (const [file, entry] of Object.entries(b)) seen[file] = (entry as { modules?: unknown }).modules;
+            },
+        };
+        const { chunks } = await build(
+            {
+                '/lib.ts': 'export const foo = 42;\nexport const dropped = 1;',
+                '/reexporter.ts': "export { foo } from './lib';",
+                '/main.ts': "export { foo } from './reexporter';",
+            },
+            [spy],
+        );
+        const mods = chunks[0].modules;
+        // A pure RE-EXPORTER renders nothing and is absent; the ENTRY renders nothing either but is
+        // listed with `code: null`, because it is why the chunk exists. Both oracles agree on exactly
+        // this pair of keys, in this order.
+        expect(Object.keys(mods)).toEqual(['/lib.ts', '/main.ts']);
+        expect(mods['/main.ts']).toEqual({ code: null, renderedLength: 0, renderedExports: ['foo'] });
+        expect(mods['/lib.ts'].code).toContain('foo = 42');
+        expect(mods['/lib.ts'].renderedLength).toBe(mods['/lib.ts'].code?.length);
+        // `dropped` was shaken, so it is not a rendered export — the field's whole point.
+        expect(mods['/lib.ts'].renderedExports).toEqual(['foo']);
+        // The same object reaches `generateBundle`, which is where the fixtures read it.
+        expect(seen['main.js']).toBe(mods);
+    });
+
     it('ctx.warn lands in result warnings', async () => {
         const warner: Plugin = {
             name: 'warner',

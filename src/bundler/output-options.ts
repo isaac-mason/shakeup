@@ -1,6 +1,21 @@
 import type { CompressMode } from '../passes/compress/index.ts';
 import { type GetHash, type HashCharacters, hasherByType } from '../util/hash.ts';
 
+/**
+ * One module's contribution to a chunk, as both oracles report it on `OutputChunk.modules`.
+ *
+ * `code` is the module's region of the RENDERED chunk — its text before any chunk-level
+ * post-processing. shakeup's cosmetic compress (and rolldown's minifier, and a `renderChunk` plugin)
+ * run over the assembled chunk afterwards and neither bundler restates these; Rollup documents
+ * `renderedLength` the same way.
+ */
+export type RenderedModule = {
+    code: string | null;
+    renderedLength: number;
+    /** The module's exported names that SURVIVED — shaken-away ones are not listed. */
+    renderedExports: string[];
+};
+
 /** Slim `PreRenderedChunk` passed to filename functions. */
 export type PreRenderedChunk = {
     name: string;

@@ -563,5 +563,6 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         imports: importNames,
         dynamicImports: dynamicImportNames,
         exports: exportedNames,
+        modules: mods.modules,
     };
 }

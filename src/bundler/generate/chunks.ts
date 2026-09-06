@@ -5,7 +5,14 @@
 // than beside either, because this is the only caller and the pipeline reads top-down from it.
 
 import type { CompressMode } from '../../passes/compress/index.ts';
-import { composeMappings, encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from '../../util/sourcemap.ts';
+import {
+    composeMappings,
+    encodeMappings,
+    inlineSourceMapComment,
+    joinParts,
+    type Part,
+    type SourceMap,
+} from '../../util/sourcemap.ts';
 import type { OutputChunk } from '../bundle.ts';
 import { compressChunk } from '../chunk-compress.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
@@ -19,6 +26,7 @@ import {
     makeUnique,
     type NormalizedOutputNaming,
     type PreRenderedChunk,
+    type RenderedModule,
     renderNamePattern,
     replacePlaceholders,
     replacePlaceholdersWithDefaultAndGetContainedPlaceholders,
@@ -126,6 +134,7 @@ export type CachedRender = {
     imports: string[];
     dynamicImports: string[];
     exports: string[];
+    modules: Record<string, RenderedModule>;
 };
 export type RenderCache = Map<string, CachedRender>;
 
@@ -283,6 +292,7 @@ export function renderChunks(
                 imports: cached.imports,
                 dynamicImports: cached.dynamicImports,
                 exports: cached.exports,
+                modules: cached.modules,
             });
             inc.stats.reused++;
             continue;
@@ -297,7 +307,14 @@ export function renderChunks(
         // is the only place a mangler runs at all.
         if (compressMode === 'full' || chunkMangle) {
             const joined = wantMap ? joinParts(rc.parts) : null;
-            const done = compressChunk(rc.code, { minify: naming.minify }, wantMap, chunkMangle, compressMode === 'full', effectiveComments(naming.comments, naming.minify));
+            const done = compressChunk(
+                rc.code,
+                { minify: naming.minify },
+                wantMap,
+                chunkMangle,
+                compressMode === 'full',
+                effectiveComments(naming.comments, naming.minify),
+            );
             rc.code = done.code;
             // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
             // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.
@@ -319,6 +336,7 @@ export function renderChunks(
                 imports: rc.imports,
                 dynamicImports: rc.dynamicImports,
                 exports: rc.exports,
+                modules: rc.modules,
             });
             inc.stats.rendered++;
         }
@@ -416,6 +434,7 @@ export function renderChunks(
             imports: rc.imports,
             dynamicImports: rc.dynamicImports,
             exports: rc.exports,
+            modules: rc.modules,
             code,
             map,
         });

@@ -29,7 +29,7 @@ import {
 } from '../graph-types.ts';
 import { initRefForRecord, recordIsInitObligation } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
-import { effectiveComments } from '../output-options.ts';
+import { effectiveComments, type RenderedModule } from '../output-options.ts';
 import { isRequireCall } from '../scan.ts';
 import {
     clauseSep,
@@ -41,7 +41,6 @@ import {
     type RenderedModules,
 } from './context.ts';
 import { freeRequireRefs } from './esm.ts';
-
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
 function renameOf(ctx: EmitCtx, identNode: Node): string | null {
@@ -535,6 +534,36 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
     const moduleParts: Part[] = [];
     const mapSources: string[] = [];
     const mapSourcesContent: string[] = [];
+    /** `OutputChunk.modules`. Insertion order is `chunk.modules` order, which is emit order, which is
+     *  what Rollup's own fixtures assert (`inline-dynamic-imports-bundle` reads `Object.keys`). */
+    const modules: Record<string, RenderedModule> = {};
+    /** A module's exported names that survived the shake. `null` liveness (`treeshake: false`) means
+     *  everything survived. Reads the same `liveRefs` set the emitter resolves names through, so it
+     *  cannot drift from what the chunk actually exports. */
+    const renderedExportsOf = (idx: number): string[] => {
+        // The module's OWN declared surface (`namedExports`), not `linked.exportMaps` — the latter is
+        // built only for entries and namespace targets, so an ordinary module answered `[]` where
+        // rolldown answers its export names.
+        const m = graph.modules[idx];
+        const out: string[] = [];
+        for (const [name, exp] of m.namedExports) {
+            // A re-export (`export { x } from './y'`) names ANOTHER module's binding, so there is no
+            // local symbol to test — resolve it through the link stage's export map, which is where
+            // that indirection is already followed. Present for entries and namespace targets; an
+            // ordinary re-exporting module has none, and its re-exports go unreported rather than
+            // guessed. (`chunk.exports` is not the answer: it is still empty when this runs.)
+            if (exp.rec >= 0) {
+                const bind = linked.exportMaps.get(idx)?.get(name);
+                if (shaken === null) out.push(name);
+                else if (bind === undefined) continue;
+                else if (bind.kind !== 'found' && bind.kind !== 'cjs-member') out.push(name);
+                else if (shaken.liveRefs.has(bind.ref)) out.push(name);
+                continue;
+            }
+            if (shaken === null || shaken.liveRefs.has(packRef(idx, exp.symbol))) out.push(name);
+        }
+        return out;
+    };
     const chunkKey = chunk.modules.map((i) => graph.modules[i].id).join('\x1f');
 
     for (const idx of chunk.modules) {
@@ -560,6 +589,11 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
             ) {
                 reuse.stats.moduleReused++;
                 if (entry.text !== '') {
+                    modules[mod.id] = {
+                        code: entry.text,
+                        renderedLength: entry.text.length,
+                        renderedExports: renderedExportsOf(idx),
+                    };
                     if (wantMap) {
                         mapSources.push(mod.id);
                         mapSourcesContent.push(mod.source);
@@ -801,7 +835,20 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 }
             }
         }
+        // A module that rendered nothing is ABSENT — that is how a pure re-exporter stays out of
+        // `modules`, which both oracles agree on (`reexporter.js` appears in neither). The chunk's
+        // own entry module is the exception: it is listed with `code: null, renderedLength: 0` even
+        // when it contributed no text, because it is why the chunk exists. Recorded HERE rather than
+        // appended afterwards so its position in the map matches emit order.
+        //
+        // HONEST LIMIT: any OTHER included module that renders nothing would be missing. Neither
+        // oracle's fixtures exercise one, and shakeup has no "included" flag distinct from "rendered
+        // something", so the case is unrepresented rather than handled.
+        if (out === '' && idx === chunk.entryModule) {
+            modules[mod.id] = { code: null, renderedLength: 0, renderedExports: renderedExportsOf(idx) };
+        }
         if (out !== '') {
+            modules[mod.id] = { code: out, renderedLength: out.length, renderedExports: renderedExportsOf(idx) };
             if (wantMap) {
                 mapSources.push(mod.id);
                 mapSourcesContent.push(mod.source);
@@ -830,5 +877,5 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         }
     }
 
-    return { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs };
+    return { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs, modules };
 }

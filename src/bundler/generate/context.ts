@@ -10,7 +10,7 @@ import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
 import { externalKey, type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE } from '../graph-types.ts';
 import type { InteropOwner } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
-import type { NormalizedOutputNaming } from '../output-options.ts';
+import type { NormalizedOutputNaming, RenderedModule } from '../output-options.ts';
 import type { TreeshakeResult } from '../treeshake.ts';
 
 /** Per-module render context. Built once per module inside `renderChunk`'s loop, and by nothing
@@ -141,6 +141,9 @@ export type RenderedModules = {
     entryStarSpecs: string[];
     /** External specifiers imported for side effects only. */
     sideEffectSpecs: Set<string>;
+    /** Per-module rendered text, keyed by module id, in emit order — `OutputChunk.modules`. A module
+     *  that rendered nothing is omitted, which is what makes a pure re-exporter absent from it. */
+    modules: Record<string, RenderedModule>;
 };
 
 export const isIdentName = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
@@ -174,6 +177,7 @@ export type RenderedChunk = {
     imports: string[];
     dynamicImports: string[];
     exports: string[];
+    modules: Record<string, RenderedModule>;
 };
 
 export type RenderStats = { rendered: number; reused: number; moduleRendered: number; moduleReused: number };

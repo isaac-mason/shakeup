@@ -32,6 +32,7 @@ import {
     type NormalizedOutputNaming,
     normalizeOutputOptions,
     type OutputOptionsNaming,
+    type RenderedModule,
     resolveMinify,
 } from './output-options.ts';
 import {
@@ -148,6 +149,10 @@ export type OutputChunk = {
     dynamicImports: string[];
     /** Exported names this chunk surfaces. */
     exports: string[];
+    /** Per-module rendered contribution, keyed by module id, in emit order — Rollup's and rolldown's
+     *  `OutputChunk.modules`. A module that rendered nothing (a pure re-exporter) is absent, which is
+     *  what Rollup's `inline-dynamic-imports-bundle` asserts by reading `Object.keys`. */
+    modules: Record<string, RenderedModule>;
     code: string;
     map?: SourceMap;
 };
