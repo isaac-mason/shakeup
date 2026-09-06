@@ -37,6 +37,7 @@ import {
     resolveMinify,
 } from './output-options.ts';
 import {
+    addOutputPlugins,
     callOptionsHook,
     compilePipeline,
     type GenerateBundleEntry,
@@ -44,6 +45,7 @@ import {
     type ModuleInfo,
     normalizePluginOption,
     type PluginCtx,
+    type PluginOption,
     pluginParse,
 } from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
@@ -89,6 +91,10 @@ export type ManualChunks = ((id: string, meta: ChunkMeta) => string | null | und
 
 /** Output-shaping options plus naming/hash/sourcemap (from {@link OutputOptionsNaming}). */
 export type OutputOptions = OutputOptionsNaming & {
+    /** Plugins for THIS output only. Both oracles have it; only the GENERATE-phase hooks of these
+     *  run (`renderStart`, `renderChunk`, `generateBundle`) — a build hook on an output plugin is
+     *  ignored, not an error, which is Rollup's documented behaviour. */
+    plugins?: PluginOption;
     /** false / the deprecated inlineDynamicImports = don't split dynamic imports out. An
      *  object configures groups. Default true. */
     codeSplitting?: boolean | { minSize?: number; groups?: CodeSplittingGroup[] };
@@ -334,7 +340,12 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         options as unknown as Record<string, unknown>,
         minimalCtx,
     )) as unknown as BundleOptions;
-    const pipeline = compilePipeline(await normalizePluginOption(options.plugins));
+    const inputPlugins = await normalizePluginOption(options.plugins);
+    const pipeline = compilePipeline(inputPlugins);
+    // OUTPUT plugins contribute their generate-phase hooks, after the input plugins'. Their
+    // `pluginIdx` continues the input list's so the two cannot collide.
+    const outputPlugins = await normalizePluginOption(options.output?.plugins);
+    if (outputPlugins.length > 0) addOutputPlugins(pipeline, outputPlugins, inputPlugins.length);
     const warningsOut: string[] = [...optionsWarnings];
     // Full PluginCtx for the bundle-level hooks (buildStart/renderChunk/buildEnd).
     // getModuleInfo/getModuleIds read `graph` once it's built (null/empty before);
@@ -652,6 +663,25 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         naming = normalizeOutputOptions(options.output, options.sourcemap, multiChunk, warnings);
     } catch (e) {
         return failed([(e as Error).message], warnings, linked, shaken);
+    }
+
+    // `renderStart` — the first GENERATE-phase hook, with the output options SETTLED (`naming` is
+    // normalized above) and before any chunk is rendered. Awaited in PARALLEL: both oracles list it
+    // as `async parallel`, like `buildStart`.
+    //
+    // It gets the INPUT options as well, which is the whole reason the hook takes two arguments — a
+    // plugin used as an OUTPUT plugin has never seen them otherwise.
+    if (pipeline.renderStart.length > 0) {
+        await Promise.all(
+            pipeline.renderStart.map((hook) =>
+                hook.handler.call(
+                    pluginCtx,
+                    naming as unknown as Record<string, unknown>,
+                    options as unknown as Record<string, unknown>,
+                ),
+            ),
+        );
+        warnings.push(...warningsOut.splice(0));
     }
 
     // Two-pass render → content-hash → final-hash → substitute (see renderChunks below). The per-chunk

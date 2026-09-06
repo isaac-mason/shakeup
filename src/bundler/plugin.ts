@@ -300,6 +300,19 @@ export type Plugin = {
     /** Rewrite an emitted chunk. Rollup documents this as ASYNC, and plugins written against it
      *  return promises — hence {@link MaybePromise}. Hooks run in order, each seeing the previous
      *  one's output. */
+    /**
+     * `renderStart(outputOptions, inputOptions)` — the first GENERATE-phase hook, once the output
+     * options are settled and before any chunk is rendered.
+     *
+     * It receives the INPUT options too, which is the point rolldown's own docs make: "plugins that
+     * can be used as output plugins, i.e. plugins that only use generate phase hooks, can get access
+     * to them". Async PARALLEL in both oracles' tables, like `buildStart`.
+     */
+    renderStart?: (
+        this: PluginCtx,
+        outputOptions: Record<string, unknown>,
+        inputOptions: Record<string, unknown>,
+    ) => MaybePromise<void>;
     renderChunk?: (this: PluginCtx, code: string) => MaybePromise<string | { code: string; map?: unknown } | null | undefined>;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
     /**
@@ -348,6 +361,7 @@ export type Pipeline = {
     load: Compiled<Extract<NonNullable<Plugin['load']>, (...a: never[]) => unknown>>[];
     transform: Compiled<Extract<NonNullable<Plugin['transform']>, (...a: never[]) => unknown>>[];
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
+    renderStart: Compiled<NonNullable<Plugin['renderStart']>>[];
     renderChunk: Compiled<NonNullable<Plugin['renderChunk']>>[];
     buildEnd: Compiled<NonNullable<Plugin['buildEnd']>>[];
     generateBundle: Compiled<NonNullable<Plugin['generateBundle']>>[];
@@ -429,7 +443,20 @@ export async function callOptionsHook(
     return current;
 }
 
-export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
+/** The GENERATE-phase hooks, and the only ones an OUTPUT plugin contributes. Rollup's wording:
+ *  "plugins that can be used as output plugins, i.e. plugins that only use generate phase hooks" —
+ *  a build hook on an output plugin does not run, and is not an error in either oracle. */
+export const OUTPUT_HOOKS = ['renderStart', 'renderChunk', 'generateBundle'] as const;
+
+/** Merge an OUTPUT plugin list's generate-phase hooks into an existing pipeline, in order after the
+ *  input plugins'. `idxOffset` keeps `pluginIdx` unique across the two lists — it is the identity
+ *  `skipSelf` is keyed on, and a collision would take the wrong plugin out of a resolve chain. */
+export function addOutputPlugins(pipeline: Pipeline, plugins: readonly Plugin[], idxOffset: number): void {
+    const out = compilePipeline(plugins, idxOffset);
+    for (const hook of OUTPUT_HOOKS) (pipeline[hook] as unknown[]).push(...(out[hook] as unknown[]));
+}
+
+export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipeline {
     const pipeline: Pipeline = {
         buildStart: [],
         resolveId: [],
@@ -438,10 +465,12 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         transform: [],
         generateBundle: [],
         moduleParsed: [],
+        renderStart: [],
         renderChunk: [],
         buildEnd: [],
     };
-    for (const [pluginIdx, p] of plugins.entries()) {
+    for (const [i, p] of plugins.entries()) {
+        const pluginIdx = i + idxOffset;
         const bs = normalize(p.name, pluginIdx, p.buildStart);
         if (bs !== null) pipeline.buildStart.push(bs);
         const ri = normalize(p.name, pluginIdx, p.resolveId);
@@ -454,6 +483,8 @@ export function compilePipeline(plugins: readonly Plugin[]): Pipeline {
         if (tr !== null) pipeline.transform.push(tr as Pipeline['transform'][number]);
         const mp = normalize(p.name, pluginIdx, p.moduleParsed);
         if (mp !== null) pipeline.moduleParsed.push(mp);
+        const rs = normalize(p.name, pluginIdx, p.renderStart);
+        if (rs !== null) pipeline.renderStart.push(rs);
         const rc = normalize(p.name, pluginIdx, p.renderChunk);
         if (rc !== null) pipeline.renderChunk.push(rc);
         const be = normalize(p.name, pluginIdx, p.buildEnd);

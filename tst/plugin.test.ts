@@ -327,6 +327,64 @@ describe('plugin pipeline', () => {
         expect(unknown).toMatch(/Unknown file reference id/);
     });
 
+    it('renderStart fires before rendering, and output.plugins contribute only generate hooks', async () => {
+        // `renderStart(outputOptions, inputOptions)` is the first generate-phase hook, once the output
+        // options are settled. It takes the INPUT options too, which is the point rolldown's docs
+        // make: "plugins that can be used as output plugins ... can get access to them" — an output
+        // plugin has never seen them otherwise.
+        //
+        // `output.plugins` contributes ONLY generate-phase hooks. A build hook on one does not run,
+        // and is not an error, which is Rollup's documented behaviour and the assertion below that
+        // would be easy to omit.
+        const order: string[] = [];
+        let outputOptions: Record<string, unknown> = {};
+        let inputOptions: Record<string, unknown> = {};
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const x = 1;' }),
+            external: [],
+            output: {
+                entryFileNames: '[name].js',
+                plugins: [
+                    {
+                        name: 'out',
+                        renderStart: (o, i) => {
+                            order.push('out:renderStart');
+                            outputOptions = o;
+                            inputOptions = i;
+                        },
+                        renderChunk: (c) => {
+                            order.push('out:renderChunk');
+                            return c;
+                        },
+                        generateBundle: () => void order.push('out:generateBundle'),
+                        transform: (c) => {
+                            order.push('out:transform');
+                            return c;
+                        },
+                        buildStart: () => void order.push('out:buildStart'),
+                    },
+                ],
+            },
+            plugins: [
+                {
+                    name: 'in',
+                    buildStart: () => void order.push('in:buildStart'),
+                    renderStart: () => void order.push('in:renderStart'),
+                },
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        // Input plugin's hooks first, then the output plugin's, and NOTHING from its build hooks.
+        expect(order).toEqual(['in:buildStart', 'in:renderStart', 'out:renderStart', 'out:renderChunk', 'out:generateBundle']);
+        // Settled OUTPUT options, not the raw object: `entryFileNames` is present because it was
+        // given, and the rest of the normalized naming surface is there too.
+        expect(outputOptions.entryFileNames).toBe('[name].js');
+        expect(Object.keys(outputOptions)).toContain('chunkFileNames');
+        // And the INPUT options, which is the whole reason the hook takes two arguments.
+        expect(inputOptions.entry).toBe('/main.ts');
+    });
+
     it('an output asset carries the full rollup/rolldown shape', async () => {
         // Every expectation here was read off a real rolldown build of the same four emits before it
         // was written — including the two that are easy to get backwards: `name` is ABSENT (not
