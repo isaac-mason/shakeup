@@ -740,16 +740,40 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     //
     // It gets the INPUT options as well, which is the whole reason the hook takes two arguments — a
     // plugin used as an OUTPUT plugin has never seen them otherwise.
+    /**
+     * `renderError` — the render failed. The WINDOW is `renderStart` to the end of chunk rendering,
+     * and nothing else: not `generateBundle`, not the output-directory check after it, not a
+     * build-phase failure. Measured against rolldown (llm/repro/_rendererr.mts) and confirmed
+     * against rollup's own source, where `Bundle.ts:60-91` wraps exactly this span in the try that
+     * calls the hook and runs `generateBundle` afterwards.
+     *
+     * Parallel, matching rollup's `hookParallel`. It does NOT change the outcome — a throw stays a
+     * throw and a `failed()` stays a `failed()`; this only tells the plugins.
+     */
+    const renderErrorHook = async (e: unknown): Promise<void> => {
+        if (pipeline.renderError.length === 0) return;
+        const error = e instanceof Error ? e : new Error(String(e));
+        await Promise.all(pipeline.renderError.map((hook) => hook.handler.call(pluginCtx, error)));
+        warnings.push(...warningsOut.splice(0));
+    };
+
     if (pipeline.renderStart.length > 0) {
-        await Promise.all(
-            pipeline.renderStart.map((hook) =>
-                hook.handler.call(
-                    pluginCtx,
-                    naming as unknown as Record<string, unknown>,
-                    options as unknown as Record<string, unknown>,
+        try {
+            await Promise.all(
+                pipeline.renderStart.map((hook) =>
+                    hook.handler.call(
+                        pluginCtx,
+                        naming as unknown as Record<string, unknown>,
+                        options as unknown as Record<string, unknown>,
+                    ),
                 ),
-            ),
-        );
+            );
+        } catch (e) {
+            // Rethrown, because that is what a throwing `renderStart` already did here. Alignment is
+            // in WHEN the hook fires, not in changing how the build fails.
+            await renderErrorHook(e);
+            throw e;
+        }
         warnings.push(...warningsOut.splice(0));
     }
 
@@ -885,6 +909,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         outputChunks = r.chunks;
         assets = r.assets;
     } catch (e) {
+        await renderErrorHook(e);
         return failed([(e as Error).message], warnings, linked, shaken);
     }
     Timer.end(timer, 'render');

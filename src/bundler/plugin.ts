@@ -406,6 +406,24 @@ export type Plugin = {
      * propagates to every chunk that imports this one, exactly as a content change would.
      */
     augmentChunkHash?: (this: PluginCtx, chunk: RenderedChunkInfo) => MaybePromise<string | void | null | undefined>;
+    /**
+     * `renderError(error)` — the render failed. Fires for errors between `renderStart` and the end
+     * of chunk rendering, and NOWHERE ELSE. That window is narrower than "during generate", and it
+     * was measured rather than read off the doc comment (llm/repro/_rendererr.mts, rolldown 1.2.4):
+     *
+     *     fail in renderChunk      renderStart | renderError(...) | throw
+     *     fail in generateBundle   renderStart | throw                      <- NO renderError
+     *     fail in transform        buildEnd(ERROR) | closeBundle | throw    <- NO renderError
+     *
+     * rolldown is faithful to rollup there: `Bundle.ts:60-91` wraps `renderStart` → `generateChunks`
+     * → `renderChunks` in the try that calls this hook, and calls `generateBundle` and
+     * `validateOutputBundleFileNames` after it.
+     *
+     * Async parallel, like rollup's `hookParallel`. It does not change the outcome — the build still
+     * fails the way it would have — it is the notification a plugin needs to undo what it set up in
+     * `renderStart`.
+     */
+    renderError?: (this: PluginCtx, error?: Error) => MaybePromise<void>;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
     /**
      * `generateBundle(options, bundle, isWrite)` — the last chance to inspect or MUTATE the output.
@@ -459,6 +477,7 @@ export type Pipeline = {
     renderStart: Compiled<NonNullable<Plugin['renderStart']>>[];
     renderChunk: Compiled<NonNullable<Plugin['renderChunk']>>[];
     augmentChunkHash: Compiled<NonNullable<Plugin['augmentChunkHash']>>[];
+    renderError: Compiled<NonNullable<Plugin['renderError']>>[];
     buildEnd: Compiled<NonNullable<Plugin['buildEnd']>>[];
     generateBundle: Compiled<NonNullable<Plugin['generateBundle']>>[];
 };
@@ -602,7 +621,14 @@ export async function callOptionsHook(
 /** The GENERATE-phase hooks, and the only ones an OUTPUT plugin contributes. Rollup's wording:
  *  "plugins that can be used as output plugins, i.e. plugins that only use generate phase hooks" —
  *  a build hook on an output plugin does not run, and is not an error in either oracle. */
-export const OUTPUT_HOOKS = ['outputOptions', 'renderStart', 'renderChunk', 'augmentChunkHash', 'generateBundle'] as const;
+export const OUTPUT_HOOKS = [
+    'outputOptions',
+    'renderStart',
+    'renderChunk',
+    'augmentChunkHash',
+    'renderError',
+    'generateBundle',
+] as const;
 
 /** Merge an OUTPUT plugin list's generate-phase hooks into an existing pipeline, in order after the
  *  input plugins'. `idxOffset` keeps `pluginIdx` unique across the two lists — it is the identity
@@ -625,6 +651,7 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         renderStart: [],
         renderChunk: [],
         augmentChunkHash: [],
+        renderError: [],
         buildEnd: [],
     };
     for (const [i, p] of plugins.entries()) {
@@ -649,6 +676,8 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         if (rc !== null) pipeline.renderChunk.push(rc);
         const ach = normalize(p.name, pluginIdx, p.augmentChunkHash);
         if (ach !== null) pipeline.augmentChunkHash.push(ach);
+        const re = normalize(p.name, pluginIdx, p.renderError);
+        if (re !== null) pipeline.renderError.push(re);
         const be = normalize(p.name, pluginIdx, p.buildEnd);
         if (be !== null) pipeline.buildEnd.push(be);
         const gb = normalize(p.name, pluginIdx, p.generateBundle);

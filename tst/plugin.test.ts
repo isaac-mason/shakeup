@@ -1160,3 +1160,95 @@ describe('the outputOptions hook', () => {
         expect(r.chunks[0].fileName).toBe('out-main.js');
     });
 });
+
+// `renderError` — the render failed. The WINDOW is the point of this test block: it is `renderStart`
+// to the end of chunk rendering, and nothing else. That is narrower than "during generate", and it
+// was measured (llm/repro/_rendererr.mts) rather than read off a doc comment:
+//
+//     rolldown  fail in renderChunk      renderStart | renderError(...) | throw
+//     rolldown  fail in generateBundle   renderStart | throw                    <- NO renderError
+//     rolldown  fail in transform        buildEnd(ERROR) | closeBundle | throw  <- NO renderError
+//
+// and confirmed against rollup's own `Bundle.ts:60-91`, which wraps exactly that span.
+describe('renderError', () => {
+    const FILES = { '/main.ts': "import './dep.ts';\nexport const a = 1;\n", '/dep.ts': 'export const d = 2;\n' };
+    /** run a build that fails in `failIn`, and report whether renderError saw it. */
+    const seenBy = async (failIn: 'none' | 'transform' | 'renderChunk' | 'generateBundle' | 'renderStart') => {
+        const errors: string[] = [];
+        const plugin = {
+            name: 'boom',
+            transform(_c: string, id: string) {
+                if (failIn === 'transform' && id === '/main.ts') throw new Error('transform exploded');
+                return null;
+            },
+            renderStart() {
+                if (failIn === 'renderStart') throw new Error('renderStart exploded');
+            },
+            renderChunk(code: string) {
+                if (failIn === 'renderChunk') throw new Error('renderChunk exploded');
+                return code;
+            },
+            generateBundle() {
+                if (failIn === 'generateBundle') throw new Error('generateBundle exploded');
+            },
+            renderError(e?: Error) {
+                errors.push(e?.message ?? '<no error>');
+            },
+        } as unknown as Plugin;
+        let threw = false;
+        try {
+            await bundle({ entry: '/main.ts', fs: createMemoryFs(FILES), external: [], plugins: [plugin] });
+        } catch {
+            threw = true;
+        }
+        return { errors, threw };
+    };
+
+    it('fires when chunk rendering fails, with the error', async () => {
+        const { errors } = await seenBy('renderChunk');
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain('renderChunk exploded');
+    });
+
+    it('fires when renderStart fails', async () => {
+        const { errors, threw } = await seenBy('renderStart');
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain('renderStart exploded');
+        expect(threw, 'and the build still fails the way it did before').toBe(true);
+    });
+
+    it('does NOT fire when generateBundle fails — that is outside the window', async () => {
+        // The measured boundary, and the arm that catches "fire it for any generate-phase error".
+        expect((await seenBy('generateBundle')).errors).toEqual([]);
+    });
+
+    it('does NOT fire for a BUILD-phase failure', async () => {
+        expect((await seenBy('transform')).errors).toEqual([]);
+    });
+
+    it('does NOT fire when the build succeeds', async () => {
+        expect((await seenBy('none')).errors).toEqual([]);
+    });
+
+    it('an OUTPUT plugin contributes it', async () => {
+        const errors: string[] = [];
+        await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(FILES),
+            external: [],
+            output: {
+                plugins: [
+                    {
+                        name: 'out',
+                        renderChunk() {
+                            throw new Error('from an output plugin');
+                        },
+                        renderError: (e?: Error) => void errors.push(e?.message ?? ''),
+                    },
+                ],
+            } as never,
+        });
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain('from an output plugin');
+    });
+});
