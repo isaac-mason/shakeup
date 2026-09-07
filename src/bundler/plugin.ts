@@ -322,6 +322,24 @@ export type Plugin = {
         this: MinimalPluginCtx,
         options: Record<string, unknown>,
     ) => MaybePromise<Record<string, unknown> | null | undefined>;
+    /**
+     * `outputOptions(options)` — inspect or replace the OUTPUT options at the start of the generate
+     * phase, the way {@link Plugin.options} does for the input ones. Returning an object replaces
+     * them; returning nothing keeps them. Sequential, so each plugin sees the previous one's result.
+     *
+     * Measured against rolldown 1.2.4 (llm/repro/_outopts.mts): it hands the hook the RAW options,
+     * the return value replaces them, `renderStart` sees the replacement, and the emitted file names
+     * follow. shakeup ran no such hook at all — the name existed only as an ARGUMENT to
+     * `renderStart`/`renderChunk`.
+     *
+     * Generate-phase, so it runs AFTER the build: an option the build already consumed (the asset
+     * name pattern threaded into scan, the scan-time compress tier) is past changing by then. Both
+     * oracles have the same boundary, for the same reason.
+     */
+    outputOptions?: (
+        this: MinimalPluginCtx,
+        options: Record<string, unknown>,
+    ) => Record<string, unknown> | null | undefined;
     buildStart?: (this: PluginCtx) => MaybePromise<void>;
     resolveId?: WithFilter<
         (this: PluginCtx, specifier: string, importer: string | undefined, extra: ResolveIdExtra) => MaybePromise<ResolveIdResult>
@@ -437,6 +455,7 @@ export type Pipeline = {
     load: Compiled<Extract<NonNullable<Plugin['load']>, (...a: never[]) => unknown>>[];
     transform: Compiled<Extract<NonNullable<Plugin['transform']>, (...a: never[]) => unknown>>[];
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
+    outputOptions: Compiled<NonNullable<Plugin['outputOptions']>>[];
     renderStart: Compiled<NonNullable<Plugin['renderStart']>>[];
     renderChunk: Compiled<NonNullable<Plugin['renderChunk']>>[];
     augmentChunkHash: Compiled<NonNullable<Plugin['augmentChunkHash']>>[];
@@ -551,6 +570,21 @@ export function normalizePluginOptionSync(plugins: PluginOption, warn: (m: strin
  *  REPLACES the options; returning nothing leaves the (possibly mutated) object in place. The caller
  *  must re-run {@link normalizePluginOption} over the result's `plugins` afterwards — that is what
  *  lets a hook add a plugin, and it is the order both oracles use. */
+/** `outputOptions`, in plugin order, each seeing the previous one's result — rollup and rolldown
+ *  both run it sequentially at the start of generate. Sync in both, so this is too. */
+export function callOutputOptionsHook(
+    pipeline: Pipeline,
+    options: Record<string, unknown>,
+    ctx: MinimalPluginCtx,
+): Record<string, unknown> {
+    let current = options;
+    for (const hook of pipeline.outputOptions) {
+        const next = hook.handler.call(ctx, current);
+        if (next !== null && next !== undefined) current = next;
+    }
+    return current;
+}
+
 export async function callOptionsHook(
     plugins: readonly Plugin[],
     options: Record<string, unknown>,
@@ -568,7 +602,7 @@ export async function callOptionsHook(
 /** The GENERATE-phase hooks, and the only ones an OUTPUT plugin contributes. Rollup's wording:
  *  "plugins that can be used as output plugins, i.e. plugins that only use generate phase hooks" —
  *  a build hook on an output plugin does not run, and is not an error in either oracle. */
-export const OUTPUT_HOOKS = ['renderStart', 'renderChunk', 'augmentChunkHash', 'generateBundle'] as const;
+export const OUTPUT_HOOKS = ['outputOptions', 'renderStart', 'renderChunk', 'augmentChunkHash', 'generateBundle'] as const;
 
 /** Merge an OUTPUT plugin list's generate-phase hooks into an existing pipeline, in order after the
  *  input plugins'. `idxOffset` keeps `pluginIdx` unique across the two lists — it is the identity
@@ -587,6 +621,7 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         transform: [],
         generateBundle: [],
         moduleParsed: [],
+        outputOptions: [],
         renderStart: [],
         renderChunk: [],
         augmentChunkHash: [],
@@ -606,6 +641,8 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         if (tr !== null) pipeline.transform.push(tr as Pipeline['transform'][number]);
         const mp = normalize(p.name, pluginIdx, p.moduleParsed);
         if (mp !== null) pipeline.moduleParsed.push(mp);
+        const oo = normalize(p.name, pluginIdx, p.outputOptions);
+        if (oo !== null) pipeline.outputOptions.push(oo);
         const rs = normalize(p.name, pluginIdx, p.renderStart);
         if (rs !== null) pipeline.renderStart.push(rs);
         const rc = normalize(p.name, pluginIdx, p.renderChunk);

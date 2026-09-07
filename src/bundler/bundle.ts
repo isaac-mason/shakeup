@@ -40,6 +40,7 @@ import {
 import {
     addOutputPlugins,
     callOptionsHook,
+    callOutputOptionsHook,
     compilePipeline,
     type GenerateBundleEntry,
     type RenderedChunkInfo,
@@ -676,12 +677,25 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
 
     // Assign chunks → wire cross-chunk imports/exports → per-chunk deconflict.
     Timer.start(timer, 'chunk');
+    // `outputOptions` — the generate phase's counterpart to the `options` hook, and the first thing
+    // that runs in it, so every read below sees what the plugins settled on rather than what the
+    // caller passed. Bound to a local because `options.output` is also read during the BUILD, where
+    // this hook has not run yet: an option the build already consumed (the asset pattern threaded
+    // into scan, the scan-time compress tier) is past changing here, which is the same boundary both
+    // oracles draw.
+    const outputOptions = callOutputOptionsHook(
+        pipeline,
+        (options.output ?? {}) as unknown as Record<string, unknown>,
+        pluginCtx,
+    ) as unknown as typeof options.output;
+    warnings.push(...warningsOut.splice(0));
+
     // Option validation reports through `errors` like every other build failure, rather than
     // escaping as a throw — a caller reads `result.errors`, and a config mistake is not an exception.
     let chunkOptions: ReturnType<typeof resolveChunkOptions>;
     try {
         chunkOptions = resolveChunkOptions(
-            options.output,
+            outputOptions,
             graph.entries.length,
             warnings,
             pluginCtx.getModuleInfo,
@@ -690,7 +704,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     } catch (e) {
         return failed([(e as Error).message], warnings, linked, shaken);
     }
-    const min = resolveMinify(options.output?.minify);
+    const min = resolveMinify(outputOptions?.minify);
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
@@ -715,7 +729,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     const multiChunk = chunkGraph.chunks.length > 1;
     let naming: NormalizedOutputNaming;
     try {
-        naming = normalizeOutputOptions(options.output, options.sourcemap, multiChunk, warnings);
+        naming = normalizeOutputOptions(outputOptions, options.sourcemap, multiChunk, warnings);
     } catch (e) {
         return failed([(e as Error).message], warnings, linked, shaken);
     }
@@ -773,7 +787,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 interopOwners,
                 warnings,
                 naming,
-                symbols: options.output?.generatedCode?.symbols !== false,
+                symbols: outputOptions?.generatedCode?.symbols !== false,
                 context: options.context ?? null,
                 wantMap: want,
                 // Emit-glue spacing and module printing both stay readable when the chunk pass will

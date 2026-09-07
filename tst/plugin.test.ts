@@ -1083,3 +1083,80 @@ describe('addWatchFile x cross-module @inline — one transformDependencies fiel
         expect((await build(files2, cache2)).parseStats.parsed, 'inlined producer changed').toBeGreaterThan(0);
     });
 });
+
+// The `outputOptions` HOOK — the generate phase's counterpart to `options`. rolldown has it
+// (plugin/index.ts:335) and shakeup ran no such hook at all: the name existed only as an ARGUMENT to
+// `renderStart`/`renderChunk`. Measured in both (llm/repro/_outopts.mts).
+describe('the outputOptions hook', () => {
+    const FILES = { '/main.ts': 'export const a = 1;\n' };
+    const run = async (plugins: unknown[], output: Record<string, unknown> = { entryFileNames: '[name].js' }) => {
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(FILES),
+            external: [],
+            output: output as never,
+            plugins: plugins as Plugin[],
+        });
+        expect(r.errors).toEqual([]);
+        return r;
+    };
+    const rename = (to: string) => ({
+        name: `to-${to}`,
+        outputOptions: (o: Record<string, unknown>) => ({ ...o, entryFileNames: to }),
+    });
+
+    it('replaces the options — the emitted name follows', async () => {
+        expect((await run([rename('custom-[name].js')])).chunks[0].fileName).toBe('custom-main.js');
+    });
+
+    it('renderStart and renderChunk see the REPLACEMENT, not what the caller passed', async () => {
+        let atStart: unknown;
+        let atChunk: unknown;
+        await run([
+            rename('custom-[name].js'),
+            {
+                name: 'peek',
+                renderStart: (o: Record<string, unknown>) => void (atStart = o.entryFileNames),
+                renderChunk: (_c: string, _ch: unknown, o: Record<string, unknown>) => {
+                    atChunk = o.entryFileNames;
+                    return null;
+                },
+            } as unknown as Plugin,
+        ]);
+        expect(atStart).toBe('custom-[name].js');
+        expect(atChunk).toBe('custom-[name].js');
+    });
+
+    it('is sequential — the second plugin sees the first’s result', async () => {
+        const seen: unknown[] = [];
+        await run([
+            rename('one-[name].js'),
+            {
+                name: 'second',
+                outputOptions: (o: Record<string, unknown>) => {
+                    seen.push(o.entryFileNames);
+                    return { ...o, entryFileNames: 'two-[name].js' };
+                },
+            } as unknown as Plugin,
+        ]);
+        expect(seen, 'the first plugin’s replacement, not the caller’s value').toEqual(['one-[name].js']);
+    });
+
+    it('returning nothing keeps the options', async () => {
+        // The falsification arm: a hook whose result was ignored, or one that wiped the options,
+        // would both pass the first test alone.
+        const r = await run([{ name: 'quiet', outputOptions: () => undefined } as unknown as Plugin]);
+        expect(r.chunks[0].fileName).toBe('main.js');
+    });
+
+    it('an OUTPUT plugin contributes it, like every other generate-phase hook', async () => {
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(FILES),
+            external: [],
+            output: { entryFileNames: '[name].js', plugins: [rename('out-[name].js')] } as never,
+        });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].fileName).toBe('out-main.js');
+    });
+});
