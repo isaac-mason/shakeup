@@ -88,7 +88,7 @@ describe('environment — externalized entry', () => {
             fetchModule: server.fetchModule,
             resolveId: server.resolveId,
             evaluator: {
-                async runExternalModule(target) {
+                async runExternalModule(target: string) {
                     external.push(target);
                     return { v: 'native' };
                 },
