@@ -23,7 +23,7 @@ const bothWays = async (files: Record<string, string>, entry = '/main.js'): Prom
 
     const server = createDevServer({ fs });
     const runner = createModuleRunner({
-        resolveId: (spec, importer) => server.resolveId(spec, importer),
+        resolveId: (spec, importer, extra) => server.resolveId(spec, importer, extra),
         fetchModule: async (id) => {
             const res = await server.fetchModule(id);
             if (res.errors.length > 0) throw new Error(res.errors.join('\n'));
@@ -178,5 +178,118 @@ describe('the dev server SAYS SO when it cannot run something', () => {
             expect(r.errors, id).toEqual([]);
             expect(r.code.length, id).toBeGreaterThan(0);
         }
+    });
+});
+
+// The PLUGIN SURFACE, dev vs bundle. The same plugin object goes into both pipelines; a hook that
+// runs in one and not the other is a silent behaviour change for anyone who writes plugins. Each
+// case below was MEASURED against the bundler first (llm/repro/_resolvesurf.mts) — the assertion on
+// the bundler is not scaffolding, it is the reference the dev assertion is judged against.
+describe('the dev server and the bundler present the same plugin surface', () => {
+    const FILES: Record<string, string> = {
+        '/dep.js': "export const d = 'D';\n",
+        '/lazy.js': "export const l = 'L';\n",
+        '/main.js': "import { d } from './dep.js';\nexport const got = d;\nexport const lazy = () => import('./lazy.js');\n",
+    };
+    const fs: Fs = { read: (id) => FILES[id] ?? null, exists: (id) => id in FILES };
+
+    /** run `plugin` through the dev pipeline, importing (and awaiting the dynamic import of) main. */
+    const throughDev = async (plugin: unknown, entry = '/main.js') => {
+        const server = createDevServer({ fs, plugins: [plugin as never] });
+        const runner = createModuleRunner({
+            resolveId: (spec, importer, extra) => server.resolveId(spec, importer, extra),
+            fetchModule: async (id) => {
+                const res = await server.fetchModule(id);
+                if (res.errors.length > 0) throw new Error(res.errors.join('\n'));
+                return res.code;
+            },
+            createImportMeta: (id) => ({ url: `sk://${id}` }),
+        });
+        const ns = (await runner.import(entry)) as { lazy?: () => Promise<unknown> };
+        await ns.lazy?.();
+    };
+
+    const throughBundle = async (plugin: unknown, entry = '/main.js') => {
+        const r = await bundle({ entry, fs, external: [], output: {}, plugins: [plugin as never] });
+        expect(r.errors, 'bundle').toEqual([]);
+    };
+
+    it('fires buildStart — ONCE, however many modules are served', async () => {
+        // It never fired at all: a plugin doing setup in `buildStart` silently did nothing in dev.
+        let n = 0;
+        await throughDev({ name: 'p', buildStart: () => void n++ });
+        expect(n).toBe(1);
+    });
+
+    it('runs resolveDynamicImport for a dynamic import', async () => {
+        // Dev never entered that chain, so the hook was dead code under the dev server.
+        const seen: string[] = [];
+        const plugin = { name: 'p', resolveDynamicImport: (spec: string) => (seen.push(spec), null) };
+        await throughBundle(plugin);
+        expect(seen, 'bundle').toContain('./lazy.js');
+        seen.length = 0;
+        await throughDev(plugin);
+        expect(seen, 'dev').toContain('./lazy.js');
+    });
+
+    it("gives resolveId the import's KIND, not `import-statement` for everything", async () => {
+        const kinds = new Map<string, Set<string>>();
+        const plugin = {
+            name: 'p',
+            resolveId: (spec: string, _i: string | undefined, extra: { kind: string }) => {
+                (kinds.get(spec) ?? kinds.set(spec, new Set()).get(spec))?.add(extra.kind);
+                return null;
+            },
+        };
+        await throughDev(plugin);
+        expect([...(kinds.get('./lazy.js') ?? [])], 'dynamic').toContain('dynamic-import');
+        expect([...(kinds.get('./dep.js') ?? [])], 'static').toEqual(['import-statement']);
+    });
+
+    it('resolves the ENTRY, with isEntry and kind=entry', async () => {
+        // `runner.import` used the caller's specifier as an id verbatim.
+        const entries: string[] = [];
+        const plugin = {
+            name: 'p',
+            resolveId: (spec: string, importer: string | undefined, extra: { isEntry: boolean; kind: string }) => {
+                if (extra.isEntry) entries.push(`${spec} ${importer === undefined ? 'undefined' : importer} ${extra.kind}`);
+                return null;
+            },
+        };
+        await throughBundle(plugin);
+        expect(entries, 'bundle').toEqual(['/main.js undefined entry']);
+        entries.length = 0;
+        await throughDev(plugin);
+        expect(entries, 'dev').toEqual(['/main.js undefined entry']);
+    });
+
+    it('lets a plugin REWRITE the entry, in both pipelines', async () => {
+        // The payoff of resolving the entry: it is a resolution like any other.
+        const plugin = { name: 'p', resolveId: (spec: string) => (spec === 'app' ? '/main.js' : null) };
+        await throughBundle(plugin, 'app');
+        await throughDev(plugin, 'app');
+    });
+
+    it('carries `custom` through this.resolve — including a SECOND call with different custom', async () => {
+        // `custom` is Rollup's plugin-to-plugin channel; dev dropped it. The second call also had to
+        // defeat dev's resolve cache, which keyed on (importer, spec) alone and reused the first
+        // answer — so it reached the plugin with the FIRST call's custom, or not at all.
+        const got: unknown[] = [];
+        const plugin = {
+            name: 'p',
+            resolveId: (_s: string, _i: string | undefined, extra: { custom?: unknown }) => {
+                if (extra.custom !== undefined) got.push(extra.custom);
+                return null;
+            },
+            load(this: { resolve: (s: string, i: string, o: unknown) => Promise<unknown> }, id: string) {
+                if (id !== '/main.js') return null;
+                return Promise.all([
+                    this.resolve('./dep.js', '/main.js', { custom: { tag: 1 } }),
+                    this.resolve('./dep.js', '/main.js', { custom: { tag: 2 } }),
+                ]).then(() => null);
+            },
+        };
+        await throughDev(plugin);
+        expect(got).toEqual([{ tag: 1 }, { tag: 2 }]);
     });
 });

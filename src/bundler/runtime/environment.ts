@@ -218,10 +218,10 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
             // (or externalises) falls back to a direct fetch by the spec itself, so a
             // host id-scheme the resolver doesn't understand (e.g. a project-relative
             // 'src/app.ts') still loads as it did before.
-            const resolved = await options.resolveId(spec, null);
+            const resolved = await options.resolveId(spec, null, { isEntry: true, kind: 'entry' });
             const id = typeof resolved === 'string' ? resolved : spec;
             roots.add(id); // an explicitly-imported module is a root (never orphaned)
-            return runner.import(id);
+            return runner.importResolved(id);
         },
         applyEdit,
         node: (id) => graph.get(id),

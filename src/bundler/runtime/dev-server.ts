@@ -5,6 +5,7 @@ import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
 import {
     compilePipeline,
+    type ImportKind,
     type ModuleInfo,
     normalizePluginOptionSync,
     type PartialResolvedId,
@@ -69,7 +70,7 @@ export type FetchResult = {
 export type EnvHandle = { readonly name: string; applyEdit(id: string): Promise<HmrUpdate> };
 
 export type DevServer = {
-    resolveId(spec: string, importer: string | null): Promise<ResolveResult>;
+    resolveId(spec: string, importer: string | null, extra?: ResolveIdExtra): Promise<ResolveResult>;
     /** transform (cached) + graph-track a module; the runner calls this. */
     fetchModule(id: string): Promise<FetchResult>;
     /** mark a module changed: drop its cache so the next fetch re-transforms. */
@@ -294,17 +295,64 @@ export function createDevServer(options: DevServerOptions): DevServer {
         getModuleIds: () => graph.keys(),
     };
 
-    async function resolveId(spec: string, importer: string | null, _extra?: ResolveIdExtra): Promise<ResolveResult> {
-        const key = `${importer ?? ''}\x00${spec}`;
+    /**
+     * `buildStart`, ONCE per server, lazily.
+     *
+     * It never ran here at all — a plugin doing setup in `buildStart` (seeding state its `load` reads,
+     * opening a cache, reading a manifest) worked under the bundler and silently did nothing under
+     * the dev server. Both pipelines run the same plugin list, so the surface has to be the same.
+     *
+     * Lazily rather than in `createDevServer`, because that is synchronous and `buildStart` is
+     * `async, parallel`; and once rather than per fetch, which is Vite's model — its
+     * `PluginContainer.buildStart()` fires a single time for the life of the server. The promise is
+     * memoised, so concurrent first fetches await one call rather than racing several.
+     *
+     * `buildEnd` is deliberately NOT fired: a long-lived server has no build to end, this surface has
+     * no `close()`, and inventing a trigger would be worse than the gap. Recorded rather than
+     * half-done.
+     */
+    let started: Promise<void> | null = null;
+    const ensureStarted = (): Promise<void> => {
+        started ??= Promise.all(pipeline.buildStart.map((hook) => hook.handler.call(ctx))).then(() => undefined);
+        return started;
+    };
+
+    const DEV_RESOLVE_EXTRA: ResolveIdExtra = { isEntry: false, kind: 'import-statement' };
+
+    async function resolveId(
+        spec: string,
+        importer: string | null,
+        extra: ResolveIdExtra = DEV_RESOLVE_EXTRA,
+    ): Promise<ResolveResult> {
+        await ensureStarted();
+        // `extra` was ACCEPTED AND DROPPED here, so every dev resolution reached the plugins as
+        // `{isEntry: false, kind: 'import-statement'}`: a dynamic import resolved as if it were a
+        // static one, and `custom` — Rollup's documented plugin-to-plugin channel, the whole point
+        // of `this.resolve(…, {custom})` — never arrived. Both are threaded now.
+        //
+        // `custom` also has to defeat the cache: it carries arbitrary values that cannot go in a
+        // string key, and two `this.resolve` calls for one specifier with DIFFERENT custom data are
+        // two different questions. Before this, the second silently reused the first's answer.
+        // `kind`/`isEntry` are keyable, so they join the key rather than skipping the cache.
+        if (extra.custom !== undefined) return resolveIdInner(spec, importer, extra);
+        const key = `${importer ?? ''}\x00${extra.kind}\x00${extra.isEntry ? 'E' : ''}\x00${spec}`;
         const cached = resolveCache.get(key);
         if (cached !== undefined) return cached;
-        const result = await resolveIdInner(spec, importer);
+        const result = await resolveIdInner(spec, importer, extra);
         resolveCache.set(key, result);
         return result;
     }
 
-    async function resolveIdInner(spec: string, importer: string | null): Promise<ResolveResult> {
-        const hit = await runResolveId(pipeline, () => ctx, spec, importer);
+    async function resolveIdInner(spec: string, importer: string | null, extra: ResolveIdExtra): Promise<ResolveResult> {
+        // A dynamic import tries `resolveDynamicImport` FIRST and falls through to `resolveId` when
+        // every hook declines — the same shape as the bundler's (see `scan.ts`), which mirrors
+        // rolldown's `resolve_id_with_plugins`. Dev never ran this chain at all, so a plugin's
+        // `resolveDynamicImport` hook was dead code under the dev server.
+        const dynamicHit =
+            extra.kind === 'dynamic-import' && pipeline.resolveDynamicImport.length > 0
+                ? await runResolveId(pipeline, () => ctx, spec, importer, extra, undefined, 'resolveDynamicImport')
+                : null;
+        const hit = dynamicHit ?? (await runResolveId(pipeline, () => ctx, spec, importer, extra));
         if (hit === false) return { external: spec };
         if (typeof hit === 'string') return hit;
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
@@ -326,10 +374,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
         return spec.startsWith('/') || importer === null ? spec : joinPath(dirOf(importer), spec);
     }
 
-    async function resolveDeps(id: string, specs: string[]): Promise<string[]> {
+    async function resolveDeps(id: string, specs: string[], kind: ImportKind = 'import-statement'): Promise<string[]> {
         const out: string[] = [];
         for (const spec of specs) {
-            const r = await resolveId(spec, id);
+            const r = await resolveId(spec, id, { isEntry: false, kind });
             if (typeof r === 'string') out.push(r);
         }
         return out;
@@ -371,6 +419,9 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
 
     async function fetchModuleImpl(id: string): Promise<FetchResult> {
+        // The other entry point — a runner that already holds a resolved id fetches without ever
+        // calling `resolveId`, so gating only that one would leave `buildStart` unfired.
+        await ensureStarted();
         if (id === EMPTY_MODULE_ID) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [] };
         // Known-clean fast path: a fully-transformed module whose cache wasn't invalidated
         // (invalidate/handleChange zero the hash) is served WITHOUT re-reading source — the big
@@ -452,10 +503,14 @@ export function createDevServer(options: DevServerOptions): DevServer {
         if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
         const tResolve = performance.now();
         const deps = await resolveDeps(id, result.deps);
-        const dynamicDeps = await resolveDeps(id, result.dynamicDeps);
+        const dynamicDeps = await resolveDeps(id, result.dynamicDeps, 'dynamic-import');
         // resolve accepted-dep specifiers to ids so the graph walk matches `deps`.
         const hmr: HmrInfo = {
             selfAccepts: result.hmr.selfAccepts,
+            // `import-statement`, NOT the `hot-accept` kind: an accepted dep names the same
+            // specifier as a static import of it, and must resolve to the SAME id or the HMR
+            // boundary points at a module the graph does not have. A plugin that rewrites
+            // `import-statement` and declines an unfamiliar kind would break exactly that.
             acceptedDeps: await resolveDeps(id, result.hmr.acceptedDeps),
         };
         perf.resolveMs += performance.now() - tResolve;

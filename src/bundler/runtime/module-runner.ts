@@ -5,6 +5,9 @@ import type { SourceMap } from '../../util/sourcemap.ts';
 export type ResolveId = (
     spec: string,
     importer: string | null,
+    /** Rollup's third `resolveId` argument. The runner supplies it for the ENTRY it is asked to
+     *  import; a host that resolves without plugins can ignore it. */
+    extra?: { isEntry: boolean; kind: 'import-statement' | 'entry' },
 ) => string | { external: string } | Promise<string | { external: string }>;
 
 /** transformed source for a module — code, plus an optional source map (SMv3)
@@ -114,8 +117,12 @@ export type ModuleEvaluator = {
 };
 
 export type ModuleRunner = {
-    /** evaluate a module by id and return its live namespace. */
-    import(id: string): Promise<Namespace>;
+    /** RESOLVE a specifier as an entry (`isEntry: true, kind: 'entry'`, importer `null`), then
+     *  evaluate it and return its live namespace — the bundler resolves its entry, so this does
+     *  too. A caller holding an already-resolved id wants {@link ModuleRunner.importResolved}. */
+    import(spec: string): Promise<Namespace>;
+    /** evaluate an ALREADY-RESOLVED module id and return its live namespace. */
+    importResolved(id: string): Promise<Namespace>;
     /** self-accept convenience: re-evaluate a module and run its own accept
      *  callbacks. Returns false if it didn't self-accept (caller full-reloads). */
     applyUpdate(id: string): Promise<boolean>;
@@ -429,8 +436,31 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         }
     }
 
+    /**
+     * The public entry: RESOLVE the specifier, then load it.
+     *
+     * `import` was `loadModule` directly, so the caller's specifier was used as an id verbatim and
+     * the entry never reached `resolveId` — the bundler resolves its entry (`isEntry: true,
+     * kind: 'entry'`), so a plugin that rewrites entries, and plain extensionless resolution
+     * (`/src/main` → `/src/main.ts`), worked under the bundler and 404'd here. Resolution happens
+     * HERE and not in `loadModule` because `linkFrom` has already resolved before calling it;
+     * resolving again there would run every plugin's `resolveId` twice per import.
+     */
+    async function importEntry(spec: string): Promise<Namespace> {
+        const resolved = await options.resolveId(spec, null, { isEntry: true, kind: 'entry' });
+        // A spec the resolver can't place (or externalises) falls back to loading the spec ITSELF,
+        // rather than a native import: a host id-scheme the resolver doesn't understand (a
+        // project-relative 'src/app.ts') still loads. `Environment.import` already had this
+        // fallback; both entry paths now agree on it.
+        return loadModule(typeof resolved === 'string' ? resolved : spec);
+    }
+
     return {
-        import: loadModule,
+        import: importEntry,
+        /** `import` for a caller that has ALREADY resolved — used by `Environment.import`, which
+         *  resolves itself because it must record the resolved id as a root. Resolving here too
+         *  would run every plugin's `resolveId` twice for the entry, under two different `kind`s. */
+        importResolved: loadModule,
         applyUpdate,
         applyHmr,
         invalidate,

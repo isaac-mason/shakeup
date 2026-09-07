@@ -1,3 +1,4 @@
+import type { ResolveIdExtra } from '../plugin.ts';
 import type { DevServer, FetchResult, ResolveResult } from './dev-server.ts';
 import { createEnvironment, type Environment, type EnvironmentOptions } from './environment.ts';
 
@@ -28,7 +29,19 @@ export function attachEnvironment(
                 try {
                     if (frame.call === 'fetchModule') respond(frame.id, await server.fetchModule(frame.args[0] as string));
                     else if (frame.call === 'resolveId')
-                        respond(frame.id, await server.resolveId(frame.args[0] as string, frame.args[1] as string | null));
+                        respond(
+                            frame.id,
+                            // The third argument is Rollup's `extra` — forwarded, not dropped, so an
+                            // entry resolved across the bridge still reaches plugins as
+                            // `{isEntry: true, kind: 'entry'}`. Only the runner sends it, and only
+                            // with those two JSON-safe fields; `custom` never crosses (a plugin's
+                            // `this.resolve` runs server-side).
+                            await server.resolveId(
+                                frame.args[0] as string,
+                                frame.args[1] as string | null,
+                                frame.args[2] as ResolveIdExtra | undefined,
+                            ),
+                        );
                     else respond(frame.id, undefined, `unknown call: ${frame.call}`);
                 } catch (e) {
                     respond(frame.id, undefined, e instanceof Error ? e.message : String(e));
@@ -124,7 +137,7 @@ export function connectEnvironment(
     const env = createEnvironment({
         ...options,
         fetchModule: (id) => bridge.invoke('fetchModule', id) as Promise<FetchResult>,
-        resolveId: (spec, importer) => bridge.invoke('resolveId', spec, importer) as Promise<ResolveResult>,
+        resolveId: (spec, importer, extra) => bridge.invoke('resolveId', spec, importer, extra) as Promise<ResolveResult>,
     });
     bridge.onPush((payload) => {
         const changed = (payload as { changed?: string }).changed;
