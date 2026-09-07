@@ -122,6 +122,14 @@ export function watch(
     let timer: ReturnType<typeof setTimeout> | null = null;
     let resolveBatch: (() => void) | null = null;
     let batch: Promise<void> | null = null;
+    /** Batches are applied ONE AT A TIME. `flush` awaits `handleChange` per id, so a batch whose
+     *  debounce elapsed while an earlier one was still applying used to start on top of it: the
+     *  transcript read `start a | start b | end a | end b`. `handleChange` invalidates the shared
+     *  transform cache and then fans HMR updates out to every environment, so overlapping batches
+     *  let an environment receive an update computed either side of another batch's invalidation.
+     *  Chaining here is the whole serialisation — the timer schedules onto this tail, never
+     *  straight into `flush`. */
+    let applying: Promise<void> = Promise.resolve();
 
     const flush = async (): Promise<void> => {
         const ids = [...pending];
@@ -148,7 +156,9 @@ export function watch(
             });
         }
         if (timer !== null) clearTimeout(timer);
-        timer = setTimeout(flush, debounceMs);
+        timer = setTimeout(() => {
+            applying = applying.then(flush);
+        }, debounceMs);
         return batch;
     };
 
@@ -156,6 +166,17 @@ export function watch(
     return {
         close() {
             if (timer !== null) clearTimeout(timer);
+            timer = null;
+            // SETTLE the batch this close abandons. `emit` resolves "once that batch is handled",
+            // and a host that awaits it before shutting down waited forever: close cleared the
+            // timer, so nothing ever called `resolveBatch`. The pending paths are dropped — the
+            // server is closed — but the promise must not be. A batch already applying is not
+            // touched; it resolves when it finishes.
+            pending = new Set();
+            batch = null;
+            const done = resolveBatch;
+            resolveBatch = null;
+            done?.();
             unsub?.();
         },
     };

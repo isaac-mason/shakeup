@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { bundle } from '../src/bundler/bundle.ts';
 import { createMemoryFs, type Fs } from '../src/bundler/fs.ts';
 import type { Plugin } from '../src/bundler/plugin.ts';
-import { createDevServer, type DevServerOptions } from '../src/bundler/runtime/dev-server.ts';
+import { createDevServer, type DevServerOptions, watch } from '../src/bundler/runtime/dev-server.ts';
 import { createModuleRunner } from '../src/bundler/runtime/module-runner.ts';
 
 function setup(files: Record<string, string>, opts: Omit<DevServerOptions, 'fs'> = {}) {
@@ -379,5 +379,104 @@ describe('dev server — sourcemap policy', () => {
         expect((await server.fetchModule('/node_modules/dep/index.js')).map).toBeUndefined();
         expect((await server.fetchModule('/src/app.ts')).map).toBeDefined();
         expect((await server.fetchModule('/src/app.ts')).map).toBeDefined();
+    });
+});
+
+// `watch()` is a public export with no tests: it batches + de-dups a host watcher's paths and drives
+// `handleChange` for each. Only a fake server is needed — `watch` uses nothing but `handleChange`.
+// Two of these were measured failing before the fix (llm/repro/_watchsurf.mts).
+describe('watch — batching a host change source', () => {
+    type Server = { handleChange: (id: string) => Promise<{ env: string; update: never }[]> };
+    /** hand back the `emit` the source is given, so a test drives the watcher directly. */
+    const wire = (server: Server, opts: { debounceMs?: number; onError?: (e: unknown) => void } = {}) => {
+        let emit!: (paths: string[]) => Promise<void>;
+        const w = watch(server as never, (e) => void (emit = e), opts);
+        return { emit, close: w.close };
+    };
+
+    it('settles the batch it abandons when closed mid-debounce', async () => {
+        // `emit` resolves "once that batch is handled". `close()` cleared the debounce timer and
+        // nothing ever called the batch's resolve, so a host that awaited it before shutting down
+        // waited forever. The paths are dropped — the server is closing — but the promise is not.
+        const { emit, close } = wire({ handleChange: async () => [] }, { debounceMs: 50 });
+        const pending = emit(['/a.js']);
+        close();
+        const raced = await Promise.race([pending.then(() => 'settled'), new Promise((r) => setTimeout(() => r('hung'), 250))]);
+        expect(raced).toBe('settled');
+    });
+
+    it('applies batches ONE AT A TIME, never overlapping', async () => {
+        // `handleChange` invalidates the shared transform cache and then fans HMR updates out to
+        // every environment. A batch whose debounce elapsed mid-apply used to start on top of the
+        // one still running — transcript `start a | start b | end a | end b` — so an environment
+        // could receive an update computed either side of another batch's invalidation.
+        const log: string[] = [];
+        const { emit, close } = wire(
+            {
+                handleChange: async (id) => {
+                    log.push(`start ${id}`);
+                    await new Promise((r) => setTimeout(r, 30));
+                    log.push(`end ${id}`);
+                    return [];
+                },
+            },
+            { debounceMs: 0 },
+        );
+        const first = emit(['/a.js']);
+        await new Promise((r) => setTimeout(r, 10)); // the first batch is mid-flight
+        const second = emit(['/b.js']);
+        await Promise.all([first, second]);
+        close();
+        expect(log).toEqual(['start /a.js', 'end /a.js', 'start /b.js', 'end /b.js']);
+    });
+
+    it('de-dups a path repeated across one batch, and keeps first-seen order', async () => {
+        const log: string[] = [];
+        const { emit, close } = wire({ handleChange: async (id) => (log.push(id), []) }, { debounceMs: 5 });
+        const done = emit(['/a.js', '/b.js']);
+        void emit(['/a.js', '/c.js']); // same debounce window
+        await done;
+        close();
+        expect(log).toEqual(['/a.js', '/b.js', '/c.js']);
+    });
+
+    it('reports a failing handleChange and still applies the rest of the batch', async () => {
+        const log: string[] = [];
+        const errors: string[] = [];
+        const { emit, close } = wire(
+            {
+                handleChange: async (id) => {
+                    if (id === '/b.js') throw new Error('boom');
+                    log.push(id);
+                    return [];
+                },
+            },
+            { debounceMs: 0, onError: (e) => errors.push((e as Error).message) },
+        );
+        await emit(['/a.js', '/b.js', '/c.js']);
+        close();
+        expect(log, 'the batch continues past the failure').toEqual(['/a.js', '/c.js']);
+        expect(errors, 'and the failure is reported, not swallowed').toEqual(['boom']);
+    });
+
+    it('a batch already applying when close() lands still finishes', async () => {
+        // The falsification arm for the close fix: settling the ABANDONED batch must not settle,
+        // or abandon, one that is already running.
+        const log: string[] = [];
+        const { emit, close } = wire(
+            {
+                handleChange: async (id) => {
+                    await new Promise((r) => setTimeout(r, 20));
+                    log.push(id);
+                    return [];
+                },
+            },
+            { debounceMs: 0 },
+        );
+        const inFlight = emit(['/a.js']);
+        await new Promise((r) => setTimeout(r, 5)); // handleChange has started
+        close();
+        await inFlight;
+        expect(log).toEqual(['/a.js']);
     });
 });
