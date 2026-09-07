@@ -397,6 +397,32 @@ export function createDevServer(options: DevServerOptions): DevServer {
             (await fs.read(id));
         perf.ioMs += performance.now() - tIo;
         if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
+        // COMMONJS IS NOT A DEV-SERVER GOAL — the module runner evaluates ESM, and `module`/`exports`
+        // do not exist there. shakeup's position (`llm/notes/cjs.md`) is that npm dependencies are
+        // pre-seeded as ESM by an offline step rather than translated on the hot path.
+        //
+        // Say so. Served verbatim, a `.cjs` file reached the runner and threw
+        // `ReferenceError: module is not defined` from inside the evaluated module — a runtime error
+        // with no connection to its cause, from a `fetchModule` that reported success. The BUNDLE
+        // path handles the same file correctly, which is what makes the silence worst: the two
+        // pipelines disagreed and only one said anything.
+        //
+        // Keyed on the EXTENSION alone, which is unambiguous: `.cjs`/`.cts` are CommonJS by
+        // definition. A `.js` file that is CommonJS by its package manifest is not detected here —
+        // that needs the `defFormat` resolution the dev path does not do — and is left as a known
+        // limit rather than guessed at from the source text.
+        if (id.endsWith('.cjs') || id.endsWith('.cts')) {
+            return {
+                code: '',
+                deps: [],
+                dynamicDeps: [],
+                hmr: EMPTY_HMR,
+                errors: [
+                    `${id}: CommonJS is not supported by the dev server — the module runner evaluates ES modules. ` +
+                        `Pre-build this dependency to ESM, or import an ESM entry point instead. (The bundler handles CommonJS.)`,
+                ],
+            };
+        }
 
         const hash = hashOf(source);
         // Re-read reached only after invalidation/first-fetch; content-hash still matching (e.g. a
