@@ -135,7 +135,10 @@ export type WatchOptions = NodeBuildOptions & {
  * rollup's `rollup.watch` JS API and esbuild's `context.watch`.
  */
 export function watch(options: WatchOptions): WatchHandle {
-    const { outDir, write, watch: watchPaths, debounceMs, onRebuild, onError, ...bundleOptions } = options;
+    const { outDir, write, watch: watchPaths, debounceMs, onRebuild, onError, ...rest } = options;
+    // This host IS the watcher, so plugins reading `this.meta.watchMode` get the truth without the
+    // caller having to say so twice. An explicit `watchMode: false` still wins.
+    const bundleOptions = { watchMode: true, ...rest };
     const fs = bundleOptions.fs ?? createNodeFs();
     const ctx = createBuildContext({ ...bundleOptions, fs });
 

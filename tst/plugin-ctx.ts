@@ -1,10 +1,11 @@
 import type { Fs } from '../src/bundler/fs.ts';
-import { type PluginCtx, pluginParse } from '../src/bundler/plugin.ts';
+import { type PluginCtx, pluginMeta, pluginParse } from '../src/bundler/plugin.ts';
 
 /** A minimal full {@link PluginCtx} for unit tests that drive a single hook in
  *  isolation (resolve/getModuleInfo/getModuleIds are inert stubs). */
 export function stubPluginCtx(fs: Fs, warn: (m: string) => void = () => {}): PluginCtx {
     return {
+        meta: pluginMeta(false),
         warn,
         error: (m) => {
             throw new Error(m);

@@ -48,8 +48,7 @@ import {
     normalizePluginOption,
     type PluginCtx,
     type PluginOption,
-    pluginParse,
-} from './plugin.ts';
+    pluginParse, pluginMeta,} from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
 import { buildGraph, externalModuleInfo, fileNameOfRef, hashSource, registerEmitted, toModuleInfo } from './scan.ts';
@@ -364,6 +363,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         },
         info: (m) => warningsOut.push(m),
         debug: () => {},
+        meta: pluginMeta(options.watchMode),
         parse: pluginParse,
         fs: options.fs,
         resolve: () => null,

@@ -52,8 +52,7 @@ import {
     type ResolveSkip,
     runLoad,
     runResolveId,
-    runTransform,
-} from './plugin.ts';
+    runTransform, pluginMeta,} from './plugin.ts';
 import {
     type GraphOptions,
     type InputOption,
@@ -1234,6 +1233,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         },
         info: (m) => graph.warnings.push(m),
         debug: () => {},
+        meta: pluginMeta(options.watchMode),
         parse: pluginParse,
         fs: options.fs,
         resolve: async (source, importer = null, opts) => {

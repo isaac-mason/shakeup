@@ -815,3 +815,79 @@ describe('a throwing plugin hook names the plugin, and the module', () => {
         expect(message).toBe('[plugin thrower] nested exploded');
     });
 });
+
+// `this.meta` — the metadata block both oracles put on every plugin context. It was missing
+// entirely, so `this.meta.watchMode` threw `Cannot read properties of undefined` (measured against
+// rolldown 1.2.4: llm/repro/_ctxsurf.mts).
+describe('this.meta', () => {
+    const metaFrom = async (opts: Record<string, unknown> = {}) => {
+        let seen: Record<string, unknown> | undefined;
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const a = 1;\n' }),
+            external: [],
+            ...opts,
+            plugins: [
+                {
+                    name: 'peek',
+                    transform(this: { meta: Record<string, unknown> }) {
+                        seen = this.meta;
+                        return null;
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        return seen;
+    };
+
+    it('carries the keys rolldown carries', async () => {
+        const meta = await metaFrom();
+        expect(Object.keys(meta ?? {}).sort()).toEqual(['rollupVersion', 'shakeupVersion', 'watchMode']);
+    });
+
+    it('claims a rollup API version, because plugins feature-detect on it', async () => {
+        // The same claim rolldown hardcodes. Asserted exactly so that changing it is deliberate:
+        // a plugin gating a code path on this string is the reason the field exists.
+        expect((await metaFrom())?.rollupVersion).toBe('4.23.0');
+    });
+
+    it('the GENERATE-phase context carries the same meta', async () => {
+        // There are three contexts — scan-time, post-build and the dev server's — and only the
+        // scan-time one is on the transform path. A sabotage that gave the post-build context a
+        // different `watchMode` passed every other test in this file, which is how this one exists.
+        let fromTransform: unknown;
+        let fromRenderChunk: unknown;
+        let fromGenerateBundle: unknown;
+        const r = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': 'export const a = 1;\n' }),
+            external: [],
+            plugins: [
+                {
+                    name: 'peek',
+                    transform(this: { meta: unknown }) {
+                        fromTransform = this.meta;
+                        return null;
+                    },
+                    renderChunk(this: { meta: unknown }) {
+                        fromRenderChunk = this.meta;
+                        return null;
+                    },
+                    generateBundle(this: { meta: unknown }) {
+                        fromGenerateBundle = this.meta;
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+        expect(r.errors).toEqual([]);
+        expect(fromRenderChunk).toEqual(fromTransform);
+        expect(fromGenerateBundle).toEqual(fromTransform);
+    });
+
+    it('watchMode is false by default and true when the host says so', async () => {
+        // Both arms: a field that is always false would pass the first assertion alone.
+        expect((await metaFrom())?.watchMode).toBe(false);
+        expect((await metaFrom({ watchMode: true }))?.watchMode).toBe(true);
+    });
+});

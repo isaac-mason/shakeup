@@ -270,6 +270,22 @@ describe('the dev server and the bundler present the same plugin surface', () =>
         await throughDev(plugin, 'app');
     });
 
+    it('gives a plugin the same this.meta the bundler does', async () => {
+        const grab = (into: Record<string, unknown>[]) => ({
+            name: 'peek',
+            transform(this: { meta: Record<string, unknown> }) {
+                into.push(this.meta);
+                return null;
+            },
+        });
+        const fromBundle: Record<string, unknown>[] = [];
+        await throughBundle(grab(fromBundle));
+        const fromDev: Record<string, unknown>[] = [];
+        await throughDev(grab(fromDev));
+        expect(fromBundle[0], 'the bundler').toMatchObject({ rollupVersion: expect.any(String), watchMode: false });
+        expect(fromDev[0], 'and the dev server, identically').toEqual(fromBundle[0]);
+    });
+
     it('attributes a throwing hook the same way the bundler does', async () => {
         // Both pipelines compile the same plugin list through the same `compilePipeline`, so the
         // blame belongs to both or neither. rolldown's format is the reference:

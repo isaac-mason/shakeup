@@ -17,6 +17,7 @@ import {
     runModuleParsed,
     runResolveId,
     runTransform,
+    pluginMeta,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
@@ -285,6 +286,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         },
         info: warn,
         debug: () => {},
+        meta: pluginMeta(options.watchMode),
         parse: pluginParse,
         fs,
         resolve: async (source, importer = null, opts) => {

@@ -3,7 +3,9 @@ import { astToEstree } from '../ast/estree.ts';
 import type { Program } from '../ast/index.ts';
 import { parse } from '../parser/index.ts';
 import type { SourceMap } from '../util/sourcemap.ts';
+
 import type { Fs, MaybePromise } from './fs.ts';
+import { VERSION } from './version.ts';
 import { applyEdits, type Edit } from './patches.ts';
 
 /** false = no side effects (droppable if unused); true = default liveness;
@@ -161,7 +163,39 @@ export type EmittedFile = EmittedAsset | EmittedChunk;
 
 /** Context passed to every plugin hook. Every method returns {@link MaybePromise}
  *  so the sync fast path holds (`assertSync` unwraps in bundle mode). */
+/**
+ * `this.meta` — the metadata block both oracles put on every plugin context. It was MISSING
+ * entirely, so `this.meta.watchMode` threw `Cannot read properties of undefined` (measured against
+ * rolldown 1.2.4: `llm/repro/_ctxsurf.mts`).
+ *
+ * `rollupVersion` is the compatibility claim rolldown also makes (it hardcodes `'4.23.0'` in
+ * `minimal-plugin-context.ts`): a plugin feature-detects on it, and answering `undefined` reads as
+ * "not rollup-compatible at all". `shakeupVersion` is who we actually are — rolldown reports
+ * `rolldownVersion` alongside for the same reason.
+ */
+export type PluginContextMeta = {
+    /** The rollup API version this plugin surface targets, for plugins that feature-detect. */
+    rollupVersion: string;
+    /** shakeup's own version — see `src/version.ts`. */
+    shakeupVersion: string;
+    /** Whether the build is running under a watcher. From the `watch` input option; false unless a
+     *  host says otherwise, because nothing in shakeup infers it. */
+    watchMode: boolean;
+};
+
+/** The rollup API version reported to plugins, matching rolldown's own compatibility claim. */
+export const ROLLUP_VERSION = '4.23.0';
+
+/** Build the shared `this.meta` — one function, so the scan-time, bundle-time and dev-server
+ *  contexts cannot answer differently. */
+export const pluginMeta = (watchMode: boolean | undefined): PluginContextMeta => ({
+    rollupVersion: ROLLUP_VERSION,
+    shakeupVersion: VERSION,
+    watchMode: watchMode === true,
+});
+
 export type PluginCtx = {
+    meta: PluginContextMeta;
     warn(message: string): void;
     error(message: string): never;
     info(message: string): void;

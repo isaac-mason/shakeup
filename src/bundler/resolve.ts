@@ -140,6 +140,14 @@ export type CommonOptions = {
      *  the way both oracles do. See {@link PluginOption}. */
     plugins?: PluginOption;
     jsx?: JSXOptions;
+    /** Whether this build is running under a file watcher. Plugins read it as
+     *  `this.meta.watchMode` and branch on it (skip expensive work, register a watcher of their
+     *  own); both oracles carry it.
+     *
+     *  Spelled `watchMode`, not `watch`, because `watch()` in `src/node.ts` already takes a `watch`
+     *  option meaning the PATHS to watch. That host sets this itself — it knows it is a watcher —
+     *  so only a host driving `driveWatch` directly needs to pass it. */
+    watchMode?: boolean;
 };
 
 /** Inputs to {@link buildGraph}. */
