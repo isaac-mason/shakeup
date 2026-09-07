@@ -89,6 +89,12 @@ export type LoadResult = string | null | undefined | SourceDescription;
  *  model and write arbitrary ones back. */
 export type GenerateBundleEntry = { type: 'chunk' | 'asset'; fileName: string } & Record<string, unknown>;
 
+/** The chunk a `renderChunk` hook is rewriting — rollup's and rolldown's `RenderedChunk`: everything
+ *  on the output chunk EXCEPT `code`/`map`, so the object stays a stable description of the chunk
+ *  while the code passes hook to hook. Kept loose for the same reason as
+ *  {@link GenerateBundleEntry}. */
+export type RenderedChunkInfo = { type: 'chunk'; fileName: string } & Record<string, unknown>;
+
 /** transform: string = replace source, Edit[] = patch it, null/undefined = pass,
  *  object = a {@link TransformDescription}. */
 export type TransformResult = string | Edit[] | null | undefined | TransformDescription;
@@ -313,7 +319,29 @@ export type Plugin = {
         outputOptions: Record<string, unknown>,
         inputOptions: Record<string, unknown>,
     ) => MaybePromise<void>;
-    renderChunk?: (this: PluginCtx, code: string) => MaybePromise<string | { code: string; map?: unknown } | null | undefined>;
+    /**
+     * `renderChunk(code, chunk, outputOptions, meta)` — rewrite one rendered chunk.
+     *
+     * The last three arguments were MISSING: the hook was called with `code` alone, so a plugin
+     * could not tell WHICH chunk it was rewriting — no `fileName`, no `isEntry`, no `moduleIds` —
+     * which is what almost every real renderChunk plugin branches on. Measured against rolldown
+     * 1.2.4, which passes `(code, chunk, outputOptions, meta)` with `chunk` carrying
+     * `{dynamicImports, exports, facadeModuleId, fileName, imports, isDynamicEntry, isEntry,
+     * moduleIds, modules, name, type}` and `meta` carrying `{chunks}`.
+     *
+     * `outputOptions` is the same normalized object `renderStart` receives. `meta.chunks` is every
+     * rendered chunk keyed by fileName, for a plugin that needs the whole chunk graph.
+     *
+     * One documented difference from rollup: `chunk.fileName` here is FINAL, never a hash
+     * placeholder, because shakeup runs this hook after naming. See the ROADMAP on the ordering.
+     */
+    renderChunk?: (
+        this: PluginCtx,
+        code: string,
+        chunk: RenderedChunkInfo,
+        outputOptions: Record<string, unknown>,
+        meta: { chunks: Record<string, RenderedChunkInfo> },
+    ) => MaybePromise<string | { code: string; map?: unknown } | null | undefined>;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
     /**
      * `generateBundle(options, bundle, isWrite)` — the last chance to inspect or MUTATE the output.

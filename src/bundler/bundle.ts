@@ -41,6 +41,7 @@ import {
     callOptionsHook,
     compilePipeline,
     type GenerateBundleEntry,
+    type RenderedChunkInfo,
     type MinimalPluginCtx,
     type ModuleInfo,
     normalizePluginOption,
@@ -145,6 +146,9 @@ export type OutputChunk = {
     fileName: string;
     /** Logical name (entry name, group name, or derived). */
     name: string;
+    /** Id of the module this chunk is a facade for — the entry module for an entry chunk, `null`
+     *  for a shared one. Both oracles carry it on `RenderedChunk`. */
+    facadeModuleId: string | null;
     /** True iff this is a static user entry chunk. */
     isEntry: boolean;
     /** True iff this is a dynamic-import target chunk. */
@@ -775,6 +779,18 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
 
     // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
+    //
+    // The chunk DESCRIPTION each hook receives alongside the code — rollup's and rolldown's
+    // `RenderedChunk`. Built once, before the loop, and deliberately WITHOUT `code`/`map`: the code
+    // changes from hook to hook, so a chunk object carrying a stale copy of it is a trap, and both
+    // oracles omit it for the same reason.
+    const renderedInfo = new Map<string, RenderedChunkInfo>();
+    for (const oc of outputChunks) {
+        const { code: _code, map: _map, ...info } = oc;
+        renderedInfo.set(oc.fileName, info as RenderedChunkInfo);
+    }
+    const renderChunkMeta = { chunks: Object.fromEntries(renderedInfo) };
+
     for (let i = 0; i < outputChunks.length; i++) {
         const oc = outputChunks[i];
         for (const hook of pipeline.renderChunk) {
@@ -783,7 +799,13 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             // off a PROMISE, got `undefined`, and discarded the result — every hook then saw the
             // original chunk and the bundle was emitted unmodified, with no error and no warning.
             // Sequential rather than parallel because each hook's input is the previous one's output.
-            const raw = await hook.handler.call(pluginCtx, oc.code);
+            const raw = await hook.handler.call(
+                pluginCtx,
+                oc.code,
+                renderedInfo.get(oc.fileName)!,
+                naming as unknown as Record<string, unknown>,
+                renderChunkMeta,
+            );
             // rollup's `renderChunk` may return either a string or `{ code, map }`, and plugins
             // written against rollup return the object form. It used to be assigned straight to
             // `oc.code`, so the chunk was emitted as the string `[object Object]` — no error, no

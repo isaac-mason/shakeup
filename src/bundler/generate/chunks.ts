@@ -447,6 +447,11 @@ export function renderChunks(
             type: 'chunk',
             fileName,
             name: rc.name,
+            // The module this chunk fronts, or null for a shared chunk. Already computed for the
+            // pattern functions (`preRenderedInfo`) and simply not carried through — rolldown's
+            // `RenderedChunk` has it, and a `renderChunk` plugin identifying the entry reaches for
+            // it first.
+            facadeModuleId: infos[rc.chunkIdx].facadeModuleId,
             isEntry: rc.isEntry,
             isDynamicEntry: rc.isDynamicEntry,
             moduleIds: rc.moduleIds,
