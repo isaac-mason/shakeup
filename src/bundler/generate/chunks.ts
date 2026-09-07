@@ -18,6 +18,7 @@ import { compressChunk } from '../chunk-compress.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
 import { basenameOf, dirnameOf, relativePath } from '../fs.ts';
 import type { Linked } from '../graph-types.ts';
+import type { RenderedChunkInfo } from '../plugin.ts';
 import {
     DEFAULT_HASH_SIZE,
     effectiveComments,
@@ -223,7 +224,31 @@ function fromMarkers(code: string, placeholderByKey: Map<string, string>): strin
  * (fileName/code/map placeholder-free) plus emitted `.map` asset entries. When `inc` is present,
  * a chunk whose members are all clean and whose signature is unchanged reuses its cached render.
  */
-export function renderChunks(
+/**
+ * The plugin hooks that run INSIDE this pass rather than after it, because their result feeds the
+ * CONTENT HASH. `renderChunk` used to run in `bundle.ts` once naming was finished, so a plugin that
+ * rewrote a chunk got a filename hashed from code that no longer existed, and `augmentChunkHash` had
+ * nowhere to live at all. Both were measured against rolldown 1.2.4 (llm/repro/_rcsurf.mts): there,
+ * a renderChunk rewrite moves the hash and so does an augmentChunkHash salt.
+ *
+ * The consequence, which rollup shares and documents: the code and the `fileName` a hook sees still
+ * carry `!~{001}~` hash PLACEHOLDERS, because the hashes do not exist yet. Pass C substitutes them
+ * afterwards — including inside whatever the plugin returned, so a name a plugin embedded from
+ * `this.getFileName` resolves correctly.
+ */
+export type RenderHooks = {
+    /** Every chunk's preliminary (placeholder-bearing) description, before any `renderChunk` runs —
+     *  the caller uses it to answer `this.getFileName` for an emitted chunk and to build the
+     *  `meta.chunks` record the hook receives. */
+    beforeRenderChunk?: (chunks: RenderedChunkInfo[]) => void;
+    /** The `renderChunk` chain for one chunk: replacement code, or null to leave it alone. */
+    renderChunk?: (code: string, chunk: RenderedChunkInfo) => Promise<string | null>;
+    /** `augmentChunkHash(chunk)` — extra content folded into this chunk's hash. */
+    augmentChunkHash?: (chunk: RenderedChunkInfo) => Promise<string>;
+    warn?: (message: string) => void;
+};
+
+export async function renderChunks(
     chunkGraph: ChunkGraph,
     naming: NormalizedOutputNaming,
     render: ChunkRenderer,
@@ -234,7 +259,8 @@ export function renderChunks(
     /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
     chunkMangle: boolean,
     inc?: RenderIncremental,
-): { chunks: OutputChunk[]; assets: OutputAsset[] } {
+    hooks?: RenderHooks,
+): Promise<{ chunks: OutputChunk[]; assets: OutputAsset[] }> {
     const chunks = chunkGraph.chunks;
     const wantMap = naming.sourcemap !== false;
     const genPlaceholder = getHashPlaceholderGenerator();
@@ -350,6 +376,41 @@ export function renderChunks(
         rendered.push(rc);
     }
 
+    // Pass 0c — the `renderChunk` and `augmentChunkHash` PLUGIN hooks. Between the render and the
+    // content hash, so what a plugin produced is what gets hashed (see {@link RenderHooks}).
+    const rewritten = new Set<number>();
+    const hashSalt = new Map<number, string>();
+    if (hooks !== undefined && (hooks.renderChunk !== undefined || hooks.augmentChunkHash !== undefined)) {
+        const described: RenderedChunkInfo[] = rendered.map((rc) => ({
+            type: 'chunk',
+            fileName: rc.prelim.fileName,
+            name: rc.name,
+            facadeModuleId: infos[rc.chunkIdx].facadeModuleId,
+            isEntry: rc.isEntry,
+            isDynamicEntry: rc.isDynamicEntry,
+            moduleIds: rc.moduleIds,
+            imports: rc.imports,
+            dynamicImports: rc.dynamicImports,
+            exports: rc.exports,
+            modules: rc.modules,
+        }));
+        hooks.beforeRenderChunk?.(described);
+        for (let i = 0; i < rendered.length; i++) {
+            const rc = rendered[i];
+            const next = await hooks.renderChunk?.(rc.code, described[i]);
+            if (next !== null && next !== undefined && next !== rc.code) {
+                rc.code = next;
+                // `rc.parts` described the text the module pass emitted and no longer matches, so
+                // the map for this chunk cannot be built. Same verdict as before the hook moved,
+                // and warned in the same place a caller would have warned.
+                rewritten.add(rc.chunkIdx);
+                if (wantMap) hooks.warn?.('sourcemap omitted: a renderChunk plugin rewrote the chunk');
+            }
+            const salt = await hooks.augmentChunkHash?.(described[i]);
+            if (salt !== undefined && salt !== '') hashSalt.set(rc.chunkIdx, salt);
+        }
+    }
+
     // Collect every chunk placeholder up-front.
     const placeholders = new Set<string>();
     for (const rc of rendered) if (rc.prelim.hashPlaceholder) placeholders.add(rc.prelim.hashPlaceholder);
@@ -363,7 +424,13 @@ export function renderChunks(
             rc.code,
             placeholders,
         );
-        hashDependenciesByPlaceholder.set(ph, { containedPlaceholders, contentHash: naming.getHash(transformedCode) });
+        // The `augmentChunkHash` salt joins the CONTENT hash, so it propagates to every chunk that
+        // imports this one exactly as a content change would.
+        const salt = hashSalt.get(rc.chunkIdx) ?? '';
+        hashDependenciesByPlaceholder.set(ph, {
+            containedPlaceholders,
+            contentHash: naming.getHash(salt === '' ? transformedCode : transformedCode + salt),
+        });
     }
 
     // Pass B — final hashes via transitive closure (fold CONTENT hashes, never FINAL hashes).
@@ -406,7 +473,7 @@ export function renderChunks(
                 : rc.prelim.fileName;
 
         let map: SourceMap | undefined;
-        if (wantMap) {
+        if (wantMap && !rewritten.has(rc.chunkIdx)) {
             const joined = joinParts(rc.parts);
             const sourcesContent = naming.sourcemapExcludeSources ? undefined : rc.mapSourcesContent;
             const ignore: number[] = [];

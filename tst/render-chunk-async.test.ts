@@ -167,3 +167,123 @@ describe('renderChunk — the chunk it hands over', () => {
         for (const c of r.chunks) expect(c.code).not.toContain('should not be emitted');
     });
 });
+
+// The hook runs BEFORE hashing, so what a plugin produced is what gets hashed. Both lines below were
+// measured on rolldown 1.2.4 first (llm/repro/_rcsurf.mts): there a renderChunk rewrite moves the
+// hash and so does an augmentChunkHash salt; shakeup moved neither, because the hook used to run
+// after naming was already finished.
+describe('renderChunk and augmentChunkHash feed the content hash', () => {
+    const HASHED: Record<string, string> = {
+        '/main.js': "import { d } from './dep.js';\nexport const got = d;\n",
+        '/dep.js': "export const d = 'D';\n",
+    };
+    const hashed = async (plugins: unknown[]) => {
+        const fs = { read: (id: string) => HASHED[id] ?? null, exists: (id: string) => id in HASHED };
+        const r = await bundle({
+            entry: '/main.js',
+            fs,
+            external: [],
+            plugins: plugins as never,
+            output: { entryFileNames: '[name]-[hash].js' },
+        });
+        expect(r.errors).toEqual([]);
+        return r;
+    };
+    const nameOf = async (plugins: unknown[]) => (await hashed(plugins)).chunks[0].fileName;
+
+    it('a renderChunk rewrite moves the hash', async () => {
+        const plain = await nameOf([]);
+        const rewritten = await nameOf([{ name: 'p', renderChunk: (code: string) => `${code}\n//probe\n` }]);
+        expect(rewritten).not.toBe(plain);
+    });
+
+    it('an augmentChunkHash salt moves the hash; declining leaves it alone', async () => {
+        const plain = await nameOf([]);
+        expect(await nameOf([{ name: 'p', augmentChunkHash: () => 'SALT' }])).not.toBe(plain);
+        // The falsification arm: merely REGISTERING the hook must not perturb anything, or the test
+        // above would pass for the wrong reason.
+        expect(await nameOf([{ name: 'p', augmentChunkHash: () => undefined }])).toBe(plain);
+    });
+
+    it('a different salt gives a different hash, and the same salt is stable', async () => {
+        const a = await nameOf([{ name: 'p', augmentChunkHash: () => 'A' }]);
+        const b = await nameOf([{ name: 'p', augmentChunkHash: () => 'B' }]);
+        const a2 = await nameOf([{ name: 'p', augmentChunkHash: () => 'A' }]);
+        expect(a).not.toBe(b);
+        expect(a2).toBe(a);
+    });
+
+    it('every plugin contributes — the chain accumulates, it does not overwrite', async () => {
+        const plain = await nameOf([]);
+        const onlyA = await nameOf([{ name: 'a', augmentChunkHash: () => 'A' }]);
+        const onlyB = await nameOf([{ name: 'b', augmentChunkHash: () => 'B' }]);
+        const bothAB = await nameOf([
+            { name: 'a', augmentChunkHash: () => 'A' },
+            { name: 'b', augmentChunkHash: () => 'B' },
+        ]);
+        // Two salts are not either salt — the arm that catches a chain where the last hook wins.
+        expect(bothAB).not.toBe(onlyA);
+        expect(bothAB).not.toBe(onlyB);
+        expect(bothAB).not.toBe(plain);
+        // And a plugin declining AFTER one that salted must not wipe it, which is the same bug in
+        // the other order.
+        const saltThenQuiet = await nameOf([
+            { name: 'a', augmentChunkHash: () => 'A' },
+            { name: 'quiet', augmentChunkHash: () => undefined },
+        ]);
+        expect(saltThenQuiet).toBe(onlyA);
+    });
+
+    it('augmentChunkHash receives the chunk it is salting', async () => {
+        const seen: unknown[] = [];
+        await hashed([
+            {
+                name: 'p',
+                augmentChunkHash(chunk: { isEntry: boolean; facadeModuleId: unknown }) {
+                    seen.push({ isEntry: chunk.isEntry, facadeModuleId: chunk.facadeModuleId });
+                    return undefined;
+                },
+            },
+        ]);
+        expect(seen).toEqual([{ isEntry: true, facadeModuleId: '/main.js' }]);
+    });
+
+    it('a rewrite drops that chunk’s sourcemap, and says so', async () => {
+        // The chunk's mapping parts describe the text the module pass emitted; a plugin's
+        // replacement invalidates them. This behaviour moved into the render pass along with the
+        // hook, and had never been gated anywhere.
+        const fs = { read: (id: string) => HASHED[id] ?? null, exists: (id: string) => id in HASHED };
+        const opts = { entry: '/main.js', fs, external: [], output: { sourcemap: true } } as const;
+        const kept = await bundle({ ...opts, plugins: [{ name: 'p', renderChunk: () => null }] } as never);
+        expect(kept.chunks[0].map, 'an untouched chunk keeps its map').toBeDefined();
+        expect(kept.warnings ?? []).not.toContain('sourcemap omitted: a renderChunk plugin rewrote the chunk');
+
+        const lost = await bundle({
+            ...opts,
+            plugins: [{ name: 'p', renderChunk: (code: string) => `${code}\n//probe\n` }],
+        } as never);
+        expect(lost.chunks[0].map).toBeUndefined();
+        expect(lost.warnings ?? []).toContain('sourcemap omitted: a renderChunk plugin rewrote the chunk');
+    });
+
+    it('the fileName a hook sees still carries the hash PLACEHOLDER — and a name it embeds is substituted', async () => {
+        // Running before hashing has a price rollup pays too and documents: the hashes do not exist
+        // yet. The compensation is that placeholders are substituted inside the plugin's OWN output,
+        // so embedding the name a hook was given still yields the real file name.
+        let seenName = '';
+        const r = await hashed([
+            {
+                name: 'p',
+                renderChunk(code: string, chunk: { fileName: string }) {
+                    seenName = chunk.fileName;
+                    return `${code}\nexport const self = ${JSON.stringify(chunk.fileName)};\n`;
+                },
+            },
+        ]);
+        expect(seenName, 'not a final name').not.toBe(r.chunks[0].fileName);
+        expect(r.chunks[0].code, 'the placeholder was resolved in the plugin’s own text').toContain(
+            JSON.stringify(r.chunks[0].fileName),
+        );
+        expect(r.chunks[0].code).not.toContain(seenName);
+    });
+});

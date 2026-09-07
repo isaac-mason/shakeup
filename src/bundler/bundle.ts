@@ -13,6 +13,7 @@ import {
     type RenderIncremental,
     renderChunk,
     renderChunks,
+    type RenderHooks,
 } from './generate/chunks.ts';
 import { includedModuleIds, type ModuleRenderCache, type ModuleReuse, type RenderStats } from './generate/context.ts';
 import {
@@ -745,11 +746,78 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             inc?.mod ?? null,
         );
 
+    // `renderChunk` and `augmentChunkHash` run INSIDE `renderChunks`, between the render and the
+    // content hash — see {@link RenderHooks}. They used to run out here, after naming was finished,
+    // which meant a plugin's rewrite never reached the hash: rolldown moves the hash for both and
+    // shakeup moved it for neither (measured, §2z82).
+    let renderChunkMeta: { chunks: Record<string, RenderedChunkInfo> } = { chunks: {} };
+    const renderHooks: RenderHooks = {
+        beforeRenderChunk: (described) => {
+            // EMITTED-CHUNK reference ids become resolvable now, and not before: a chunk's fileName
+            // exists only once chunking and naming have run, which is the whole reason `emitFile`
+            // answers a reference id (§2z61). The name is PRELIMINARY here, so it may carry a hash
+            // placeholder — which is exactly why a plugin can embed it: Pass C substitutes
+            // placeholders inside the plugin's own output too. `bundle()` re-points these at the
+            // final names below, for `generateBundle` and anything after it.
+            // Matched by FACADE MODULE — the emitted chunk is an entry, so the chunk that fronts it
+            // is the one whose facade is that module.
+            for (const emitted of graph.emittedChunks) {
+                if (emitted.module < 0) continue;
+                const id = graph.modules[emitted.module].id;
+                const own = described.find((c) => c.isEntry === true && (c.moduleIds as string[]).includes(id));
+                if (own !== undefined) graph.emittedRefs.set(emitted.ref, own.fileName);
+            }
+            renderChunkMeta = { chunks: Object.fromEntries(described.map((c) => [c.fileName, c])) };
+        },
+        renderChunk:
+            pipeline.renderChunk.length === 0
+                ? undefined
+                : async (code, chunk) => {
+                      let current = code;
+                      for (const hook of pipeline.renderChunk) {
+                          // AWAITED, and in ORDER. Rollup documents `renderChunk` as async and plugins
+                          // return promises; calling it synchronously meant the `{ code, map }` unwrap
+                          // below read `.code` off a PROMISE, got `undefined`, and discarded the result —
+                          // every hook then saw the original chunk and the bundle was emitted unmodified,
+                          // with no error and no warning. Sequential rather than parallel because each
+                          // hook's input is the previous one's output.
+                          const raw = await hook.handler.call(
+                              pluginCtx,
+                              current,
+                              chunk,
+                              naming as unknown as Record<string, unknown>,
+                              renderChunkMeta,
+                          );
+                          // rollup's `renderChunk` may return either a string or `{ code, map }`, and
+                          // plugins written against rollup return the object form. It used to be assigned
+                          // straight to the chunk's code, so the chunk was emitted as the string
+                          // `[object Object]` — no error, no warning, just a destroyed bundle.
+                          const result = typeof raw === 'object' && raw !== null ? raw.code : raw;
+                          if (result !== null && result !== undefined) current = result;
+                      }
+                      return current === code ? null : current;
+                  },
+        augmentChunkHash:
+            pipeline.augmentChunkHash.length === 0
+                ? undefined
+                : async (chunk) => {
+                      // Every plugin's salt, concatenated in plugin order — one declining (returning
+                      // nothing) must not erase another's.
+                      let salt = '';
+                      for (const hook of pipeline.augmentChunkHash) {
+                          const part = await hook.handler.call(pluginCtx, chunk);
+                          if (typeof part === 'string') salt += part;
+                      }
+                      return salt;
+                  },
+        warn: (m) => warnings.push(m),
+    };
+
     let outputChunks: OutputChunk[];
     let assets: OutputAsset[];
     Timer.start(timer, 'render');
     try {
-        const r = renderChunks(
+        const r = await renderChunks(
             chunkGraph,
             naming,
             renderer,
@@ -758,6 +826,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             min.compress,
             min.mangle,
             inc,
+            renderHooks,
         );
         outputChunks = r.chunks;
         assets = r.assets;
@@ -766,60 +835,17 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
     Timer.end(timer, 'render');
 
-    // EMITTED-CHUNK reference ids become resolvable now, and not before: a chunk's fileName exists
-    // only once chunking and naming have run, which is the whole reason `emitFile` answers a
-    // reference id (§2z61). Matched by FACADE MODULE — the emitted chunk is an entry, so the chunk
-    // that fronts it is the one whose facade is that module. Placed ahead of `renderChunk`, so every
-    // hook from there on can call `getFileName` on it.
+    // The emitted-chunk reference ids are re-pointed at the FINAL names. `beforeRenderChunk` set
+    // them to the preliminary ones so `renderChunk` could resolve a reference; from here on
+    // (`buildEnd`, `generateBundle`, the returned bundle) they must be the real file names.
     for (const emitted of graph.emittedChunks) {
         if (emitted.module < 0) continue;
         const id = graph.modules[emitted.module].id;
         const own = outputChunks.find((c) => c.moduleIds.length > 0 && c.isEntry && c.moduleIds.includes(id));
         if (own !== undefined) graph.emittedRefs.set(emitted.ref, own.fileName);
     }
+    warnings.push(...warningsOut.splice(0));
 
-    // renderChunk plugin hook: run per emitted chunk (rewrites drop that chunk's sourcemap).
-    //
-    // The chunk DESCRIPTION each hook receives alongside the code — rollup's and rolldown's
-    // `RenderedChunk`. Built once, before the loop, and deliberately WITHOUT `code`/`map`: the code
-    // changes from hook to hook, so a chunk object carrying a stale copy of it is a trap, and both
-    // oracles omit it for the same reason.
-    const renderedInfo = new Map<string, RenderedChunkInfo>();
-    for (const oc of outputChunks) {
-        const { code: _code, map: _map, ...info } = oc;
-        renderedInfo.set(oc.fileName, info as RenderedChunkInfo);
-    }
-    const renderChunkMeta = { chunks: Object.fromEntries(renderedInfo) };
-
-    for (let i = 0; i < outputChunks.length; i++) {
-        const oc = outputChunks[i];
-        for (const hook of pipeline.renderChunk) {
-            // AWAITED, and in ORDER. Rollup documents `renderChunk` as async and plugins return
-            // promises; calling it synchronously meant the `{ code, map }` unwrap below read `.code`
-            // off a PROMISE, got `undefined`, and discarded the result — every hook then saw the
-            // original chunk and the bundle was emitted unmodified, with no error and no warning.
-            // Sequential rather than parallel because each hook's input is the previous one's output.
-            const raw = await hook.handler.call(
-                pluginCtx,
-                oc.code,
-                renderedInfo.get(oc.fileName)!,
-                naming as unknown as Record<string, unknown>,
-                renderChunkMeta,
-            );
-            // rollup's `renderChunk` may return either a string or `{ code, map }`, and plugins
-            // written against rollup return the object form. It used to be assigned straight to
-            // `oc.code`, so the chunk was emitted as the string `[object Object]` — no error, no
-            // warning, just a destroyed bundle.
-            const result = typeof raw === 'object' && raw !== null ? raw.code : raw;
-            if (result !== null && result !== undefined && result !== oc.code) {
-                oc.code = result;
-                if (oc.map !== undefined) {
-                    oc.map = undefined;
-                    warnings.push('sourcemap omitted: a renderChunk plugin rewrote the chunk');
-                }
-            }
-        }
-    }
     // AWAITED, and in parallel — Rollup documents `buildEnd` as `Kind: async, parallel` and says
     // "you can also return a Promise" (`docs/plugin-development/index.md:304-313`). Calling it and
     // walking away meant an async `buildEnd` neither blocked the build nor surfaced its error: the

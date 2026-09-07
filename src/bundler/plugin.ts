@@ -342,6 +342,15 @@ export type Plugin = {
         outputOptions: Record<string, unknown>,
         meta: { chunks: Record<string, RenderedChunkInfo> },
     ) => MaybePromise<string | { code: string; map?: unknown } | null | undefined>;
+    /**
+     * `augmentChunkHash(chunk)` — extra content folded into this chunk's hash, for a plugin whose
+     * output depends on state the chunk's own code does not contain. Returning a string changes the
+     * chunk's `[hash]`; returning nothing leaves it alone.
+     *
+     * Runs alongside `renderChunk`, before hashing, and the salt joins the CONTENT hash — so it
+     * propagates to every chunk that imports this one, exactly as a content change would.
+     */
+    augmentChunkHash?: (this: PluginCtx, chunk: RenderedChunkInfo) => MaybePromise<string | void | null | undefined>;
     buildEnd?: (this: PluginCtx) => MaybePromise<void>;
     /**
      * `generateBundle(options, bundle, isWrite)` — the last chance to inspect or MUTATE the output.
@@ -391,6 +400,7 @@ export type Pipeline = {
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
     renderStart: Compiled<NonNullable<Plugin['renderStart']>>[];
     renderChunk: Compiled<NonNullable<Plugin['renderChunk']>>[];
+    augmentChunkHash: Compiled<NonNullable<Plugin['augmentChunkHash']>>[];
     buildEnd: Compiled<NonNullable<Plugin['buildEnd']>>[];
     generateBundle: Compiled<NonNullable<Plugin['generateBundle']>>[];
 };
@@ -474,7 +484,7 @@ export async function callOptionsHook(
 /** The GENERATE-phase hooks, and the only ones an OUTPUT plugin contributes. Rollup's wording:
  *  "plugins that can be used as output plugins, i.e. plugins that only use generate phase hooks" —
  *  a build hook on an output plugin does not run, and is not an error in either oracle. */
-export const OUTPUT_HOOKS = ['renderStart', 'renderChunk', 'generateBundle'] as const;
+export const OUTPUT_HOOKS = ['renderStart', 'renderChunk', 'augmentChunkHash', 'generateBundle'] as const;
 
 /** Merge an OUTPUT plugin list's generate-phase hooks into an existing pipeline, in order after the
  *  input plugins'. `idxOffset` keeps `pluginIdx` unique across the two lists — it is the identity
@@ -495,6 +505,7 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         moduleParsed: [],
         renderStart: [],
         renderChunk: [],
+        augmentChunkHash: [],
         buildEnd: [],
     };
     for (const [i, p] of plugins.entries()) {
@@ -515,6 +526,8 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         if (rs !== null) pipeline.renderStart.push(rs);
         const rc = normalize(p.name, pluginIdx, p.renderChunk);
         if (rc !== null) pipeline.renderChunk.push(rc);
+        const ach = normalize(p.name, pluginIdx, p.augmentChunkHash);
+        if (ach !== null) pipeline.augmentChunkHash.push(ach);
         const be = normalize(p.name, pluginIdx, p.buildEnd);
         if (be !== null) pipeline.buildEnd.push(be);
         const gb = normalize(p.name, pluginIdx, p.generateBundle);
