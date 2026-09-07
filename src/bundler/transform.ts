@@ -491,7 +491,15 @@ function runnerLink(program: Program, ctx: RunnerCtx): void {
     walk(program, (n) => runnerVisit(n, ctx));
 }
 
-export type DevTransformOptions = { lang?: TransformLang; jsx?: JSXOptions; sourcemap?: boolean };
+export type DevTransformOptions = {
+    lang?: TransformLang;
+    jsx?: JSXOptions;
+    sourcemap?: boolean;
+    /** Run the plugin `transformProgram` chain over the analysed program, and return the semantic to
+     *  carry on with (rebuilt if a plugin mutated). A CALLBACK rather than the pipeline itself, so
+     *  this function stays independent of the plugin machinery — the dev server owns that. */
+    transformProgram?: (program: Program, semantic: Semantic) => Semantic;
+};
 
 /**
  * The dev-path transform (Branch A): ONE parse → analyze → runner-link → print. TS-stripping and
@@ -511,8 +519,11 @@ export function devTransform(filename: string, source: string, options: DevTrans
     const errors = parseErrors.map((e) => `${filename}:${e.pos}: ${e.msg}`);
     if (errors.length > 0) return emptyResult(errors);
 
-    const semantic = createSemantic();
+    let semantic = createSemantic();
     analyze(semantic, program);
+    // AST-level plugin passes, in the same window the bundler uses: after `analyze`, before the
+    // lowering below — so a plugin sees the syntax the user wrote, not its lowered form.
+    if (options.transformProgram !== undefined) semantic = options.transformProgram(program, semantic);
     // Transform stage: lower TS (enum/namespace) AND JSX to plain JS BEFORE the runner rewrite, so dev
     // and bundle lower through the same passes. jsxLower injects a real `import {…} from "…/jsx-runtime"`
     // that runnerLink then links like any import (its `_jsx` refs become `_N.jsx` member access).

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { N, type Node, walk } from '../src/ast.ts';
 import { bundle } from '../src/bundler/bundle.ts';
+import { createDevServer } from '../src/bundler/runtime/dev-server.ts';
 import { createMemoryFs } from '../src/bundler/fs.ts';
 import type { Plugin } from '../src/bundler/plugin.ts';
 import { json } from '../src/bundler/plugins/json.ts';
@@ -1250,5 +1252,161 @@ describe('renderError', () => {
         });
         expect(errors).toHaveLength(1);
         expect(errors[0]).toContain('from an output plugin');
+    });
+});
+
+// `transformProgram` — the AST-level counterpart to `transform`. It runs in the window both
+// pipelines share: after `analyze`, before the TS/JSX lowering. No tool has both a text- and an
+// AST-transform hook (babel/swc/parcel make `transform` itself AST-level; rollup/rolldown/vite keep
+// it text-level), so the contract below is shakeup's own and these tests are what pin it.
+describe('transformProgram', () => {
+    const TSX = { '/main.tsx': 'export const msg = "BEFORE";\nexport const App = () => <div>hi</div>;\n' };
+    const fsOf = (files: Record<string, string>) => ({
+        read: (id: string) => files[id] ?? null,
+        exists: (id: string) => id in files,
+    });
+
+    /** `str` puts the RAW text in `name` (ast/build.ts), so this is the smallest observable edit. */
+    const rewriteLiteral = (from: string, to: string) => (program: Node) => {
+        walk(program, (n) => {
+            if (n.type === N.StringLiteral && n.name === from) n.name = to;
+            return undefined;
+        });
+    };
+
+    it('runs in BOTH pipelines, before lowering, with a populated semantic', async () => {
+        // Pre-lowering is the load-bearing part: after `jsxLower` there are no JSXElements left, so
+        // seeing one proves the ordering rather than merely that the hook fired.
+        const seen: string[] = [];
+        const plugin = {
+            name: 'peek',
+            transformProgram(program: Node, semantic: { scopes: unknown[] }, id: string) {
+                let jsx = 0;
+                walk(program, (n) => {
+                    if (n.type === N.JSXElement) jsx++;
+                    return undefined;
+                });
+                seen.push(`${id} jsx=${jsx} scopes=${semantic.scopes.length > 0}`);
+                return false;
+            },
+        } as unknown as Plugin;
+
+        const r = await bundle({ entry: '/main.tsx', fs: fsOf(TSX), external: [], plugins: [plugin] });
+        expect(r.errors).toEqual([]);
+        const server = createDevServer({ fs: fsOf(TSX), plugins: [plugin] });
+        await server.fetchModule('/main.tsx');
+
+        expect(seen).toEqual(['/main.tsx jsx=1 scopes=true', '/main.tsx jsx=1 scopes=true']);
+    });
+
+    it('a mutation reaches the emitted output, in both pipelines', async () => {
+        const plugin = {
+            name: 'rewrite',
+            transformProgram: (program: Node) => rewriteLiteral('"BEFORE"', '"AFTER"')(program),
+        } as unknown as Plugin;
+
+        const r = await bundle({ entry: '/main.tsx', fs: fsOf(TSX), external: [], plugins: [plugin] });
+        expect(r.errors).toEqual([]);
+        expect(r.chunks[0].code).toContain('AFTER');
+        expect(r.chunks[0].code).not.toContain('BEFORE');
+
+        const server = createDevServer({ fs: fsOf(TSX), plugins: [plugin] });
+        const dev = await server.fetchModule('/main.tsx');
+        expect(dev.errors).toEqual([]);
+        expect(dev.code).toContain('AFTER');
+        expect(dev.code).not.toContain('BEFORE');
+    });
+
+    it('with no such plugin the output is untouched', async () => {
+        // The falsification arm for the two above.
+        const r = await bundle({ entry: '/main.tsx', fs: fsOf(TSX), external: [] });
+        expect(r.chunks[0].code).toContain('BEFORE');
+        expect(r.chunks[0].code).not.toContain('AFTER');
+    });
+
+    it('honours a filter', async () => {
+        const seen: string[] = [];
+        const files = { '/main.tsx': "import './other.ts';\nexport const a = 1;\n", '/other.ts': 'export const b = 2;\n' };
+        await bundle({
+            entry: '/main.tsx',
+            fs: fsOf(files),
+            external: [],
+            plugins: [
+                {
+                    name: 'filtered',
+                    transformProgram: {
+                        filter: { id: /\.tsx$/ },
+                        handler: (_p: Node, _s: unknown, id: string) => {
+                            seen.push(id);
+                            return false;
+                        },
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+        expect(seen, 'only the .tsx module').toEqual(['/main.tsx']);
+    });
+
+    it('rebuilds the semantic BETWEEN hooks when one mutated, and skips it when none did', async () => {
+        // Object identity is the instrument: a rebuild hands the next plugin a DIFFERENT Semantic.
+        // This is what stops a second plugin reading a semantic that describes a tree that no longer
+        // exists — and what makes the `false` return worth having.
+        const run = async (firstMutates: boolean) => {
+            const semantics: unknown[] = [];
+            await bundle({
+                entry: '/main.tsx',
+                fs: fsOf(TSX),
+                external: [],
+                plugins: [
+                    {
+                        name: 'first',
+                        transformProgram: (program: Node, s: unknown) => {
+                            semantics.push(s);
+                            if (!firstMutates) return false;
+                            rewriteLiteral('"BEFORE"', '"AFTER"')(program);
+                            return undefined;
+                        },
+                    } as unknown as Plugin,
+                    {
+                        name: 'second',
+                        transformProgram: (_p: Node, s: unknown) => {
+                            semantics.push(s);
+                            return false;
+                        },
+                    } as unknown as Plugin,
+                ],
+            });
+            return semantics;
+        };
+
+        const mutated = await run(true);
+        expect(mutated).toHaveLength(2);
+        expect(mutated[0], 'a mutation forces a fresh semantic for the next plugin').not.toBe(mutated[1]);
+
+        const clean = await run(false);
+        expect(clean).toHaveLength(2);
+        expect(clean[0], 'returning false skips the rebuild').toBe(clean[1]);
+    });
+
+    it('a throwing hook names the plugin and the module', async () => {
+        let message = '';
+        try {
+            await bundle({
+                entry: '/main.tsx',
+                fs: fsOf(TSX),
+                external: [],
+                plugins: [
+                    {
+                        name: 'boom',
+                        transformProgram() {
+                            throw new Error('ast exploded');
+                        },
+                    } as unknown as Plugin,
+                ],
+            });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        expect(message).toBe('[plugin boom] /main.tsx ast exploded');
     });
 });

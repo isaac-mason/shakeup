@@ -355,6 +355,27 @@ export type Plugin = {
     >;
     load?: WithFilter<(this: PluginCtx, id: string) => MaybePromise<LoadResult>>;
     transform?: WithFilter<(this: PluginCtx, code: string, id: string) => MaybePromise<TransformResult>>;
+    /**
+     * `transformProgram(program, semantic, id)` — rewrite the module's AST, in place.
+     *
+     * The AST-level counterpart to {@link Plugin.transform}, which is text-level. Runs in the window
+     * both pipelines share: after `analyze` (so the semantic is populated) and BEFORE the TS/JSX
+     * lowering, so a plugin still sees `JSXElement`, `enum` and namespaces — the syntax the user
+     * wrote. The module is neither re-parsed nor printed for this: shakeup already holds the tree.
+     *
+     * SYNCHRONOUS, like every other tool's equivalent — babel visitors, swc plugins and closure
+     * passes are all sync — and because `devTransform`, one of the two call sites, is synchronous.
+     *
+     * The `Semantic` describes the tree AS GIVEN. Do your queries BEFORE you mutate; shakeup
+     * re-analyses afterwards rather than maintaining your edits, and re-analyses BETWEEN hooks so
+     * the next plugin is not handed a stale one. Return `false` to say you changed nothing and skip
+     * that rebuild.
+     *
+     * The name is shakeup's own: no tool has both a text- and an AST-transform hook. babel, swc and
+     * parcel make `transform` itself AST-level; rollup, rolldown, vite and esbuild keep it
+     * text-level. `Program` is the noun swc, closure and our own AST all use.
+     */
+    transformProgram?: WithFilter<(this: PluginCtx, program: Program, semantic: Semantic, id: string) => boolean | void>;
     moduleParsed?: (this: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     /** Return the rewritten code, or rollup's `{ code, map }` object form. A returned `map` is NOT
      *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
@@ -472,6 +493,7 @@ export type Pipeline = {
     resolveDynamicImport: Compiled<Extract<NonNullable<Plugin['resolveDynamicImport']>, (...a: never[]) => unknown>>[];
     load: Compiled<Extract<NonNullable<Plugin['load']>, (...a: never[]) => unknown>>[];
     transform: Compiled<Extract<NonNullable<Plugin['transform']>, (...a: never[]) => unknown>>[];
+    transformProgram: Compiled<Extract<NonNullable<Plugin['transformProgram']>, (...a: never[]) => unknown>>[];
     moduleParsed: Compiled<NonNullable<Plugin['moduleParsed']>>[];
     outputOptions: Compiled<NonNullable<Plugin['outputOptions']>>[];
     renderStart: Compiled<NonNullable<Plugin['renderStart']>>[];
@@ -645,6 +667,7 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         resolveDynamicImport: [],
         load: [],
         transform: [],
+        transformProgram: [],
         generateBundle: [],
         moduleParsed: [],
         outputOptions: [],
@@ -665,6 +688,9 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         const ld = normalize(p.name, pluginIdx, p.load, 0); // load(id)
         if (ld !== null) pipeline.load.push(ld as Pipeline['load'][number]);
         const tr = normalize(p.name, pluginIdx, p.transform, 1); // transform(code, id)
+        // `transformProgram(program, semantic, id)` — the id is argument 2, for error attribution.
+        const tp = normalize(p.name, pluginIdx, p.transformProgram, 2);
+        if (tp !== null) pipeline.transformProgram.push(tp as Pipeline['transformProgram'][number]);
         if (tr !== null) pipeline.transform.push(tr as Pipeline['transform'][number]);
         const mp = normalize(p.name, pluginIdx, p.moduleParsed);
         if (mp !== null) pipeline.moduleParsed.push(mp);
@@ -767,6 +793,41 @@ export type TransformAccumulator = {
 /** sequential transform chain. Threads the running code AND merges each hook's
  *  option overrides. `Edit[]` / string `code` patch the running code; the
  *  accumulator adds option merging. Returns the accumulator (read `.code`). */
+/**
+ * The `transformProgram` chain: every matching hook, in plugin order, over ONE tree.
+ *
+ * `rebuild` is supplied by the caller rather than imported, so scan and `devTransform` each keep
+ * their own `analyze` arguments (scan's runs the checker and knows the module kind; dev's does not).
+ * It is called only BETWEEN hooks, and only when the previous one reported a change — a stale
+ * semantic handed to the next plugin is the failure this exists to prevent. The caller rebuilds once
+ * more if `mutated` comes back true.
+ *
+ * Sync throughout: the hook is sync, and so is `devTransform`.
+ */
+export function runTransformProgram(
+    pipeline: Pipeline,
+    ctxFor: CtxFor,
+    program: Program,
+    semantic: Semantic,
+    id: string,
+    rebuild: () => Semantic,
+): { semantic: Semantic; mutated: boolean } {
+    let current = semantic;
+    let dirty = false;
+    for (const hook of pipeline.transformProgram) {
+        if (hook.matches !== null && !hook.matches(id)) continue;
+        if (dirty) {
+            current = rebuild();
+            dirty = false;
+        }
+        // `false` is the only way to say "I changed nothing" — a hook returning undefined is assumed
+        // to have mutated, because that is the safe reading of a plugin that did not answer.
+        const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS, id), program, current, id);
+        if (r !== false) dirty = true;
+    }
+    return { semantic: current, mutated: dirty };
+}
+
 export function runTransform(pipeline: Pipeline, ctx: PluginCtx, code: string, id: string): MaybePromise<TransformAccumulator> {
     const hooks = pipeline.transform;
     const acc: TransformAccumulator = { code, moduleSideEffects: null, meta: {}, moduleType: undefined };

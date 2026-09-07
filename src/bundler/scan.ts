@@ -52,7 +52,8 @@ import {
     type ResolveSkip,
     runLoad,
     runResolveId,
-    runTransform, pluginMeta,} from './plugin.ts';
+    runTransform,
+    runTransformProgram, pluginMeta,} from './plugin.ts';
 import {
     type GraphOptions,
     type InputOption,
@@ -1589,6 +1590,21 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                     isTs,
                 );
                 for (const e of semantic.errors) graph.errors.push(`${id}:${e.pos}: ${e.msg}`);
+                // `transformProgram` — the AST-level counterpart to `transform`. HERE: after
+                // `analyze`, so a plugin gets a populated semantic, and before the TS/JSX lowering,
+                // so it still sees the syntax the user wrote. A plugin that mutates invalidates the
+                // semantic, so it is rebuilt — the same two lines the lowering already uses when
+                // `LOWER_SEMANTIC_MODE` is not `maintain`, and skipped entirely when every hook
+                // reported no change.
+                if (pipe.transformProgram.length > 0) {
+                    const rebuildSemantic = (): Semantic => {
+                        const fresh = createSemantic();
+                        analyze(fresh, program, kind === 'module' || parsed.hasEsmExport || parsed.hasEsmImport, false, isTs);
+                        return fresh;
+                    };
+                    const tp = runTransformProgram(pipe, ctxFor, program, semantic, id, rebuildSemantic);
+                    semantic = tp.mutated ? rebuildSemantic() : tp.semantic;
+                }
                 // AFTER `analyze` — the resolver reads `sym` off the binding identifiers, which is
                 // only assigned once the semantic has run. Done once here so the set rides the parse
                 // cache with everything else derived from the AST.

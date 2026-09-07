@@ -1,4 +1,4 @@
-import { analyze, createSemantic } from '../../analysis/semantic.ts';
+import { analyze, createSemantic, type Semantic } from '../../analysis/semantic.ts';
 import { parse } from '../../parser/index.ts';
 import type { SourceMap } from '../../util/sourcemap.ts';
 import type { Fs } from '../fs.ts';
@@ -21,6 +21,7 @@ import {
     runModuleParsed,
     runResolveId,
     runTransform,
+    runTransformProgram,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
@@ -581,7 +582,25 @@ export function createDevServer(options: DevServerOptions): DevServer {
         perf.transformMs += performance.now() - tTransform;
 
         const tDev = performance.now();
-        const result = devTransform(id, patched, { jsx: options.jsx, sourcemap: wantSourcemap(id) });
+        const result = devTransform(id, patched, {
+            jsx: options.jsx,
+            sourcemap: wantSourcemap(id),
+            // The dev server owns the pipeline, so it supplies the chain as a callback. `analyze`
+            // here takes the same arguments `devTransform`'s own call does — no checker, no
+            // module-kind hint — so a rebuild is indistinguishable from the original analysis.
+            transformProgram:
+                pipeline.transformProgram.length === 0
+                    ? undefined
+                    : (program, semantic) => {
+                          const rebuild = (): Semantic => {
+                              const fresh = createSemantic();
+                              analyze(fresh, program);
+                              return fresh;
+                          };
+                          const tp = runTransformProgram(pipeline, () => ctxForModule(id), program, semantic, id, rebuild);
+                          return tp.mutated ? rebuild() : tp.semantic;
+                      },
+        });
         perf.devTransformMs += performance.now() - tDev;
         if (result.errors.length > 0) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: result.errors };
         const tResolve = performance.now();
