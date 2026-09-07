@@ -751,3 +751,67 @@ describe('this.load is re-entrancy safe', () => {
         expect(count).toBe(1);
     });
 });
+
+// A throwing hook used to escape as its bare message — `Error: transform exploded` — out of a build
+// running many plugins over many modules, naming neither. rolldown 1.2.4 attributes every one
+// (measured, llm/repro/_errsurf.mts): `[plugin <name>]` for resolveId, `[plugin <name>] <id>` for
+// load and transform. These assert that format, in both pipelines.
+describe('a throwing plugin hook names the plugin, and the module', () => {
+    const FILES = { '/main.ts': "import { d } from './dep.ts';\nexport const got = d;\n", '/dep.ts': "export const d = 'D';\n" };
+    const boom = (hook: 'resolveId' | 'load' | 'transform'): Plugin =>
+        ({
+            name: 'boom',
+            [hook]: () => {
+                throw new Error(`${hook} exploded`);
+            },
+        }) as Plugin;
+    const failing = async (hook: 'resolveId' | 'load' | 'transform') => {
+        try {
+            await bundle({ entry: '/main.ts', fs: createMemoryFs(FILES), external: [], plugins: [boom(hook)] });
+        } catch (e) {
+            return e as Error;
+        }
+        throw new Error(`${hook} did not fail the build`);
+    };
+
+    it('names the plugin AND the file for load', async () => {
+        const e = await failing('load');
+        expect(e.message).toBe('[plugin boom] /main.ts load exploded');
+        expect((e as { plugin?: string }).plugin, 'rollup hangs the plugin off the error too').toBe('boom');
+    });
+
+    it('names the plugin AND the file for transform', async () => {
+        expect((await failing('transform')).message).toBe('[plugin boom] /main.ts transform exploded');
+    });
+
+    it('names the plugin only for resolveId — which is what rolldown reports', async () => {
+        // The falsification arm for the id: it is attached where the hook HAS a module, and nowhere
+        // else. A prefix that always appended something would fail here.
+        expect((await failing('resolveId')).message).toBe('[plugin boom] resolveId exploded');
+    });
+
+    it('blames the plugin that threw, once, through a nested this.resolve', async () => {
+        const thrower: Plugin = {
+            name: 'thrower',
+            resolveId: (spec) => {
+                if (spec === 'nested') throw new Error('nested exploded');
+                return null;
+            },
+        };
+        const caller: Plugin = {
+            name: 'caller',
+            load(this: { resolve: (s: string, i: string) => Promise<unknown> }, id: string) {
+                if (id !== '/main.ts') return null;
+                return this.resolve('nested', '/main.ts').then(() => null);
+            },
+        } as unknown as Plugin;
+        let message = '';
+        try {
+            await bundle({ entry: '/main.ts', fs: createMemoryFs(FILES), external: [], plugins: [thrower, caller] });
+        } catch (e) {
+            message = (e as Error).message;
+        }
+        // `thrower` threw; `caller` merely propagated. One prefix, and it is the culprit's.
+        expect(message).toBe('[plugin thrower] nested exploded');
+    });
+});

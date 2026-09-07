@@ -411,14 +411,59 @@ function compileMatcher(filter: HookFilter | undefined): ((id: string) => boolea
     return (id: string) => patterns.some((p) => p.test(id));
 }
 
-function normalize<F>(plugin: string, pluginIdx: number, hook: WithFilter<F> | undefined | null): Compiled<F> | null {
+/**
+ * Name the plugin — and the module — a thrown error came from.
+ *
+ * A throwing hook used to escape as its bare message: `Error: transform exploded`, with no plugin
+ * and no file, out of a build running twenty plugins over a thousand modules. rolldown 1.2.4
+ * attributes every one (measured, llm/repro/_errsurf.mts): `[plugin boom]` for `resolveId`, and
+ * `[plugin boom] /abs/path/main.js` for `load` and `transform` — so the prefix here is its format.
+ *
+ * The error object is MUTATED rather than wrapped: wrapping loses the plugin's own stack, and
+ * rollup plugins hang `code`/`loc` off the error for the host to read. Already-attributed errors are
+ * left alone, so a nested `this.resolve` into another plugin is blamed once, on the plugin that
+ * actually threw.
+ */
+const attribute = (e: unknown, plugin: string, id: unknown): unknown => {
+    if (e instanceof Error && !e.message.startsWith('[plugin ')) {
+        e.message = `[plugin ${plugin}] ${typeof id === 'string' ? `${id} ` : ''}${e.message}`;
+        if ((e as { plugin?: unknown }).plugin === undefined) (e as { plugin?: unknown }).plugin = plugin;
+    }
+    return e;
+};
+
+/** Wrap a hook so a throw is attributed. `idArg` is the argument index holding the module id, or
+ *  -1 for a hook that has none — matching which hooks rolldown names a file for. */
+const attributed = <F>(plugin: string, idArg: number, fn: F): F =>
+    function (this: unknown, ...args: unknown[]): unknown {
+        try {
+            const r = (fn as (...a: unknown[]) => unknown).apply(this, args);
+            // Only a thenable pays for a `.catch`; a sync hook pays an untaken try/catch.
+            return typeof (r as { then?: unknown } | null)?.then === 'function'
+                ? (r as Promise<unknown>).catch((e: unknown) => {
+                      throw attribute(e, plugin, idArg >= 0 ? args[idArg] : undefined);
+                  })
+                : r;
+        } catch (e) {
+            throw attribute(e, plugin, idArg >= 0 ? args[idArg] : undefined);
+        }
+    } as F;
+
+function normalize<F>(
+    plugin: string,
+    pluginIdx: number,
+    hook: WithFilter<F> | undefined | null,
+    idArg = -1,
+): Compiled<F> | null {
     // `null` as well as `undefined`: rollup treats an explicitly-null hook as absent, and plugins
     // written as `{ transform: cond ? fn : null }` are common. It used to reach `compileMatcher`
     // through the object branch and crash the whole build with `Cannot read properties of null`.
     if (hook === undefined || hook === null) return null;
-    if (typeof hook === 'function') return { plugin, pluginIdx, matches: null, handler: hook as F };
+    if (typeof hook === 'function') {
+        return { plugin, pluginIdx, matches: null, handler: attributed(plugin, idArg, hook as F) };
+    }
     const h = hook as { filter?: HookFilter; handler: F };
-    return { plugin, pluginIdx, matches: compileMatcher(h.filter), handler: h.handler };
+    return { plugin, pluginIdx, matches: compileMatcher(h.filter), handler: attributed(plugin, idArg, h.handler) };
 }
 
 /** Flatten a plugin list into a {@link Pipeline}, compiling each hook's id filter. */
@@ -516,9 +561,9 @@ export function compilePipeline(plugins: readonly Plugin[], idxOffset = 0): Pipe
         if (ri !== null) pipeline.resolveId.push(ri as Pipeline['resolveId'][number]);
         const rd = normalize(p.name, pluginIdx, p.resolveDynamicImport);
         if (rd !== null) pipeline.resolveDynamicImport.push(rd as Pipeline['resolveId'][number]);
-        const ld = normalize(p.name, pluginIdx, p.load);
+        const ld = normalize(p.name, pluginIdx, p.load, 0); // load(id)
         if (ld !== null) pipeline.load.push(ld as Pipeline['load'][number]);
-        const tr = normalize(p.name, pluginIdx, p.transform);
+        const tr = normalize(p.name, pluginIdx, p.transform, 1); // transform(code, id)
         if (tr !== null) pipeline.transform.push(tr as Pipeline['transform'][number]);
         const mp = normalize(p.name, pluginIdx, p.moduleParsed);
         if (mp !== null) pipeline.moduleParsed.push(mp);

@@ -270,6 +270,32 @@ describe('the dev server and the bundler present the same plugin surface', () =>
         await throughDev(plugin, 'app');
     });
 
+    it('attributes a throwing hook the same way the bundler does', async () => {
+        // Both pipelines compile the same plugin list through the same `compilePipeline`, so the
+        // blame belongs to both or neither. rolldown's format is the reference:
+        // `[plugin <name>] <id>` for a hook that has a module.
+        const plugin = {
+            name: 'boom',
+            transform: () => {
+                throw new Error('transform exploded');
+            },
+        };
+        let fromBundle = '';
+        try {
+            await bundle({ entry: '/main.js', fs, external: [], output: {}, plugins: [plugin as never] });
+        } catch (e) {
+            fromBundle = (e as Error).message;
+        }
+        let fromDev = '';
+        try {
+            await throughDev(plugin);
+        } catch (e) {
+            fromDev = (e as Error).message;
+        }
+        expect(fromBundle).toBe('[plugin boom] /main.js transform exploded');
+        expect(fromDev, 'the dev server says the same thing').toContain('[plugin boom] /main.js transform exploded');
+    });
+
     it('carries `custom` through this.resolve — including a SECOND call with different custom', async () => {
         // `custom` is Rollup's plugin-to-plugin channel; dev dropped it. The second call also had to
         // defeat dev's resolve cache, which keyed on (importer, spec) alone and reused the first
