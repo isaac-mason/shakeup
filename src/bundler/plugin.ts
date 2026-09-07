@@ -196,6 +196,9 @@ export const pluginMeta = (watchMode: boolean | undefined): PluginContextMeta =>
 
 export type PluginCtx = {
     meta: PluginContextMeta;
+    /** Declare a file the build depends on but does not import — a config, a codegen input, a
+     *  template. Both oracles have it; the collected set surfaces as `BundleResult.watchFiles`. */
+    addWatchFile(file: string): void;
     warn(message: string): void;
     error(message: string): never;
     info(message: string): void;
@@ -422,7 +425,9 @@ export type ResolveSkip = { pluginIdx: number; importer: string | null; specifie
 
 /** Build the context a hook belonging to `pluginIdx` sees, carrying the skips in force. `null` is a
  *  caller outside any plugin (the driver itself), which skips nothing. */
-export type CtxFor = (pluginIdx: number | null, skipped: readonly ResolveSkip[]) => PluginCtx;
+/** Build a context for one hook call. `moduleId` is the module the hook is working on, where it has
+ *  one (`load`, `transform`) — `this.addWatchFile` records against it. */
+export type CtxFor = (pluginIdx: number | null, skipped: readonly ResolveSkip[], moduleId?: string | null) => PluginCtx;
 
 /** Plugins flattened into dense per-hook arrays so hot loops skip feature tests. */
 export type Pipeline = {
@@ -674,7 +679,7 @@ export function runLoad(pipeline: Pipeline, ctxFor: CtxFor, id: string): MaybePr
             if (hook.matches !== null && !hook.matches(id)) continue;
             // A `load` hook's own `this.resolve` skips ITS plugin's `resolveId`, so it needs the same
             // per-plugin context a `resolveId` hook gets. Nothing is inherited: this is a fresh chain.
-            const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS), id);
+            const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS, id), id);
             if (isThenable(r)) return r.then((v) => (v !== null && v !== undefined ? (v as LoadResult) : step()));
             if (r !== null && r !== undefined) return r;
         }

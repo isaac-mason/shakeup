@@ -287,6 +287,10 @@ export function createDevServer(options: DevServerOptions): DevServer {
         info: warn,
         debug: () => {},
         meta: pluginMeta(options.watchMode),
+        // Replaced per module by `ctxForModule`. A declaration with no module in hand (from
+        // `buildStart` or `resolveId`) has nothing to invalidate, so it is dropped rather than
+        // recorded against the wrong module.
+        addWatchFile: () => {},
         parse: pluginParse,
         fs,
         resolve: async (source, importer = null, opts) => {
@@ -317,6 +321,28 @@ export function createDevServer(options: DevServerOptions): DevServer {
         },
         getModuleIds: () => graph.keys(),
     };
+
+    /**
+     * MODULE -> the files a plugin declared for it with `this.addWatchFile`, and the reverse index
+     * `handleChange` consults. A dev server's whole job is to invalidate on change, so a plugin
+     * saying "this module depends on that file" has to actually mean something here: a change to a
+     * declared file invalidates every module that declared it, exactly as a change to the module's
+     * own source would.
+     *
+     * A fresh context per module rather than a mutable "current module": the dev server fetches
+     * modules CONCURRENTLY (measured — llm/repro/_interleave.mts shows 60 interleaved hook windows
+     * where the bundler's scan shows none), so a single mutable field would attribute a declaration
+     * to whichever module happened to be in flight.
+     */
+    const watchedBy = new Map<string, Set<string>>();
+    const ctxForModule = (moduleId: string): PluginCtx => ({
+        ...ctx,
+        addWatchFile: (file) => {
+            const owners = watchedBy.get(file);
+            if (owners === undefined) watchedBy.set(file, new Set([moduleId]));
+            else owners.add(moduleId);
+        },
+    });
 
     /**
      * `buildStart`, ONCE per server, lazily.
@@ -463,7 +489,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         }
 
         const tIo = performance.now();
-        const loaded = await runLoad(pipeline, () => ctx, id);
+        const loaded = await runLoad(pipeline, () => ctxForModule(id), id);
         // SourceDescription → take .code; string/null unchanged. Dev doesn't shake, so
         // moduleSideEffects/meta/moduleType are accepted but ignored.
         const source =
@@ -517,7 +543,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
 
         // plugin source patches → fused strip + module-runner rewrite.
         const tTransform = performance.now();
-        const patched = (await runTransform(pipeline, ctx, source, id)).code;
+        const patched = (await runTransform(pipeline, ctxForModule(id), source, id)).code;
         perf.transformMs += performance.now() - tTransform;
 
         const tDev = performance.now();
@@ -620,8 +646,16 @@ export function createDevServer(options: DevServerOptions): DevServer {
     async function handleChange(id: string): Promise<{ env: string; update: HmrUpdate }[]> {
         invalidate(id); // shared transform cache — the module is re-transformed once
         resolveCache.clear(); // a create/edit can shift resolution (new file, shadowing) — re-resolve lazily
+        // A file no module imports, but that some module DECLARED with `this.addWatchFile`: the
+        // declarers are what changed, so they are what gets invalidated and updated. Without this
+        // the declaration is inert and a codegen plugin's input can change with nothing rebuilding.
+        const declarers = watchedBy.get(id);
+        const changed = declarers === undefined ? [id] : [id, ...declarers];
         const out: { env: string; update: HmrUpdate }[] = [];
-        for (const env of environments) out.push({ env: env.name, update: await env.applyEdit(id) });
+        for (const dep of changed) {
+            if (dep !== id) invalidate(dep);
+            for (const env of environments) out.push({ env: env.name, update: await env.applyEdit(dep) });
+        }
         return out;
     }
 

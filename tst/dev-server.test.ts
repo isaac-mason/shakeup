@@ -480,3 +480,58 @@ describe('watch — batching a host change source', () => {
         expect(log).toEqual(['/a.js']);
     });
 });
+
+// `this.addWatchFile` on the DEV side. A declaration that only reported a name would be inert here:
+// a dev server's whole job is to invalidate on change, so a change to a declared file has to
+// invalidate the module that declared it.
+describe('dev server — a plugin-declared watch file', () => {
+    const files = () => ({
+        '/main.js': "import './dep.js';\nexport const a = 1;\n",
+        '/dep.js': 'export const d = 2;\n',
+    });
+
+    /** count transform calls per module, and declare `/gen.json` for `/main.js` only. */
+    const declaring = (calls: string[]): Plugin =>
+        ({
+            name: 'gen',
+            transform(this: { addWatchFile: (f: string) => void }, _code: string, id: string) {
+                calls.push(id);
+                if (id === '/main.js') this.addWatchFile('/gen.json');
+                return null;
+            },
+        }) as unknown as Plugin;
+
+    it('a change to the declared file re-transforms the module that declared it', async () => {
+        const calls: string[] = [];
+        const { server } = setup(files(), { plugins: [declaring(calls)] });
+        await server.fetchModule('/main.js');
+        await server.fetchModule('/main.js');
+        expect(calls.filter((c) => c === '/main.js'), 'cached on the second fetch').toHaveLength(1);
+
+        await server.handleChange('/gen.json');
+        await server.fetchModule('/main.js');
+        expect(calls.filter((c) => c === '/main.js'), 're-transformed after its watch file changed').toHaveLength(2);
+    });
+
+    it('a change to an UNDECLARED file leaves it alone', async () => {
+        // The falsification arm: invalidating everything on every change would pass the test above.
+        const calls: string[] = [];
+        const { server } = setup(files(), { plugins: [declaring(calls)] });
+        await server.fetchModule('/main.js');
+        await server.handleChange('/somethingelse.json');
+        await server.fetchModule('/main.js');
+        expect(calls.filter((c) => c === '/main.js')).toHaveLength(1);
+    });
+
+    it('only the DECLARING module is invalidated, not every module', async () => {
+        const calls: string[] = [];
+        const { server } = setup(files(), { plugins: [declaring(calls)] });
+        await server.fetchModule('/main.js');
+        await server.fetchModule('/dep.js');
+        await server.handleChange('/gen.json');
+        await server.fetchModule('/main.js');
+        await server.fetchModule('/dep.js');
+        expect(calls.filter((c) => c === '/main.js')).toHaveLength(2);
+        expect(calls.filter((c) => c === '/dep.js'), '/dep.js declared nothing').toHaveLength(1);
+    });
+});

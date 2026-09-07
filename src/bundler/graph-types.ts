@@ -249,6 +249,15 @@ export type Graph = {
      *  extra ENTRY once the declared entries are rooted; `module` is filled in then, and the
      *  reference id only resolves to a fileName after the chunk is named (see `bundle()`). */
     emittedChunks: { ref: string; id: string; importer?: string; name?: string; module: number }[];
+    /** Every file a plugin declared with `this.addWatchFile`, in declaration order. Surfaced as
+     *  `BundleResult.watchFiles` — rollup's `bundle.watchFiles` and rolldown's `build.watchFiles`,
+     *  which is how a host driving a watcher learns what to watch beyond the module graph. */
+    watchFiles: Set<string>;
+    /** MODULE -> the files it declared, for the calls made from a `load`/`transform` hook, where
+     *  the declaration means "this module's output depends on that file". This is the half that
+     *  feeds incremental invalidation (`transformDependencies`); a call from a hook with no module
+     *  in hand (`buildStart`, `resolveId`) lands only in {@link Graph.watchFiles}. */
+    moduleWatchFiles: Map<string, Set<string>>;
     /** Modules freshly parsed vs reused from `options.cache` this build. */
     parseStats: ParseStats;
     /** Module ids whose downstream artifacts (link/shake/render) are stale this rebuild —

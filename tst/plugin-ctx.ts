@@ -6,6 +6,7 @@ import { type PluginCtx, pluginMeta, pluginParse } from '../src/bundler/plugin.t
 export function stubPluginCtx(fs: Fs, warn: (m: string) => void = () => {}): PluginCtx {
     return {
         meta: pluginMeta(false),
+        addWatchFile: () => {},
         warn,
         error: (m) => {
             throw new Error(m);

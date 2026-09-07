@@ -1013,6 +1013,8 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         assetFileNames: options.assetFileNames ?? 'assets/[name]-[hash][extname]',
         emittedRefs: new Map(),
         emittedChunks: [],
+        watchFiles: new Set(),
+        moduleWatchFiles: new Map(),
         parseStats: { parsed: 0, reused: 0 },
         affected: new Set(),
         changed: new Set(),
@@ -1226,7 +1228,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // asking. rolldown makes a `PluginContext` per plugin carrying `plugin_idx` and
     // `skipped_resolve_calls`; this is that, built on demand. `null` is the driver itself — the graph
     // walk's own resolutions, which skip nothing.
-    const ctxFor: CtxFor = (callerPluginIdx, callerSkips) => ({
+    const ctxFor: CtxFor = (callerPluginIdx, callerSkips, moduleId = null) => ({
         warn: (m) => graph.warnings.push(m),
         error: (m) => {
             throw new Error(m);
@@ -1234,6 +1236,23 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         info: (m) => graph.warnings.push(m),
         debug: () => {},
         meta: pluginMeta(options.watchMode),
+        /**
+         * `this.addWatchFile(file)` — declare that the build depends on a file outside the module
+         * graph (a config, a codegen input, a template). rolldown has it and shakeup had no such
+         * method at all (measured: llm/repro/_ctxsurf.mts), so a plugin had no way to say so.
+         *
+         * Recorded against the MODULE when there is one — `runLoad`/the transform call site pass the
+         * id — because that is the declaration that means something incrementally: the module's
+         * output depends on that file, so a change to it must evict the module's cached parse. A
+         * call from `buildStart` or `resolveId` has no module and lands only in the build-wide set.
+         */
+        addWatchFile: (file) => {
+            graph.watchFiles.add(file);
+            if (moduleId === null) return;
+            const own = graph.moduleWatchFiles.get(moduleId);
+            if (own === undefined) graph.moduleWatchFiles.set(moduleId, new Set([file]));
+            else own.add(file);
+        },
         parse: pluginParse,
         fs: options.fs,
         resolve: async (source, importer = null, opts) => {
@@ -1456,7 +1475,11 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // same shape — `StrOrBytes` survives only as far as `pre_process_source`.
             const bytes = typeof loaded === 'string' ? null : loaded;
             const source0 = bytes === null ? (loaded as string) : '';
-            const transformed = bytes === null ? await runTransform(pipe, ctx, source0, id) : { code: source0, meta: {} };
+            // A context that KNOWS ITS MODULE, so `this.addWatchFile` from a transform hook records
+            // against `id` rather than build-wide. `ctxFor` already builds a fresh context per call;
+            // it only lacked the module.
+            const transformed =
+                bytes === null ? await runTransform(pipe, ctxFor(null, [], id), source0, id) : { code: source0, meta: {} };
             source = transformed.code;
             // Merge transform overrides (transform > load > resolveId precedence).
             const pending = pendingFor(id);

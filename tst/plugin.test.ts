@@ -891,3 +891,195 @@ describe('this.meta', () => {
         expect((await metaFrom({ watchMode: true }))?.watchMode).toBe(true);
     });
 });
+
+// `this.addWatchFile` — how a plugin declares a dependency on a file that is NOT in the module
+// graph: a config, a codegen input, a template. rolldown has it and surfaces the set as
+// `build.watchFiles`; shakeup had no such method at all (measured: llm/repro/_ctxsurf.mts).
+describe('this.addWatchFile', () => {
+    const FILES = { '/main.ts': "import './dep.ts';\nexport const a = 1;\n", '/dep.ts': 'export const d = 2;\n' };
+    const withPlugin = (plugin: unknown) =>
+        bundle({ entry: '/main.ts', fs: createMemoryFs(FILES), external: [], plugins: [plugin as Plugin] });
+
+    it('reports what a transform declared, as BundleResult.watchFiles', async () => {
+        const r = await withPlugin({
+            name: 'gen',
+            transform(this: { addWatchFile: (f: string) => void }, _code: string, id: string) {
+                this.addWatchFile(`${id}.meta.json`);
+                return null;
+            },
+        });
+        expect(r.errors).toEqual([]);
+        expect([...r.watchFiles].sort()).toEqual(['/dep.ts.meta.json', '/main.ts.meta.json']);
+    });
+
+    it('collects from a hook with no module too, and de-dups', async () => {
+        // `buildStart` has no module in hand — the declaration is build-wide, and it is still
+        // reported. Two hooks naming the same file report it once.
+        const r = await withPlugin({
+            name: 'gen',
+            buildStart(this: { addWatchFile: (f: string) => void }) {
+                this.addWatchFile('/config.json');
+            },
+            transform(this: { addWatchFile: (f: string) => void }) {
+                this.addWatchFile('/config.json');
+                return null;
+            },
+        });
+        expect(r.watchFiles).toEqual(['/config.json']);
+    });
+
+    it('is empty, not undefined, when no plugin declares anything', async () => {
+        // The falsification arm: a field that always listed something would pass the tests above.
+        expect((await bundle({ entry: '/main.ts', fs: createMemoryFs(FILES), external: [] })).watchFiles).toEqual([]);
+    });
+
+    it('is reported even when the build FAILS', async () => {
+        // A watcher has to keep watching the file whose change is what fixes the error.
+        const r = await withPlugin({
+            name: 'gen',
+            buildStart(this: { addWatchFile: (f: string) => void }) {
+                this.addWatchFile('/config.json');
+            },
+            transform() {
+                throw new Error('nope');
+            },
+        }).catch((e: Error) => e);
+        // The throw escapes `bundle()` (aligned with rolldown), so the failure path is exercised by
+        // a plugin that reports an error rather than throwing.
+        expect(r).toBeInstanceOf(Error);
+        const r2 = await bundle({
+            entry: '/nonexistent.ts',
+            fs: createMemoryFs(FILES),
+            external: [],
+            plugins: [
+                {
+                    name: 'gen',
+                    buildStart(this: { addWatchFile: (f: string) => void }) {
+                        this.addWatchFile('/config.json');
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+        expect(r2.errors.length).toBeGreaterThan(0);
+        expect(r2.watchFiles).toEqual(['/config.json']);
+    });
+});
+
+// The half that makes the declaration MEAN something incrementally: a module's declared files
+// become its `transformDependencies`, so the next build's pre-scan check evicts its cached parse
+// when one of them changed. Without this, a rebuild serves the module from cache unchanged and the
+// declaration is only a name in `watchFiles`.
+describe('addWatchFile drives incremental invalidation', () => {
+    const build = async (files: Record<string, string>, cache: Map<string, unknown>) =>
+        bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(files),
+            external: [],
+            cache: cache as never,
+            plugins: [
+                {
+                    name: 'gen',
+                    transform(this: { addWatchFile: (f: string) => void }, _code: string, id: string) {
+                        if (id === '/main.ts') this.addWatchFile('/gen.json');
+                        return null;
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+
+    it('a changed declared file evicts the declaring module from the parse cache', async () => {
+        const files: Record<string, string> = { '/main.ts': 'export const a = 1;\n', '/gen.json': '{"v":1}' };
+        const cache = new Map();
+        const first = await build(files, cache);
+        expect(first.errors).toEqual([]);
+        expect(first.parseStats.parsed, 'nothing cached yet').toBeGreaterThan(0);
+
+        // Nothing changed: the module is reused.
+        const second = await build(files, cache);
+        expect(second.parseStats.parsed, 'a clean rebuild re-parses nothing').toBe(0);
+
+        // The declared file changed — and nothing imports it, so only the declaration can connect it.
+        files['/gen.json'] = '{"v":2}';
+        const third = await build(files, cache);
+        expect(third.parseStats.parsed, 'the declaring module is re-parsed').toBeGreaterThan(0);
+    });
+
+    it('a change to an undeclared file leaves the cache alone', async () => {
+        // The falsification arm: an eviction that fired for any file would pass the test above.
+        const files: Record<string, string> = {
+            '/main.ts': 'export const a = 1;\n',
+            '/gen.json': '{"v":1}',
+            '/other.json': '{"v":1}',
+        };
+        const cache = new Map();
+        await build(files, cache);
+        expect((await build(files, cache)).parseStats.parsed).toBe(0);
+        files['/other.json'] = '{"v":2}';
+        expect((await build(files, cache)).parseStats.parsed, 'undeclared: still cached').toBe(0);
+    });
+});
+
+// The CROSSING: a module that both declares a watch file AND inlines a helper across a module
+// boundary. Both write to the same `transformDependencies` field, at different points in the build,
+// and the later writer used to assign a fresh array — dropping the other's records entirely. Neither
+// path's own tests could see it, because nothing exercised both on one module.
+describe('addWatchFile x cross-module @inline — one transformDependencies field, two writers', () => {
+    const SRC: Record<string, string> = {
+        '/helper.ts': '/* @inline */ export function addOne(x: number): number { return x + 1; }\n',
+        '/main.ts':
+            'import { addOne } from "./helper.ts";\n' +
+            '/* @optimize */ export function run(n: number): number { return addOne(n) + addOne(n); }\n' +
+            'globalThis.sink = run(1);\n',
+        '/gen.json': '{"v":1}',
+    };
+
+    const build = async (files: Record<string, string>, cache: Map<string, unknown>) =>
+        bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs(files),
+            external: [],
+            cache: cache as never,
+            output: { optimize: true },
+            plugins: [
+                {
+                    name: 'gen',
+                    transform(this: { addWatchFile: (f: string) => void }, _code: string, id: string) {
+                        if (id === '/main.ts') this.addWatchFile('/gen.json');
+                        return null;
+                    },
+                } as unknown as Plugin,
+            ],
+        });
+
+    it('keeps BOTH the declared file and the inlined producer as dependencies', async () => {
+        const files = { ...SRC };
+        const cache = new Map();
+        expect((await build(files, cache)).errors).toEqual([]);
+        expect((await build(files, cache)).parseStats.parsed, 'a clean rebuild re-parses nothing').toBe(0);
+
+        // The declared file — the record the inline path's writer used to clobber.
+        files['/gen.json'] = '{"v":2}';
+        expect((await build(files, cache)).parseStats.parsed, 'declared file changed').toBeGreaterThan(0);
+
+        // And the case that actually pins the clobber. The inline writer only runs when the module
+        // is FRESHLY built, so a lost record is restored by the next build and a three-build test
+        // sees nothing (measured: llm/repro/_tdeps2.mts). The one observable window is a change to
+        // the declared file straight after the FIRST build.
+        const coldCache = new Map();
+        const coldFiles = { ...SRC };
+        expect((await build(coldFiles, coldCache)).errors).toEqual([]);
+        coldFiles['/gen.json'] = '{"v":9}';
+        expect(
+            (await build(coldFiles, coldCache)).parseStats.parsed,
+            'the declaration must survive the build that recorded it',
+        ).toBeGreaterThan(0);
+
+        // And the producer, which must survive the watch-file writer in the other direction.
+        const cache2 = new Map();
+        const files2 = { ...SRC };
+        await build(files2, cache2);
+        expect((await build(files2, cache2)).parseStats.parsed).toBe(0);
+        files2['/helper.ts'] = '/* @inline */ export function addOne(x: number): number { return x + 2; }\n';
+        expect((await build(files2, cache2)).parseStats.parsed, 'inlined producer changed').toBeGreaterThan(0);
+    });
+});

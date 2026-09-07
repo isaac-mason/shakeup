@@ -214,6 +214,10 @@ export type BundleResult = {
     chunks: OutputChunk[];
     /** Emitted non-chunk files — `.map` sidecars plus plugin `ctx.emitFile` assets. */
     assets?: OutputAsset[];
+    /** Files a plugin declared with `this.addWatchFile` — rollup's `bundle.watchFiles` and
+     *  rolldown's `build.watchFiles`. A host driving a watcher watches these ALONGSIDE the module
+     *  ids, because nothing in the graph points at them. */
+    watchFiles: string[];
     errors: string[];
     warnings: string[];
     graph: Graph | null;
@@ -364,6 +368,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         info: (m) => warningsOut.push(m),
         debug: () => {},
         meta: pluginMeta(options.watchMode),
+        // The GENERATE-phase context has no module in hand, so a declaration here is build-wide.
+        addWatchFile: (file) => void graph.watchFiles.add(file),
         parse: pluginParse,
         fs: options.fs,
         resolve: () => null,
@@ -462,6 +468,32 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         },
         pipeline,
     );
+    // A module's `this.addWatchFile` declarations become its `transformDependencies`, so the NEXT
+    // build's pre-scan check above evicts that module's cached parse when a declared file changed.
+    // Without this the declaration is only a name in `watchFiles`: a host would rebuild, and the
+    // module whose output actually depends on the file would be served from cache unchanged.
+    //
+    // APPENDED, not assigned: the cross-module-inline path records producers on the same field.
+    // BELT AND BRACES in this direction — a producer is by definition an imported module, so losing
+    // its record is masked by ordinary import-graph invalidation (measured: llm/repro/_tdeps2.mts,
+    // where assigning here still re-parses on a producer change). The other direction is NOT
+    // redundant and is gated: see `addWatchFile x cross-module @inline` in `plugin.test.ts`.
+    if (options.cache !== undefined && graph.moduleWatchFiles.size > 0) {
+        for (const [moduleId, files] of graph.moduleWatchFiles) {
+            const entry = options.cache.get(moduleId);
+            if (entry === undefined) continue;
+            const deps: [string, number][] = [...(entry.transformDependencies ?? [])];
+            for (const file of files) {
+                if (deps.some(([d]) => d === file)) continue;
+                const src = await options.fs.read(file);
+                // An unreadable declared file hashes -1, so the module is always invalidated —
+                // the same conservative choice the producer path makes.
+                deps.push([file, src === null ? -1 : hashSource(src)]);
+            }
+            entry.transformDependencies = deps;
+        }
+    }
+
     // Generate-stage asset emit: read + content-hash resolved `new-url` assets (scan only resolved
     // their paths). Before the error gate so an asset load failure surfaces like a scan error.
     await emitAssets(graph, options.fs);
@@ -482,6 +514,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         atShake: TreeshakeResult | null,
     ): BundleResult => ({
         chunks: [],
+        // Reported even on a FAILED build: a watcher has to keep watching the file whose change is
+        // what will fix the error, and a plugin may well have declared it before the failure.
+        watchFiles: [...graph.watchFiles],
         errors,
         warnings,
         graph,
@@ -533,11 +568,16 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             // `srcHash` alone is no longer a sufficient key for it.
             const entry = options.cache?.get(mod.id);
             if (entry !== undefined) {
-                const deps: [string, number][] = [];
+                // SEEDED with whatever is already recorded — `this.addWatchFile` writes to this same
+                // field earlier in the build, and assigning a fresh array here silently dropped
+                // every declared file for any module that also inlines across a boundary. Found by a
+                // sabotage that did not bite: nothing crossed the two paths, so nothing noticed.
+                const deps: [string, number][] = [...(entry.transformDependencies ?? [])];
                 for (const p of producers) {
                     const pid = graph.modules[p].id;
                     // RAW-file hash, matching what the pre-scan check re-computes; an unreadable
                     // producer records -1 so the consumer is always invalidated (conservative).
+                    if (deps.some(([d]) => d === pid)) continue;
                     const src = await options.fs.read(pid);
                     deps.push([pid, src === null ? -1 : hashSource(src)]);
                 }
@@ -918,6 +958,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     return {
         chunks: outputChunks,
         assets,
+        watchFiles: [...graph.watchFiles],
         errors: [],
         warnings,
         graph,
