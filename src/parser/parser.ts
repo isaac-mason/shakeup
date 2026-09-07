@@ -4098,6 +4098,20 @@ function fnTypeAhead(state: ParserState): boolean {
             const q = c;
             p++;
             while (p < srcLen && src.charCodeAt(p) !== q) p += src.charCodeAt(p) === 92 ? 2 : 1;
+        } else if (c === 47) {
+            // COMMENTS ARE NOT CODE. Skipping them is not a nicety: prose routinely contains an
+            // apostrophe (`/** the caller's id */`), which the quote branch above reads as the start
+            // of a string and runs to the next `'` — or to EOF — swallowing the closing paren; and
+            // prose contains stray brackets (`/** import( */`), which unbalance `depth`. Either way
+            // the scan said "not a function type" and the parser then failed on the real `)`. A `/`
+            // here can only begin a comment: this scan starts at a `(` opening a parameter list.
+            const n = src.charCodeAt(p + 1);
+            if (n === 47) while (p < srcLen && src.charCodeAt(p) !== 10) p++;
+            else if (n === 42) {
+                p += 2;
+                while (p < srcLen && !(src.charCodeAt(p) === 42 && src.charCodeAt(p + 1) === 47)) p++;
+                p++; // now on the '/' of the closing delimiter; the trailing p++ steps past it
+            }
         }
         p++;
     }

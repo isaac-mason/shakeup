@@ -66,3 +66,31 @@ describe('type predicates', () => {
         expect(has('let a: B = c;', N.TSTypePredicate)).toBe(false);
     });
 });
+
+// `fnTypeAhead` — the raw-character scan that decides `(A, B) => C` (a function type) from `(A)` (a
+// parenthesized one) — tracked brackets and quotes but not COMMENTS. Found by the devTransform
+// corpus gate on shakeup's own `src/`, from a doc comment written in ordinary prose.
+describe('a comment inside a function type’s parameter list', () => {
+    const FN_TYPE = (doc: string) => `type R = (\n    a: string,\n    ${doc}\n    b?: number,\n) => string;\n`;
+
+    it.each([
+        ['an apostrophe: the quote scan ran to EOF and ate the closing paren', "/** the caller's id */"],
+        ['an unbalanced paren in prose: `depth` never returned to 0', '/** as in import( */'],
+        ['a line comment', "// the caller's id"],
+        ['a multi-line block comment', "/** the caller's id\n     *  and more prose (unbalanced */"],
+        ['a comment holding a quoted string', "/** pass `kind: 'entry'` here */"],
+    ])('is skipped — %s', (_why, doc) => {
+        const src = FN_TYPE(doc);
+        expect(errs(src), src).toEqual([]);
+        // Not merely error-free: the disambiguation must still reach the FUNCTION-type branch.
+        expect(has(src, N.TSFunctionType), 'builds a TSFunctionType').toBe(true);
+    });
+
+    it('a comment does not turn a parenthesized type INTO a function type', () => {
+        // The falsification arm: skipping comments must not make the scan see a `=>` that is not
+        // there. `(A /* => */)` is a parenthesized type, whatever the prose says.
+        const src = 'type R = (A /* => B */);\n';
+        expect(errs(src)).toEqual([]);
+        expect(has(src, N.TSFunctionType)).toBe(false);
+    });
+});
