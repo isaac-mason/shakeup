@@ -5,6 +5,7 @@
 import type { Semantic } from '../analysis/semantic.ts';
 import type { Node, Program } from '../ast/index.ts';
 import type { CompressMode } from '../passes/compress/index.ts';
+import type { AssetFileNamesFn } from './output-options.ts';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin.ts';
 import type { Platform } from './resolve.ts';
 
@@ -237,6 +238,9 @@ export type Graph = {
      *  file, named after the first, listing both names. Measured against rolldown. Only NAME-based
      *  emits participate — an explicit `fileName` is a demand, not a suggestion. */
     emittedByContent: Map<string, string>;
+    /** `output.assetFileNames`, resolved once. Lives on the graph because `registerEmitted` runs
+     *  during SCAN — an asset's fileName is embedded in module code long before generate. */
+    assetFileNames: string | AssetFileNamesFn;
     /** REFERENCE ID -> fileName. `emitFile` hands back a reference id, not a name (both oracles do;
      *  see `PluginCtx.getFileName`), and this is what resolves one. Every call gets its own id, so
      *  two emits of the same bytes share a fileName and not an id — which is Rollup's behaviour. */

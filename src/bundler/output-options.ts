@@ -28,6 +28,17 @@ export type PreRenderedChunk = {
 };
 
 export type ChunkFileNamesFn = (chunk: PreRenderedChunk) => string;
+
+/** What an `assetFileNames` FUNCTION receives — rollup's `PreRenderedAsset`. */
+export type PreRenderedAsset = {
+    type: 'asset';
+    name: string | undefined;
+    names: string[];
+    originalFileName: string | null;
+    originalFileNames: string[];
+    source: string | Uint8Array;
+};
+export type AssetFileNamesFn = (asset: PreRenderedAsset) => string;
 /** Addon (banner/footer/intro/outro) function — sync only. */
 export type AddonFn = (chunk: PreRenderedChunk) => string;
 
@@ -45,7 +56,7 @@ export type OutputOptionsNaming = {
     // naming patterns
     entryFileNames?: string | ChunkFileNamesFn; // default '[name].js'
     chunkFileNames?: string | ChunkFileNamesFn; // default '[name]-[hash].js'
-    assetFileNames?: string | ChunkFileNamesFn; // default 'assets/[name]-[hash][extname]'
+    assetFileNames?: string | AssetFileNamesFn; // default 'assets/[name]-[hash][extname]'
     hashCharacters?: HashCharacters; // default 'base64'
     sanitizeFileName?: boolean | ((name: string) => string); // default true
     // addons
@@ -141,7 +152,7 @@ export type NormalizedOutputNaming = {
     file: string | null;
     entryFileNames: string | ChunkFileNamesFn;
     chunkFileNames: string | ChunkFileNamesFn;
-    assetFileNames: string | ChunkFileNamesFn;
+    assetFileNames: string | AssetFileNamesFn;
     hashCharacters: HashCharacters;
     getHash: GetHash;
     sanitizeFileName: (name: string) => string;

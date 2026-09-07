@@ -32,6 +32,7 @@ import {
 } from './graph-types.ts';
 import { compileToModule, loaderWantsBytes } from './loaders.ts';
 import { createDefFormatLookup, EMPTY_MODULE_ID } from './node-resolve.ts';
+import { type AssetFileNamesFn, renderNamePattern } from './output-options.ts';
 import {
     type CtxFor,
     type CustomPluginOptions,
@@ -920,7 +921,18 @@ export function registerEmitted(graph: Graph, file: EmittedFile): string {
     //
     // An explicit `fileName` is exempt: that is a demand for a specific path, not a suggestion.
     const contentKey = file.fileName === undefined ? hashSourceHex(file.source) : null;
-    const fileName = (contentKey !== null ? graph.emittedByContent.get(contentKey) : undefined) ?? resolveEmittedFileName(file);
+    // A bad `assetFileNames` pattern is a CONFIG MISTAKE, and shakeup reports those through
+    // `errors` rather than as a throw — a caller reads `result.errors`. `renderNamePattern` throws by
+    // design (it is shared with the chunk side, which catches), so it is caught here and the default
+    // pattern carries the build far enough to report everything else that is wrong.
+    let named: string;
+    try {
+        named = resolveEmittedFileName(file, graph.assetFileNames);
+    } catch (e) {
+        if (!graph.errors.includes((e as Error).message)) graph.errors.push((e as Error).message);
+        named = resolveEmittedFileName(file, 'assets/[name]-[hash][extname]');
+    }
+    const fileName = (contentKey !== null ? graph.emittedByContent.get(contentKey) : undefined) ?? named;
     if (contentKey !== null && !graph.emittedByContent.has(contentKey)) graph.emittedByContent.set(contentKey, fileName);
     // DEDUPE UNIONS the metadata. Two emits of the same bytes under different names are ONE file that
     // lists both — measured against rolldown, which answers `names: ["dup1.txt","dup2.txt"]` and
@@ -955,13 +967,37 @@ export function fileNameOfRef(graph: Graph, referenceId: string): string {
     throw new Error(`Unknown file reference id "${referenceId}".`);
 }
 
-export function resolveEmittedFileName(file: EmittedAsset): string {
+export function resolveEmittedFileName(file: EmittedAsset, assetFileNames: string | AssetFileNamesFn): string {
+    // An explicit `fileName` is a DEMAND for a path and is never patterned — both oracles leave it
+    // exactly as given (probed: `exact/thing.txt` survives every pattern).
     if (file.fileName !== undefined) return file.fileName;
     const base = file.name ?? 'asset';
     const dot = base.lastIndexOf('.');
     const stem = dot > 0 ? base.slice(0, dot) : base;
     const ext = dot > 0 ? base.slice(dot) : '';
-    return `assets/${stem}-${hashSourceHex(file.source)}${ext}`;
+    const pattern =
+        typeof assetFileNames === 'function'
+            ? assetFileNames({
+                  type: 'asset',
+                  name: file.name,
+                  names: file.name === undefined ? [] : [file.name],
+                  originalFileName: file.originalFileName ?? null,
+                  originalFileNames: file.originalFileName === undefined ? [] : [file.originalFileName],
+                  source: file.source,
+              })
+            : assetFileNames;
+    // The four placeholders rollup defines for an asset (`FileEmitter.ts:83-88`) and rolldown
+    // accepts (probed: `[name]`, `[hash]`, `[hash:8]`, `[ext]`, `[extname]` all render). No
+    // `[dirname]` — that one is chunks-only. `renderNamePattern` rejects anything else by name, and
+    // rejects an absolute or relative path, so a bad pattern is a clear error rather than a file
+    // written outside the output directory.
+    const full = hashSourceHex(file.source);
+    return renderNamePattern(pattern, 'output.assetFileNames', {
+        name: () => stem,
+        ext: () => ext.slice(1),
+        extname: () => ext,
+        hash: (size) => (size === undefined ? full : full.slice(0, size)),
+    });
 }
 
 export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Promise<Graph> {
@@ -975,6 +1011,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         warnings: [],
         emitted: new Map(),
         emittedByContent: new Map(),
+        assetFileNames: options.assetFileNames ?? 'assets/[name]-[hash][extname]',
         emittedRefs: new Map(),
         emittedChunks: [],
         parseStats: { parsed: 0, reused: 0 },

@@ -2,6 +2,7 @@ import type { CompressMode } from '../passes/compress/index.ts';
 import { dirnameOf, type Fs, fileExists, joinPath, type MaybePromise } from './fs.ts';
 import type { ParseCache } from './graph-types.ts';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
+import type { AssetFileNamesFn } from './output-options.ts';
 import type { ModuleType, PluginOption } from './plugin.ts';
 
 /** Automatic-runtime JSX options. No `runtime`/`factory`/`fragment`/`development` —
@@ -159,6 +160,13 @@ export type TreeshakeOptions = {
 };
 
 export type GraphOptions = CommonOptions & {
+    /** `output.assetFileNames` — the naming pattern for emitted assets.
+     *
+     *  An OUTPUT option that has to be known during SCAN, which is why it is here rather than only in
+     *  `OutputOptions`: an asset's fileName is embedded in module CODE at transform time (the `?url`
+     *  loader default-exports it, and a `new URL()` site is rewritten to it), so it must exist long
+     *  before the generate stage picks names for chunks. */
+    assetFileNames?: string | AssetFileNamesFn;
     /** The value of `this` at the TOP LEVEL of each module — rolldown's `context?: string`, Rollup's
      *  `context`. Emitted as raw text where the module's top-level `this` was, so
      *  `context: 'globalThis'` turns `this.x` into `globalThis.x`.
