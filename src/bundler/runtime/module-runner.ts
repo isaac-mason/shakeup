@@ -123,6 +123,10 @@ export type ModuleRunner = {
     import(spec: string): Promise<Namespace>;
     /** evaluate an ALREADY-RESOLVED module id and return its live namespace. */
     importResolved(id: string): Promise<Namespace>;
+    /** import an EXTERNAL target the resolver produced (a URL, a bare specifier the host serves)
+     *  through this runner's evaluator, the way a runner-evaluated module's own external imports
+     *  are: `Environment.import` needs it for an entry a plugin externalizes to a rewritten id. */
+    importExternal(target: string): Promise<Namespace>;
     /** self-accept convenience: re-evaluate a module and run its own accept
      *  callbacks. Returns false if it didn't self-accept (caller full-reloads). */
     applyUpdate(id: string): Promise<boolean>;
@@ -465,6 +469,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
          *  resolves itself because it must record the resolved id as a root. Resolving here too
          *  would run every plugin's `resolveId` twice for the entry, under two different `kind`s. */
         importResolved: loadModule,
+        importExternal: async (target) => (await evaluator.runExternalModule(target)) as Namespace,
         applyUpdate,
         applyHmr,
         invalidate,

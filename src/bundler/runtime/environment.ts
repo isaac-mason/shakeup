@@ -219,6 +219,12 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
             // host id-scheme the resolver doesn't understand (e.g. a project-relative
             // 'src/app.ts') still loads as it did before.
             const resolved = await options.resolveId(spec, null, { isEntry: true, kind: 'entry' });
+            // A plugin that externalizes to a REWRITTEN target (a bare dep resolved to a served URL
+            // the realm native-imports) is answered the way `linkFrom` answers a dep: through the
+            // evaluator. It is not a module of this graph, so it is no root either. Only an
+            // externalization that kept the spec verbatim (the resolver could not place it) takes
+            // the fetch-by-spec fallback below.
+            if (typeof resolved !== 'string' && resolved.external !== spec) return runner.importExternal(resolved.external);
             const id = typeof resolved === 'string' ? resolved : spec;
             roots.add(id); // an explicitly-imported module is a root (never orphaned)
             return runner.importResolved(id);

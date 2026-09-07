@@ -58,6 +58,59 @@ describe('environment — isolation (one bundler, many apps)', () => {
     });
 });
 
+describe('environment — externalized entry', () => {
+    it('an entry a plugin externalizes to a rewritten target goes through runExternalModule', async () => {
+        // The realm boot case: `env.import('pkg')` where a host plugin answers every dependency
+        // with a served URL the realm native-imports. `Environment.import` used to drop the
+        // external answer and fetch the literal spec — a "pkg: not found" for a module that
+        // resolved fine.
+        const files: Record<string, string> = {
+            'node_modules/pkg/package.json': `{"name":"pkg","exports":{".":"./index.js"}}`,
+            'node_modules/pkg/index.js': `export const v = 1;`,
+        };
+        const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
+        const server = createDevServer({
+            fs,
+            plugins: [
+                {
+                    name: 'serve-deps-natively',
+                    async resolveId(spec, importer, extra) {
+                        if (extra.custom?.self) return null;
+                        const r = await this.resolve(spec, importer, { custom: { self: true } });
+                        return r && !r.external && r.id.startsWith('node_modules/') ? { id: `https://host/${r.id}`, external: true } : r;
+                    },
+                },
+            ],
+        });
+        const external: string[] = [];
+        const env = createEnvironment({
+            name: 'realm',
+            fetchModule: server.fetchModule,
+            resolveId: server.resolveId,
+            evaluator: {
+                async runExternalModule(target) {
+                    external.push(target);
+                    return { v: 'native' };
+                },
+            } as never,
+        });
+        const ns = await env.import('pkg');
+        expect(external).toEqual(['https://host/node_modules/pkg/index.js']);
+        expect(ns.v).toBe('native');
+        expect(env.node('pkg')).toBeUndefined(); // not a module of this graph, not a root
+    });
+
+    it('an entry the resolver cannot place still falls back to a fetch by the spec itself', async () => {
+        // A host id scheme the resolver does not understand (a project-relative 'src/app.ts' with a
+        // cwd it cannot probe) resolves `{ external: spec }` and must keep loading as before.
+        const files: Record<string, string> = { 'src/app.ts': `export const ok = true;` };
+        const fs: Fs = { read: (id) => files[id] ?? null, exists: () => false };
+        const server = createDevServer({ fs });
+        const env = createEnvironment({ name: 'realm', fetchModule: server.fetchModule, resolveId: server.resolveId });
+        expect((await env.import('src/app.ts')).ok).toBe(true);
+    });
+});
+
 describe('environment — HMR propagation', () => {
     it('a self-accepting edit updates each env independently', async () => {
         const { server, env, files } = multiEnv({
