@@ -452,3 +452,51 @@ describe('a CommonJS module reached only by dynamic import()', () => {
         expect(code, 'and not through a cross-chunk conversion').not.toContain('__toESM(m.default');
     });
 });
+
+// A thirteenth batch of never-run configurations. These found NO defect — they are recorded because
+// nothing else covers them, and the file's own premise is that an unrun configuration is where the
+// defects are. Each was executed against node and rolldown; all three agree.
+describe('interop shapes that no other test reaches', () => {
+    it('CIRCULAR require between two CommonJS modules', async () => {
+        expect(
+            await run({
+                '/a.cjs': "exports.tagA = 'A';\nconst b = require('./b.cjs');\nexports.fromA = () => 'A' + b.tagB;\n",
+                '/b.cjs': "exports.tagB = 'B';\nconst a = require('./a.cjs');\nexports.fromB = () => 'B' + a.tagA;\n",
+                '/main.js': "import a from './a.cjs';\nimport b from './b.cjs';\nexport const x = [a.fromA(), b.fromB()];",
+            }),
+        ).toEqual(['AB', 'BA']);
+    });
+
+    it('a module that is BOTH statically imported and a dynamic import target', async () => {
+        expect(
+            await run({
+                '/dep.js': "export const d = 'D';\nexport const e = 'E';",
+                '/main.js': "import { d } from './dep.js';\nexport const x = import('./dep.js').then((m) => [d, m.e]);",
+            }),
+        ).toEqual(['D', 'E']);
+    });
+
+    it('`export { v as default }` read back through a CommonJS `require`', async () => {
+        expect(
+            await run({
+                '/esm.js': "const v = 'V';\nexport { v as default, v as named };",
+                '/mid.cjs': "const m = require('./esm.js');\nmodule.exports.both = [m.default, m.named].join(',');\n",
+                '/main.js': "import mid from './mid.cjs';\nexport const x = mid.both;",
+            }),
+        ).toBe('V,V');
+    });
+
+    it('`export * from` does NOT re-export the default', async () => {
+        // The spec rule, and the one a star re-export is easiest to get wrong: `export *` carries
+        // every named export and never `default`.
+        expect(
+            await run({
+                '/dep.js': "export default 'DEF';\nexport const n = 'N';",
+                '/mid.js': "export * from './dep.js';",
+                '/main.js':
+                    "import * as mid from './mid.js';\n" +
+                    "export const x = [mid.n, mid.default === undefined ? 'no-default' : 'has-default'].join('|');",
+            }),
+        ).toBe('N|no-default');
+    });
+});
