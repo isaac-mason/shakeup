@@ -417,3 +417,49 @@ export const v = 1;`,
         expect(p.reloads).toEqual([]);
     });
 });
+
+// `acceptExports(names, cb)`. Vite is the reference and it is unambiguous: the client
+// (`packages/vite/src/shared/hmr.ts`) implements it as `acceptDeps([ownerPath], cb)` — a plain
+// self-accept — under the comment "export names (first arg) are irrelevant on the client side,
+// they're extracted in the server for propagation". Ours compared the listed exports' VALUES across
+// the update and fired only on a change, so a module re-evaluating to an equal value silently got no
+// callback (measured: llm/repro/_acceptexports.mts).
+describe('hmr — acceptExports', () => {
+    const withExports = (n: string, extra: string) =>
+        `import.meta.env.log.push('m:eval');\nexport const n = ${n};\n${extra}\n` +
+        `import.meta.hot.acceptExports(['n'], () => { import.meta.env.log.push('m:cb'); });\n`;
+
+    it('fires the callback even when the listed export keeps the same value', async () => {
+        const p = probe({ '/main.js': withExports('1', '') });
+        await p.env.import('/main.js');
+        p.take();
+        p.files['/main.js'] = withExports('1', 'export const other = 2;');
+        await p.change('/main.js');
+        expect(p.take()).toEqual(['m:eval', 'm:cb']);
+        expect(p.reloads, 'and it stays a boundary — no full reload').toEqual([]);
+    });
+
+    it('fires when the listed export DOES change, too', async () => {
+        const p = probe({ '/main.js': withExports('1', '') });
+        await p.env.import('/main.js');
+        p.take();
+        p.files['/main.js'] = withExports('2', '');
+        await p.change('/main.js');
+        expect(p.take()).toEqual(['m:eval', 'm:cb']);
+    });
+
+    it('is a boundary: the importer is not re-evaluated', async () => {
+        const p = probe({
+            '/dep.js': withExports('1', ''),
+            '/main.js': "import { n } from './dep.js';\nimport.meta.env.log.push(`main:eval:${n}`);\n",
+        });
+        await p.env.import('/main.js');
+        expect(p.take()).toEqual(['m:eval', 'main:eval:1']);
+        p.files['/dep.js'] = withExports('2', '');
+        await p.change('/dep.js');
+        // Only the accepting module re-runs. The falsification arm is the reload check: without a
+        // boundary this edit would propagate to the unaccepting root and full-reload instead.
+        expect(p.take()).toEqual(['m:eval', 'm:cb']);
+        expect(p.reloads).toEqual([]);
+    });
+});

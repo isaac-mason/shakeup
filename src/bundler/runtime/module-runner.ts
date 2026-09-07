@@ -75,10 +75,10 @@ type ModuleRecord = {
     /** dep-accept: fire when a listed dep updates. `single` = `accept(dep, cb)` (cb
      *  gets the one module) vs `accept([deps], cb)` (cb gets the array). */
     depAccepts: { deps: string[]; single: boolean; cb: (mods: unknown) => void }[];
-    /** acceptExports(names, cb): a self-accept that fires only when a named export
-     *  changed value across the update. We treat it as a self-accept boundary that
-     *  fires cb on a named-value change (value-identity comparison is unreliable for
-     *  functions/objects, which always "change" on re-eval). */
+    /** acceptExports(names, cb): a SELF-ACCEPT, and the callback fires on every update —
+     *  vite's client ignores the names entirely. `names` is retained because vite uses it
+     *  SERVER-side to decide propagation (a partially-accepting module is a boundary only for
+     *  importers whose every binding is accepted), which shakeup does not implement yet. */
     acceptExports: { names: string[]; cb: (mod: unknown) => void }[];
     disposeCallbacks: ((data: Record<string, unknown>) => void)[];
     /** prune(cb): fired when the module is removed from the graph (orphaned). */
@@ -396,13 +396,17 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             const accepts = rec.acceptCallbacks;
             const exportAccepts = rec.acceptExports;
             if (accepts.length === 0 && exportAccepts.length === 0) return false;
-            // snapshot the old named-export values for acceptExports comparison.
-            const oldVals = exportAccepts.map((ea) => ea.names.map((n) => rec.exports[n]));
             const ns = await reeval(boundary);
             for (const cb of accepts) fire(boundary, 'accept', () => cb(ns));
-            exportAccepts.forEach((ea, i) => {
-                if (ea.names.some((n, j) => ns[n] !== oldVals[i][j])) fire(boundary, 'accept', () => ea.cb(ns));
-            });
+            // `acceptExports` fires like any other self-accept. It used to snapshot the listed
+            // exports' values and fire only if one CHANGED IDENTITY, which silently skipped the
+            // callback whenever a module re-evaluated to an equal value. Vite is the reference and
+            // has no such rule: its client (`shared/hmr.ts`) implements `acceptExports(names, cb)`
+            // as `acceptDeps([ownerPath], cb)` — a plain self-accept — under the comment "export
+            // names (first arg) are irrelevant on the client side, they're extracted in the server
+            // for propagation". See the ROADMAP for the propagation half, which needs per-importer
+            // binding tracking shakeup does not have; the names are kept on the record for it.
+            for (const ea of exportAccepts) fire(boundary, 'accept', () => ea.cb(ns));
             return true;
         }
         // dep-accept: re-evaluate the changed dep, fire the boundary's accept callback

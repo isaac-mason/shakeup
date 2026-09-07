@@ -187,23 +187,30 @@ describe('environment — dynamic-import boundaries', () => {
 });
 
 describe('environment — acceptExports + prune', () => {
-    it('acceptExports fires only when a named export changes', async () => {
+    it('acceptExports fires on EVERY update — the names are the server’s business', async () => {
+        // This test used to assert the opposite: that the callback fires only when one of the
+        // listed exports changed value. That rule was ours, not the reference's. Vite's client
+        // (`packages/vite/src/shared/hmr.ts`) implements `acceptExports(names, cb)` as
+        // `acceptDeps([ownerPath], cb)` — a plain self-accept — under the comment "export names
+        // (first arg) are irrelevant on the client side, they're extracted in the server for
+        // propagation". So the value comparison went, and this asserts what vite does.
+        (globalThis as { __log?: unknown[] }).__log = [];
         const { server, env, files } = multiEnv({
             '/m.ts': `globalThis.__log ??= [];\nexport let a = 1;\nexport let b = 1;\nimport.meta.hot.acceptExports(['a'], (nm) => { globalThis.__log.push('a=' + nm.a); });`,
         });
         const e = env('e');
         await e.import('/m.ts');
 
-        // change only b — 'a' unchanged → callback must NOT fire.
+        // change only b — 'a' is unchanged, and the callback fires anyway.
         files['/m.ts'] = files['/m.ts'].replace('let b = 1', 'let b = 2');
         server.invalidate('/m.ts');
         expect((await e.applyEdit('/m.ts')).type).toBe('update');
-        expect((globalThis as { __log?: unknown[] }).__log ?? []).toEqual([]);
+        expect((globalThis as { __log?: unknown[] }).__log).toEqual(['a=1']);
 
         files['/m.ts'] = files['/m.ts'].replace('let a = 1', 'let a = 9');
         server.invalidate('/m.ts');
         await e.applyEdit('/m.ts');
-        expect((globalThis as { __log?: unknown[] }).__log).toEqual(['a=9']);
+        expect((globalThis as { __log?: unknown[] }).__log).toEqual(['a=1', 'a=9']);
     });
 
     it('prunes a module that an edit removed from the graph', async () => {
