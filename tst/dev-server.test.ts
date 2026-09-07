@@ -98,6 +98,25 @@ describe('dev server — resolve config (shared with bundle)', () => {
 });
 
 describe('dev server — plugins are the surface', () => {
+    it("a plugin's this.resolve skips itself, so it can redirect its own input without recursing", async () => {
+        // The externalize-to-a-URL shape: resolve normally, then rewrite the answer. Under the old
+        // shared ctx the nested resolve re-entered this hook forever (an async hang, not a stack
+        // overflow). skipSelf is the bundler's contract; dev must honour it too.
+        const calls: string[] = [];
+        const redirect: Plugin = {
+            name: 'redirect',
+            async resolveId(spec, importer) {
+                calls.push(spec);
+                const r = await this.resolve(spec, importer);
+                return r && !r.external && r.id.startsWith('/dep') ? { id: `served:${r.id}`, external: true } : r;
+            },
+        };
+        const { server } = setup({ '/entry.ts': '', '/dep.ts': '' }, { plugins: [redirect] });
+        expect(await server.resolveId('./dep', '/entry.ts')).toEqual({ external: 'served:/dep.ts' });
+        expect(calls).toEqual(['./dep']); // once: the nested resolve did not re-enter the plugin
+        expect(await server.resolveId('./entry', '/dep.ts')).toBe('/entry.ts'); // untouched answers pass through
+    });
+
     it('a load plugin supplies virtual modules', async () => {
         const { runner } = setup(
             { '/entry.ts': `import { v } from 'virtual:config';\nexport const r = v;` },
@@ -506,11 +525,17 @@ describe('dev server — a plugin-declared watch file', () => {
         const { server } = setup(files(), { plugins: [declaring(calls)] });
         await server.fetchModule('/main.js');
         await server.fetchModule('/main.js');
-        expect(calls.filter((c) => c === '/main.js'), 'cached on the second fetch').toHaveLength(1);
+        expect(
+            calls.filter((c) => c === '/main.js'),
+            'cached on the second fetch',
+        ).toHaveLength(1);
 
         await server.handleChange('/gen.json');
         await server.fetchModule('/main.js');
-        expect(calls.filter((c) => c === '/main.js'), 're-transformed after its watch file changed').toHaveLength(2);
+        expect(
+            calls.filter((c) => c === '/main.js'),
+            're-transformed after its watch file changed',
+        ).toHaveLength(2);
     });
 
     it('a change to an UNDECLARED file leaves it alone', async () => {
@@ -532,6 +557,9 @@ describe('dev server — a plugin-declared watch file', () => {
         await server.fetchModule('/main.js');
         await server.fetchModule('/dep.js');
         expect(calls.filter((c) => c === '/main.js')).toHaveLength(2);
-        expect(calls.filter((c) => c === '/dep.js'), '/dep.js declared nothing').toHaveLength(1);
+        expect(
+            calls.filter((c) => c === '/dep.js'),
+            '/dep.js declared nothing',
+        ).toHaveLength(1);
     });
 });

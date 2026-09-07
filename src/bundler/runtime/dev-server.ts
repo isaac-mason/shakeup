@@ -5,19 +5,22 @@ import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
 import {
     compilePipeline,
+    type CtxFor,
+    type CustomPluginOptions,
     type ImportKind,
     type ModuleInfo,
     normalizePluginOptionSync,
     type PartialResolvedId,
     type Pipeline,
     type PluginCtx,
+    pluginMeta,
     pluginParse,
     type ResolveIdExtra,
+    type ResolveSkip,
     runLoad,
     runModuleParsed,
     runResolveId,
     runTransform,
-    pluginMeta,
 } from '../plugin.ts';
 import { type CommonOptions, isExternalSpecifier, makeBaseResolve } from '../resolve.ts';
 import { devTransform, type HmrInfo } from '../transform.ts';
@@ -279,6 +282,39 @@ export function createDevServer(options: DevServerOptions): DevServer {
     }
 
     const warn = options.warn ?? (() => {});
+    const EMPTY_SKIPS: readonly ResolveSkip[] = [];
+    /** `this.resolve` for a caller that is `callerPluginIdx` (or the driver, `null`) with the skip
+     *  set in force. Same rules as the bundler's (scan.ts): `skipSelf` (default true) takes THIS
+     *  plugin out of the loop for THIS (specifier, importer) only; inherited skips are kept even when
+     *  it is false; a plugin already skipped for the same question cannot make progress and gets
+     *  null. The dev server used to hand every hook one shared ctx whose `resolve` skipped nothing,
+     *  so a plugin re-resolving its own input to redirect the answer recursed forever. */
+    const resolveFrom = async (
+        callerPluginIdx: number | null,
+        callerSkips: readonly ResolveSkip[],
+        source: string,
+        importer: string | null,
+        opts?: { isEntry?: boolean; kind?: ImportKind; skipSelf?: boolean; custom?: CustomPluginOptions },
+    ): Promise<PartialResolvedId | null> => {
+        let skips = callerSkips;
+        if (opts?.skipSelf !== false && callerPluginIdx !== null) {
+            if (callerSkips.some((k) => k.pluginIdx === callerPluginIdx && k.specifier === source && k.importer === importer))
+                return null;
+            skips = [...callerSkips, { pluginIdx: callerPluginIdx, importer, specifier: source }];
+        }
+        const r = await resolveId(
+            source,
+            importer,
+            // Rollup's documented default: with no importer, a `this.resolve(spec)` IS an entry.
+            { isEntry: opts?.isEntry ?? importer === null, kind: opts?.kind ?? 'import-statement', custom: opts?.custom },
+            skips,
+        );
+        return typeof r === 'string' ? { id: r, external: false } : { id: r.external, external: true };
+    };
+    const ctxFor: CtxFor = (pluginIdx, skips) => ({
+        ...ctx,
+        resolve: (source, importer = null, opts) => resolveFrom(pluginIdx, skips, source, importer, opts),
+    });
     const ctx: PluginCtx = {
         warn,
         error: (m) => {
@@ -293,16 +329,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         addWatchFile: () => {},
         parse: pluginParse,
         fs,
-        resolve: async (source, importer = null, opts) => {
-            const r = await resolveId(source, importer ?? null, {
-                isEntry: opts?.isEntry ?? false,
-                kind: opts?.kind ?? 'import-statement',
-                custom: opts?.custom,
-            });
-            const partial: PartialResolvedId =
-                typeof r === 'string' ? { id: r, external: false } : { id: r.external, external: true };
-            return partial;
-        },
+        resolve: (source, importer = null, opts) => resolveFrom(null, EMPTY_SKIPS, source, importer, opts),
         emitFile: () => {
             // The dev server has no output sink — assets resolve through a host url() strategy
             // (e.g. the asset plugin's `url` option) rather than being emitted.
@@ -372,6 +399,7 @@ export function createDevServer(options: DevServerOptions): DevServer {
         spec: string,
         importer: string | null,
         extra: ResolveIdExtra = DEV_RESOLVE_EXTRA,
+        skipped: readonly ResolveSkip[] = EMPTY_SKIPS,
     ): Promise<ResolveResult> {
         await ensureStarted();
         // `extra` was ACCEPTED AND DROPPED here, so every dev resolution reached the plugins as
@@ -383,7 +411,8 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // string key, and two `this.resolve` calls for one specifier with DIFFERENT custom data are
         // two different questions. Before this, the second silently reused the first's answer.
         // `kind`/`isEntry` are keyable, so they join the key rather than skipping the cache.
-        if (extra.custom !== undefined) return resolveIdInner(spec, importer, extra);
+        // A resolution with plugins skipped is a different question too (a nested `this.resolve`).
+        if (extra.custom !== undefined || skipped.length > 0) return resolveIdInner(spec, importer, extra, skipped);
         const key = `${importer ?? ''}\x00${extra.kind}\x00${extra.isEntry ? 'E' : ''}\x00${spec}`;
         const cached = resolveCache.get(key);
         if (cached !== undefined) return cached;
@@ -392,16 +421,21 @@ export function createDevServer(options: DevServerOptions): DevServer {
         return result;
     }
 
-    async function resolveIdInner(spec: string, importer: string | null, extra: ResolveIdExtra): Promise<ResolveResult> {
+    async function resolveIdInner(
+        spec: string,
+        importer: string | null,
+        extra: ResolveIdExtra,
+        skipped: readonly ResolveSkip[] = EMPTY_SKIPS,
+    ): Promise<ResolveResult> {
         // A dynamic import tries `resolveDynamicImport` FIRST and falls through to `resolveId` when
         // every hook declines — the same shape as the bundler's (see `scan.ts`), which mirrors
         // rolldown's `resolve_id_with_plugins`. Dev never ran this chain at all, so a plugin's
         // `resolveDynamicImport` hook was dead code under the dev server.
         const dynamicHit =
             extra.kind === 'dynamic-import' && pipeline.resolveDynamicImport.length > 0
-                ? await runResolveId(pipeline, () => ctx, spec, importer, extra, undefined, 'resolveDynamicImport')
+                ? await runResolveId(pipeline, ctxFor, spec, importer, extra, skipped, 'resolveDynamicImport')
                 : null;
-        const hit = dynamicHit ?? (await runResolveId(pipeline, () => ctx, spec, importer, extra));
+        const hit = dynamicHit ?? (await runResolveId(pipeline, ctxFor, spec, importer, extra, skipped));
         if (hit === false) return { external: spec };
         if (typeof hit === 'string') return hit;
         if (hit !== null && hit !== undefined && typeof hit === 'object') {
