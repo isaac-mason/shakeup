@@ -18,7 +18,7 @@ import * as api from '../src/index.ts';
 const BUNDLER = [
     'asset', 'attachEnvironment', 'bundle', 'connectEnvironment', 'createBuildContext', 'createDevServer',
     'createEnvironment', 'createEnvironmentBridge', 'createMemoryFs', 'createModuleRunner', 'css',
-    'defaultEvaluator', 'devTransform', 'json', 'watch', 'worker',
+    'defaultEvaluator', 'devTransform', 'json', 'packageSideEffectsFor', 'watch', 'worker',
 ].sort();
 
 const TOOLCHAIN = [
