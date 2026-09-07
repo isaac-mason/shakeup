@@ -338,7 +338,22 @@ export const tsStrip: Visitor = {
         },
         // Pure type-field clearing (A1b — plain-JS AST).
         [N.VariableDeclarator]: (n, ctx) => clearTypes(n, ctx),
-        [N.FormalParameter]: (n, ctx) => clearTypes(n, ctx),
+        [N.FormalParameter]: (n, ctx) => {
+            // A `this` PARAMETER is TS-only pseudo-syntax and erases WHOLE. Clearing its annotation
+            // and keeping the parameter emitted `function f(this, a)`, which is not JS — `this` is
+            // not a binding identifier — so the stripped output failed to parse. Nothing in our own
+            // src/ used one until now, and `print.corpus.test.ts` caught it the moment one appeared.
+            //
+            // Safe to key on the NAME alone: a parameter literally named `this` cannot exist in JS,
+            // so any such parameter is the TS pseudo-parameter. `ctx.remove()` in a list slot
+            // retires the subtree's bindings, so the symbol goes with it.
+            const pat = (n.data as { pattern?: Node }).pattern;
+            if (pat !== null && pat !== undefined && pat.type === N.BindingIdentifier && (pat as { name: string }).name === 'this') {
+                ctx.remove();
+                return;
+            }
+            clearTypes(n, ctx);
+        },
         [N.RestElement]: (n, ctx) => clearTypes(n, ctx),
         [N.FunctionExpression]: (n, ctx) => clearTypes(n, ctx),
         [N.ArrowFunctionExpression]: (n, ctx) => clearTypes(n, ctx),

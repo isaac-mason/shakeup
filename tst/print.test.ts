@@ -147,6 +147,13 @@ const TS_CASES = [
     'class C<T> extends B<number> implements I { x: number = 1; m(a: string): void {} }',
     'const arr: Array<number> = [1, 2, 3];',
     'const fn = foo<number>;',
+    // A `this` PARAMETER is TS-only pseudo-syntax and erases WHOLE — clearing its annotation and
+    // keeping the parameter emits `function f(this, a)`, which is not JS. Judged against esbuild
+    // rather than against our own idea of the right output.
+    'function f(this: unknown, a: number) { return a; }',
+    'function g(this: Window) { return 1; }',
+    'const h = function (this: unknown, ...args: unknown[]) { return args; };',
+    'class C { m(this: C, a: number) { return a; } }',
 ];
 
 describe('printer — structural round-trip parity', () => {
