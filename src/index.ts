@@ -31,6 +31,11 @@ export type * from './bundler/bundle.ts';
 export type * from './bundler/graph-types.ts';
 export type * from './bundler/output-options.ts';
 export type * from './bundler/resolve.ts';
+// A plugin that resolves modules ITSELF never runs shakeup's resolver, so it never gets the
+// `package.json#sideEffects` verdict that resolution normally carries back — and a bundle built
+// through such a plugin would silently ignore every manifest in `node_modules`. This is the one
+// piece of the resolver a self-resolving plugin cannot do without, so it is named here.
+export { packageSideEffectsFor } from './bundler/node-resolve.ts';
 export type * from './bundler/treeshake.ts';
 export type * from './bundler/generate/context.ts';
 export type * from './util/sourcemap.ts';

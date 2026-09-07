@@ -1,8 +1,5 @@
-import type { AST_NODE_TYPES } from '@typescript-eslint/types';
 import { decodeJSXEntities } from '../util/jsx-entities.ts';
 import { CHILD_FIELDS, N, NODE_TYPE_NAMES, type Node, TYPE_COUNT, type TypeName } from './index.ts';
-
-type ESTreeTypeName = `${AST_NODE_TYPES}`;
 
 /** ESTree type name per shakeup type; `null` marks types with no ESTree counterpart. */
 export const ESTREE_NAME = {
@@ -161,7 +158,13 @@ export const ESTREE_NAME = {
     Decorator: 'Decorator',
     TSTypePredicate: 'TSTypePredicate',
     WithStatement: 'WithStatement',
-} satisfies Record<TypeName, ESTreeTypeName | null>;
+    // Checked against `@typescript-eslint`'s real `AST_NODE_TYPES` by
+    // `tst/estree-names.type-check.ts`, NOT here. shakeup ships raw TS with zero runtime
+    // dependencies, so a consumer typechecking these sources resolves every import in them — and a
+    // `import type … from '@typescript-eslint/types'` here made that fail with TS2307 for anyone
+    // without our devDependencies. The check keeps its full strength; it just lives where devDeps
+    // are legal.
+} as const satisfies Record<TypeName, string | null>;
 
 /** ESTree type name per numeric type id. */
 export const ESTREE_TYPE: string[] = new Array(TYPE_COUNT).fill('');

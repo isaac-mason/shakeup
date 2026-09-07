@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
@@ -47,5 +49,55 @@ describe('the published entry loads under plain node', () => {
         // A second `exports` entry is a second thing that can be broken by an extensionless specifier
         // or an un-strippable construct, and it reaches a different half of the tree.
         expect(loadUnderNode(entry('../src/ast.ts'))).toMatch(/^OK \d+$/);
+    });
+});
+
+// The other half of shipping raw TypeScript: a consumer TYPECHECKS our sources too, so every import
+// in `src/` has to resolve for someone who installed shakeup and none of our devDependencies.
+//
+// `src/ast/estree.ts` imported `@typescript-eslint/types` for a single `satisfies` clause. Runtime
+// was fine — it was `import type`, which node's erase-only stripping removes, and the tests above
+// prove that — so nothing here could see it, and a downstream consumer hit TS2307 on a package that
+// advertises zero dependencies. `src/ast.ts` even documents estree as withheld from both entries for
+// exactly this reason; the import one level down defeated it. The check now lives in
+// `tst/estree-names.type-check.ts`, where devDependencies are legal.
+describe('src/ imports nothing a consumer would not have', () => {
+    const SRC = fileURLToPath(new URL('../src', import.meta.url));
+
+    /** every bare (non-relative, non-`node:`) specifier imported anywhere under `src/`. */
+    const bareSpecifiers = (): { file: string; spec: string }[] => {
+        const out: { file: string; spec: string }[] = [];
+        const walk = (dir: string): void => {
+            for (const e of readdirSync(dir, { withFileTypes: true })) {
+                const p = join(dir, e.name);
+                if (e.isDirectory()) {
+                    walk(p);
+                    continue;
+                }
+                if (!e.name.endsWith('.ts')) continue;
+                // Import STATEMENTS only — a specifier inside a comment or a template that generates
+                // code is not an import, and matching text would flag both.
+                for (const m of readFileSync(p, 'utf8').matchAll(
+                    /^\s*(?:import|export)\s[^\n]*?from\s+'([^']+)'|^\s*import\s+'([^']+)'/gm,
+                )) {
+                    const spec = m[1] ?? m[2];
+                    if (spec.startsWith('.') || spec.startsWith('node:')) continue;
+                    out.push({ file: p.slice(SRC.length + 1), spec });
+                }
+            }
+        };
+        walk(SRC);
+        return out;
+    };
+
+    it('imports only relative paths and node: builtins', () => {
+        const deps = JSON.parse(readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8')) as {
+            dependencies?: Record<string, string>;
+        };
+        // If shakeup ever takes a real runtime dependency, importing it is legal — the rule is that
+        // a consumer must HAVE it, and `dependencies` is what makes that true.
+        const allowed = new Set(Object.keys(deps.dependencies ?? {}));
+        const offenders = bareSpecifiers().filter(({ spec }) => !allowed.has(spec.split('/').slice(0, 2).join('/')) && !allowed.has(spec));
+        expect(offenders).toEqual([]);
     });
 });
