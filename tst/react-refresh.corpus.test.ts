@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { N, type Node, parse, walk } from '../src/ast.ts';
-import { refreshProgram } from '../src/bundler/plugins/react-refresh.ts';
+import { type ReactRefreshOptions, refreshProgram } from '../src/bundler/plugins/react-refresh.ts';
 import { makeJsxLower } from '../src/passes/lower-jsx.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
 import { tsStrip } from '../src/passes/strip-ts.ts';
@@ -56,11 +56,35 @@ function clearShorthand(program: Node): Node {
 
 const normaliseRuntimeName = (t: string): string => t.replace(/\b_(jsxs?|jsxDEV|Fragment)\b/g, '$1');
 
-function transform(src: string, ts: boolean): string {
+/**
+ * A fixture's refresh options, from the nearest `options.json` at or above it. `refresh/options.json`
+ * sets `emitFullSignatures: true` for the corpus; two fixtures override it to get HASHED keys, and
+ * one swaps both identifiers. Hardcoding the default would make those unreachable.
+ */
+function optionsFor(dir: string): ReactRefreshOptions {
+    for (let d = dir; d.startsWith(ROOT); d = dirname(d)) {
+        const f = join(d, 'options.json');
+        if (!existsSync(f)) continue;
+        const parsed = JSON.parse(readFileSync(f, 'utf8')) as { plugins?: unknown[] };
+        for (const plugin of parsed.plugins ?? []) {
+            if (!Array.isArray(plugin) || plugin[0] !== 'transform-react-jsx') continue;
+            const refresh = (plugin[1] as { refresh?: Record<string, unknown> } | undefined)?.refresh;
+            if (refresh === undefined) continue;
+            return {
+                emitFullSignatures: refresh.emitFullSignatures === true,
+                refreshReg: refresh.refreshReg as string | undefined,
+                refreshSig: refresh.refreshSig as string | undefined,
+            };
+        }
+    }
+    return { emitFullSignatures: true };
+}
+
+function transform(src: string, ts: boolean, options: ReactRefreshOptions): string {
     const { program } = parse(src, { ts, jsx: true });
     const sem = createSemantic();
     analyze(sem, program);
-    refreshProgram(program, sem, src, { emitFullSignatures: true });
+    refreshProgram(program, sem, src, options);
     traverse(program, sem, [tsLower, makeJsxLower('react', true)]);
     traverse(program, sem, [tsStrip]);
     const p = createPrinter({ minify: false });
@@ -90,6 +114,9 @@ function fixtures(): { name: string; dir: string }[] {
  *  `$RefreshReg$`/`$RefreshSig$` identifiers. */
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
+    'emit-full-signatures-option',
+    'nested-member-expression-with-hooks',
+    'nested-member-expression-without-binding',
     'parenthesized-variable-declarators',
     'react-refresh/can-handle-implicit-arrow-returns',
     'react-refresh/generates-signatures-for-function-declarations-calling-hooks',
@@ -107,6 +134,7 @@ const PASSING = new Set([
     'react-refresh/registers-top-level-function-declarations',
     'react-refresh/registers-top-level-variable-declarations-with-arrow-functions',
     'react-refresh/registers-top-level-variable-declarations-with-function-expressions',
+    'react-refresh/uses-custom-identifiers-for-refresh-reg-and-refresh-sig',
     'react-refresh/uses-original-function-declaration-if-it-get-reassigned',
     'variable-declarator-with-function',
 ]);
@@ -129,7 +157,7 @@ describe('react-refresh — oxc conformance corpus', () => {
             const ts = inputName.endsWith('.ts') || inputName.endsWith('.tsx');
             let same = false;
             try {
-                const got = parse(dropRuntimeImport(transform(readFileSync(join(dir, inputName), 'utf8'), ts)), {
+                const got = parse(dropRuntimeImport(transform(readFileSync(join(dir, inputName), 'utf8'), ts, optionsFor(dir))), {
                     ts: false,
                     jsx: false,
                 });

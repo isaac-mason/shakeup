@@ -13,6 +13,8 @@ import {
     cloneNode,
     create,
     exprStmt,
+    idName,
+    member,
     N,
     type Node,
     ref,
@@ -23,7 +25,8 @@ import {
     walk,
     walkChildren,
 } from '../../ast.ts';
-import type { Semantic } from '../../analysis/semantic.ts';
+import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
+import { base64, sha1 } from '../../util/sha1.ts';
 import type { Plugin } from '../plugin.ts';
 
 /** Wrap an expression as `(_cN = expr)` and remember the registration. */
@@ -130,6 +133,60 @@ function keyEntry(hookName: string, declaratorId: string, argsKey: string): stri
     return argsKey === '' ? `${hookName}{${declaratorId}}` : `${hookName}{${declaratorId}(${argsKey})}`;
 }
 
+/**
+ * Which BINDING a non-builtin hook call depends on, and how to name it again.
+ *
+ * `useHook()` -> `useHook`; `Fancy.useHook()` -> `Fancy` plus one member; `Fancy.prop.useHook()` ->
+ * `Fancy` plus two. Deeper than that — `A.B.C.useHook()` — contributes NOTHING: oxc supports one
+ * extra member level and no more (citing facebook/react#35318), so such a call adds a key entry but
+ * no callee, and therefore no `forceReset` either. The fixture proves it: `_s(Bar, "useHook{}")`,
+ * two arguments.
+ */
+function hookCalleeBinding(callee: Node): { name: string; middle: string | null } | null {
+    if (callee.type === N.IdentifierReference) return { name: callee.name, middle: null };
+    if (callee.type !== N.StaticMemberExpression) return null;
+    const object = dataOf(callee).object as Node;
+    if (object.type === N.IdentifierReference) return { name: object.name, middle: null };
+    if (object.type !== N.StaticMemberExpression) return null;
+    const inner = dataOf(object).object as Node;
+    if (inner.type !== N.IdentifierReference) return null;
+    return { name: inner.name, middle: (dataOf(object).property as Node).name };
+}
+
+/**
+ * Parse a `refreshReg`/`refreshSig` option into the expression to CALL — oxc's
+ * `RefreshIdentifierResolver::parse`. Three forms, and only these:
+ *
+ *     $RefreshReg$              a bare identifier
+ *     window.$RefreshReg$       one member off an identifier
+ *     import.meta.refreshReg    `import.meta`, optionally with one property
+ *
+ * Built as a real expression rather than an identifier whose NAME contains dots. That shortcut
+ * prints correctly and is a malformed AST: every later pass — jsxLower, the bundler's scope
+ * analysis, deconfliction — would treat `import.meta.refreshReg` as one renameable binding.
+ */
+function refreshCallee(spec: string): Node {
+    const parts = spec.split('.');
+    if (parts.length === 1) return ref(spec);
+    if (parts[0] === 'import' && parts[1] === 'meta') {
+        const meta = create.ImportMeta(0, 0, 0);
+        return parts[2] === undefined ? meta : member(meta, idName(parts[2]));
+    }
+    return member(ref(parts[0]), idName(parts[1]));
+}
+
+/** Rebuild the callee as an expression the signature thunk hands to the runtime. */
+function calleeExpression(
+    bindingRef: { name: string; middle: string | null },
+    hookName: string,
+    isMember: boolean,
+): Node {
+    let expr = ref(bindingRef.name);
+    if (!isMember) return expr;
+    if (bindingRef.middle !== null) expr = member(expr, idName(bindingRef.middle));
+    return member(expr, idName(hookName));
+}
+
 /** The callee's name for hook purposes: `useX()` or `a.useX()` — the PROPERTY, in the member case. */
 function hookNameOf(callee: Node): string {
     if (callee.type === N.IdentifierReference) return callee.name;
@@ -149,7 +206,7 @@ type Signature = { key: string; callees: (Node | null)[]; enclosing: Node | null
  * call belongs to the nearest enclosing function, and its `declaratorId` comes from the nearest
  * enclosing `VariableDeclarator`.
  */
-function collectSignatures(program: Node, code: string): Map<Node, Signature> {
+function collectSignatures(program: Node, code: string, sem: Semantic): Map<Node, Signature> {
     const out = new Map<Node, Signature>();
     /** function -> the function enclosing IT. `_s` is declared in the PARENT: a signed function
      *  cannot declare the variable its own wrapper call reads. */
@@ -198,11 +255,21 @@ function collectSignatures(program: Node, code: string): Map<Node, Signature> {
                 sig.key = sig.key === '' ? entry : `${sig.key}\\n${entry}`;
                 if (!BUILTIN_HOOKS.has(hookName)) {
                     // A custom hook contributes its CALLEE, so a change to that hook's identity
-                    // forces a remount. An unresolvable one contributes null -> forceReset.
-                    // The NODE, not its text: the thunk below hands the runtime the live
-                    // binding, so a custom hook changing identity forces a remount. An unresolved
-                    // reference contributes null, which becomes `forceReset`.
-                    sig.callees.push(callee.type === N.IdentifierReference && callee.sym === 0 ? null : callee);
+                    // forces a remount.
+                    const bindingRef = hookCalleeBinding(callee);
+                    if (bindingRef !== null) {
+                        // Resolved in the scope ENCLOSING the function — the hook is a free name
+                        // there, which is oxc's lookup. Unresolved (a global like `GlobalHook`)
+                        // pushes null, and any null makes the signature `forceReset`.
+                        const fnScope = (dataOf(nextFn).scopeId as number | undefined) ?? 0;
+                        const parentScope = sem.scopes[fnScope]?.parent ?? 0;
+                        const sym = lookupValue(sem, parentScope, bindingRef.name);
+                        sig.callees.push(
+                            sym === 0
+                                ? null
+                                : calleeExpression(bindingRef, hookName, callee.type === N.StaticMemberExpression),
+                        );
+                    }
                 }
                 out.set(nextFn, sig);
             }
@@ -233,7 +300,7 @@ export type ReactRefreshOptions = {
  */
 export function refreshProgram(
     program: Node,
-    _semantic: Semantic,
+    semantic: Semantic,
     code: string,
     options: ReactRefreshOptions = {},
 ): boolean {
@@ -291,7 +358,10 @@ export function refreshProgram(
     /** The trailing arguments of `_s(fn, …)`: the key, then `forceReset`, then the custom-hook
      *  thunk — each present only when it carries information. */
     const signatureArgs = (sig: Signature): Node[] => {
-        const args: Node[] = [str(sig.key)];
+        // HASHED unless the caller asks for the raw key. oxc: SHA-1, then STANDARD base64 — which
+        // is why `util/sha1.ts` exists rather than reusing `util/hash.ts` (xxHash64, radix
+        // base64url: different algorithm, different alphabet).
+        const args: Node[] = [str(options.emitFullSignatures === true ? sig.key : base64(sha1(sig.key)))];
         const forceReset = sig.callees.some((c) => c === null);
         const present = sig.callees.filter((c): c is Node => c !== null);
         if (forceReset || present.length > 0) args.push(bool(forceReset));
@@ -446,7 +516,7 @@ export function refreshProgram(
     }
 
     // PASS 2 — signatures, over the tree pass 1 produced.
-    signatures = collectSignatures(program, code);
+    signatures = collectSignatures(program, code, semantic);
     signExpressions();
 
     for (const [i, stmt] of body.entries()) {
@@ -486,7 +556,7 @@ export function refreshProgram(
         ),
     );
     for (const [temp, id] of registrations) {
-        out.push(exprStmt(create.CallExpression(0, 0, 0, ref(refreshReg), [ref(temp), str(id)], null)));
+        out.push(exprStmt(create.CallExpression(0, 0, 0, refreshCallee(refreshReg), [ref(temp), str(id)], null)));
     }
 
     dataOf(program).body = out;
@@ -666,7 +736,7 @@ function signatureDeclaration(names: string[], refreshSig: string): Node {
         0,
         VAR_KIND.VAR,
         names.map((n) =>
-            create.VariableDeclarator(0, 0, 0, binding(n), null, create.CallExpression(0, 0, 0, ref(refreshSig), [], null)),
+            create.VariableDeclarator(0, 0, 0, binding(n), null, create.CallExpression(0, 0, 0, refreshCallee(refreshSig), [], null)),
         ),
     );
 }
