@@ -29,6 +29,15 @@ import {
 import { lookupValue, type Semantic } from '../../analysis/semantic.ts';
 import { base64, sha1 } from '../../util/sha1.ts';
 import type { Plugin } from '../plugin.ts';
+import { REACT_REFRESH_RUNTIME_ID, REACT_REFRESH_RUNTIME_SOURCE } from './react-refresh-runtime.ts';
+
+export { REACT_REFRESH_RUNTIME_ID, reactRefreshPreamble } from './react-refresh-runtime.ts';
+
+/** The runtime id as a filter. `matches` is given the SPECIFIER for `resolveId` and the ID for
+ *  `load`, and this path is the same string in both. Anchored, and the handlers re-check equality:
+ *  either alone is enough, and a resolveId that answered anything else would silently redirect every
+ *  import in the graph. */
+const RUNTIME_ID_RE = /^\/@react-refresh$/;
 
 /** Wrap an expression as `(_cN = expr)` and remember the registration. */
 type WrapFn = (inferredName: string, expr: Node) => void;
@@ -918,6 +927,20 @@ export function reactRefresh(options: ReactRefreshOptions & ReactRefreshWrapperO
     const source = options.jsxImportSource ?? 'react';
     return {
         name: 'react-refresh',
+        // rolldown's wrapper resolves `/@react-refresh` to itself and leaves the LOADING to its host
+        // (`resolve_id` returns the id, there is no `load` hook) — vite serves the file. shakeup has
+        // no separate host layer, so the plugin does both halves and stays self-contained.
+        //
+        // The bare path, not `${host}/@react-refresh`: a configured host is a different origin, and
+        // the browser fetches an absolute URL from THAT server, where it arrives as this path again.
+        resolveId: {
+            filter: { id: RUNTIME_ID_RE },
+            handler: (specifier) => (specifier === REACT_REFRESH_RUNTIME_ID ? REACT_REFRESH_RUNTIME_ID : null),
+        },
+        load: {
+            filter: { id: RUNTIME_ID_RE },
+            handler: (moduleId) => (moduleId === REACT_REFRESH_RUNTIME_ID ? REACT_REFRESH_RUNTIME_SOURCE : null),
+        },
         transformProgram: {
             filter: { id: /\.[jt]sx?$/ },
             handler: (program, semantic, id, code) => {

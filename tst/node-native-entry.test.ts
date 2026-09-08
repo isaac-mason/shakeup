@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { N, parse, walk as walkAst } from '../src/ast.ts';
 
 // `package.json` ships `"." -> "./src/index.ts"` — raw TypeScript. Node 24 strips types by default,
 // so a consumer's `import('shakeup')` runs our source through node's OWN resolver and stripper, and
@@ -75,15 +76,30 @@ describe('src/ imports nothing a consumer would not have', () => {
                     continue;
                 }
                 if (!e.name.endsWith('.ts')) continue;
-                // Import STATEMENTS only — a specifier inside a comment or a template that generates
-                // code is not an import, and matching text would flag both.
-                for (const m of readFileSync(p, 'utf8').matchAll(
-                    /^\s*(?:import|export)\s[^\n]*?from\s+'([^']+)'|^\s*import\s+'([^']+)'/gm,
-                )) {
-                    const spec = m[1] ?? m[2];
-                    if (spec.startsWith('.') || spec.startsWith('node:')) continue;
+                // Import STATEMENTS only, found by PARSING. Matching text cannot tell an import from
+                // a specifier inside a comment or inside a template that generates code — and shakeup
+                // has exactly such a template (the `/@react-refresh` runtime source, whose bare
+                // `react-refresh/runtime` resolves against the user's app, not this package).
+                const { program, errors } = parse(readFileSync(p, 'utf8'), { ts: true, jsx: false });
+                expect(errors, p).toEqual([]);
+                walkAst(program, (n) => {
+                    if (
+                        n.type !== N.ImportDeclaration &&
+                        n.type !== N.ExportNamedDeclaration &&
+                        n.type !== N.ExportAllDeclaration &&
+                        n.type !== N.ImportExpression
+                    )
+                        return undefined;
+                    const source = (n.data as { source?: { name?: string } } | null)?.source;
+                    const raw = source?.name;
+                    // A string literal's raw text, quotes included; a non-literal `import(expr)` has
+                    // no quotes and no fixed specifier to judge.
+                    if (raw === undefined || !(raw.startsWith("'") || raw.startsWith('"'))) return undefined;
+                    const spec = raw.slice(1, -1);
+                    if (spec.startsWith('.') || spec.startsWith('node:')) return undefined;
                     out.push({ file: p.slice(SRC.length + 1), spec });
-                }
+                    return undefined;
+                });
             }
         };
         walk(SRC);
