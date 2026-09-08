@@ -22,6 +22,41 @@ afterEach(() => {
     (globalThis as Record<string, unknown>).__log = undefined;
 });
 
+describe('runner — the namespace object', () => {
+    // vite's module runner builds `Object.create(null)` with a non-enumerable, non-configurable
+    // `Symbol.toStringTag` of 'Module' (`module-runner/runner.ts`), which is what a real ESM
+    // namespace exotic object also reports. A plain `{}` is neither, and consumers can tell: with
+    // live bindings every export is a getter, so the tag is the only thing distinguishing an ESM
+    // namespace from a CommonJS object full of side-effecting getters.
+    it('reports [object Module] and has a null prototype', async () => {
+        const ns = await graph({ entry: `export const v = 1;` }).import('entry');
+        expect(Object.prototype.toString.call(ns)).toBe('[object Module]');
+        expect(Object.getPrototypeOf(ns)).toBe(null);
+    });
+
+    it('the tag is not enumerable, and not reconfigurable', async () => {
+        const ns = await graph({ entry: `export const v = 1;` }).import('entry');
+        // It must not show up as an export, in `for...in` or anywhere else.
+        expect(Object.keys(ns)).toEqual(['v']);
+        const desc = Object.getOwnPropertyDescriptor(ns, Symbol.toStringTag);
+        expect(desc).toMatchObject({ value: 'Module', enumerable: false, configurable: false });
+    });
+
+    it('a re-evaluated module gets a namespace of the same shape', async () => {
+        // HMR builds a FRESH namespace on re-eval; a tag on only the first one would make Fast
+        // Refresh work once and then stop.
+        const sources: Record<string, string> = {
+            entry: `import.meta.hot.accept((ns) => { globalThis.__log = ns; });\nexport const v = 1;`,
+        };
+        const runner = graph(sources);
+        await runner.import('entry');
+        sources.entry = `import.meta.hot.accept((ns) => { globalThis.__log = ns; });\nexport const v = 2;`;
+        expect(await runner.applyHmr('entry', 'entry')).toBe(true);
+        const next = (globalThis as Record<string, unknown>).__log;
+        expect(Object.prototype.toString.call(next)).toBe('[object Module]');
+    });
+});
+
 describe('runner — basic linking', () => {
     it('imports and evaluates a dependency', async () => {
         const ns = await graph({

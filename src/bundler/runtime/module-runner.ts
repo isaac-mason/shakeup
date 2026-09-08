@@ -65,6 +65,22 @@ export type HotContext = {
 
 type Namespace = Record<string, unknown>;
 
+/**
+ * A module namespace, shaped like the real thing: a null prototype and `[object Module]`.
+ *
+ * vite's module runner builds exactly this — `Object.create(null)` plus a non-enumerable,
+ * non-configurable `Symbol.toStringTag` of `'Module'` (`module-runner/runner.ts`) — and so does a
+ * genuine ESM namespace exotic object. A plain `{}` is neither, and the difference is observable:
+ * with live bindings every export is a GETTER, so the only way for a consumer to tell an ESM
+ * namespace from a CommonJS object full of side-effecting getters is this tag. React Fast Refresh
+ * asks precisely that question before it will read a module's exports.
+ */
+function createNamespace(): Namespace {
+    const ns = Object.create(null) as Namespace;
+    Object.defineProperty(ns, Symbol.toStringTag, { value: 'Module', enumerable: false, configurable: false });
+    return ns;
+}
+
 type ModuleRecord = {
     id: string;
     exports: Namespace;
@@ -301,7 +317,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         let resolveReady!: () => void;
         const rec: ModuleRecord = {
             id,
-            exports: {},
+            exports: createNamespace(),
             ready: new Promise<void>((r) => {
                 resolveReady = r;
             }),
@@ -364,7 +380,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         if (old !== undefined) for (const cb of old.disposeCallbacks) fire(id, 'dispose', () => cb(old.hotData));
         const fresh: ModuleRecord = {
             id,
-            exports: {},
+            exports: createNamespace(),
             ready: Promise.resolve(),
             acceptCallbacks: [],
             depAccepts: [],
