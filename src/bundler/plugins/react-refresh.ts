@@ -25,6 +25,9 @@ import {
 import type { Semantic } from '../../analysis/semantic.ts';
 import type { Plugin } from '../plugin.ts';
 
+/** Wrap an expression as `(_cN = expr)` and remember the registration. */
+type WrapFn = (inferredName: string, expr: Node) => void;
+
 /** `refresh.rs:911` — a component's name starts with an ASCII uppercase letter. */
 const isComponentish = (name: string): boolean => name.length > 0 && name[0] >= 'A' && name[0] <= 'Z';
 
@@ -232,7 +235,11 @@ export function refreshProgram(
 ): boolean {
     const refreshReg = options.refreshReg ?? '$RefreshReg$';
     const refreshSig = options.refreshSig ?? '$RefreshSig$';
-    const signatures = collectSignatures(program, code);
+    // Assigned AFTER the registration pass below, not here. That pass wraps inner functions as
+    // `(_c = fn)` by RETYPING the function's node and moving its contents into a clone — so a map
+    // keyed on node identity before the wrap points at nodes that are no longer functions, and every
+    // signature in a HOC chain silently disappears. Collecting afterwards keys on the final tree.
+    let signatures = new Map<Node, Signature>();
     const jsxBindings = usedInJsxBindings(program);
     const taken = takenNames(program);
 
@@ -314,13 +321,15 @@ export function refreshProgram(
      */
     const signExpressions = (): void => {
         const pending: Node[] = [];
+        // Parents, recorded as we go — the carry below has to walk UP, and there are no back-links.
+        const parent = new Map<Node, Node>();
         const gather = (n: Node): void => {
-            if (
-                (n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression) &&
-                signatures.has(n)
-            )
+            if ((n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression) && signatures.has(n))
                 pending.push(n);
-            walkChildren(n, gather);
+            walkChildren(n, (child) => {
+                parent.set(child, n);
+                gather(child);
+            });
         };
         gather(program);
 
@@ -333,6 +342,26 @@ export function refreshProgram(
             if (stmts === null) continue;
             stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
             wrapInSignature(fn, sName, signatureArgs(sig));
+
+            // THE HOC CARRY. `memo(forwardRef(fn))` signs at every level, all with the SAME `_s` —
+            // `_s(memo(_c2 = _s(forwardRef(_c = _s(fn, key)), key)), key)`. oxc keeps this in a
+            // `last_signature` slot carried out of the traversal; walking up is the same thing
+            // without the traversal. Assignments are stepped THROUGH, because pass 1's `_c = …`
+            // wrappers sit between the function and its enclosing call.
+            let cur: Node = fn;
+            for (;;) {
+                let up = parent.get(cur);
+                while (up !== undefined && up.type === N.AssignmentExpression) {
+                    cur = up;
+                    up = parent.get(cur);
+                }
+                if (up === undefined || up.type !== N.CallExpression) break;
+                // Only the ARGUMENT position carries — `fn(…)` where fn is the signed function is a
+                // call OF it, not a HOC wrapping it.
+                if (!(dataOf(up).arguments as Node[]).includes(cur)) break;
+                wrapInSignature(up, sName, signatureArgs(sig));
+                cur = up;
+            }
         }
     };
 
@@ -343,14 +372,38 @@ export function refreshProgram(
         return exprStmt(create.AssignmentExpression(0, 0, '=', ref(temp), ref(componentName)));
     };
 
-    // Expression signatures FIRST: they wrap functions where they stand, and the statement walk
-    // below reads the top-level list after that.
-    signExpressions();
+    /** `(_cN = expr)` in place, recording the registration. Mirrors `wrapInSignature`'s trick: the
+     *  node is retyped, so nothing that points at it needs updating. */
+    const wrapInRegistration: WrapFn = (inferredName, expr) => {
+        const temp = mintRegistration();
+        registrations.push([temp, inferredName]);
+        const inner = cloneNode(expr);
+        if (inner === null) return;
+        const assignment = create.AssignmentExpression(expr.start, expr.end, '=', ref(temp), inner);
+        set(expr, N.AssignmentExpression, assignment.data as never);
+    };
 
     const body = dataOf(program).body as Node[];
     const out: Node[] = [];
 
+    // PASS 1 — registration. Wrapping happens here, before any signing, because oxc does it in
+    // `enter_program` and signs during the traversal that follows: `_c = fn` first, then `_s` goes
+    // INSIDE it as `_c = _s(fn, key)`.
+    //
+    // The registration STATEMENT is minted here too, not later: `_c` numbering interleaves with the
+    // inner wraps, statement by statement. `const A = forwardRef(fn)` yields `_c` for the inner
+    // function and `_c2` for `A` — deferring the outer ones to the end renumbers everything.
+    const registrationStatements: (Node | null)[] = [];
     for (const stmt of body) {
+        const name = registerFor(stmt, jsxBindings, code, wrapInRegistration);
+        registrationStatements.push(name === null ? null : registrationFor(name));
+    }
+
+    // PASS 2 — signatures, over the tree pass 1 produced.
+    signatures = collectSignatures(program, code);
+    signExpressions();
+
+    for (const [i, stmt] of body.entries()) {
         out.push(stmt);
         // The signature line comes BEFORE the registration line — `_s(App, …)` then `_c = App`,
         // which is the order every fixture shows.
@@ -359,8 +412,8 @@ export function refreshProgram(
             const signed = signFunctionDeclaration(fn.node, fn.name);
             if (signed !== null) out.push(signed);
         }
-        const registered = registerFor(stmt, jsxBindings);
-        if (registered !== null) out.push(registrationFor(registered));
+        const registered = registrationStatements[i];
+        if (registered !== null && registered !== undefined) out.push(registered);
     }
 
     if (registrations.length === 0 && signatureVars.length === 0) return false;
@@ -415,20 +468,26 @@ function signableFunctionDeclaration(stmt: Node): { node: Node; name: string } |
  * Which component name a TOP-LEVEL statement defines, or null. `process_statement` +
  * `handle_function_declaration` + `handle_variable_declaration` in `refresh.rs`.
  */
-function registerFor(stmt: Node, jsxBindings: Set<number>): string | null {
+function registerFor(stmt: Node, jsxBindings: Set<number>, code: string, wrap: WrapFn): string | null {
     if (stmt.type === N.FunctionDeclaration) return fromFunctionDeclaration(stmt);
     if (stmt.type === N.ExportNamedDeclaration) {
         const decl = dataOf(stmt).declaration as Node | null;
         if (decl === null) return null;
         if (decl.type === N.FunctionDeclaration) return fromFunctionDeclaration(decl);
-        if (decl.type === N.VariableDeclaration) return fromVariableDeclaration(decl, jsxBindings);
+        if (decl.type === N.VariableDeclaration) return fromVariableDeclaration(decl, jsxBindings, code, wrap);
         return null;
     }
     if (stmt.type === N.ExportDefaultDeclaration) {
         const decl = dataOf(stmt).declaration as Node | null;
-        return decl !== null && decl.type === N.FunctionDeclaration ? fromFunctionDeclaration(decl) : null;
+        if (decl === null || decl === undefined) return null;
+        if (decl.type === N.FunctionDeclaration) return fromFunctionDeclaration(decl);
+        // `export default memo(() => {})` — no name to register, so the inner function is wrapped
+        // under the reserved id `%default%`. Only call expressions: an anonymous
+        // `export default function () {}` is ignored, as oxc ignores it.
+        if (decl.type === N.CallExpression) replaceInnerComponents('%default%', decl, false, code, wrap);
+        return null;
     }
-    if (stmt.type === N.VariableDeclaration) return fromVariableDeclaration(stmt, jsxBindings);
+    if (stmt.type === N.VariableDeclaration) return fromVariableDeclaration(stmt, jsxBindings, code, wrap);
     return null;
 }
 
@@ -440,7 +499,7 @@ function fromFunctionDeclaration(fn: Node): string | null {
     return isComponentish(id.name) ? id.name : null;
 }
 
-function fromVariableDeclaration(decl: Node, jsxBindings: Set<number>): string | null {
+function fromVariableDeclaration(decl: Node, jsxBindings: Set<number>, code: string, wrap: WrapFn): string | null {
     const declarators = dataOf(decl).declarations as Node[];
     if (declarators.length !== 1) return null;
     const d = dataOf(declarators[0]);
@@ -478,44 +537,61 @@ function fromVariableDeclaration(decl: Node, jsxBindings: Set<number>): string |
 
     // THEN the same two-part test oxc applies: something component-shaped inside, or a binding JSX
     // actually uses. Neither alone is enough.
-    const foundInside = looksLikeComponent(init, /* isVariableDeclarator */ true);
+    const foundInside = replaceInnerComponents(id.name, init, /* isVariableDeclarator */ true, code, wrap);
     if (!foundInside && !jsxBindings.has(id.sym)) return null;
     return id.name;
 }
 
 /**
- * `replace_inner_components`, as a PREDICATE — "is there a component in here?".
+ * `replace_inner_components` — "is there a component in here?", AND wrap the ones that need it.
  *
- * oxc's version also WRAPS an inner function as `(_c = fn)` when it is not a declarator init, which
- * is how a HOC's inline argument gets registered. That half is a later stage; this one decides
- * registration, which is what the shape gate above feeds.
+ * A function that is not a declarator's init has no name to be registered under, so it is wrapped
+ * where it stands as `(_cN = fn)`. That is how a HOC's inline argument gets registered:
+ * `memo(fn)` becomes `memo(_c = fn)`. A declarator's init is left alone — it is registered by name
+ * on the next line instead, so the inferred function name survives.
+ *
+ * `inferredName` accumulates the callee text as it descends (`Foo$memo$forwardRef`), which is the
+ * persistent id an inner function is registered under.
  */
-function looksLikeComponent(expr: Node, isVariableDeclarator: boolean): boolean {
-    const e = expr;
-    switch (e.type) {
+function replaceInnerComponents(
+    inferredName: string,
+    expr: Node,
+    isVariableDeclarator: boolean,
+    code: string,
+    wrap: (name: string, expr: Node) => void,
+): boolean {
+    switch (expr.type) {
         case N.IdentifierReference:
-            // `export const Something = hoc(Foo)` — `Foo` is assumed registered at ITS definition,
-            // so this reports the name's shape rather than wrapping anything.
-            return isComponentish(e.name);
+            // `export const Something = hoc(Foo)` — `Foo` is registered at ITS definition, so this
+            // reports the name's shape and wraps nothing.
+            return isComponentish(expr.name);
         case N.FunctionExpression:
-            return true;
+            break;
         case N.ArrowFunctionExpression:
-            return !arrowReturnsArrow(e);
+            if (arrowReturnsArrow(expr)) return false;
+            break;
         case N.CallExpression: {
-            const callee = dataOf(e).callee as Node;
+            const callee = dataOf(expr).callee as Node;
             const calleeOk =
                 callee.type === N.IdentifierReference ||
                 callee.type === N.StaticMemberExpression ||
                 callee.type === N.ComputedMemberExpression;
             if (!calleeOk) return false;
-            const first = (dataOf(e).arguments as Node[])[0];
+            const first = (dataOf(expr).arguments as Node[])[0];
             if (first === undefined) return false;
-            if (!looksLikeComponent(first, false)) return false;
-            return isVariableDeclarator;
+            const calleeText = code.slice(callee.start, callee.end).trim();
+            if (!replaceInnerComponents(`${inferredName}$${calleeText}`, first, false, code, wrap)) return false;
+            // `const Foo = hoc1(hoc2(() => {}))` — the outermost call belongs to the declarator, so
+            // it is registered by name rather than wrapped.
+            if (isVariableDeclarator) return true;
+            break;
         }
         default:
             return false;
     }
+
+    if (!isVariableDeclarator) wrap(inferredName, expr);
+    return true;
 }
 
 /** `() => () => {}` — with `expression: true` the arrow's `body` IS the expression. */

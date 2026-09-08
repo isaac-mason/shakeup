@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { parse } from '../src/ast.ts';
+import { N, type Node, parse, walk } from '../src/ast.ts';
 import { refreshProgram } from '../src/bundler/plugins/react-refresh.ts';
 import { makeJsxLower } from '../src/passes/lower-jsx.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
@@ -43,6 +43,17 @@ const dropRuntimeImport = (t: string): string =>
         .split('\n')
         .filter((l) => !/^import\s*\{[^}]*\}\s*from\s*["']react\/jsx-(dev-)?runtime["'];?$/.test(l.trim()))
         .join('\n');
+/** `{ ref }` vs `{ ref: ref }`: Babel emits object shorthand where shakeup's JSX lowering writes
+ *  the pair out. A printer-level difference in `jsxLower`, gated by shakeup's own JSX tests, and
+ *  nothing to do with refresh — so the flag is cleared on BOTH sides before comparing. */
+function clearShorthand(program: Node): Node {
+    walk(program, (n) => {
+        if (n.type === N.ObjectProperty) (n.data as unknown as { shorthand: boolean }).shorthand = false;
+        return undefined;
+    });
+    return program;
+}
+
 const normaliseRuntimeName = (t: string): string => t.replace(/\b_(jsxs?|jsxDEV|Fragment)\b/g, '$1');
 
 function transform(src: string, ts: boolean): string {
@@ -73,17 +84,23 @@ function fixtures(): { name: string; dir: string }[] {
 
 /** Fixtures the port reproduces TODAY. A ratchet: adding a stage moves names in, and any name
  *  falling out is a regression. Registration is done, and signatures for function DECLARATIONS;
- *  signatures for function declarations AND for expressions/arrows wrapped in place. The HOC
- *  carry-slot — one `_s` reused across a `memo(forwardRef(fn))` chain, with `_c =` on the inner
- *  expressions — is not. */
+ *  signatures for declarations and for expressions wrapped in place, and the HOC chain — `_c =` on
+ *  inner functions plus one `_s` carried up through the enclosing calls. Still missing: the
+ *  custom-hook thunk (the 4th `_s` argument), hashed keys (needs SHA-1), and the configurable
+ *  `$RefreshReg$`/`$RefreshSig$` identifiers. */
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
     'parenthesized-variable-declarators',
     'react-refresh/generates-signatures-for-function-declarations-calling-hooks',
+    'react-refresh/generates-signatures-for-function-expressions-calling-hooks',
     'react-refresh/ignores-complex-definitions',
     'react-refresh/ignores-hoc-definitions',
     'react-refresh/ignores-unnamed-function-declarations',
     'react-refresh/only-registers-pascal-case-functions',
+    'react-refresh/registers-capitalized-identifiers-in-hoc-calls',
+    'react-refresh/registers-likely-hocs-with-inline-functions-1',
+    'react-refresh/registers-likely-hocs-with-inline-functions-2',
+    'react-refresh/registers-likely-hocs-with-inline-functions-3',
     'react-refresh/registers-top-level-exported-named-arrow-functions',
     'react-refresh/registers-top-level-function-declarations',
     'react-refresh/registers-top-level-variable-declarations-with-arrow-functions',
@@ -120,7 +137,7 @@ describe('react-refresh — oxc conformance corpus', () => {
                 });
                 // Our own output failing to parse is never acceptable, passing or not.
                 expect(got.errors, 'our output must be valid JS').toEqual([]);
-                same = want.errors.length === 0 && astEqual(got.program, want.program);
+                same = want.errors.length === 0 && astEqual(clearShorthand(got.program), clearShorthand(want.program));
             } catch (e) {
                 if (expected) throw e;
             }
