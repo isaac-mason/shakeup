@@ -73,7 +73,9 @@ function fixtures(): { name: string; dir: string }[] {
 
 /** Fixtures the port reproduces TODAY. A ratchet: adding a stage moves names in, and any name
  *  falling out is a regression. Registration is done, and signatures for function DECLARATIONS;
- *  wrapping function expressions/arrows and the HOC carry-slot are not. */
+ *  signatures for function declarations AND for expressions/arrows wrapped in place. The HOC
+ *  carry-slot — one `_s` reused across a `memo(forwardRef(fn))` chain, with `_c =` on the inner
+ *  expressions — is not. */
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
     'parenthesized-variable-declarators',
@@ -87,6 +89,7 @@ const PASSING = new Set([
     'react-refresh/registers-top-level-variable-declarations-with-arrow-functions',
     'react-refresh/registers-top-level-variable-declarations-with-function-expressions',
     'react-refresh/uses-original-function-declaration-if-it-get-reassigned',
+    'variable-declarator-with-function',
 ]);
 
 describe('react-refresh — oxc conformance corpus', () => {

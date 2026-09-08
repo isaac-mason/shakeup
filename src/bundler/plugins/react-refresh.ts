@@ -7,7 +7,21 @@
 //
 // Nothing about React lives in shakeup's core: this reads the AST and the semantic through the
 // published toolchain API and mutates the tree it is handed.
-import { binding, bool, create, exprStmt, N, type Node, ref, str, VAR_KIND, walk, walkChildren } from '../../ast.ts';
+import {
+    binding,
+    bool,
+    cloneNode,
+    create,
+    exprStmt,
+    N,
+    type Node,
+    ref,
+    set,
+    str,
+    VAR_KIND,
+    walk,
+    walkChildren,
+} from '../../ast.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import type { Plugin } from '../plugin.ts';
 
@@ -121,7 +135,7 @@ function hookNameOf(callee: Node): string {
 
 /** What one function's hook calls added up to. `callees` holds a custom hook's callee SOURCE TEXT,
  *  or null when the binding could not be resolved — any null forces `forceReset`. */
-type Signature = { key: string; callees: (string | null)[] };
+type Signature = { key: string; callees: (string | null)[]; enclosing: Node | null };
 
 /**
  * Walk the program collecting a signature per FUNCTION node, plus the enclosing-declarator context
@@ -133,6 +147,9 @@ type Signature = { key: string; callees: (string | null)[] };
  */
 function collectSignatures(program: Node, code: string): Map<Node, Signature> {
     const out = new Map<Node, Signature>();
+    /** function -> the function enclosing IT. `_s` is declared in the PARENT: a signed function
+     *  cannot declare the variable its own wrapper call reads. */
+    const parentFn = new Map<Node, Node | null>();
     // TRIMMED. The key is the text the user WROTE for a construct, and surrounding whitespace is
     // not part of it. shakeup also needs the trim more than oxc does: a destructuring pattern's span
     // ends one character past its closing bracket (`[a, b] `, `{x} `), where plain identifiers and
@@ -146,6 +163,7 @@ function collectSignatures(program: Node, code: string): Map<Node, Signature> {
             n.type === N.FunctionExpression ||
             n.type === N.ArrowFunctionExpression;
         const nextFn = isFn ? n : fn;
+        if (isFn) parentFn.set(n, fn);
         // A declarator's context reaches its INIT, not the whole subtree below the next function:
         // `const [a, setA] = useState(0)` keys on `[a, setA]`, but a hook inside a nested function
         // there does not.
@@ -169,7 +187,9 @@ function collectSignatures(program: Node, code: string): Map<Node, Signature> {
                         ? textOf(dataOf(declarator).id as Node)
                         : '';
                 const entry = keyEntry(hookName, declId, argsKey);
-                const sig = out.get(nextFn) ?? { key: '', callees: [] };
+                // `enclosing` is where `var _s = $RefreshSig$()` goes: the nearest enclosing FUNCTION,
+                // not always the module top. The fixtures show `function hoc() { var _s3 = … }`.
+                const sig = out.get(nextFn) ?? { key: '', callees: [], enclosing: parentFn.get(nextFn) ?? null };
                 // A literal backslash-n between entries — see `keyEntry`.
                 sig.key = sig.key === '' ? entry : `${sig.key}\\n${entry}`;
                 if (!BUILTIN_HOOKS.has(hookName)) {
@@ -244,8 +264,28 @@ export function refreshProgram(
             }
         }
     };
-    /** `var _s = $RefreshSig$(), …` — the declarations to hoist to the top of the module. */
-    const signatureVars: string[] = [];
+    /** The `_s` names to declare, keyed by the FUNCTION they belong in (null = module top). A
+     *  signed function nested inside another gets its `var _s3 = $RefreshSig$()` in that function,
+     *  not at module scope — `function hoc() { var _s3 = $RefreshSig$(); … }` in the fixtures. */
+    const signatureVarsByScope = new Map<Node | null, string[]>();
+    const signatureVarsFor = (scope: Node | null): string[] => {
+        const existing = signatureVarsByScope.get(scope);
+        if (existing !== undefined) return existing;
+        const fresh: string[] = [];
+        signatureVarsByScope.set(scope, fresh);
+        return fresh;
+    };
+    const signatureVars = signatureVarsFor(null);
+
+    /** The trailing arguments of `_s(fn, …)`: the key, then `forceReset`, then the custom-hook
+     *  thunk — each present only when it carries information. */
+    const signatureArgs = (sig: Signature): Node[] => {
+        const args: Node[] = [str(sig.key)];
+        const forceReset = sig.callees.some((c) => c === null);
+        const present = sig.callees.filter((c): c is string => c !== null);
+        if (forceReset || present.length > 0) args.push(bool(forceReset));
+        return args;
+    };
 
     /**
      * Sign one function DECLARATION: `_s()` first in its body, and `_s(Name, key, …)` after the
@@ -257,18 +297,43 @@ export function refreshProgram(
         const sName = mintSignature();
         signatureVars.push(sName);
 
-        const body = dataOf(fn).body as Node | null;
-        if (body === null) return null;
-        const stmts = dataOf(body).body as Node[];
+        const stmts = blockBodyOf(fn);
+        if (stmts === null) return null;
         stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
 
-        const args: Node[] = [ref(name), str(sig.key)];
-        const forceReset = sig.callees.some((c) => c === null);
-        const present = sig.callees.filter((c): c is string => c !== null);
-        // The 3rd and 4th arguments appear only when they carry information — `forceReset` when
-        // either it is true or custom hooks exist, and the thunk only when there are custom hooks.
-        if (forceReset || present.length > 0) args.push(bool(forceReset));
-        return exprStmt(create.CallExpression(0, 0, 0, ref(sName), args, null));
+        return exprStmt(create.CallExpression(0, 0, 0, ref(sName), [ref(name), ...signatureArgs(sig)], null));
+    };
+
+    /**
+     * Sign every function EXPRESSION and arrow that calls hooks, by wrapping it where it stands:
+     * `_s(fn, key)`. A declaration cannot be wrapped — it is a statement — which is why oxc emits
+     * `_s(Name, key)` on the next line for those and wraps these.
+     *
+     * Collected first and wrapped after: `wrapInSignature` retypes the node into a call whose
+     * argument is the old function, so mutating during the descent would walk the clone.
+     */
+    const signExpressions = (): void => {
+        const pending: Node[] = [];
+        const gather = (n: Node): void => {
+            if (
+                (n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression) &&
+                signatures.has(n)
+            )
+                pending.push(n);
+            walkChildren(n, gather);
+        };
+        gather(program);
+
+        for (const fn of pending) {
+            const sig = signatures.get(fn);
+            if (sig === undefined) continue;
+            const sName = mintSignature();
+            signatureVarsFor(sig.enclosing).push(sName);
+            const stmts = blockBodyOf(fn);
+            if (stmts === null) continue;
+            stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
+            wrapInSignature(fn, sName, signatureArgs(sig));
+        }
     };
 
     /** `_c = Foo;` — the statement that captures a component at its definition site. */
@@ -277,6 +342,10 @@ export function refreshProgram(
         registrations.push([temp, componentName]);
         return exprStmt(create.AssignmentExpression(0, 0, '=', ref(temp), ref(componentName)));
     };
+
+    // Expression signatures FIRST: they wrap functions where they stand, and the statement walk
+    // below reads the top-level list after that.
+    signExpressions();
 
     const body = dataOf(program).body as Node[];
     const out: Node[] = [];
@@ -296,19 +365,16 @@ export function refreshProgram(
 
     if (registrations.length === 0 && signatureVars.length === 0) return false;
 
-    // `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` at the top of the module.
-    if (signatureVars.length > 0) {
-        out.unshift(
-            create.VariableDeclaration(
-                0,
-                0,
-                VAR_KIND.VAR,
-                signatureVars.map((n) =>
-                    create.VariableDeclarator(0, 0, 0, binding(n), null, create.CallExpression(0, 0, 0, ref(refreshSig), [], null)),
-                ),
-            ),
-        );
+    // A nested function's `_s` is declared inside THAT function, before anything else in it.
+    for (const [scope, names] of signatureVarsByScope) {
+        if (scope === null || names.length === 0) continue;
+        const stmts = blockBodyOf(scope);
+        if (stmts === null) continue;
+        stmts.unshift(signatureDeclaration(names, refreshSig));
     }
+
+    // `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` at the top of the module.
+    if (signatureVars.length > 0) out.unshift(signatureDeclaration(signatureVars, refreshSig));
 
     if (registrations.length === 0) {
         dataOf(program).body = out;
@@ -459,6 +525,51 @@ function arrowReturnsArrow(arrow: Node): boolean {
 }
 
 
+
+/** `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` — one declaration, however many names. */
+function signatureDeclaration(names: string[], refreshSig: string): Node {
+    return create.VariableDeclaration(
+        0,
+        0,
+        VAR_KIND.VAR,
+        names.map((n) =>
+            create.VariableDeclarator(0, 0, 0, binding(n), null, create.CallExpression(0, 0, 0, ref(refreshSig), [], null)),
+        ),
+    );
+}
+
+/**
+ * Wrap `fn` in place as `_s(fn, …args)`.
+ *
+ * `set` retypes the node itself, so every reference to it in the tree keeps pointing at the right
+ * place — no parent bookkeeping. The original contents move into a clone that becomes the call's
+ * first argument. Cloning is O(function) and happens once per signed component, which is a dev-only
+ * transform's budget.
+ */
+function wrapInSignature(fn: Node, sName: string, args: Node[]): void {
+    const inner = cloneNode(fn);
+    if (inner === null) return;
+    const call = create.CallExpression(fn.start, fn.end, 0, ref(sName), [inner, ...args], null);
+    set(fn, N.CallExpression, call.data as never);
+}
+
+/**
+ * Give an arrow a BLOCK body, so `_s()` has somewhere to go.
+ *
+ * `() => <div/>` has an expression body; the signature call has to run before the return, so the
+ * body becomes `{ return <div/>; }`. oxc does the same via
+ * `arrow_function_body_as_function_body_mut`.
+ */
+function blockBodyOf(fn: Node): Node[] | null {
+    const d = dataOf(fn);
+    const body = d.body as Node | null;
+    if (body === null || body === undefined) return null;
+    if (d.expression !== true) return dataOf(body).body as Node[];
+    const stmts: Node[] = [create.ReturnStatement(body.start, body.end, 0, body)];
+    d.body = create.BlockStatement(body.start, body.end, 0, stmts);
+    d.expression = false;
+    return dataOf(d.body as Node).body as Node[];
+}
 
 /** The plugin. `.jsx`/`.tsx` only — the same gate rolldown's wrapper uses. */
 export function reactRefresh(options: ReactRefreshOptions = {}): Plugin {
