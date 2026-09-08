@@ -91,8 +91,10 @@ function fixtures(): { name: string; dir: string }[] {
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
     'parenthesized-variable-declarators',
+    'react-refresh/can-handle-implicit-arrow-returns',
     'react-refresh/generates-signatures-for-function-declarations-calling-hooks',
     'react-refresh/generates-signatures-for-function-expressions-calling-hooks',
+    'react-refresh/includes-custom-hooks-into-the-signatures',
     'react-refresh/ignores-complex-definitions',
     'react-refresh/ignores-hoc-definitions',
     'react-refresh/ignores-unnamed-function-declarations',

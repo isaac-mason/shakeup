@@ -18,6 +18,7 @@ import {
     ref,
     set,
     str,
+    statementListOf,
     VAR_KIND,
     walk,
     walkChildren,
@@ -138,7 +139,7 @@ function hookNameOf(callee: Node): string {
 
 /** What one function's hook calls added up to. `callees` holds a custom hook's callee SOURCE TEXT,
  *  or null when the binding could not be resolved — any null forces `forceReset`. */
-type Signature = { key: string; callees: (string | null)[]; enclosing: Node | null };
+type Signature = { key: string; callees: (Node | null)[]; enclosing: Node | null };
 
 /**
  * Walk the program collecting a signature per FUNCTION node, plus the enclosing-declarator context
@@ -198,7 +199,10 @@ function collectSignatures(program: Node, code: string): Map<Node, Signature> {
                 if (!BUILTIN_HOOKS.has(hookName)) {
                     // A custom hook contributes its CALLEE, so a change to that hook's identity
                     // forces a remount. An unresolvable one contributes null -> forceReset.
-                    sig.callees.push(callee.type === N.IdentifierReference && callee.sym === 0 ? null : textOf(callee));
+                    // The NODE, not its text: the thunk below hands the runtime the live
+                    // binding, so a custom hook changing identity forces a remount. An unresolved
+                    // reference contributes null, which becomes `forceReset`.
+                    sig.callees.push(callee.type === N.IdentifierReference && callee.sym === 0 ? null : callee);
                 }
                 out.set(nextFn, sig);
             }
@@ -289,26 +293,18 @@ export function refreshProgram(
     const signatureArgs = (sig: Signature): Node[] => {
         const args: Node[] = [str(sig.key)];
         const forceReset = sig.callees.some((c) => c === null);
-        const present = sig.callees.filter((c): c is string => c !== null);
+        const present = sig.callees.filter((c): c is Node => c !== null);
         if (forceReset || present.length > 0) args.push(bool(forceReset));
+        if (present.length > 0) {
+            // `function () { return [useFancyEffect]; }` — a plain function expression, as oxc
+            // emits. Cloned, because each signed level of a HOC chain gets its own copy.
+            const items = present.map((c) => cloneNode(c)).filter((c): c is Node => c !== null);
+            const ret = create.ReturnStatement(0, 0, 0, create.ArrayExpression(0, 0, 0, items));
+            args.push(
+                create.FunctionExpression(0, 0, 0, null, null, [], null, create.BlockStatement(0, 0, 0, [ret])),
+            );
+        }
         return args;
-    };
-
-    /**
-     * Sign one function DECLARATION: `_s()` first in its body, and `_s(Name, key, …)` after the
-     * statement. Function expressions and arrows are wrapped in place instead — a later stage.
-     */
-    const signFunctionDeclaration = (fn: Node, name: string): Node | null => {
-        const sig = signatures.get(fn);
-        if (sig === undefined) return null;
-        const sName = mintSignature();
-        signatureVars.push(sName);
-
-        const stmts = blockBodyOf(fn);
-        if (stmts === null) return null;
-        stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
-
-        return exprStmt(create.CallExpression(0, 0, 0, ref(sName), [ref(name), ...signatureArgs(sig)], null));
     };
 
     /**
@@ -319,12 +315,23 @@ export function refreshProgram(
      * Collected first and wrapped after: `wrapInSignature` retypes the node into a call whose
      * argument is the old function, so mutating during the descent would walk the clone.
      */
+    /** Statements to splice in AFTER a given statement — the next-line signatures. */
+    const pendingAfter = new Map<Node, Node[]>();
+
     const signExpressions = (): void => {
         const pending: Node[] = [];
         // Parents, recorded as we go — the carry below has to walk UP, and there are no back-links.
         const parent = new Map<Node, Node>();
         const gather = (n: Node): void => {
-            if ((n.type === N.FunctionExpression || n.type === N.ArrowFunctionExpression) && signatures.has(n))
+            // DECLARATIONS TOO, in document order. `_s` numbering follows the order functions
+            // appear, so signing all expressions first and declarations afterwards renumbers every
+            // signature in a file that mixes them.
+            if (
+                (n.type === N.FunctionExpression ||
+                    n.type === N.ArrowFunctionExpression ||
+                    n.type === N.FunctionDeclaration) &&
+                signatures.has(n)
+            )
                 pending.push(n);
             walkChildren(n, (child) => {
                 parent.set(child, n);
@@ -341,6 +348,45 @@ export function refreshProgram(
             const stmts = blockBodyOf(fn);
             if (stmts === null) continue;
             stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
+
+            // A function DECLARATION is a statement — it cannot be wrapped, so its signature goes
+            // on the next line, under its own name.
+            if (fn.type === N.FunctionDeclaration) {
+                const id = dataOf(fn).id as Node | null;
+                const stmt = statementContaining(fn, parent);
+                if (id !== null && id !== undefined && stmt !== null) {
+                    const after = pendingAfter.get(stmt) ?? [];
+                    after.push(
+                        exprStmt(create.CallExpression(0, 0, 0, ref(sName), [ref(id.name), ...signatureArgs(sig)], null)),
+                    );
+                    pendingAfter.set(stmt, after);
+                }
+                continue;
+            }
+
+            // A declarator's init is signed on the NEXT LINE, not wrapped: `const Foo = () => {};`
+            // then `_s(Foo, key)`. Wrapping it would replace the initialiser with a call, and the
+            // function would lose the name JavaScript infers from the declarator — which is what
+            // `@babel/plugin-transform-react-display-name` and styled-components read.
+            const up = parent.get(fn);
+            const boundName =
+                up !== undefined && up.type === N.VariableDeclarator && (dataOf(up).init as Node | null) === fn
+                    ? (dataOf(up).id as Node)
+                    : null;
+            if (boundName !== null && boundName.type === N.BindingIdentifier) {
+                const stmt = statementContaining(up as Node, parent);
+                if (stmt !== null) {
+                    const after = pendingAfter.get(stmt) ?? [];
+                    after.push(
+                        exprStmt(
+                            create.CallExpression(0, 0, 0, ref(sName), [ref(boundName.name), ...signatureArgs(sig)], null),
+                        ),
+                    );
+                    pendingAfter.set(stmt, after);
+                    continue;
+                }
+            }
+
             wrapInSignature(fn, sName, signatureArgs(sig));
 
             // THE HOC CARRY. `memo(forwardRef(fn))` signs at every level, all with the SAME `_s` —
@@ -407,11 +453,6 @@ export function refreshProgram(
         out.push(stmt);
         // The signature line comes BEFORE the registration line — `_s(App, …)` then `_c = App`,
         // which is the order every fixture shows.
-        const fn = signableFunctionDeclaration(stmt);
-        if (fn !== null) {
-            const signed = signFunctionDeclaration(fn.node, fn.name);
-            if (signed !== null) out.push(signed);
-        }
         const registered = registrationStatements[i];
         if (registered !== null && registered !== undefined) out.push(registered);
     }
@@ -431,6 +472,7 @@ export function refreshProgram(
 
     if (registrations.length === 0) {
         dataOf(program).body = out;
+        applyPendingAfter(program, pendingAfter);
         return true;
     }
 
@@ -448,20 +490,9 @@ export function refreshProgram(
     }
 
     dataOf(program).body = out;
+    // Last, so it can also splice into `program.body` as just rebuilt.
+    applyPendingAfter(program, pendingAfter);
     return true;
-}
-
-/** The function DECLARATION a top-level statement holds, with its name — `export`s unwrapped. */
-function signableFunctionDeclaration(stmt: Node): { node: Node; name: string } | null {
-    let decl: Node | null = null;
-    if (stmt.type === N.FunctionDeclaration) decl = stmt;
-    else if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration) {
-        const inner = dataOf(stmt).declaration as Node | null;
-        if (inner !== null && inner !== undefined && inner.type === N.FunctionDeclaration) decl = inner;
-    }
-    if (decl === null) return null;
-    const id = dataOf(decl).id as Node | null;
-    return id === null || id === undefined ? null : { node: decl, name: id.name };
 }
 
 /**
@@ -601,6 +632,32 @@ function arrowReturnsArrow(arrow: Node): boolean {
 }
 
 
+
+/** The STATEMENT containing `n` — the ancestor that is an element of some statement list. */
+function statementContaining(n: Node, parent: Map<Node, Node>): Node | null {
+    let cur = n;
+    for (;;) {
+        const up = parent.get(cur);
+        if (up === undefined) return null;
+        const list = statementListOf(up);
+        if (list !== null && list.includes(cur)) return cur;
+        cur = up;
+    }
+}
+
+/** Splice every pending next-line signature in after its statement, wherever that list lives. */
+function applyPendingAfter(program: Node, pendingAfter: Map<Node, Node[]>): void {
+    if (pendingAfter.size === 0) return;
+    walk(program, (n) => {
+        const list = statementListOf(n);
+        if (list === null) return undefined;
+        for (let i = list.length - 1; i >= 0; i--) {
+            const extra = pendingAfter.get(list[i]);
+            if (extra !== undefined) list.splice(i + 1, 0, ...extra);
+        }
+        return undefined;
+    });
+}
 
 /** `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` — one declaration, however many names. */
 function signatureDeclaration(names: string[], refreshSig: string): Node {
