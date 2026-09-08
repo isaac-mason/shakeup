@@ -1602,7 +1602,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                         analyze(fresh, program, kind === 'module' || parsed.hasEsmExport || parsed.hasEsmImport, false, isTs);
                         return fresh;
                     };
-                    const tp = runTransformProgram(pipe, ctxFor, program, semantic, id, rebuildSemantic);
+                    const tp = runTransformProgram(pipe, ctxFor, program, semantic, id, source, rebuildSemantic);
                     semantic = tp.mutated ? rebuildSemantic() : tp.semantic;
                 }
                 // AFTER `analyze` — the resolver reads `sym` off the binding identifiers, which is

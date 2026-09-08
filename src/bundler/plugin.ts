@@ -375,7 +375,9 @@ export type Plugin = {
      * parcel make `transform` itself AST-level; rollup, rolldown, vite and esbuild keep it
      * text-level. `Program` is the noun swc, closure and our own AST all use.
      */
-    transformProgram?: WithFilter<(this: PluginCtx, program: Program, semantic: Semantic, id: string) => boolean | void>;
+    transformProgram?: WithFilter<
+        (this: PluginCtx, program: Program, semantic: Semantic, id: string, code: string) => boolean | void
+    >;
     moduleParsed?: (this: PluginCtx, info: ModuleParsedInfo) => MaybePromise<void>;
     /** Return the rewritten code, or rollup's `{ code, map }` object form. A returned `map` is NOT
      *  composed — the chunk's own map is dropped with a warning, same as for a string return. */
@@ -810,6 +812,10 @@ export function runTransformProgram(
     program: Program,
     semantic: Semantic,
     id: string,
+    /** The source the program was parsed from. A pass whose output depends on how the user WROTE
+     *  something needs it — React Refresh's signature key is built from raw source spans, and no
+     *  amount of re-printing reproduces the original text. */
+    code: string,
     rebuild: () => Semantic,
 ): { semantic: Semantic; mutated: boolean } {
     let current = semantic;
@@ -822,7 +828,7 @@ export function runTransformProgram(
         }
         // `false` is the only way to say "I changed nothing" — a hook returning undefined is assumed
         // to have mutated, because that is the safe reading of a plugin that did not answer.
-        const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS, id), program, current, id);
+        const r = hook.handler.call(ctxFor(hook.pluginIdx, EMPTY_SKIPS, id), program, current, id, code);
         if (r !== false) dirty = true;
     }
     return { semantic: current, mutated: dirty };

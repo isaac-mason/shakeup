@@ -49,7 +49,7 @@ function transform(src: string, ts: boolean): string {
     const { program } = parse(src, { ts, jsx: true });
     const sem = createSemantic();
     analyze(sem, program);
-    refreshProgram(program, sem, { emitFullSignatures: true });
+    refreshProgram(program, sem, src, { emitFullSignatures: true });
     traverse(program, sem, [tsLower, makeJsxLower('react', true)]);
     traverse(program, sem, [tsStrip]);
     const p = createPrinter({ minify: false });
@@ -72,10 +72,12 @@ function fixtures(): { name: string; dir: string }[] {
 }
 
 /** Fixtures the port reproduces TODAY. A ratchet: adding a stage moves names in, and any name
- *  falling out is a regression. Registration is done; signatures and the HOC wrapping are not. */
+ *  falling out is a regression. Registration is done, and signatures for function DECLARATIONS;
+ *  wrapping function expressions/arrows and the HOC carry-slot are not. */
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
     'parenthesized-variable-declarators',
+    'react-refresh/generates-signatures-for-function-declarations-calling-hooks',
     'react-refresh/ignores-complex-definitions',
     'react-refresh/ignores-hoc-definitions',
     'react-refresh/ignores-unnamed-function-declarations',

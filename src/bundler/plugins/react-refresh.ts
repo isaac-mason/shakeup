@@ -7,7 +7,7 @@
 //
 // Nothing about React lives in shakeup's core: this reads the AST and the semantic through the
 // published toolchain API and mutates the tree it is handed.
-import { binding, create, exprStmt, N, type Node, ref, str, VAR_KIND, walk } from '../../ast.ts';
+import { binding, bool, create, exprStmt, N, type Node, ref, str, VAR_KIND, walk, walkChildren } from '../../ast.ts';
 import type { Semantic } from '../../analysis/semantic.ts';
 import type { Plugin } from '../plugin.ts';
 
@@ -69,6 +69,126 @@ function takenNames(program: Node): Set<string> {
     return taken;
 }
 
+/** `refresh.rs:915` — `use` followed by nothing, or by an uppercase letter. `used` is not a hook. */
+const isUseHookName = (name: string): boolean =>
+    name.startsWith('use') && (name.length === 3 || (name[3] >= 'A' && name[3] <= 'Z'));
+
+/** `refresh.rs:920`, verbatim. A hook NOT on this list is a custom one: it joins the signature's
+ *  callee list, which is how a custom hook changing identity forces a remount. */
+const BUILTIN_HOOKS = new Set([
+    'useState',
+    'useReducer',
+    'useEffect',
+    'useLayoutEffect',
+    'useMemo',
+    'useCallback',
+    'useRef',
+    'useContext',
+    'useImperativeHandle',
+    'useDebugValue',
+    'useId',
+    'useDeferredValue',
+    'useTransition',
+    'useInsertionEffect',
+    'useSyncExternalStore',
+    'useFormStatus',
+    'useFormState',
+    'useActionState',
+    'useOptimistic',
+]);
+
+/**
+ * One hook call's contribution to its function's signature key.
+ *
+ * `hookName{declaratorId}` or `hookName{declaratorId(argsKey)}`, and entries are joined by a LITERAL
+ * BACKSLASH-N — `push_str("\\n")` in `refresh.rs`, two characters, not a newline. The fixture proves
+ * it: the expected key is the JS literal `"useState{[foo, setFoo](0)}\\nuseEffect{}"`. Emitting a real
+ * newline changes every multi-hook key and therefore every hash.
+ *
+ * Both `declaratorId` and `argsKey` are RAW SOURCE TEXT, taken by span — which is why this pass needs
+ * the source at all. Re-printing the nodes would normalise the very spacing the key encodes.
+ */
+function keyEntry(hookName: string, declaratorId: string, argsKey: string): string {
+    return argsKey === '' ? `${hookName}{${declaratorId}}` : `${hookName}{${declaratorId}(${argsKey})}`;
+}
+
+/** The callee's name for hook purposes: `useX()` or `a.useX()` — the PROPERTY, in the member case. */
+function hookNameOf(callee: Node): string {
+    if (callee.type === N.IdentifierReference) return callee.name;
+    if (callee.type === N.StaticMemberExpression) return (dataOf(callee).property as Node).name;
+    return '';
+}
+
+/** What one function's hook calls added up to. `callees` holds a custom hook's callee SOURCE TEXT,
+ *  or null when the binding could not be resolved — any null forces `forceReset`. */
+type Signature = { key: string; callees: (string | null)[] };
+
+/**
+ * Walk the program collecting a signature per FUNCTION node, plus the enclosing-declarator context
+ * each hook call needs.
+ *
+ * A manual descent rather than `walk`, because `walk` is enter-only and this needs a stack: a hook
+ * call belongs to the nearest enclosing function, and its `declaratorId` comes from the nearest
+ * enclosing `VariableDeclarator`.
+ */
+function collectSignatures(program: Node, code: string): Map<Node, Signature> {
+    const out = new Map<Node, Signature>();
+    // TRIMMED. The key is the text the user WROTE for a construct, and surrounding whitespace is
+    // not part of it. shakeup also needs the trim more than oxc does: a destructuring pattern's span
+    // ends one character past its closing bracket (`[a, b] `, `{x} `), where plain identifiers and
+    // call arguments are tight. Untrimmed, `const [foo, setFoo] = useState(0)` keys as
+    // `useState{[foo, setFoo] (0)}` and every such signature diverges from the oracle.
+    const textOf = (n: Node): string => code.slice(n.start, n.end).trim();
+
+    const visit = (n: Node, fn: Node | null, declarator: Node | null): void => {
+        const isFn =
+            n.type === N.FunctionDeclaration ||
+            n.type === N.FunctionExpression ||
+            n.type === N.ArrowFunctionExpression;
+        const nextFn = isFn ? n : fn;
+        // A declarator's context reaches its INIT, not the whole subtree below the next function:
+        // `const [a, setA] = useState(0)` keys on `[a, setA]`, but a hook inside a nested function
+        // there does not.
+        const nextDeclarator = isFn ? null : n.type === N.VariableDeclarator ? n : declarator;
+
+        if (n.type === N.CallExpression && nextFn !== null) {
+            const d = dataOf(n);
+            const callee = d.callee as Node;
+            const hookName = hookNameOf(callee);
+            if (isUseHookName(hookName)) {
+                const args = d.arguments as Node[];
+                const argsKey =
+                    hookName === 'useState' && args.length > 0
+                        ? textOf(args[0])
+                        : hookName === 'useReducer' && args.length > 1
+                          ? textOf(args[1])
+                          : '';
+                // The declarator id is the one this call INITIALISES, not any outer one.
+                const declId =
+                    declarator !== null && (dataOf(declarator).init as Node | null) === n
+                        ? textOf(dataOf(declarator).id as Node)
+                        : '';
+                const entry = keyEntry(hookName, declId, argsKey);
+                const sig = out.get(nextFn) ?? { key: '', callees: [] };
+                // A literal backslash-n between entries — see `keyEntry`.
+                sig.key = sig.key === '' ? entry : `${sig.key}\\n${entry}`;
+                if (!BUILTIN_HOOKS.has(hookName)) {
+                    // A custom hook contributes its CALLEE, so a change to that hook's identity
+                    // forces a remount. An unresolvable one contributes null -> forceReset.
+                    sig.callees.push(callee.type === N.IdentifierReference && callee.sym === 0 ? null : textOf(callee));
+                }
+                out.set(nextFn, sig);
+            }
+        }
+
+        walkChildren(n, (child) => {
+            visit(child, nextFn, nextDeclarator);
+        });
+    };
+    visit(program, null, null);
+    return out;
+}
+
 export type ReactRefreshOptions = {
     /** The registration callee. Default `$RefreshReg$`. */
     refreshReg?: string;
@@ -84,8 +204,15 @@ export type ReactRefreshOptions = {
  *
  * Returns whether anything changed, which is exactly what `transformProgram` wants back.
  */
-export function refreshProgram(program: Node, _semantic: Semantic, options: ReactRefreshOptions = {}): boolean {
+export function refreshProgram(
+    program: Node,
+    _semantic: Semantic,
+    code: string,
+    options: ReactRefreshOptions = {},
+): boolean {
     const refreshReg = options.refreshReg ?? '$RefreshReg$';
+    const refreshSig = options.refreshSig ?? '$RefreshSig$';
+    const signatures = collectSignatures(program, code);
     const jsxBindings = usedInJsxBindings(program);
     const taken = takenNames(program);
 
@@ -105,6 +232,45 @@ export function refreshProgram(program: Node, _semantic: Semantic, options: Reac
     /** (temporary name, persistent id) pairs, in registration order — the epilogue's input. */
     const registrations: [string, string][] = [];
 
+    /** `_s`, `_s2`, … — one per SIGNED function, minted in the same collision-checked way. */
+    let sigCounter = 0;
+    const mintSignature = (): string => {
+        for (;;) {
+            sigCounter++;
+            const name = sigCounter === 1 ? '_s' : `_s${sigCounter}`;
+            if (!taken.has(name)) {
+                taken.add(name);
+                return name;
+            }
+        }
+    };
+    /** `var _s = $RefreshSig$(), …` — the declarations to hoist to the top of the module. */
+    const signatureVars: string[] = [];
+
+    /**
+     * Sign one function DECLARATION: `_s()` first in its body, and `_s(Name, key, …)` after the
+     * statement. Function expressions and arrows are wrapped in place instead — a later stage.
+     */
+    const signFunctionDeclaration = (fn: Node, name: string): Node | null => {
+        const sig = signatures.get(fn);
+        if (sig === undefined) return null;
+        const sName = mintSignature();
+        signatureVars.push(sName);
+
+        const body = dataOf(fn).body as Node | null;
+        if (body === null) return null;
+        const stmts = dataOf(body).body as Node[];
+        stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
+
+        const args: Node[] = [ref(name), str(sig.key)];
+        const forceReset = sig.callees.some((c) => c === null);
+        const present = sig.callees.filter((c): c is string => c !== null);
+        // The 3rd and 4th arguments appear only when they carry information — `forceReset` when
+        // either it is true or custom hooks exist, and the thunk only when there are custom hooks.
+        if (forceReset || present.length > 0) args.push(bool(forceReset));
+        return exprStmt(create.CallExpression(0, 0, 0, ref(sName), args, null));
+    };
+
     /** `_c = Foo;` — the statement that captures a component at its definition site. */
     const registrationFor = (componentName: string): Node => {
         const temp = mintRegistration();
@@ -117,11 +283,37 @@ export function refreshProgram(program: Node, _semantic: Semantic, options: Reac
 
     for (const stmt of body) {
         out.push(stmt);
+        // The signature line comes BEFORE the registration line — `_s(App, …)` then `_c = App`,
+        // which is the order every fixture shows.
+        const fn = signableFunctionDeclaration(stmt);
+        if (fn !== null) {
+            const signed = signFunctionDeclaration(fn.node, fn.name);
+            if (signed !== null) out.push(signed);
+        }
         const registered = registerFor(stmt, jsxBindings);
         if (registered !== null) out.push(registrationFor(registered));
     }
 
-    if (registrations.length === 0) return false;
+    if (registrations.length === 0 && signatureVars.length === 0) return false;
+
+    // `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` at the top of the module.
+    if (signatureVars.length > 0) {
+        out.unshift(
+            create.VariableDeclaration(
+                0,
+                0,
+                VAR_KIND.VAR,
+                signatureVars.map((n) =>
+                    create.VariableDeclarator(0, 0, 0, binding(n), null, create.CallExpression(0, 0, 0, ref(refreshSig), [], null)),
+                ),
+            ),
+        );
+    }
+
+    if (registrations.length === 0) {
+        dataOf(program).body = out;
+        return true;
+    }
 
     // The epilogue: `var _c, _c2;` then one `$RefreshReg$(_cN, "Name")` each, in order.
     out.push(
@@ -138,6 +330,19 @@ export function refreshProgram(program: Node, _semantic: Semantic, options: Reac
 
     dataOf(program).body = out;
     return true;
+}
+
+/** The function DECLARATION a top-level statement holds, with its name — `export`s unwrapped. */
+function signableFunctionDeclaration(stmt: Node): { node: Node; name: string } | null {
+    let decl: Node | null = null;
+    if (stmt.type === N.FunctionDeclaration) decl = stmt;
+    else if (stmt.type === N.ExportNamedDeclaration || stmt.type === N.ExportDefaultDeclaration) {
+        const inner = dataOf(stmt).declaration as Node | null;
+        if (inner !== null && inner !== undefined && inner.type === N.FunctionDeclaration) decl = inner;
+    }
+    if (decl === null) return null;
+    const id = dataOf(decl).id as Node | null;
+    return id === null || id === undefined ? null : { node: decl, name: id.name };
 }
 
 /**
@@ -261,7 +466,7 @@ export function reactRefresh(options: ReactRefreshOptions = {}): Plugin {
         name: 'react-refresh',
         transformProgram: {
             filter: { id: /\.[jt]sx$/ },
-            handler: (program, semantic) => refreshProgram(program, semantic, options),
+            handler: (program, semantic, _id, code) => refreshProgram(program, semantic, code, options),
         },
     };
 }

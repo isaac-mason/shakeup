@@ -591,13 +591,13 @@ export function createDevServer(options: DevServerOptions): DevServer {
             transformProgram:
                 pipeline.transformProgram.length === 0
                     ? undefined
-                    : (program, semantic) => {
+                    : (program, semantic, src) => {
                           const rebuild = (): Semantic => {
                               const fresh = createSemantic();
                               analyze(fresh, program);
                               return fresh;
                           };
-                          const tp = runTransformProgram(pipeline, () => ctxForModule(id), program, semantic, id, rebuild);
+                          const tp = runTransformProgram(pipeline, () => ctxForModule(id), program, semantic, id, src, rebuild);
                           return tp.mutated ? rebuild() : tp.semantic;
                       },
         });
