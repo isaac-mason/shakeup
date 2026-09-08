@@ -17,6 +17,7 @@ import {
     member,
     N,
     type Node,
+    parse,
     ref,
     set,
     str,
@@ -816,13 +817,122 @@ function blockBodyOf(fn: Node): Node[] | null {
     return dataOf(d.body as Node).body as Node[];
 }
 
-/** The plugin. `.jsx`/`.tsx` only — the same gate rolldown's wrapper uses. */
-export function reactRefresh(options: ReactRefreshOptions = {}): Plugin {
+// ── the WRAPPER ─────────────────────────────────────────────────────────────────────────────────
+// Port of rolldown's `rolldown_plugin_vite_react_refresh_wrapper`. The compile pass above emits FREE
+// `$RefreshReg$`/`$RefreshSig$` references; this supplies them, plus the HMR boundary. Keeping the
+// two apart is the split oxc and rolldown draw, and it is why the pass needs no HMR knowledge.
+//
+// A plain text `transform`, needing nothing from `transformProgram`: `dev-server.ts` runs plugin
+// transforms BEFORE `devTransform`, so the `import.meta.hot.accept` appended here is lowered by the
+// runner-link rewrite afterwards — exactly the ordering it needs.
+
+/** rolldown: the id with any `?query` stripped ends with the letter `x` (`.jsx`, `.tsx`). */
+const isJsxId = (id: string): boolean => (id.split('?')[0] ?? id).endsWith('x');
+
+/** A class component has no `$RefreshReg$` call to detect, so it is found by shape. */
+const REACT_CLASS_COMPONENT = /extends\s+(?:React\.)?(?:Pure)?Component/;
+
+export type ReactRefreshWrapperOptions = {
+    /** Where the runtime is served from. Prefixed to `/@react-refresh`. */
+    reactRefreshHost?: string;
+    /** Matches rolldown's option of the same name; used only to sniff a lowered JSX module. */
+    jsxImportSource?: string;
+};
+
+/**
+ * The footer, transcribed from `add_refresh_wrapper`.
+ *
+ * `id` is embedded three times and namespaces every registration (`register(type, id + ' ' + id)`),
+ * so two modules exporting a component of the same name stay distinct.
+ */
+export function refreshFooter(id: string, host: string, hasRefresh: boolean): string {
+    const q = JSON.stringify(id);
+    let out = `
+import * as RefreshRuntime from ${JSON.stringify(`${host}/@react-refresh`)};
+const inWebWorker = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
+import * as __vite_react_currentExports from ${q};
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+
+  const currentExports = __vite_react_currentExports;
+  queueMicrotask(() => {
+    RefreshRuntime.registerExportsForReactRefresh(${q}, currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate(${q}, currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+`;
+    // Only a module the compile pass touched needs the definitions. A class component gets the
+    // boundary WITHOUT them — it has no signatures and nothing to register.
+    if (hasRefresh)
+        out += `function $RefreshReg$(type, id) { return RefreshRuntime.register(type, ${q} + ' ' + id); }
+function $RefreshSig$() { return RefreshRuntime.createSignatureFunctionForTransform(); }
+`;
+    return out;
+}
+
+/**
+ * Splice the footer into the program, as AST.
+ *
+ * NOT a separate text `transform`, which is how rolldown and vite ship it — because shakeup runs
+ * `transform` (text, pre-parse) BEFORE `transformProgram` (AST, post-parse), so a text wrapper runs
+ * too early to see the `$RefreshReg$(` the pass emits and its gate never fires. Measured, not
+ * assumed: a probe plugin with both hooks logs `transform -> transformProgram`.
+ *
+ * Doing it here is also closer to what vite actually ships: `@vitejs/plugin-react` runs Babel AND
+ * appends the wrapper in ONE hook, inspecting the transform's own output. This inspects the pass's
+ * return value instead, which is the same question asked more directly.
+ *
+ * The footer is parsed with shakeup's own parser and its spans zeroed: the nodes come from a
+ * different source string, so keeping their offsets would map them onto unrelated parts of the
+ * module. Unmapped is what every other synthesised node does.
+ */
+function spliceFooter(program: Node, id: string, host: string, hasRefresh: boolean): void {
+    const { program: footer, errors } = parse(refreshFooter(id, host, hasRefresh), { ts: false, jsx: false });
+    if (errors.length > 0) return;
+    walk(footer, (n) => {
+        (n as { start: number; end: number }).start = 0;
+        (n as { start: number; end: number }).end = 0;
+        return undefined;
+    });
+    (dataOf(program).body as Node[]).push(...(dataOf(footer).body as Node[]));
+}
+
+/**
+ * React Fast Refresh: the compile pass AND the wrapper, in one plugin.
+ *
+ * The pass emits free `$RefreshReg$`/`$RefreshSig$` references and the footer defines them, so they
+ * are only meaningful together — and shakeup's hook order forces them into the same hook anyway
+ * (see {@link spliceFooter}). `.jsx`/`.tsx` only, plus a module that imports the JSX runtime, which
+ * is rolldown's gate.
+ */
+export function reactRefresh(options: ReactRefreshOptions & ReactRefreshWrapperOptions = {}): Plugin {
+    const host = options.reactRefreshHost ?? '';
+    const source = options.jsxImportSource ?? 'react';
     return {
         name: 'react-refresh',
         transformProgram: {
-            filter: { id: /\.[jt]sx$/ },
-            handler: (program, semantic, _id, code) => refreshProgram(program, semantic, code, options),
+            filter: { id: /\.[jt]sx?$/ },
+            handler: (program, semantic, id, code) => {
+                const useFastRefresh =
+                    isJsxId(id) || code.includes(`${source}/jsx-dev-runtime`) || code.includes(`${source}/jsx-runtime`);
+                if (!useFastRefresh) return false;
+
+                const hasRefresh = refreshProgram(program, semantic, code, options);
+                // A class component has nothing to register, so the pass reports no change — but it
+                // still needs the boundary. That path is why the gate is two questions, not one.
+                if (!hasRefresh && !REACT_CLASS_COMPONENT.test(code)) return false;
+
+                spliceFooter(program, id, host, hasRefresh);
+                return true;
+            },
         },
     };
 }
