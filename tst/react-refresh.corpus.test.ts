@@ -49,6 +49,15 @@ const dropRuntimeImport = (t: string): string =>
 function clearShorthand(program: Node): Node {
     walk(program, (n) => {
         if (n.type === N.ObjectProperty) (n.data as unknown as { shorthand: boolean }).shorthand = false;
+        // Quote style is the printer's: shakeup keeps the source's `'hi'`, Babel normalises to
+        // `"hi"`. Only the SAFE case is rewritten — a single-quoted literal containing neither a
+        // double quote nor a backslash — so nothing with escapes is touched and the signature keys,
+        // which are the strings this oracle exists to compare, keep their exact text.
+        if (n.type === N.StringLiteral) {
+            const raw = n.name;
+            if (raw.startsWith("'") && raw.endsWith("'") && !raw.includes('"') && !raw.includes('\\'))
+                (n as { name: string }).name = `"${raw.slice(1, -1)}"`;
+        }
         return undefined;
     });
     return program;
@@ -106,12 +115,9 @@ function fixtures(): { name: string; dir: string }[] {
     return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
-/** Fixtures the port reproduces TODAY. A ratchet: adding a stage moves names in, and any name
- *  falling out is a regression. Registration is done, and signatures for function DECLARATIONS;
- *  signatures for declarations and for expressions wrapped in place, and the HOC chain — `_c =` on
- *  inner functions plus one `_s` carried up through the enclosing calls. Still missing: the
- *  custom-hook thunk (the 4th `_s` argument), hashed keys (needs SHA-1), and the configurable
- *  `$RefreshReg$`/`$RefreshSig$` identifiers. */
+/** Every fixture the port reproduces — now ALL 32 that oxc itself passes. Kept as an explicit list
+ *  rather than "expect everything": a name falling out is a regression, and if a future oxc bump
+ *  adds fixtures they arrive as `does NOT yet match` rather than silently passing. */
 const PASSING = new Set([
     'does-not-transform-it-because-it-is-not-used-in-the-AST',
     'emit-full-signatures-option',
@@ -122,6 +128,14 @@ const PASSING = new Set([
     'react-refresh/generates-signatures-for-function-declarations-calling-hooks',
     'react-refresh/generates-signatures-for-function-expressions-calling-hooks',
     'react-refresh/includes-custom-hooks-into-the-signatures',
+    'react-refresh/does-not-consider-require-like-methods-to-be-hocs',
+    'react-refresh/does-not-get-tripped-by-iifes',
+    'react-refresh/ignores-higher-order-functions-that-are-not-hocs',
+    'react-refresh/registers-identifiers-used-in-jsx-at-definition-site',
+    'react-refresh/registers-identifiers-used-in-react-create-element-at-definition-site',
+    'react-refresh/registers-top-level-exported-function-declarations',
+    'react-refresh/generates-valid-signature-for-exotic-ways-to-call-hooks',
+    'react-refresh/generates-valid-signature-for-nested-ways-to-call-hooks',
     'react-refresh/ignores-complex-definitions',
     'react-refresh/ignores-hoc-definitions',
     'react-refresh/ignores-unnamed-function-declarations',

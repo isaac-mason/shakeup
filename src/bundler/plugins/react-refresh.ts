@@ -52,8 +52,11 @@ function usedInJsxBindings(program: Node): Set<number> {
     walk(program, (n) => {
         if (n.type === N.JSXOpeningElement) {
             const name = dataOf(n).name as Node | null;
-            // `<Foo>` is an identifier; `<foo.bar>` and `<foo:bar>` are not registered by oxc either.
-            if (name !== null && name.type === N.JSXIdentifier && name.sym !== 0) out.add(name.sym);
+            // A COMPONENT tag is an `IdentifierReference` in shakeup's AST, symbol-linked like any
+            // other reference — not a `JSXIdentifier`, which is what a lowercase host tag stays.
+            // Checking for the latter matched nothing, and every styled-component went unregistered.
+            // `<foo.bar>` and `<foo:bar>` are not registered by oxc either.
+            if (name !== null && name.type === N.IdentifierReference && name.sym !== 0) out.add(name.sym);
             return undefined;
         }
         if (n.type === N.CallExpression) {
@@ -345,15 +348,19 @@ export function refreshProgram(
     /** The `_s` names to declare, keyed by the FUNCTION they belong in (null = module top). A
      *  signed function nested inside another gets its `var _s3 = $RefreshSig$()` in that function,
      *  not at module scope — `function hoc() { var _s3 = $RefreshSig$(); … }` in the fixtures. */
-    const signatureVarsByScope = new Map<Node | null, string[]>();
-    const signatureVarsFor = (scope: Node | null): string[] => {
-        const existing = signatureVarsByScope.get(scope);
+    // Keyed on the CONTAINER of the nearest enclosing statement list — the program, a function
+    // body, or any block. One rule covers every placement the fixtures show: module top for a
+    // top-level component, inside `function hoc() { … }` for one nested in it, and inside
+    // `while (item) { … }` for one built in a loop. `var` is function-scoped either way, so the
+    // block is only where the declaration is WRITTEN, which is what has to match.
+    const signatureVarsByContainer = new Map<Node, string[]>();
+    const signatureVarsFor = (container: Node): string[] => {
+        const existing = signatureVarsByContainer.get(container);
         if (existing !== undefined) return existing;
         const fresh: string[] = [];
-        signatureVarsByScope.set(scope, fresh);
+        signatureVarsByContainer.set(container, fresh);
         return fresh;
     };
-    const signatureVars = signatureVarsFor(null);
 
     /** The trailing arguments of `_s(fn, …)`: the key, then `forceReset`, then the custom-hook
      *  thunk — each present only when it carries information. */
@@ -396,6 +403,15 @@ export function refreshProgram(
             // DECLARATIONS TOO, in document order. `_s` numbering follows the order functions
             // appear, so signing all expressions first and declarations afterwards renumbers every
             // signature in a file that mixes them.
+            walkChildren(n, (child) => {
+                parent.set(child, n);
+                gather(child);
+            });
+            // POST-ORDER: children first. `_s` numbering follows the order oxc MINTS the names, and
+            // oxc mints them in `exit_function`/`exit_expression` — on the way out. For siblings that
+            // is document order, but a function nested inside another is signed BEFORE its parent:
+            // `export default function App() { function useFancyState() {…} }` gives the inner one
+            // `_s` and `App` `_s2`.
             if (
                 (n.type === N.FunctionExpression ||
                     n.type === N.ArrowFunctionExpression ||
@@ -403,10 +419,6 @@ export function refreshProgram(
                 signatures.has(n)
             )
                 pending.push(n);
-            walkChildren(n, (child) => {
-                parent.set(child, n);
-                gather(child);
-            });
         };
         gather(program);
 
@@ -414,7 +426,19 @@ export function refreshProgram(
             const sig = signatures.get(fn);
             if (sig === undefined) continue;
             const sName = mintSignature();
-            signatureVarsFor(sig.enclosing).push(sName);
+            const container = statementListContainer(fn, parent) ?? program;
+            if (container === program) {
+                // Module scope is accumulated and written after the imports, once, at the end —
+                // `program.body` is rebuilt below, so an insertion now would be discarded.
+                signatureVarsFor(container).push(sName);
+            } else {
+                // A NESTED container gets its declaration NOW, not at the end. Signing is
+                // post-order, so the enclosing function is signed after this one and unshifts its
+                // own `_s2()` call — which has to land ABOVE this declaration, as it does in oxc
+                // where the var is hoisted before the parent's signature call is inserted.
+                const list = statementListOf(container);
+                if (list !== null) list.unshift(signatureDeclaration([sName], refreshSig));
+            }
             const stmts = blockBodyOf(fn);
             if (stmts === null) continue;
             stmts.unshift(exprStmt(create.CallExpression(0, 0, 0, ref(sName), [], null)));
@@ -527,22 +551,12 @@ export function refreshProgram(
         if (registered !== null && registered !== undefined) out.push(registered);
     }
 
-    if (registrations.length === 0 && signatureVars.length === 0) return false;
-
-    // A nested function's `_s` is declared inside THAT function, before anything else in it.
-    for (const [scope, names] of signatureVarsByScope) {
-        if (scope === null || names.length === 0) continue;
-        const stmts = blockBodyOf(scope);
-        if (stmts === null) continue;
-        stmts.unshift(signatureDeclaration(names, refreshSig));
-    }
-
-    // `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` at the top of the module.
-    if (signatureVars.length > 0) out.unshift(signatureDeclaration(signatureVars, refreshSig));
+    if (registrations.length === 0 && signatureVarsByContainer.size === 0) return false;
 
     if (registrations.length === 0) {
         dataOf(program).body = out;
         applyPendingAfter(program, pendingAfter);
+        applySignatureVars(signatureVarsByContainer, refreshSig);
         return true;
     }
 
@@ -560,8 +574,9 @@ export function refreshProgram(
     }
 
     dataOf(program).body = out;
-    // Last, so it can also splice into `program.body` as just rebuilt.
+    // Last, so both can also reach `program.body` as just rebuilt.
     applyPendingAfter(program, pendingAfter);
+    applySignatureVars(signatureVarsByContainer, refreshSig);
     return true;
 }
 
@@ -703,6 +718,18 @@ function arrowReturnsArrow(arrow: Node): boolean {
 
 
 
+/** The node OWNING the nearest enclosing statement list — the program, a function body, a block. */
+function statementListContainer(n: Node, parent: Map<Node, Node>): Node | null {
+    let cur = n;
+    for (;;) {
+        const up = parent.get(cur);
+        if (up === undefined) return null;
+        const list = statementListOf(up);
+        if (list !== null && list.includes(cur)) return up;
+        cur = up;
+    }
+}
+
 /** The STATEMENT containing `n` — the ancestor that is an element of some statement list. */
 function statementContaining(n: Node, parent: Map<Node, Node>): Node | null {
     let cur = n;
@@ -727,6 +754,21 @@ function applyPendingAfter(program: Node, pendingAfter: Map<Node, Node[]>): void
         }
         return undefined;
     });
+}
+
+/** Write each container's `var _s = $RefreshSig$(), …` at the top of its statement list. Done last,
+ *  so it reaches `program.body` after that list has been rebuilt. */
+function applySignatureVars(byContainer: Map<Node, string[]>, refreshSig: string): void {
+    for (const [container, names] of byContainer) {
+        if (names.length === 0) continue;
+        const list = statementListOf(container);
+        if (list === null) continue;
+        // AFTER the import prologue. A `var` before an `import` is legal but is not what oxc emits,
+        // and at module scope the imports are the first thing in the list.
+        let at = 0;
+        while (at < list.length && list[at].type === N.ImportDeclaration) at++;
+        list.splice(at, 0, signatureDeclaration(names, refreshSig));
+    }
 }
 
 /** `var _s = $RefreshSig$(), _s2 = $RefreshSig$();` — one declaration, however many names. */
