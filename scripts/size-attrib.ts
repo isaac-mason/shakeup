@@ -23,7 +23,8 @@
  * Usage: `pnpm sizeattrib` — add `--out <dir>` to also write both bundles for eyeballing.
  */
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { N, type Node, walkChildren } from '../src/ast/index.ts';
+import { brotliCompressSync, gzipSync } from 'node:zlib';
+import { N, type Node, walk, walkChildren } from '../src/ast/index.ts';
 import { bundle as shakeupBundle } from '../src/bundler/bundle.ts';
 import { parse } from '../src/parser/index.ts';
 
@@ -145,7 +146,55 @@ function attribute(code: string): Attrib {
 
 const pad = (s: string | number, w: number): string => String(s).padStart(w);
 
-function report(sk: Attrib, rd: Attrib): void {
+/**
+ * THE SHIPPED AXIS. Every bucket above is RAW, and raw is not what ships — a change can close the raw
+ * gap and leave the brotli gap untouched, which is exactly where crashcat ended up: +658 raw (0.16%)
+ * and +2,097 brotli (2.27%). Same bytes, worse compressed, and nothing in the raw table says why.
+ *
+ * The attribution is by ABLATION. Flatten one axis to a constant token in BOTH bundles and re-measure
+ * the gap: if it collapses, that axis carried it. Flattening destroys the program, which is fine —
+ * nothing runs it, and the only question asked of it is how well it compresses.
+ */
+function reportCompressed(skCode: string, rdCode: string): void {
+    const flatten = (code: string, kinds: Map<number, string>): string => {
+        const { program } = parse(code, { ts: false, jsx: false });
+        const edits: [number, number, string][] = [];
+        walk(program, (n) => {
+            const to = kinds.get(n.type);
+            if (to !== undefined && n.end > n.start) edits.push([n.start, n.end, to]);
+            return undefined;
+        });
+        edits.sort((a, b) => a[0] - b[0]);
+        let out = '';
+        let at = 0;
+        for (const [from, to, text] of edits) {
+            if (from < at) continue; // nested spans: keep the outer
+            out += code.slice(at, from) + text;
+            at = to;
+        }
+        return out + code.slice(at);
+    };
+    const IDENTS = new Map([
+        [N.IdentifierReference, 'x'],
+        [N.BindingIdentifier, 'x'],
+    ]);
+    const MEMBERS = new Map([[N.IdentifierName, 'm']]);
+    const sizes = (t: string): number[] => {
+        const b = Buffer.from(t);
+        return [b.length, gzipSync(b).length, brotliCompressSync(b).length];
+    };
+    const gap = (a: string, b: string): string => {
+        const [x, y] = [sizes(a), sizes(b)];
+        return [0, 1, 2].map((i) => `${x[i] - y[i] >= 0 ? '+' : ''}${x[i] - y[i]}`.padStart(10)).join('');
+    };
+    console.log(`\n  COMPRESSED — the gap on the axis that ships${' '.repeat(6)}raw      gzip    brotli`);
+    console.log(`    as emitted${' '.repeat(24)}${gap(skCode, rdCode)}`);
+    console.log(`    identifiers flattened${' '.repeat(13)}${gap(flatten(skCode, IDENTS), flatten(rdCode, IDENTS))}`);
+    console.log(`    member names flattened${' '.repeat(12)}${gap(flatten(skCode, MEMBERS), flatten(rdCode, MEMBERS))}`);
+    console.log('\n    An axis whose row is ~0 is where the compressed gap LIVES; one that barely moves is not it.');
+}
+
+function report(sk: Attrib, rd: Attrib, skCode: string, rdCode: string): void {
     const structure = (x: Attrib): number => x.total - x.identifiers - x.memberNames - x.strings - x.numbers;
     const rows: [string, number, number, number, number][] = [
         ['identifiers', sk.identifiers, rd.identifiers, sk.identCount, rd.identCount],
@@ -228,6 +277,7 @@ function report(sk: Attrib, rd: Attrib): void {
     console.log('\n  NODE COUNTS, largest DEFICIT first (fewer than rolldown — optimisation, or LOSS?):');
     for (const [t, c, r] of [...deltas].reverse().slice(0, 10)) console.log(`    ${pad(c - r, 7)}  ${t.padEnd(28)} ${c} vs ${r}`);
     console.log(`\n    ${pad(sk.nodes - rd.nodes, 7)}  ${'TOTAL NODES'.padEnd(28)} ${sk.nodes} vs ${rd.nodes}`);
+    reportCompressed(skCode, rdCode);
 }
 
 const outDir = process.argv.includes('--out') ? process.argv[process.argv.indexOf('--out') + 1] : null;
@@ -250,4 +300,4 @@ if (outDir !== null) {
 }
 
 console.log(`\ncorpus: ${which}`);
-report(attribute(skCode), attribute(rdCode));
+report(attribute(skCode), attribute(rdCode), skCode, rdCode);
