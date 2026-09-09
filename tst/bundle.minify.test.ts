@@ -167,10 +167,13 @@ describe('emit-layer glue respects minify.whitespace', () => {
         const code = await build(true);
         // What this pins is the absence of PADDING, not the surrounding syntax. The namespace object
         // is emitter-generated text, so a chunk-level compress pass reshapes it freely — `const` ->
-        // `let`, and joined into a neighbouring declaration (`let i=1,e={a:1}`), both smaller.
-        expect(code).toMatch(/\w+=\{\w+:/); // no padding inside the literal
+        // `let`, and joined into a neighbouring declaration (`let i=1,e=t({a:1})`), both smaller.
+        expect(code).toMatch(/\(\{\w+:/); // no padding inside the literal, which the helper wraps
         expect(code).not.toMatch(/\w+ = \{ /);
-        expect(code).toMatch(/Object\.defineProperty\(\w+,Symbol\.toStringTag,\{value:'Module'\}\);/);
+        // The tag goes on through the `__tag` helper — mangled here, like every other declaration in
+        // the chunk — so the property names appear ONCE, in its body, not at this namespace.
+        expect(code).toMatch(/=\w+=>\w+\(\w+,Symbol\.toStringTag,\{value:'Module'\}\)/);
+        expect(code).not.toMatch(/Object\.defineProperty\(\w+,Symbol\.toStringTag/);
     });
 
     it('leaves the readable form alone when whitespace minification is off', async () => {

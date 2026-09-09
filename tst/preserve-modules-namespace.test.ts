@@ -117,12 +117,19 @@ describe('single-chunk bundles still synthesize a namespace object', () => {
             false,
         );
         expect(chunks).toHaveLength(1);
-        expect(chunks[0].code).toMatch(/const \w+_ns = \{/);
+        expect(chunks[0].code).toMatch(/const \w+_ns = __tag\(\{/);
         // Not frozen — neither oracle freezes a namespace, and freezing would block the
         // `__reExport` chain that `export * from 'cjs'` needs.
         expect(chunks[0].code).not.toContain('Object.freeze');
-        // …and the tag is defined separately so it stays NON-enumerable.
-        expect(chunks[0].code).toMatch(/Object\.defineProperty\(\w+_ns, Symbol\.toStringTag/);
-        expect(await runChunks(chunks)).toMatchObject({ got: 2 });
+        // …and the tag goes on through `__tag`, which uses `defineProperty` — so it is present and
+        // NON-enumerable, which is the property this ever cared about. Asserted on the object rather
+        // than on the syntax that produced it: as a literal member it would be enumerable and get
+        // copied by `{...ns}`, and only the object can tell you that.
+        const out = (await runChunks(chunks)) as { got: number; all: object };
+        expect(out).toMatchObject({ got: 2 });
+        expect(Object.prototype.toString.call(out.all)).toBe('[object Module]');
+        // A spread copies enumerable own properties — the tag must not be among them.
+        expect(Symbol.toStringTag in { ...out.all }).toBe(false);
+        expect(Object.prototype.toString.call({ ...out.all })).toBe('[object Object]');
     });
 });

@@ -98,6 +98,19 @@ export function nameOfBind(linked: Linked, bind: ImportBind, chunk: Chunk): stri
  *  Per-CHUNK, not per-build — `chunk`, `chunkIdx` and `pathToChunk` are in here, matching rolldown's
  *  `GenerateContext` (`types/generator.rs`), which likewise carries `chunk` and `chunk_idx` beside
  *  `link_output`, `chunk_graph` and `used_symbol_refs`. */
+/**
+ * Does this chunk emit a namespace OBJECT LITERAL for `idx`?
+ *
+ * THE predicate — `generate/modules.ts` renders on exactly this test and `helpersNeededBy` asks it to
+ * decide whether the `__tag` helper has a user. Answering it twice is how a helper gets defined with
+ * nothing calling it, or (in the other direction) called without being defined. A namespace can exist
+ * in `namespaceOf` and still not be built: `preserveModules` emits a NATIVE star import instead
+ * (`nsNative`), and elision drops the object when every use is a static member read.
+ */
+export function emitsNamespaceObject(linked: Linked, chunk: Chunk, idx: number, elidedNs: ReadonlySet<number>): boolean {
+    return linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx) && !elidedNs.has(idx);
+}
+
 export type RenderCtx = {
     graph: Graph;
     linked: Linked;

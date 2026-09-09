@@ -14,6 +14,7 @@ import type { PreRenderedChunk } from '../output-options.ts';
 import { isAnyRequireCall } from '../scan.ts';
 import {
     clauseSep,
+    emitsNamespaceObject,
     includedModuleIds,
     isIdentName,
     nameOfBind,
@@ -126,6 +127,16 @@ const CJS_HELPERS: Record<string, string> = {
         '    return target;',
         '};',
     ].join('\n'),
+    // NOT CommonJS interop — the one entry here that is not. An ordinary ESM namespace object needs
+    // `Symbol.toStringTag` stamped on it, and shakeup builds those as object LITERALS (see
+    // `generate/modules.ts`), so without a helper the property names are re-spelled at every
+    // namespace: ~60 bytes each, and the entire `member names` gap against rolldown on crashcat.
+    // rolldown pays them once as well, inside the `__exportAll`-shaped function all its namespaces
+    // are built by; this is the same saving without adopting its all-accessors member shape.
+    //
+    // `Object.defineProperty` returns its target, so this returns the namespace and can WRAP the
+    // literal.
+    __tag: "var __tag = (ns) => __defProp(ns, Symbol.toStringTag, { value: 'Module' });",
     __reExport:
         "var __reExport = (target, mod, secondTarget) => (__copyProps(target, mod, 'default'), secondTarget && __copyProps(secondTarget, mod, 'default'));",
     __toCommonJS: [
@@ -190,6 +201,11 @@ const EXPORT_ALL_DEPS = [
     '__reExport',
     '__toESM',
 ];
+
+const EMPTY_ELISION: ReadonlySet<number> = new Set();
+
+/** Helpers the namespace tag needs, in dependency order. */
+const NS_TAG_DEPS = ['__defProp', '__tag'];
 
 /** Helpers `__toESM` needs, in dependency order. */
 const TO_ESM_DEPS = [
@@ -294,9 +310,20 @@ function requireShimLines(graph: Graph): string[] {
 /** Which runtime helpers this chunk's own modules require. Pure function of `graph`/`linked`/the
  *  chunk's module list, so chunk-graph can call it before rendering to decide whether a shared
  *  runtime chunk is worth minting. */
-export function helpersNeededBy(graph: Graph, linked: Linked, chunk: Chunk): Set<string> {
+export function helpersNeededBy(
+    graph: Graph,
+    linked: Linked,
+    chunk: Chunk,
+    symbols = true,
+    elidedNs: ReadonlySet<number> = EMPTY_ELISION,
+): Set<string> {
     const wanted = new Set<string>();
     const has = (f: (i: number) => boolean) => chunk.modules.some(f);
+    // A plain namespace object literal is wrapped in `__tag`. A mode-2 namespace is not — it goes
+    // through `__exportAll`, which stamps the tag itself — and `generatedCode.symbols: false` drops
+    // the stamp entirely, so neither wants the helper.
+    if (symbols && has((i) => emitsNamespaceObject(linked, chunk, i, elidedNs) && !linked.dynamicExports.has(i)))
+        for (const d of NS_TAG_DEPS) wanted.add(d);
     const needsCjs = has((i) => linked.cjsWrap.has(i)) || has((i) => linked.dynamicExports.has(i));
     // A `require()` of an ES module needs `__toCommonJS` even when nothing else here is wrapped.
     const needsToCjs = has((i) =>
@@ -501,7 +528,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
 
     // CommonJS runtime helpers. Which ones a chunk needs is decided by `helpersNeededBy`, shared
     // with chunk-graph so the SHARED-RUNTIME decision (below) uses the same answer the render does.
-    const wanted = helpersNeededBy(graph, linked, chunk);
+    const wanted = helpersNeededBy(graph, linked, chunk, ctx.symbols, ctx.elidedNs);
     const helperLines: string[] = [];
     if (chunk.runtimeHelpers !== undefined) {
         // THIS is the runtime chunk: it defines the union of every consumer's helpers and exports

@@ -1191,7 +1191,14 @@ function resolveChunkOptions(
             }
         }
     }
-    return { codeSplitting, preserveModules: output?.preserveModules === true, groups, keepNames: output?.keepNames === true };
+    return {
+        codeSplitting,
+        preserveModules: output?.preserveModules === true,
+        groups,
+        keepNames: output?.keepNames === true,
+        // Same default as the render's `ctx.symbols` at :814 — on unless explicitly disabled.
+        symbols: output?.generatedCode?.symbols !== false,
+    };
 }
 
 /** A persistent, incremental build handle (esbuild `Context.Rebuild` lineage). Holds a

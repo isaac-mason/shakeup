@@ -33,6 +33,7 @@ import { effectiveComments, type RenderedModule } from '../output-options.ts';
 import { isRequireCall } from '../scan.ts';
 import {
     clauseSep,
+    emitsNamespaceObject,
     type EmitCtx,
     isIdentName,
     type ModuleReuse,
@@ -493,9 +494,17 @@ function renderNamespaceObject(
     // the tag, which feature detection reads — and drop what only affects code that is already
     // assigning to a namespace member. Freezing also blocks the `__reExport` chain that
     // `export * from 'cjs'` (namespace mode 2) needs to extend the object.
-    const tag = !symbols
-        ? ''
-        : `${tight ? '' : ' '}Object.defineProperty(${nsName},${tight ? '' : ' '}Symbol.toStringTag,${tight ? '' : ' '}{${tight ? '' : ' '}value:${tight ? '' : ' '}'Module'${tight ? '' : ' '}});`;
+    // The tag goes on through the `__tag` RUNTIME HELPER, so its property names are paid once per
+    // chunk instead of once per namespace. Inline, `Object.defineProperty(X,Symbol.toStringTag,
+    // {value:'Module'});` is ~60 bytes at every namespace — on crashcat, 40 of them, and the whole
+    // `member names` gap against rolldown (§2z93). rolldown pays them once too, inside the helper
+    // its namespaces are built by.
+    //
+    // As a WRAP rather than a following statement: `defineProperty` returns its object, so the
+    // helper does, and wrapping avoids repeating the namespace name and the statement separator.
+    // The object literal is untouched, which keeps shakeup's plain-value members — rolldown's helper
+    // takes getter thunks and makes every member an accessor, a divergence with a miscompile behind
+    // it (see `isImmutableBind` above), and one this shape does not have to re-open.
     const decl = preDeclared ? '' : 'const ';
     // MODE 2 (cjs.md §4.4) — the module `export *`s from CommonJS, so its surface is not knowable
     // here. The statically-known names become getter THUNKS handed to `__exportAll`, which is the
@@ -546,7 +555,9 @@ function renderNamespaceObject(
     // not, and the comment above records why we follow the latter two.
     const proto = tight ? '__proto__:null' : '__proto__: null';
     const members = inner === '' ? proto : `${proto}${clauseSep(tight)}${inner}`;
-    return tight ? `${decl}${nsName}={${members}};${tag}` : `${decl}${nsName} = { ${members} };${tag}`;
+    const literal = tight ? `{${members}}` : `{ ${members} }`;
+    const value = symbols ? `__tag(${literal})` : literal;
+    return tight ? `${decl}${nsName}=${value};` : `${decl}${nsName} = ${value};`;
 }
 
 /** Render every module of one chunk to text, in that chunk's perspective.
@@ -804,7 +815,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
-        if (linked.namespaceOf.has(idx) && !chunk.nsNative?.has(idx) && !ctx.elidedNs.has(idx)) {
+        if (emitsNamespaceObject(linked, chunk, idx, ctx.elidedNs)) {
             // `preDeclared` only for the UNSPLIT lazy form, where the binding is hoisted above the
             // closure and assigned inside it. A split module keeps its namespace at top level.
             nsCode = renderNamespaceObject(

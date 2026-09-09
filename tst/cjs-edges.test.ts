@@ -282,8 +282,10 @@ describe('require() of an ES module that a sibling also imports as a namespace',
         const code = r.chunks.map((c) => c.code).join('\n');
         const named = /__toCommonJS\((\w+)\)/.exec(code);
         expect(named, 'the require should still lower through __toCommonJS').not.toBeNull();
+        // The declaration, however it is spelled — the object literal is wrapped in `__tag` now, and
+        // what this guards is that the name `__toCommonJS` passes is DECLARED, not the wrapping.
         expect(code, 'the namespace object it names must be declared').toMatch(
-            new RegExp(`(?:var|const|let) ${named?.[1]} = \\{`),
+            new RegExp(`(?:var|const|let) ${named?.[1]} = (?:__tag\\()?\\{`),
         );
     });
 });

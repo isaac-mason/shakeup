@@ -83,6 +83,10 @@ export type ChunkOptions = {
     /** `output.keepNames` — reaches deconflict so a nested class can reserve its own name against
      *  the outer symbols it references. See `classNameForbids`. */
     keepNames?: boolean;
+    /** `output.generatedCode.symbols` — reaches {@link helpersNeededBy}, so the shared-runtime
+     *  decision asks the same question the render will. Under-counting here would let a consumer
+     *  import a helper the runtime chunk never defined. */
+    symbols?: boolean;
 };
 
 /** A group after option normalization (manualChunks → single group). */
@@ -394,8 +398,8 @@ function producerBaseName(graph: Graph, linked: Linked, ref: number, isNs: boole
  *
  *  Deliberately skipped for a single consumer: an import statement plus a second file is bigger than
  *  the helpers it would save. */
-function addRuntimeChunk(graph: Graph, linked: Linked, chunks: Chunk[]): void {
-    const needs = chunks.map((c) => helpersNeededBy(graph, linked, c));
+function addRuntimeChunk(graph: Graph, linked: Linked, chunks: Chunk[], symbols: boolean, elidedNs: ReadonlySet<number>): void {
+    const needs = chunks.map((c) => helpersNeededBy(graph, linked, c, symbols, elidedNs));
     const consumers = needs.map((n, i) => (n.size > 0 ? i : -1)).filter((i) => i >= 0);
     if (consumers.length < 2) return;
     const union = new Set<string>();
@@ -463,7 +467,7 @@ export function buildChunkGraph(
             options.keepNames === true,
             nsElision,
         );
-        addRuntimeChunk(graph, linked, formed.chunks);
+        addRuntimeChunk(graph, linked, formed.chunks, options.symbols !== false, nsElision.elidedNs);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
     }
 
@@ -545,7 +549,7 @@ export function buildChunkGraph(
     );
 
     wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true, nsElision);
-    addRuntimeChunk(graph, linked, chunks);
+    addRuntimeChunk(graph, linked, chunks, options.symbols !== false, nsElision.elidedNs);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
 
