@@ -176,14 +176,44 @@ function report(sk: Attrib, rd: Attrib): void {
     console.log('\n  IDENTIFIER LENGTHS — occurrences, and the distinct names behind them:');
     const lens = [...new Set([...sk.identLen.keys(), ...rd.identLen.keys()])].sort((x, y) => x - y);
     console.log(`      len${pad('shakeup', 12)}${pad('rolldown', 11)}${pad('delta', 9)}      distinct names`);
-    for (const L of lens.slice(0, 6)) {
+    // EVERY length. This used to print `lens.slice(0, 6)` — the first six lengths PRESENT, not
+    // lengths 1..6 — which silently hid the tail. The tail is where an UNMANGLED name shows up, and
+    // it is the one thing in this bucket that is not a mangler-quality question at all.
+    let skTail = 0;
+    let rdTail = 0;
+    for (const L of lens) {
         const s = sk.identLen.get(L) ?? 0;
         const r = rd.identLen.get(L) ?? 0;
         const sn = sk.identNames.get(L)?.size ?? 0;
         const rn = rd.identNames.get(L)?.size ?? 0;
+        if (L >= 7) {
+            skTail += s * L;
+            rdTail += r * L;
+        }
         console.log(
             `    ${pad(L, 5)}${pad(s, 12)}${pad(r, 11)}${pad(`${s - r >= 0 ? '+' : ''}${s - r}`, 9)}      ${pad(sn, 5)} vs ${pad(rn, 5)}`,
         );
+    }
+    console.log(`    ${'>=7'.padEnd(5)}${' '.repeat(31)}${pad(`${skTail - rdTail >= 0 ? '+' : ''}${skTail - rdTail}`, 9)}      bytes`);
+
+    // The names themselves, biggest bill first. A mangled name is short by construction, so anything
+    // long enough to appear here was NOT mangled, and the question is why — not how the slots ranked.
+    const bill = (a: Attrib): [string, number][] => {
+        const out = new Map<string, number>();
+        for (const [L, names] of a.identNames) {
+            if (L < 7) continue;
+            for (const nm of names) out.set(nm, L);
+        }
+        return [...out].sort((x, y) => y[1] - x[1]);
+    };
+    for (const [label, a] of [
+        ['shakeup', sk],
+        ['rolldown', rd],
+    ] as const) {
+        const names = bill(a);
+        const total = names.reduce((t, [, L]) => t + L, 0);
+        console.log(`\n  UNMANGLED (>=7 chars) in ${label}: ${names.length} distinct, ${total}b of distinct text`);
+        console.log(`    ${names.slice(0, 25).map(([nm]) => nm).join(' ')}`);
     }
 
     console.log('\n  NODE COUNTS, largest excess first (a construct we emit and rolldown does not):');

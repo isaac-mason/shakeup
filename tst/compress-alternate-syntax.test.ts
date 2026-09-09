@@ -20,6 +20,10 @@ const assertParity = async (src: string) => {
     return on;
 };
 
+/** Code with every space removed — these builds enable compress but not whitespace minification, so
+ *  `1 / 0` and `1/0` are the same output. */
+const tight = (code: string): string => code.replace(/\s+/g, '');
+
 describe('substitute-alternate-syntax (compress)', () => {
     it('true → !0 and false → !1, behavior preserved', async () => {
         const src = 'export const a = true;\nexport const b = false;';
@@ -102,6 +106,95 @@ describe('substitute-alternate-syntax (compress)', () => {
         const m = await run(code);
         expect(m.has).toBe(true);
         expect(m.val).toBe(undefined);
+    });
+
+    // ---- `Infinity` -> `1/0`, and the two guards that make identifier substitution safe ----
+
+    it('global Infinity → 1/0, behavior preserved', async () => {
+        const src = 'export const a = Infinity;\nexport const b = -Infinity;\nexport const c = 1 / Infinity;';
+        const code = await assertParity(src);
+        expect(tight(code)).toContain('1/0');
+        expect(code).not.toMatch(/\bInfinity\b/);
+        const m = await run(code);
+        expect(m.a).toBe(Infinity);
+        expect(m.b).toBe(-Infinity);
+        expect(m.c).toBe(0);
+    });
+
+    it('parenthesises 1/0 wherever a division would rebind', async () => {
+        // oxc wraps when `minify && precedence >= Multiply`, or when negative and `>= Prefix`
+        // (`codegen/gen.rs`). Unparenthesised, `2*1/0` is `(2*1)/0` — still Infinity by luck — but
+        // `1/1/0` is `(1/1)/0`, which is Infinity where `1/(1/0)` is 0. The parity check is what
+        // actually decides this; the text assertions only say where the parens landed.
+        const code = await assertParity('export const a = 2 * Infinity;\nexport const b = 1 / Infinity;\nexport const c = -Infinity;');
+        expect(tight(code)).toContain('2*(1/0)');
+        expect(tight(code)).toContain('1/(1/0)');
+        expect(tight(code)).toContain('-(1/0)');
+    });
+
+    it('a locally-shadowed `Infinity` is NOT substituted', async () => {
+        // The falsification arm for the `sym === 0` gate. Written the way the `undefined` shadow
+        // test above is, and for the same reason: a LITERAL init (`let Infinity = 3`) is
+        // constant-propagated away, so the fixture passes with the gate deleted and proves nothing.
+        // A param-derived init survives, and two reads keep single-use inline off it.
+        const src = ['function f(x) {', '  let Infinity = x + 1;', '  return Infinity + Infinity;', '}', 'export const out = f(21);'].join('\n');
+        const code = await assertParity(src);
+        expect(code).toMatch(/\bInfinity\b/);
+        expect(tight(code)).not.toContain('1/0');
+        expect((await run(code)).out).toBe(44);
+    });
+
+    it('never substitutes into an assignment TARGET', async () => {
+        // `undefined = 1` is valid syntax — a no-op in sloppy mode, a TypeError in strict — and
+        // `void 0 = 1` does not parse at all. Six shapes reach the identifier hook; each one used to
+        // emit output a browser rejects, from a build reporting no errors. oxc cannot hit this: its
+        // assignment targets are a different node type from its expressions.
+        const shapes = [
+            'undefined = 1;',
+            'undefined++;',
+            '[undefined] = v;',
+            '({ undefined } = v);',
+            '({ k: undefined } = v);',
+            'for (undefined in v) {}',
+            'Infinity = 1;',
+            '[Infinity] = v;',
+        ];
+        for (const shape of shapes) {
+            const code = await build(`export function f(v) { ${shape} }`, { compress: true });
+            // The real assertion: it PARSES. `new Function` throws a SyntaxError otherwise.
+            expect(() => new Function(code.replace(/export\s*\{[^}]*\};?/g, '')), shape).not.toThrow();
+            expect(code, shape).not.toContain('void 0=');
+            expect(code, shape).not.toContain('1/0=');
+        }
+    });
+
+    it('still substitutes a destructuring DEFAULT, which is a read', async () => {
+        // The falsification arm for the target guard: marking the whole pattern subtree would be
+        // safe and would quietly stop optimising every default in the program.
+        const code = await build('export function f(v) { let a; [a = undefined] = v; return a; }', { compress: true });
+        expect(code).toContain('void 0');
+    });
+
+    it('never substitutes the argument of `delete`', async () => {
+        // `delete undefined` is `false`; `delete void 0` is `true`. Same for `delete Infinity` vs
+        // `delete 1/0`. oxc bails via `is_unary_delete_ancestor`, walking up through sequences.
+        //
+        // Reached through a COMMONJS module, which is sloppy — `delete <identifier>` is a
+        // SyntaxError in strict mode, so an ES module cannot express it and shakeup rejects it.
+        const src = { '/m.ts': 'import { f, g, h } from "./c.cjs";\nexport const r = [f(), g(), h()];' };
+        const cjs = 'exports.f = () => delete undefined;\nexports.g = () => delete Infinity;\nexports.h = () => delete (0, Infinity);';
+        const result = await bundle({
+            entry: '/m.ts',
+            fs: createMemoryFs({ ...src, '/c.cjs': cjs }),
+            output: { minify: { compress: true } },
+        });
+        expect(result.errors).toEqual([]);
+        const code = result.chunks[0].code;
+        expect(tight(code)).toContain('deleteundefined');
+        expect(tight(code)).toContain('deleteInfinity');
+        // Through a sequence, too — `delete (0, X)` is `true` either way, but oxc walks through it
+        // and so does this.
+        expect(tight(code)).toContain('delete(0,Infinity)');
     });
 
     it('does NOT fire without compress (plain build keeps literals)', async () => {

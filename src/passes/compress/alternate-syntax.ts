@@ -22,9 +22,11 @@
 // PLACEMENT: this pass runs in FINAL_PASSES — once, after the fixed-point loop settles — so these
 // byte-shaving swaps never re-enter the loop and can't oscillate against fold-constants (`!0`→`true`).
 //
-// SKIPPED for v1: `Infinity` → `1/0` (a BinaryExpression at multiplicative precedence — not always a
-// clean swap in context; deferred, low payoff).
-import { create, N, type Node, node, OP } from '../../ast/index.ts';
+// `Infinity` → `1/0` was deferred here as "low payoff" without being measured. It is 140 occurrences
+// and 700 bytes on crashcat — 19% of the whole remaining size gap against rolldown (`pnpm
+// sizeattrib`). The precedence worry it was deferred over is handled by the printer, which already
+// parenthesises the identical `Number.POSITIVE_INFINITY` → `1/0` rewrite below.
+import { create, N, type Node, node, OP, walkChildren } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 /** `NumericLiteral` `0`/`1` — data-less leaf; the printer emits `node.name` verbatim. */
@@ -33,12 +35,75 @@ const num = (n: Node, text: string): Node => node(N.NumericLiteral, n.start, n.e
 /** `!<0|1>` for a boolean literal: `true` → `!0`, `false` → `!1`. */
 const notNum = (n: Node, digit: string): Node => create.UnaryExpression(n.start, n.end, OP.NOT, num(n, digit));
 
+/** `1/0` for a global `Infinity` reference — five bytes shorter, and unshadowable. The printer
+ *  parenthesises it wherever a division needs it, exactly as it already does for the
+ *  `Number.POSITIVE_INFINITY` rewrite below. */
+const oneOverZero = (n: Node): Node => create.BinaryExpression(n.start, n.end, '/', num(n, '1'), num(n, '0'));
+
 /** `void 0` for a global `undefined` reference. */
 const voidZero = (n: Node): Node => create.UnaryExpression(n.start, n.end, OP.VOID, num(n, '0'));
+
+/**
+ * IdentifierReference nodes that must NOT be substituted, marked as the traversal descends.
+ *
+ * Two reasons, and oxc has a guard for each:
+ *
+ *  - an assignment TARGET. `undefined = 1` and `for (undefined in o)` are valid syntax — a no-op in
+ *    sloppy mode, a TypeError in strict — and rewriting the target emits `void 0 = 1`, output that
+ *    DOES NOT PARSE from a build reporting no errors. oxc cannot reach this case at all: its
+ *    assignment targets are a separate node type from its expressions, so `try_compress_identifier`
+ *    is only ever offered a value. shakeup uses `IdentifierReference` for both, so the distinction
+ *    has to be made here. `bundler/generate/modules.ts` marks member-expression targets the same
+ *    way, for the same reason.
+ *  - the argument of `delete`. `delete undefined` is `false`, `delete void 0` is `true`; likewise
+ *    `delete Infinity` vs `delete 1/0`. oxc bails via `is_unary_delete_ancestor`, which walks up
+ *    through parentheses and sequence expressions — shakeup has no parenthesis node, so a sequence
+ *    is the only thing to walk through.
+ *
+ * `walk` enters a parent before its children, so a mark made at the parent is always in time.
+ */
+const noSubstitute = new WeakSet<Node>();
+
+/** Mark every identifier this assignment target names. */
+function markTarget(n: Node): void {
+    if (n.type === N.IdentifierReference) {
+        noSubstitute.add(n);
+        return;
+    }
+    // A member expression is a target too, but it is not an identifier and nothing here rewrites it.
+    if (n.type === N.StaticMemberExpression || n.type === N.ComputedMemberExpression) return;
+    // In the cover grammar a destructuring DEFAULT is an AssignmentExpression whose right side is an
+    // ordinary value — `[a = undefined] = v` still wants `void 0` — so only the left is a target.
+    if (n.type === N.AssignmentExpression) {
+        markTarget((n.data as { left: Node }).left);
+        return;
+    }
+    // Likewise a property's KEY is not a target (and a computed key is a plain read).
+    if (n.type === N.ObjectProperty) {
+        markTarget((n.data as { value: Node }).value);
+        return;
+    }
+    // Otherwise an array/object pattern or a rest element: descend to the identifiers inside it.
+    walkChildren(n, markTarget);
+}
+
+/** Mark the operand of `delete`, through any sequence expression wrapping it. */
+function markDeleteArg(n: Node): void {
+    if (n.type === N.IdentifierReference) {
+        noSubstitute.add(n);
+        return;
+    }
+    if (n.type === N.SequenceExpression) {
+        for (const e of (n.data as { expressions: Node[] }).expressions) markDeleteArg(e);
+    }
+}
 
 /** Is `n` an IdentifierReference to the GLOBAL `undefined`? `sym === 0` = unresolved/global, so a
  *  shadowed `let undefined = …` (nonzero sym) is correctly excluded. */
 const isGlobalUndefined = (n: Node): boolean => n.type === N.IdentifierReference && n.name === 'undefined' && n.sym === 0;
+
+/** Is `n` an IdentifierReference to the GLOBAL `Infinity`? Same `sym === 0` test. */
+const isGlobalInfinity = (n: Node): boolean => n.type === N.IdentifierReference && n.name === 'Infinity' && n.sym === 0;
 
 /** Is `callee` an IdentifierReference to the GLOBAL binding named `name`? `sym === 0` = unresolved,
  *  i.e. not shadowed by any local `let name = …`. Conservative: only the true global qualifies. */
@@ -183,7 +248,27 @@ export const substituteAlternateSyntax: Visitor = {
         // hook. Shorthand-property values (`{ undefined }`) are expanded at the ObjectProperty level
         // below before descent reaches them, so they don't reach this hook as a bare reference either.
         [N.IdentifierReference]: (n, ctx: TransformCtx) => {
+            if (noSubstitute.has(n)) return;
             if (isGlobalUndefined(n)) ctx.replaceWith(voidZero(n));
+            else if (isGlobalInfinity(n)) ctx.replaceWith(oneOverZero(n));
+        },
+        // The marking hooks for {@link noSubstitute}. They rewrite nothing themselves; they run
+        // before descent reaches the identifiers underneath them.
+        [N.AssignmentExpression]: (n, _ctx: TransformCtx) => {
+            markTarget((n.data as { left: Node }).left);
+        },
+        [N.UpdateExpression]: (n, _ctx: TransformCtx) => {
+            markTarget((n.data as { argument: Node }).argument);
+        },
+        [N.ForInStatement]: (n, _ctx: TransformCtx) => {
+            markTarget((n.data as { left: Node }).left);
+        },
+        [N.ForOfStatement]: (n, _ctx: TransformCtx) => {
+            markTarget((n.data as { left: Node }).left);
+        },
+        [N.UnaryExpression]: (n, _ctx: TransformCtx) => {
+            const d = n.data as { operator: string; argument: Node };
+            if (d.operator === 'delete') markDeleteArg(d.argument);
         },
         // Shorthand `{ undefined }` means `{ undefined: undefined }`, but its value is an
         // IdentifierReference the printer only emits when the *name* changed. Substituting the value to
@@ -193,7 +278,9 @@ export const substituteAlternateSyntax: Visitor = {
         // syntax error.)
         [N.ObjectProperty]: (n, _ctx: TransformCtx) => {
             const d = n.data as { shorthand: boolean; value: Node };
-            if (d.shorthand && isGlobalUndefined(d.value)) {
+            // `({ undefined } = v)` is a destructuring TARGET, not a value: expanding it to
+            // `{ undefined: void 0 }` produces output that does not parse.
+            if (d.shorthand && isGlobalUndefined(d.value) && !noSubstitute.has(d.value)) {
                 d.shorthand = false;
                 d.value = voidZero(d.value);
             }
