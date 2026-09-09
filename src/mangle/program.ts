@@ -89,5 +89,27 @@ export function mangleProgram(program: Node, sem: Semantic, reserved: Set<string
         const slot = slots[sym];
         if (slot !== SLOT_UNASSIGNED) out.set(sym, slotName[slot]);
     }
+    // MANGLE_DUMP=1 — the slot table, for the one ranked item this file is the subject of
+    // (ROADMAP §2z94: identifiers carry 100% of the remaining COMPRESSED gap against rolldown).
+    // The output text cannot answer this on its own: a name's occurrences there conflate the slot's
+    // symbols with any UNMANGLED identifier spelled the same, and this separates them. Off, it is one
+    // `process.env` read per chunk.
+    if (process.env.MANGLE_DUMP !== undefined) {
+        const symsPerSlot = new Int32Array(totalSlots);
+        for (let sym = 1; sym < symbolCount; sym++) if (slots[sym] !== SLOT_UNASSIGNED) symsPerSlot[slots[sym]]++;
+        process.stdout.write(
+            `MANGLE_DUMP ${JSON.stringify({
+                totalSlots,
+                // The ROOT scope decides the slot space: it is walked first, so its bindings allocate
+                // every slot and no later scope ever needs a fresh one. Each root symbol then owns its
+                // slot outright; nested scopes only REUSE, and the greedy takes the lowest free slot,
+                // which is why concentration stops after ~125 slots and the rest are singletons.
+                rootBindings: bindingsByScope[root].length,
+                scopeCount,
+                // Rank order — the order names are handed out in.
+                rows: order.map((slot) => ({ slot, name: slotName[slot], refs: freq[slot], syms: symsPerSlot[slot] })),
+            })}\n`,
+        );
+    }
     return out;
 }
