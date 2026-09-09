@@ -53,10 +53,12 @@ export { asset } from './bundler/plugins/asset.ts';
 export { css } from './bundler/plugins/css.ts';
 export { json } from './bundler/plugins/json.ts';
 export { worker } from './bundler/plugins/worker.ts';
+export { reactRefresh, reactRefreshPreamble, REACT_REFRESH_RUNTIME_ID } from './bundler/plugins/react-refresh.ts';
 export type * from './bundler/plugin.ts';
 export type * from './bundler/plugins/asset.ts';
 export type * from './bundler/plugins/css.ts';
 export type * from './bundler/plugins/worker.ts';
+export type * from './bundler/plugins/react-refresh.ts';
 
 // ── dev: transform, server, runner, environments ────────────────────────────────────────────────
 // This is the surface the makecat integration needs (replacing rolldown + vite-module-runner), which

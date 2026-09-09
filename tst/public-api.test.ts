@@ -19,6 +19,9 @@ const BUNDLER = [
     'asset', 'attachEnvironment', 'bundle', 'connectEnvironment', 'createBuildContext', 'createDevServer',
     'createEnvironment', 'createEnvironmentBridge', 'createMemoryFs', 'createModuleRunner', 'css',
     'defaultEvaluator', 'devTransform', 'json', 'packageSideEffectsFor', 'watch', 'worker',
+    // React Fast Refresh. Three values, because a host needs all three to use it: the plugin, the
+    // preamble it must run before any app code, and the id of the runtime module it serves.
+    'reactRefresh', 'reactRefreshPreamble', 'REACT_REFRESH_RUNTIME_ID',
 ].sort();
 
 const TOOLCHAIN = [
