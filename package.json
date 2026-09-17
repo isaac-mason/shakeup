@@ -7,7 +7,6 @@
     "exports": {
         ".": "./src/index.ts",
         "./ast": "./src/ast.ts",
-        "./lexer": "./src/lexer.ts",
         "./node": "./src/node.ts",
         "./client": "./client.d.ts"
     },

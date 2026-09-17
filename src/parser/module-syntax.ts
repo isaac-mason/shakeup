@@ -66,7 +66,8 @@ export type ImportBinding = {
     kind: ImportBindingKind;
 };
 
-export type ImportRecord = {
+/** The specification's own word for this: a module record holds `[[ImportEntries]]`. */
+export type ImportEntry = {
     type: 'static' | 'dynamic';
     /** The specifier without quotes, or null when a dynamic import computes it. */
     specifier: string | null;
@@ -81,7 +82,8 @@ export type ImportRecord = {
 
 export type ExportKind = 'declaration' | 'specifier' | 'default' | 'all';
 
-export type ExportRecord = {
+/** Likewise `[[LocalExportEntries]]`, `[[IndirectExportEntries]]` and `[[StarExportEntries]]`. */
+export type ExportEntry = {
     kind: ExportKind;
     /** The name other modules see. `*` for an un-aliased `export * from`. */
     name: string;
@@ -105,9 +107,9 @@ export type ExportRecord = {
     declarationStart: number;
 };
 
-export type ModuleRecord = {
-    imports: ImportRecord[];
-    exports: ExportRecord[];
+export type ModuleSyntax = {
+    imports: ImportEntry[];
+    exports: ExportEntry[];
     /**
      * Every `import.meta`, which a lowering has to replace with the module's own meta object.
      *
@@ -165,7 +167,7 @@ const REGEX_PRECEDING = new Set([
     'case', 'do', 'else', 'yield', 'await',
 ]);
 
-export function moduleRecord(source: string): ModuleRecord {
+export function scanModuleSyntax(source: string): ModuleSyntax {
     /** Compare a word in place, so a keyword test costs no allocation. */
     const matches = (at: number, word: string): boolean => {
         for (let k = 0; k < word.length; k++) {
@@ -174,8 +176,8 @@ export function moduleRecord(source: string): ModuleRecord {
         return true;
     };
 
-    const imports: ImportRecord[] = [];
-    const exports: ExportRecord[] = [];
+    const imports: ImportEntry[] = [];
+    const exports: ExportEntry[] = [];
     const importMeta: { start: number; end: number }[] = [];
     let hasTopLevelAwait = false;
 
@@ -487,7 +489,7 @@ export function moduleRecord(source: string): ModuleRecord {
     function readDynamicImport(statementStart: number, at: number): number {
         let cursor = skipTrivia(at + 1);
         const c = source.charCodeAt(cursor);
-        const record: ImportRecord = {
+        const record: ImportEntry = {
             type: 'dynamic', specifier: null, start: cursor, end: cursor,
             statementStart, statementEnd: cursor, bindings: [],
         };
@@ -694,7 +696,7 @@ export function moduleRecord(source: string): ModuleRecord {
      * assuming the keyword's own length lands the name search in the middle of `function` rather
      * than on `f`. That is how `export async function toBuffer` came back with no exports at all.
      */
-    function declarationAt(at: number): { kind: ExportRecord['declarationKind']; after: number } {
+    function declarationAt(at: number): { kind: ExportEntry['declarationKind']; after: number } {
         const word = wordAt(at);
         if (word === 'const' || word === 'let' || word === 'var' || word === 'function' || word === 'class') {
             return { kind: word, after: skipTrivia(at + word.length) };

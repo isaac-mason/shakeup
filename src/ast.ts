@@ -92,3 +92,9 @@ export {
 export type * from './parser/index.ts';
 // ── parsing ─────────────────────────────────────────────────────────────────────────────────────
 export { parse, parseWithDiagnostics } from './parser/index.ts';
+/**
+ * The module lexer, beside `parse` rather than instead of it. It answers a fixed set of questions
+ * in one character pass, for a caller that needs only those: where a module's specifiers are, so
+ * they can be rewritten, is the case it exists for.
+ */
+export { scanModuleSyntax } from './parser/index.ts';
