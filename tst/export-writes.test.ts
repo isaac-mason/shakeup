@@ -73,6 +73,11 @@ describe('exportWrites', () => {
         ['const g = function total() { total = 1; };', ['total'], []],
         ['Total = class Total { m() {} };', ['Total'], ['Total']],
 
+        // A property that spells a keyword is not one.
+        ['p.catch((err) => { total = 1; });', ['total'], ['total']],
+        ['p.finally(() => { total = 1; });', ['total'], ['total']],
+        ['o.class = 1; total = 2;', ['total'], ['total']],
+
         // Arrow parameters have no keyword to catch them.
         ['const uv = (total = 0) => new Node(total);', ['total'], []],
         // A concise body has no brace to hang a scope on, so a write in one is declined.

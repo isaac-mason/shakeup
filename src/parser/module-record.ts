@@ -87,6 +87,14 @@ export type ExportRecord = {
     name: string;
     /** The binding in this module, or null when the value comes from elsewhere. */
     localName: string | null;
+    /**
+     * For a re-export, the name in the module it comes from: the `p` of
+     * `export { p as q } from './r.js'`. Null when there is no other module.
+     *
+     * Not `localName`, which means a binding in this module and is null here on purpose. A
+     * lowering needs both sides of the alias, and only this one carries the far side.
+     */
+    importedName: string | null;
     /** How that binding was declared, which says whether it can ever be reassigned. */
     declarationKind: 'const' | 'let' | 'var' | 'function' | 'class' | null;
     /** A re-export's source, without quotes. */
@@ -574,7 +582,7 @@ export function moduleRecord(source: string): ModuleRecord {
                 if (name !== '' && name !== 'extends') localName = name;
             }
             exports.push({
-                kind: 'default', name: 'default', localName, declarationKind: kind,
+                kind: 'default', name: 'default', localName, importedName: null, declarationKind: kind,
                 specifier: null, statementStart, statementEnd: cursor, declarationStart: cursor,
             });
             return cursor;
@@ -598,7 +606,7 @@ export function moduleRecord(source: string): ModuleRecord {
                 cursor = end;
             }
             exports.push({
-                kind: 'all', name, localName: null, declarationKind: null, specifier,
+                kind: 'all', name, localName: null, importedName: null, declarationKind: null, specifier,
                 statementStart, statementEnd: cursor, declarationStart,
             });
             return cursor;
@@ -641,6 +649,7 @@ export function moduleRecord(source: string): ModuleRecord {
                     kind: 'specifier', name,
                     // A re-export's local name belongs to the other module, not this one.
                     localName: specifier === null ? local : null,
+                    importedName: specifier === null ? null : local,
                     declarationKind: null, specifier,
                     statementStart, statementEnd: cursor, declarationStart,
                 });
@@ -661,7 +670,7 @@ export function moduleRecord(source: string): ModuleRecord {
             const name = wordAt(after);
             if (name !== '') {
                 exports.push({
-                    kind: 'declaration', name, localName: name, declarationKind: kind,
+                    kind: 'declaration', name, localName: name, importedName: null, declarationKind: kind,
                     specifier: null, statementStart, statementEnd: after + name.length, declarationStart,
                 });
             }
@@ -671,7 +680,7 @@ export function moduleRecord(source: string): ModuleRecord {
         const { names, end } = declaredNames(after);
         for (const name of names) {
             exports.push({
-                kind: 'declaration', name, localName: name, declarationKind: kind,
+                kind: 'declaration', name, localName: name, importedName: null, declarationKind: kind,
                 specifier: null, statementStart, statementEnd: end, declarationStart,
             });
         }
@@ -706,6 +715,37 @@ export function moduleRecord(source: string): ModuleRecord {
      * sit inside braces and brackets and the initialisers between them must not be mistaken for
      * bindings. A name followed by a colon is a property key, and the name after it is the binding.
      */
+    /** Past a whole template literal, interpolations and nested templates included. */
+    function pastTemplate(at: number): number {
+        let cursor = at + 1;
+        let depth = 0;
+        while (cursor < length) {
+            const c = source.charCodeAt(cursor);
+            if (c === CH_BACKSLASH) {
+                cursor += 2;
+                continue;
+            }
+            if (depth === 0 && c === CH_BACKTICK) return cursor + 1;
+            if (c === CH_DOLLAR && source.charCodeAt(cursor + 1) === CH_LBRACE) {
+                depth++;
+                cursor += 2;
+                continue;
+            }
+            if (depth > 0) {
+                if (c === CH_RBRACE) depth--;
+                else if (c === CH_QUOTE || c === CH_APOS) {
+                    cursor = skipString(cursor);
+                    continue;
+                } else if (c === CH_BACKTICK) {
+                    cursor = pastTemplate(cursor);
+                    continue;
+                }
+            }
+            cursor++;
+        }
+        return length;
+    }
+
     function declaredNames(at: number): { names: string[]; end: number } {
         const names: string[] = [];
         let cursor = at;
@@ -743,6 +783,13 @@ export function moduleRecord(source: string): ModuleRecord {
             }
             if (c === CH_QUOTE || c === CH_APOS) {
                 cursor = skipString(cursor);
+                continue;
+            }
+            if (c === CH_BACKTICK) {
+                // A template has to go whole. Walking into one puts `$` in identifier position,
+                // and its interpolations hold commas at nesting zero, which reset the initialiser
+                // flag: `export const all = \`${d},${a}\`` reported $, a and d as exports.
+                cursor = pastTemplate(cursor);
                 continue;
             }
             if (c === CH_SLASH) {

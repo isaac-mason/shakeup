@@ -118,6 +118,20 @@ const REGEX_PRECEDING_SET = new Set(REGEX_PRECEDING);
 /** Keywords this scanner acts on, which decide whether a word is worth slicing out. */
 const KEYWORDS = ['var', 'let', 'const', 'function', 'class', 'catch', 'for'];
 
+/**
+ * A word filter sized so a few hundred names collide rarely. A collision costs one slice and one
+ * set lookup, which is what every word used to cost.
+ */
+const FILTER_SIZE = 1 << 13;
+const FILTER_MASK = FILTER_SIZE - 1;
+
+/** The same hash the scanner builds character by character, for filling the filter. */
+function hashOf(word: string): number {
+    let hash = 0;
+    for (let index = 0; index < word.length; index++) hash = (hash * 31 + word.charCodeAt(index)) | 0;
+    return hash >>> 0;
+}
+
 /** Words that take a parenthesised head, which is not a parameter list however much it looks like one. */
 const STATEMENT_HEADS = new Set([
     'if',
@@ -186,24 +200,20 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
 
     const tracked = new Set(names);
 
-    // Most identifiers in a file share no first character with any tracked name, so one table
-    // lookup rejects them before anything is sliced out of the source.
-    const firstChar = new Uint8Array(128);
-    let anyWide = false;
-    /** Lengths the tracked names have, so a word of the wrong size is rejected without slicing. */
-    const trackedLength = new Uint8Array(64);
-    for (const name of names) {
-        const c = name.charCodeAt(0);
-        if (c < 128) firstChar[c] = 1;
-        else anyWide = true;
-        trackedLength[Math.min(name.length, 63)] = 1;
-    }
-
-    // First characters worth slicing a word for: a tracked name, a keyword this scanner acts on,
-    // or a word after which a `/` opens a regular expression.
-    const wordFirst = new Uint8Array(firstChar);
-    for (const word of KEYWORDS) wordFirst[word.charCodeAt(0)] = 1;
-    for (const word of REGEX_PRECEDING) wordFirst[word.charCodeAt(0)] = 1;
+    /**
+     * Which words are worth cutting out of the source: a tracked name, a keyword this scanner
+     * acts on, or a word after which a `/` opens a regular expression.
+     *
+     * Keyed by a hash built as the identifier is read, so a word is rejected by one typed array
+     * load and never becomes a string. The obvious filters do not work here: bundled modules
+     * export hundreds of names, so a table of first characters and one of lengths are both
+     * saturated and reject nothing, and every identifier in the file was being sliced and looked
+     * up. That was most of the scan.
+     */
+    const filter = new Uint8Array(FILTER_SIZE);
+    for (const name of names) filter[hashOf(name) & FILTER_MASK] = 1;
+    for (const word of KEYWORDS) filter[hashOf(word) & FILTER_MASK] = 1;
+    for (const word of REGEX_PRECEDING) filter[hashOf(word) & FILTER_MASK] = 1;
 
     const length = source.length;
     let uncertain = false;
@@ -476,7 +486,7 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             if (isIdentStart(c)) {
                 let end = j + 1;
                 while (end < to && isIdentPart(source.charCodeAt(end))) end++;
-                if ((c < 128 ? firstChar[c] === 1 : anyWide) && tracked.has(source.slice(j, end))) {
+                if (tracked.has(source.slice(j, end))) {
                     const after = skipTrivia(end);
                     if (after < to && assignsAt(source, after)) return true;
                     const next = source.charCodeAt(after);
@@ -508,7 +518,7 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             if (isIdentStart(c)) {
                 let end = j + 1;
                 while (end < to && isIdentPart(source.charCodeAt(end))) end++;
-                if ((c < 128 ? firstChar[c] === 1 : anyWide) && tracked.has(source.slice(j, end))) return true;
+                if (tracked.has(source.slice(j, end))) return true;
                 j = end;
                 continue;
             }
@@ -642,7 +652,8 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             pendingFrame ??= { fn: false, declared: null };
             pendingFrame.declared ??= new Set();
             pendingFrame.declared.add(name);
-        } else {
+        } else if (containsTrackedWrite(body, unbracedEnd(body))) {
+            // A single statement body has no scope to bind in, but it only matters if it writes.
             giveUp('for head without a block body');
         }
     }
@@ -806,11 +817,19 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
         // A concise body is an expression with no brace to hang a scope on. Its extent cannot be
         // found without parsing, so the rest of the enclosing group stands in: over-reaching only
         // ever costs a fallback, while under-reaching would miss a write.
-        if (containsTrackedWrite(body, enclosingEnd(body))) giveUp('concise arrow body with a tracked parameter');
+        if (containsTrackedWrite(body, unbracedEnd(body))) giveUp('concise arrow body with a tracked parameter');
     }
 
-    /** Where the group containing `at` closes, or the end of the file. */
-    function enclosingEnd(at: number): number {
+    /**
+     * Where the expression or statement starting at `at` ends: the first `,` or `;` at its own
+     * depth, or the bracket that closes around it.
+     *
+     * Used for the two bodies that have no brace to hang a scope on, a concise arrow body and a
+     * loop body without braces. Both end at one of those, so this bounds them without parsing.
+     * An earlier version ran to the end of the enclosing group, which at module scope is the end
+     * of the file, so a 1.6MB module fell back over one defaulted arrow parameter.
+     */
+    function unbracedEnd(at: number): number {
         let j = at;
         let depth = 0;
         while (j < length) {
@@ -822,7 +841,7 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             } else if (c === CH_QUOTE || c === CH_APOS || c === CH_BACKTICK) {
                 j = skipString(j, c);
                 continue;
-            }
+            } else if (depth === 0 && (c === CH_COMMA || c === CH_SEMI)) return j;
             j++;
         }
         return length;
@@ -1046,7 +1065,13 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
         if (isIdentStart(c)) {
             const start = i;
             let end = i + 1;
-            while (end < length && isIdentPart(source.charCodeAt(end))) end++;
+            let hash = (c | 0) >>> 0;
+            while (end < length) {
+                const next = source.charCodeAt(end);
+                if (!isIdentPart(next)) break;
+                hash = ((hash * 31 + next) | 0) >>> 0;
+                end++;
+            }
             i = end;
             const before = lastSignificant;
             const beforeAt = lastSignificantAt;
@@ -1076,10 +1101,10 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
                 }
             }
 
-            // Reject on the first character before anything is sliced out of the source. A word
-            // not worth slicing is also not in REGEX_PRECEDING, so clearing lastWord keeps the
-            // regex decision right rather than leaving a stale word behind.
-            if (c < 128 ? wordFirst[c] === 0 : !anyWide) {
+            // Reject before anything is sliced out of the source. A word not worth slicing is
+            // also not in REGEX_PRECEDING, so clearing lastWord keeps the regex decision right
+            // rather than leaving a stale word behind.
+            if (filter[hash & FILTER_MASK] === 0) {
                 lastWord = '';
                 // A declarator name this scanner does not track still ends the binding position.
                 // Leaving it open made the `{` of `const o = { total: 1 }` read as a pattern.
@@ -1089,27 +1114,31 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             const word = source.slice(start, end);
             lastWord = word;
 
-            if (word === 'var' || word === 'let' || word === 'const') {
+            // A property that happens to spell a keyword is not one: `promise.catch((err) => {})`
+            // was read as a try/catch clause, which gave its callback a scope built from the
+            // wrong parameters and could have shadowed an export inside it.
+            const isMember = before === CH_DOT || before === CH_HASH;
+
+            if (!isMember && (word === 'var' || word === 'let' || word === 'const')) {
                 declDepth = groupOpen.length;
                 declHoists = word === 'var';
                 expectBinding = true;
                 continue;
             }
-            if (word === 'function') {
+            if (!isMember && word === 'function') {
                 readFunction(end, start);
                 continue;
             }
-            if (word === 'class') {
+            if (!isMember && word === 'class') {
                 readClassName(end, start);
                 continue;
             }
-            if (word === 'catch') {
+            if (!isMember && word === 'catch') {
                 readCatchParam(end);
                 continue;
             }
 
-            const isTracked =
-                (c < 128 ? firstChar[c] === 1 : anyWide) && trackedLength[Math.min(end - start, 63)] === 1 && tracked.has(word);
+            const isTracked = tracked.has(word);
 
             // A declarator's own name is a binding, not an assignment. Rewriting `let total = 1`
             // as `let _live.total = 1` is not a redundant publish, it does not parse.
@@ -1164,7 +1193,7 @@ export function exportWrites(source: string, names: readonly string[]): ExportWr
             if (nextChar === CH_EQ && source.charCodeAt(after + 1) === CH_GT) {
                 const body = skipTrivia(after + 2);
                 if (source.charCodeAt(body) === CH_LBRACE) pendingFrame = { fn: true, declared: new Set([word]) };
-                else if (containsTrackedWrite(body, enclosingEnd(body))) {
+                else if (containsTrackedWrite(body, unbracedEnd(body))) {
                     giveUp('concise arrow body with a tracked parameter');
                 }
                 continue;
