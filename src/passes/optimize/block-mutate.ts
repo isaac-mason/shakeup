@@ -65,7 +65,7 @@ function targetsName(target: Node, name: string): boolean {
 
 /** Whether `name` is rebound anywhere in `stmts` — INCLUDING inside nested functions, since a closure
  *  can reassign a captured parameter. */
-function isReassigned(stmts: readonly Node[], name: string): boolean {
+export function isReassigned(stmts: readonly Node[], name: string): boolean {
     let found = false;
     for (const s of stmts) {
         walk(s, (n) => {

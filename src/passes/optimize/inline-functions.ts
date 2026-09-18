@@ -29,10 +29,10 @@
 //     mismatch. This also covers globals (`Math`), which a local binding at the call site can shadow.
 import { isPureExpr } from '../../analysis/effects.ts';
 import { lookupValue, type Semantic, scopeOf } from '../../analysis/semantic.ts';
-import { cloneNode, create, N, type Node, node, VAR_KIND, walk, walkChildren } from '../../ast/index.ts';
+import { cloneNode, create, N, type Node, node, ref, VAR_KIND, walk, walkChildren } from '../../ast/index.ts';
 import { attachScopeNode, createScope, declareLocal, SCOPE, SYM } from '../../analysis/semantic.ts';
 import { applyRefDelta, hookTable, type RefDelta, type TransformCtx, traverse, type Visitor } from '../traverse.ts';
-import { mutateForBlockInline } from './block-mutate.ts';
+import { isReassigned, mutateForBlockInline } from './block-mutate.ts';
 import { DIRECTIVE, directiveSpans } from './directives.ts';
 
 /** A callee whose body is spliced as a STATEMENT (any body, including interior returns). */
@@ -210,6 +210,17 @@ function classifyBlock(fn: Node, sym: number): BlockCandidate | null {
     return { sym, paramSyms, paramNames, body: stmts, free };
 }
 
+/** Every declaration `collectCandidates` can classify — the span set a `@flatten` body needs, where
+ *  the opt-in is on the CALLER and any resolvable callee is fair game. */
+function allCandidateSpans(program: Node): Set<number> {
+    const out = new Set<number>();
+    walk(program, (n) => {
+        if (n.type === N.FunctionDeclaration || n.type === N.VariableDeclaration) out.add(n.start);
+        return undefined;
+    });
+    return out;
+}
+
 /** Collect `@inline`-annotated candidates, keyed by their binding symbol. */
 function collectCandidates(program: Node, spans: ReadonlySet<number>): Candidates {
     const out: Candidates = { direct: new Map(), block: new Map() };
@@ -286,16 +297,6 @@ function freshName(sem: Semantic, scope: number, prefix: string, seq: number, av
 function blockIsInlinable(cand: BlockCandidate, args: readonly Node[], scope: number, sem: Semantic): boolean {
     if (args.length > cand.paramSyms.length) return false; // extra args must still be evaluated
     for (const a of args) if (a.type === N.SpreadElement) return false;
-    // An argument that READS a parameter's name would hit the prologue binding's TDZ
-    // (`const a = a`). compilecat α-renames here; refusing is the sound, simpler answer.
-    for (const a of args) {
-        let clash = false;
-        walk(a, (n) => {
-            if (n.type === N.IdentifierReference && cand.paramNames.includes(n.name)) clash = true;
-            return clash ? false : undefined;
-        });
-        if (clash) return false;
-    }
     for (const [name, sym] of cand.free) if (lookupValue(sem, scope, name) !== sym) return false;
     return true;
 }
@@ -318,7 +319,14 @@ function blockIsInlinable(cand: BlockCandidate, args: readonly Node[], scope: nu
  *
  *  Two passes, because a reference can appear before its binding. */
 function bindSplicedBlock(sem: Semantic, root: Node, scope: number): void {
+    // Keyed by SCOPE and name, not name alone. A body may bind the same name in sibling scopes —
+    //   if (…) { const n = …; use(n); }
+    //   const n = …;
+    // — and a name-keyed map keeps only the last, then stamps BOTH references with it, orphaning the
+    // first binding's symbol ("symbol partition mismatch", the unsafe direction). Resolution below
+    // walks the scope chain outward so each reference finds the binding actually visible to it.
     const minted = new Map<string, number>();
+    const key = (sc: number, name: string): string => `${sc}\u0000${name}`;
     const declare = (n: Node, sc: number): void => {
         const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
         let inner = sc;
@@ -329,7 +337,7 @@ function bindSplicedBlock(sem: Semantic, root: Node, scope: number): void {
             inner = own;
         }
         if (n.type === N.BindingIdentifier && n.name !== '') {
-            minted.set(n.name, declareLocal(sem, n, inner, SYM.LET));
+            minted.set(key(inner, n.name), declareLocal(sem, n, inner, SYM.LET));
         }
         walkChildren(n, (c) => {
             declare(c, inner);
@@ -337,9 +345,21 @@ function bindSplicedBlock(sem: Semantic, root: Node, scope: number): void {
     };
     declare(root, scope);
 
-    const stamp = (n: Node): void => {
+    /** The innermost minted binding for `name` visible from `chain`, or undefined. */
+    const mintedFor = (chain: readonly number[], name: string): number | undefined => {
+        for (let i = chain.length - 1; i >= 0; i--) {
+            const sym = minted.get(key(chain[i], name));
+            if (sym !== undefined) return sym;
+        }
+        return undefined;
+    };
+
+    const stamp = (n: Node, chain: number[]): void => {
+        const own = (n.data as { scopeId?: number } | null)?.scopeId ?? 0;
+        const pushed = own !== 0 && own !== chain[chain.length - 1];
+        if (pushed) chain.push(own);
         if (n.type === N.IdentifierReference) {
-            const sym = minted.get(n.name);
+            const sym = mintedFor(chain, n.name);
             if (sym !== undefined) {
                 // Declared inside the block — shadowing wins.
                 (n as { sym: number }).sym = sym;
@@ -352,13 +372,63 @@ function bindSplicedBlock(sem: Semantic, root: Node, scope: number): void {
                 (n as { sym: number }).sym = lookupValue(sem, scope, n.name);
             }
         }
-        walkChildren(n, stamp);
+        walkChildren(n, (c) => stamp(c, chain));
+        if (pushed) chain.pop();
     };
-    stamp(root);
+    stamp(root, [scope]);
 }
 
 /** Node types that OWN a lexical scope and so need one minted when synthesized. */
-const SCOPE_OWNERS = new Set<number>([N.BlockStatement, N.StaticBlock]);
+const SCOPE_OWNERS = new Set<number>([
+    N.BlockStatement,
+    N.StaticBlock,
+    // The rest own a scope too (their `create` carries a `scopeId`), and a spliced body containing a
+    // loop or a catch reaches them. Omitting one leaves a scope-owning node with no scopeId, which
+    // resolves its contents from the enclosing scope — the unsafe direction.
+    N.CatchClause,
+    N.ForStatement,
+    N.ForInStatement,
+    N.ForOfStatement,
+    N.SwitchStatement,
+]);
+
+/** Whether `name` is BOUND anywhere inside `stmts` — a local, a nested function's param, a catch
+ *  clause. Substituting an argument that reads `name` into such a body would silently capture that
+ *  inner binding instead of the caller's. */
+function bindsName(stmts: readonly Node[], name: string): boolean {
+    let hit = false;
+    for (const st of stmts) {
+        walk(st, (n) => {
+            if (hit) return false;
+            if (n.type === N.BindingIdentifier && n.name === name) hit = true;
+            return undefined;
+        });
+        if (hit) return true;
+    }
+    return false;
+}
+
+/**
+ * Whether `arg` can be written at each USE of its parameter rather than bound once up front.
+ *
+ * A prologue binding is an ALIAS, and an alias is where scalar replacement stops: SROA refuses a
+ * buffer that is ever used as a whole object, so `const out = _m;` is enough to keep a module scratch
+ * array allocated and index-addressed for the rest of the function. Substituting leaves `_m[0]` in the
+ * body, which SROA can take apart. This is compilecat's `FunctionArgumentInjector`.
+ *
+ * Only a CONST binding qualifies. Binding captures the argument's value at entry; substituting
+ * re-reads the variable at each use, and the two differ the moment anything the body runs reassigns
+ * it — a call into a closure over that variable is enough. `const` makes the two identical by
+ * construction, and covers what this exists for (module scratch is declared `const`). A literal would
+ * be equally safe but is left to `const`-propagation, which already handles it.
+ */
+const substitutableArg = (arg: Node, sem: Semantic): boolean => {
+    if (arg.type !== N.IdentifierReference) return false;
+    const sym = (arg as { sym: number }).sym;
+    if (sym <= 0) return false;
+    const rec = sem.symbols[sym];
+    return rec !== undefined && (rec.flags & SYM.CONST) !== 0;
+};
 
 /** The spliced statement for one call, or `null` when refused. `resultName` is `null` in statement
  *  position (the value is discarded). */
@@ -374,6 +444,119 @@ function buildSplice(
     const avoid = cand.paramNames;
     const label = freshName(sem, scope, '_L', seq, avoid);
     const result = resultName ?? freshName(sem, scope, '_r', seq, avoid);
+
+    // An argument that READS one of the callee's parameter NAMES would capture the prologue binding
+    // instead of the caller's (`const a = a` — a TDZ error, and silently wrong if it resolved). The
+    // names collide constantly in numeric code, where helpers are written `(out, a, b)` and callers
+    // hold variables of the same names, so refusing the splice would refuse most real call sites.
+    // α-rename the offending parameters instead, which is what compilecat does.
+    const argNames = new Set<string>();
+    for (const a of args) {
+        walk(a, (n) => {
+            if (n.type === N.IdentifierReference) argNames.add(n.name);
+            return undefined;
+        });
+    }
+    let paramNames = cand.paramNames;
+    const renames = new Map<number, string>();
+    for (let i = 0; i < paramNames.length; i++) {
+        if (!argNames.has(paramNames[i])) continue;
+        const fresh = freshName(sem, scope, `_p${i}`, seq, [...paramNames, ...argNames]);
+        if (paramNames === cand.paramNames) paramNames = cand.paramNames.slice();
+        paramNames[i] = fresh;
+        const sym = cand.paramSyms[i];
+        if (sym > 0) renames.set(sym, fresh);
+    }
+
+    const bodyStmts = cand.body.map((st) => cloneNode(st) as Node);
+
+    // The callee's own LOCALS collide the same way, and the splice puts them in the SAME scope as the
+    // prologue that evaluates the arguments:
+    //
+    //   { const nodeIndex = topo[idx * 5]; const topo = t.topo; … }
+    //      ↑ the CALLER's `topo`             ↑ the CALLEE's, shadowing it for the whole block
+    //
+    // which is not "silently wrong" but a hard `ReferenceError: Cannot access 'topo' before
+    // initialization` — the argument reads the binding in its temporal dead zone. Renaming the param
+    // above does not help, because the shadowing name is not a param. Rename these too, by symbol.
+    if (argNames.size > 0) {
+        const taken = [...paramNames, ...argNames];
+        let unrenamable = false;
+        for (const st of bodyStmts) {
+            walk(st, (n) => {
+                if (n.type !== N.BindingIdentifier || !argNames.has(n.name)) return undefined;
+                const sym = (n as { sym: number }).sym;
+                // A binding with no symbol cannot be renamed BY symbol, and renaming it by NAME would
+                // catch the caller's references too. Nothing here makes the splice safe, so refuse it.
+                if (sym <= 0) {
+                    unrenamable = true;
+                    return false;
+                }
+                if (!renames.has(sym)) {
+                    const fresh = freshName(sem, scope, `_s${renames.size}`, seq, taken);
+                    taken.push(fresh);
+                    renames.set(sym, fresh);
+                }
+                return undefined;
+            });
+        }
+        if (unrenamable) return null;
+    }
+
+    if (renames.size > 0) {
+        // by SYMBOL, not name: a local inside the body that shadows a parameter carries a different
+        // symbol and must keep its own name. Both halves of a local's rename — the BINDING and every
+        // reference to it — key off the same symbol.
+        for (const st of bodyStmts) {
+            walk(st, (n) => {
+                if (n.type !== N.IdentifierReference && n.type !== N.BindingIdentifier) return undefined;
+                const to = renames.get((n as { sym: number }).sym);
+                if (to !== undefined) (n as { name: string }).name = to;
+                return undefined;
+            });
+        }
+    }
+
+    // ── Substitute what can be substituted; bind the rest ──
+    // See `substitutableArg`. Everything that stays in `boundNames` gets block-mutate's `const p = arg`
+    // prologue, which is still the only correct home for a reassigned parameter or a side-effecting
+    // argument (it must be evaluated exactly once).
+    const passedCount = Math.max(Math.min(args.length, paramNames.length), 0);
+    const boundNames: string[] = [];
+    const boundArgs: Node[] = [];
+    const subs = new Map<number, Node>();
+    for (let i = 0; i < passedCount; i++) {
+        const arg = args[i];
+        const psym = cand.paramSyms[i];
+        if (
+            psym > 0 &&
+            substitutableArg(arg, sem) &&
+            !bindsName(bodyStmts, (arg as { name: string }).name) &&
+            !isReassigned(bodyStmts, paramNames[i])
+        ) {
+            subs.set(psym, arg);
+            continue;
+        }
+        boundNames.push(paramNames[i]);
+        boundArgs.push(cloneNode(arg) as Node);
+    }
+    if (subs.size > 0) {
+        // In place, by SYMBOL — same reason the α-rename above is: a body local that shadows the
+        // parameter carries its own symbol and must be left alone. Rewriting the reference's name and
+        // symbol (rather than swapping the node) keeps every parent slot untouched.
+        for (const st of bodyStmts) {
+            walk(st, (n) => {
+                if (n.type !== N.IdentifierReference) return undefined;
+                const to = subs.get((n as { sym: number }).sym);
+                if (to !== undefined) {
+                    (n as { name: string }).name = (to as { name: string }).name;
+                    (n as { sym: number }).sym = (to as { sym: number }).sym;
+                }
+                return undefined;
+            });
+        }
+    }
+
     const out = mutateForBlockInline({
         // `block-mutate` mutates its input in place, so every splice gets its own copy — and each copy
         // needs its OWN scopes and symbols. `cloneNode` clears `scopeId` and copies `sym`, so without
@@ -384,9 +567,9 @@ function buildSplice(
         // Plain clone: `bindSplicedBlock` below rebinds the whole spliced block in one pass, so
         // seeding scopes/symbols here would only be overwritten (and could not cover the PARAMETERS,
         // which the prologue declares after this point).
-        bodyStmts: cand.body.map((st) => cloneNode(st) as Node),
-        params: cand.paramNames.slice(0, Math.max(args.length, 0)),
-        args: args.map((a) => cloneNode(a) as Node),
+        bodyStmts,
+        params: boundNames,
+        args: boundArgs,
         label,
         resultName: result,
         needsResult: resultName !== null,
@@ -407,22 +590,83 @@ function callOf(expr: Node): Node | null {
 }
 
 /**
- * Inline calls to `@inline`-annotated functions. Returns whether anything changed.
- * The now-unreferenced declaration is left for `drop-unused`/treeshake to remove.
+ * Module-scope declarations whose binding a `@flatten` body reads.
+ *
+ * `@flatten` means "inline what this function calls". A hot numeric function's scratch buffer is part
+ * of that function's data, and its initialiser is code the function depends on:
+ *
+ *   const _m = vec3.create();                  // ← reached, because `f` reads `_m`
+ *   \/* @optimize *\/ function f() { _m[0] = 1; … }
+ *
+ * Reaching it matters because of what comes NEXT: SROA can only take a buffer apart when it can see
+ * the value is FRESH, and only a literal proves that. `vec3.create()` is opaque, so the buffer stays
+ * an array and every access stays a load. Inlining the factory makes the initialiser `[0, 0, 0]` and
+ * the ordinary literal path applies. Inferring the shape from the accesses instead would be the
+ * unsound shortcut: it approves `const out = res`, an ALIAS, whose scalars swallow every write.
+ *
+ * Only the DIRECT path can fire here — a module-scope initialiser is an expression slot, and a BLOCK
+ * splice needs a statement — so a factory with a multi-statement body is left alone by construction.
  */
-export function inlineFunctions(program: Node, semantic: Semantic, source: string): boolean {
-    const spans = directiveSpans(source, program, DIRECTIVE.INLINE);
-    if (spans.size === 0) return false;
-    const cands = collectCandidates(program, spans);
-    if (cands.direct.size === 0 && cands.block.size === 0) return false;
+function flattenedBufferDecls(program: Node, flattenSpans: ReadonlySet<number>): Set<Node> {
+    const out = new Set<Node>();
+    if (flattenSpans.size === 0) return out;
+    const bodies: Node[] = [];
+    walk(program, (n) => {
+        if (isFn(n) && flattenSpans.has(n.start)) bodies.push(n);
+        return undefined;
+    });
+    if (bodies.length === 0) return out;
+    const used = new Set<number>();
+    for (const f of bodies) {
+        walk(f, (n) => {
+            if (n.type === N.IdentifierReference) {
+                const sym = (n as { sym: number }).sym;
+                if (sym > 0) used.add(sym);
+            }
+            return undefined;
+        });
+    }
+    for (const st of (program.data as { body: Node[] }).body) {
+        const vd =
+            st.type === N.VariableDeclaration
+                ? st
+                : st.type === N.ExportNamedDeclaration
+                  ? ((st.data as { declaration: Node | null }).declaration ?? null)
+                  : null;
+        if (vd === null || vd.type !== N.VariableDeclaration) continue;
+        for (const dtor of (vd.data as { declarations: Node[] }).declarations) {
+            const d = dtor.data as { id: Node; init: Node | null };
+            if (d.id.type !== N.BindingIdentifier || d.init === null) continue;
+            if (used.has((d.id as { sym: number }).sym)) {
+                out.add(vd);
+                break;
+            }
+        }
+    }
+    return out;
+}
 
-    let seq = 0;
-    /** The BLOCK candidate a call resolves to, if any. */
-    const blockFor = (call: Node): BlockCandidate | undefined => {
-        const d = call.data as { callee: Node; optional: boolean };
-        if (d.optional || d.callee.type !== N.IdentifierReference) return undefined;
-        return cands.block.get((d.callee as { sym: number }).sym);
-    };
+/**
+ * The four STATEMENT SHAPES a block-inlined call can sit in, as hooks.
+ *
+ * A BLOCK splice produces STATEMENTS, so it can only replace a call that a statement slot holds:
+ *
+ *   f(args);             → { … }
+ *   x = f(args);         → { … x = … }
+ *   const x = f(args);   → let x; { … x = … }
+ *   return f(args);      → let _r; { … _r = … } return _r;
+ *
+ * Shared by the LOCAL and the CROSS-MODULE pass, which differ only in how a callee resolves to a
+ * donor — and that is all `blockFor` is. They did not used to share it: the cross-module pass grew
+ * the FIRST shape and no other, so an imported out-param helper called the way one actually is —
+ * `applied = part.warmStart(…)`, `const t = part.warmStart(…)` — stayed a call, while the identical
+ * helper inside the module inlined fine. One donor lookup, one set of shapes.
+ */
+function blockSpliceHooks(
+    semantic: Semantic,
+    blockFor: (call: Node) => BlockCandidate | undefined,
+    seq: { n: number },
+): { expressionStatement: (n: Node, ctx: TransformCtx) => void; list: (n: Node, ctx: TransformCtx) => void } {
     const argsOf = (call: Node): Node[] => (call.data as { arguments: Node[] }).arguments;
 
     /** Splice `const x = f(args);` declarations found directly in a statement list. */
@@ -434,6 +678,44 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
         const scope = scopeOf(semantic, n) || ctx.currentScope;
         for (let i = 0; i < list.length; i++) {
             const st = list[i];
+            // `return f(args);` → `let _r; { … _r = … } return _r;`. Two statements again, so it is
+            // handled here rather than by a replaceWith on the return itself.
+            if (st.type === N.ReturnStatement) {
+                const arg = (st.data as { argument: Node | null }).argument;
+                if (arg === null) continue;
+                const rcall = callOf(arg);
+                if (rcall === null) continue;
+                const rcand = blockFor(rcall);
+                if (rcand === undefined) continue;
+                // Eligibility first: declaring the result binding below is a semantic mutation, and a
+                // refused splice would leave it stranded.
+                if (!blockIsInlinable(rcand, argsOf(rcall), scope, semantic)) continue;
+                const name = freshName(semantic, scope, '_r', seq.n, rcand.paramNames);
+                // `let _r;` is SYNTHESIZED, so it carries no symbol. Declare it before splicing: the
+                // block's own `_r = …` writes resolve against the enclosing scope during
+                // `bindSplicedBlock`, and the trailing `return _r;` is stamped from the same symbol.
+                // Leaving it at 0 reads as "'_r' unbound in maintained, bound in truth" — the
+                // direction where a live binding looks dead and its declaration can be deleted.
+                const rdecl = letDecl(name);
+                const rid = ((rdecl.data as { declarations: Node[] }).declarations[0].data as { id: Node }).id;
+                const rsym = declareLocal(semantic, rid, scope, SYM.LET);
+                const rblock = buildSplice(rcand, argsOf(rcall), scope, semantic, name, seq.n++);
+                if (rblock === null) continue;
+                // `block-mutate` emits one `_r = …` per return path, each a synthesized node with no
+                // symbol. Stamp them from the binding declared above rather than leaving them to be
+                // resolved by name.
+                walk(rblock, (n) => {
+                    if (n.type === N.IdentifierReference && n.name === name && (n as { sym: number }).sym === 0) {
+                        (n as { sym: number }).sym = rsym;
+                    }
+                    return undefined;
+                });
+                const rref = ref(name);
+                (rref as { sym: number }).sym = rsym;
+                ctx.spliceStatements(list, i, 1, rdecl, rblock, create.ReturnStatement(0, 0, 0, rref));
+                i += 2;
+                continue;
+            }
             if (st.type !== N.VariableDeclaration) continue;
             const vd = st.data as { declarations: Node[] };
             if (vd.declarations.length !== 1) continue;
@@ -444,7 +726,7 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
             const cand = blockFor(call);
             if (cand === undefined) continue;
             const name = d.id.name;
-            const block = buildSplice(cand, argsOf(call), scope, semantic, name, seq++);
+            const block = buildSplice(cand, argsOf(call), scope, semantic, name, seq.n++);
             if (block === null) continue;
             // `const x = callee(...)` becomes `let x; { … x = … }` — the SAME binding, re-spelled. So
             // carry the original symbol onto the new declarator and repoint the table's `decl` at it,
@@ -465,19 +747,15 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
         }
     };
 
-    const visitor: Visitor = {
-        name: 'inlineFunctions',
-        // BLOCK splices happen on ENTER at the STATEMENT level: the body becomes a statement, so it
-        // can only replace a call sitting in one of the three shapes below.
-        enter: hookTable({
-            [N.ExpressionStatement]: (n: Node, ctx: TransformCtx) => {
+    /** `f(args);` and `x = f(args);` — both replace the statement in place. */
+    const expressionStatement = (n: Node, ctx: TransformCtx): void => {
                 const expr = (n.data as { expression: Node }).expression;
                 // `f(args);` — the value is discarded.
                 const bare = callOf(expr);
                 if (bare !== null) {
                     const cand = blockFor(bare);
                     if (cand === undefined) return;
-                    const block = buildSplice(cand, argsOf(bare), ctx.currentScope, semantic, null, seq++);
+                    const block = buildSplice(cand, argsOf(bare), ctx.currentScope, semantic, null, seq.n++);
                     if (block !== null) ctx.replaceWith(block);
                     return;
                 }
@@ -489,25 +767,80 @@ export function inlineFunctions(program: Node, semantic: Semantic, source: strin
                 if (call === null) return;
                 const cand = blockFor(call);
                 if (cand === undefined) return;
-                const block = buildSplice(cand, argsOf(call), ctx.currentScope, semantic, a.left.name, seq++);
+                const block = buildSplice(cand, argsOf(call), ctx.currentScope, semantic, a.left.name, seq.n++);
                 if (block !== null) ctx.replaceWith(block);
-            },
-            // `const x = f(args);` → `let x; { …; x = … }`. Handled on the enclosing statement LIST
-            // rather than on the declaration: the rewrite produces TWO statements, which a
+    };
+
+    return { expressionStatement, list: listHook };
+}
+
+
+/**
+ * Inline calls to `@inline`-annotated functions. Returns whether anything changed.
+ * The now-unreferenced declaration is left for `drop-unused`/treeshake to remove.
+ */
+export function inlineFunctions(program: Node, semantic: Semantic, source: string): boolean {
+    const spans = directiveSpans(source, program, DIRECTIVE.INLINE);
+    // `@flatten` (and `@optimize`, which implies it) is a CALLER-side bulk directive: every resolvable
+    // call inside the annotated body behaves as if its call site carried `/* @inline */`. So the
+    // candidate set inside such a body is every function the module can classify, not just the
+    // annotated donors.
+    const flattenSpans = directiveSpans(source, program, DIRECTIVE.FLATTEN);
+    if (spans.size === 0 && flattenSpans.size === 0) return false;
+    const cands = collectCandidates(program, spans);
+    const flat = flattenSpans.size > 0 ? collectCandidates(program, allCandidateSpans(program)) : null;
+    const nothingToDo =
+        cands.direct.size === 0 &&
+        cands.block.size === 0 &&
+        (flat === null || (flat.direct.size === 0 && flat.block.size === 0));
+    if (nothingToDo) return false;
+
+    // Depth of `@flatten` bodies we are inside; the flat candidate set only applies within one.
+    let flattenDepth = 0;
+    const flatBuffers = flattenedBufferDecls(program, flattenSpans);
+    const directFor = (sym: number): Candidate | undefined =>
+        cands.direct.get(sym) ?? (flattenDepth > 0 ? flat?.direct.get(sym) : undefined);
+
+    const seq = { n: 0 };
+    /** The BLOCK candidate a call resolves to, if any. */
+    const blockFor = (call: Node): BlockCandidate | undefined => {
+        const d = call.data as { callee: Node; optional: boolean };
+        if (d.optional || d.callee.type !== N.IdentifierReference) return undefined;
+        const sym = (d.callee as { sym: number }).sym;
+        return cands.block.get(sym) ?? (flattenDepth > 0 ? flat?.block.get(sym) : undefined);
+    };
+    const { expressionStatement, list: listHook } = blockSpliceHooks(semantic, blockFor, seq);
+
+    const visitor: Visitor = {
+        name: 'inlineFunctions',
+        // BLOCK splices happen on ENTER at the STATEMENT level: the body becomes a statement, so it
+        // can only replace a call sitting in one of the shapes `blockSpliceHooks` handles.
+        enter: hookTable({
+            [N.ExpressionStatement]: expressionStatement,
+            // `const x = f(args);` and `return f(args);` are handled on the enclosing statement LIST
+            // rather than on the statement itself: each rewrite produces TWO statements, which a
             // single-child slot (`export const x = f()`, a `for` initialiser) cannot hold. Working on
             // the list also means such a slot is simply skipped rather than throwing.
             [N.Program]: listHook,
             [N.BlockStatement]: listHook,
             [N.StaticBlock]: listHook,
             [N.SwitchCase]: listHook,
+            [N.FunctionDeclaration]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+            [N.FunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+            [N.ArrowFunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+            [N.VariableDeclaration]: (n: Node) => { if (flatBuffers.has(n)) flattenDepth++; },
         }),
         // DIRECT replaces the call expression itself, on EXIT so a nested `@inline` argument is
         // already inlined by the time this fires.
         exit: hookTable({
+            [N.FunctionDeclaration]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+            [N.FunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+            [N.ArrowFunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+            [N.VariableDeclaration]: (n: Node) => { if (flatBuffers.has(n)) flattenDepth--; },
             [N.CallExpression]: (n: Node, ctx: TransformCtx) => {
                 const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
                 if (d.optional || d.callee.type !== N.IdentifierReference) return;
-                const cand = cands.direct.get((d.callee as { sym: number }).sym);
+                const cand = directFor((d.callee as { sym: number }).sym);
                 if (cand === undefined) return;
                 if (!callIsInlinable(cand, d.arguments, ctx.currentScope, semantic)) return;
                 ctx.replaceWith(substitute(cand, d.arguments));
@@ -545,9 +878,17 @@ export function moduleInlineCandidates(program: Node, source: string): Map<numbe
     return collectCandidates(program, spans).direct;
 }
 
+/** The BLOCK half of the same set — statement-bodied donors, which is how an out-param helper is
+ *  written. Dropping these was why the tier did nothing across a module boundary. */
+export function moduleBlockCandidates(program: Node, source: string): Map<number, BlockCandidate> {
+    const spans = directiveSpans(source, program, DIRECTIVE.INLINE);
+    if (spans.size === 0) return new Map();
+    return collectCandidates(program, spans).block;
+}
+
 /** True when every free variable of `cand` is a global in the donor — the only shape that can move
  *  between modules without carrying its dependencies. */
-const freeVarsAllGlobal = (cand: Candidate): boolean => {
+const freeVarsAllGlobal = (cand: { free: ReadonlyMap<string, number> }): boolean => {
     for (const sym of cand.free.values()) if (sym !== 0) return false;
     return true;
 };
@@ -560,9 +901,26 @@ const freeVarsAllGlobal = (cand: Candidate): boolean => {
 export function inlineCrossModule(
     modules: readonly { program: Node; semantic: Semantic; source: string; namedImports: ReadonlyMap<number, unknown> }[],
     resolveImport: (moduleIdx: number, sym: number) => { mod: number; sym: number } | null,
+    /** `ns.name(…)` where `ns` is a namespace import. A numeric package is reached this way almost
+     *  exclusively (`import { mat4 } from 'math'` over `export * as mat4 from './mat4.ts'`), so
+     *  without it the whole tier is inert on such a consumer. */
+    resolveMember?: (moduleIdx: number, sym: number, name: string) => { mod: number; sym: number } | null,
 ): Map<number, Set<number>> {
     // Donor candidates per module, built lazily — most modules annotate nothing.
     const donorCache = new Map<number, Map<number, Candidate>>();
+    const blockDonorCache = new Map<number, Map<number, BlockCandidate>>();
+    // `@flatten` in the CONSUMER makes any resolvable callee fair game, including donors the
+    // producing module never annotated — which is the only way a third-party math package (shipped
+    // without directives) can be inlined at all.
+    const flatDonorCache = new Map<number, Candidates>();
+    const flatDonorsOf = (i: number): Candidates => {
+        let c = flatDonorCache.get(i);
+        if (c === undefined) {
+            c = collectCandidates(modules[i].program, allCandidateSpans(modules[i].program));
+            flatDonorCache.set(i, c);
+        }
+        return c;
+    };
     const donorsOf = (idx: number): Map<number, Candidate> => {
         let c = donorCache.get(idx);
         if (c === undefined) {
@@ -576,18 +934,74 @@ export function inlineCrossModule(
     for (let idx = 0; idx < modules.length; idx++) {
         const mod = modules[idx];
         const producers = new Set<number>();
+        const blockSeq = { n: 0 };
+        const flattenSpans = directiveSpans(mod.source, mod.program, DIRECTIVE.FLATTEN);
+        let flattenDepth = 0;
+        const flatBuffers = flattenedBufferDecls(mod.program, flattenSpans);
+        /** The donor module and symbol a callee names, for a bare import or a namespace member. */
+        const targetOf = (callee: Node): { mod: number; sym: number } | null => {
+            if (callee.type === N.IdentifierReference) {
+                const localSym = (callee as { sym: number }).sym;
+                if (localSym <= 0 || !mod.namedImports.has(localSym)) return null;
+                return resolveImport(idx, localSym);
+            }
+            if (callee.type !== N.StaticMemberExpression || resolveMember === undefined) return null;
+            const m = callee.data as { object: Node; property: Node; optional?: boolean };
+            if (m.optional === true || m.object.type !== N.IdentifierReference) return null;
+            const objSym = (m.object as { sym: number }).sym;
+            if (objSym <= 0) return null;
+            const name = (m.property as { name?: string }).name;
+            if (name === undefined) return null;
+            return resolveMember(idx, objSym, name);
+        };
+
+        /** The imported BLOCK donor a call resolves to, subject to the same cross-module hygiene
+         *  gate as the DIRECT path: every free name must be a global on both sides. */
+        const importedBlock = (call: Node): BlockCandidate | undefined => {
+            const d = call.data as { callee: Node; optional: boolean };
+            if (d.optional) return undefined;
+            const target = targetOf(d.callee);
+            if (target === null || target.mod === idx) return undefined;
+            let c = blockDonorCache.get(target.mod);
+            if (c === undefined) {
+                c = moduleBlockCandidates(modules[target.mod].program, modules[target.mod].source);
+                blockDonorCache.set(target.mod, c);
+            }
+            const cand = c.get(target.sym) ?? (flattenDepth > 0 ? flatDonorsOf(target.mod).block.get(target.sym) : undefined);
+            if (cand === undefined || !freeVarsAllGlobal(cand)) return undefined;
+            producers.add(target.mod);
+            return cand;
+        };
+        // Statement positions: the SAME four shapes the local pass handles, from the same factory.
+        // A BLOCK body becomes statements, so unlike the DIRECT path it cannot replace the call
+        // expression in place.
+        const { expressionStatement, list: listHook } = blockSpliceHooks(mod.semantic, importedBlock, blockSeq);
         const visitor: Visitor = {
             name: 'inlineCrossModule',
-            enter: null,
+            enter: hookTable({
+                [N.FunctionDeclaration]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+                [N.FunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+                [N.ArrowFunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth++; },
+                [N.VariableDeclaration]: (n: Node) => { if (flatBuffers.has(n)) flattenDepth++; },
+                [N.ExpressionStatement]: expressionStatement,
+                [N.Program]: listHook,
+                [N.BlockStatement]: listHook,
+                [N.StaticBlock]: listHook,
+                [N.SwitchCase]: listHook,
+            }),
             exit: hookTable({
+                [N.FunctionDeclaration]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+                [N.FunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+                [N.ArrowFunctionExpression]: (n: Node) => { if (flattenSpans.has(n.start)) flattenDepth--; },
+                [N.VariableDeclaration]: (n: Node) => { if (flatBuffers.has(n)) flattenDepth--; },
                 [N.CallExpression]: (n: Node, ctx: TransformCtx) => {
                     const d = n.data as { callee: Node; arguments: Node[]; optional: boolean };
-                    if (d.optional || d.callee.type !== N.IdentifierReference) return;
-                    const localSym = (d.callee as { sym: number }).sym;
-                    if (localSym <= 0 || !mod.namedImports.has(localSym)) return; // only imported callees
-                    const target = resolveImport(idx, localSym);
+                    if (d.optional) return;
+                    const target = targetOf(d.callee);
                     if (target === null || target.mod === idx) return;
-                    const cand = donorsOf(target.mod).get(target.sym);
+                    const cand =
+                        donorsOf(target.mod).get(target.sym) ??
+                        (flattenDepth > 0 ? flatDonorsOf(target.mod).direct.get(target.sym) : undefined);
                     if (cand === undefined || !freeVarsAllGlobal(cand)) return;
                     // Argument gates are the same as the local case; hygiene reduces to "each free
                     // name is still a global here", which `callIsInlinable` checks via `lookupValue`.
@@ -606,13 +1020,30 @@ export function inlineCrossModule(
         let reachesDonor = false;
         for (const localSym of mod.namedImports.keys()) {
             const target = resolveImport(idx, localSym);
-            if (target !== null && target.mod !== idx && donorsOf(target.mod).has(target.sym)) {
+            if (target === null || target.mod === idx) continue;
+            if (donorsOf(target.mod).has(target.sym)) {
+                reachesDonor = true;
+                break;
+            }
+            // BLOCK donors count too, or a module importing only out-param helpers is skipped.
+            let bc = blockDonorCache.get(target.mod);
+            if (bc === undefined) {
+                bc = moduleBlockCandidates(modules[target.mod].program, modules[target.mod].source);
+                blockDonorCache.set(target.mod, bc);
+            }
+            if (bc.has(target.sym)) {
                 reachesDonor = true;
                 break;
             }
         }
-        if (!reachesDonor) continue;
-        if (traverse(mod.program, mod.semantic, [visitor])) changed.set(idx, producers);
+        if (!reachesDonor && flattenSpans.size === 0) continue;
+        // A RefDelta, as in the local pass: a BLOCK splice introduces bindings AND references, and
+        // without one `ctx.addRefs` is a no-op, so the prologue's `const out = arg` looks unreferenced
+        // and `dropUnused` deletes it while the spliced body still reads `out`.
+        const delta = new Map<number, RefDelta>();
+        const touched = traverse(mod.program, mod.semantic, [visitor], delta);
+        applyRefDelta(mod.semantic, delta);
+        if (touched) changed.set(idx, producers);
     }
     return changed;
 }
