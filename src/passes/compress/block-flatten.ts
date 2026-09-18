@@ -42,6 +42,15 @@ function directLexicalBindings(stmts: readonly Node[]): [number, string][] {
     return out;
 }
 
+/** Every name READ in `root`, with how many times. */
+function referenceCounts(root: Node, into: Map<string, number>): Map<string, number> {
+    walk(root, (n) => {
+        if (n.type === N.IdentifierReference) into.set(n.name, (into.get(n.name) ?? 0) + 1);
+        return undefined;
+    });
+    return into;
+}
+
 /** A block that must keep its scope: it declares a function or class. */
 function declaresHoisted(stmts: readonly Node[]): boolean {
     return stmts.some((s) => s.type === N.FunctionDeclaration || s.type === N.ClassDeclaration);
@@ -114,13 +123,27 @@ export function makeBlockFlatten(): Visitor {
             namesByScope.set(target, used);
         }
 
+        // Names READ anywhere in this list, counted once. A lift hoists the block's `let`/`const` to
+        // the top of the target, so a name merely REFERENCED here — resolving to an outer binding —
+        // collides just as hard as one bound here: the earlier read lands in the lifted binding's
+        // temporal dead zone and throws at runtime. `used` only tracks names BOUND in the target
+        // scope, so it cannot see this case.
+        let listRefs: Map<string, number> | null = null;
+
         for (let i = 0; i < stmts.length; i++) {
             const b = stmts[i];
             if (b.type !== N.BlockStatement) continue;
             const inner = (b.data as { body: Node[] }).body;
             if (declaresHoisted(inner)) continue;
+            if (listRefs === null) {
+                listRefs = new Map<string, number>();
+                for (const st of stmts) referenceCounts(st, listRefs);
+            }
+            // References INSIDE the block being lifted are not a collision — they move with it.
+            const ownRefs = referenceCounts(b, new Map<string, number>());
             for (const [sym, name] of directLexicalBindings(inner)) {
-                if (!used.has(name)) {
+                const outside = (listRefs.get(name) ?? 0) - (ownRefs.get(name) ?? 0);
+                if (!used.has(name) && outside === 0) {
                     used.add(name);
                     continue;
                 }
