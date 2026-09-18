@@ -354,17 +354,56 @@ export function computeEnumInlines(graph: Graph, linked: Linked): Map<number, Ma
     return out;
 }
 
+/**
+ * Every local binding in `mod` that names a MODULE NAMESPACE, mapped to the module it names.
+ *
+ * TWO SPELLINGS reach the same thing, and only the first used to be recognized:
+ *
+ *   import * as vec3 from './vec3.js';          // a namespace IMPORT
+ *   import { vec3 } from 'math';                // a named import of `export * as vec3 …`
+ *
+ * The second is how a barrel publishes a namespace and how every consumer of one reads it, so
+ * collecting only the first left its `ns.member` reads going through a materialised object — 3524 of
+ * them on crashcat's hot path. Binding already answers the question (`kind: 'namespace'`); every
+ * caller just has to ask it the same way, which is what this is for.
+ */
+export function namespaceLocals(mod: Module, linked: Linked): Map<number, number> {
+    const out = new Map<number, number>();
+    for (const [localSym, imp] of mod.namedImports) {
+        if (imp.name === NAME_NAMESPACE) {
+            const rec = mod.importRecords[imp.rec];
+            if (!rec.external && rec.resolved >= 0) out.set(localSym, rec.resolved);
+            continue;
+        }
+        const bind = linked.binds.get(packRef(mod.idx, localSym));
+        if (bind !== undefined && bind.kind === 'namespace') out.set(localSym, bind.module);
+    }
+    return out;
+}
+
 export function namespaceTargets(graph: Graph, linked: Linked): Set<number> {
     const out = new Set<number>();
+    /** The guards are the same wherever the namespace came from: a module whose export surface is not
+     *  statically known cannot have its member reads resolved to bindings. */
+    const admit = (target: number): void => {
+        if (target < 0) return;
+        if (linked.dynamicExports.has(target) || linked.cjsWrap.has(target)) return;
+        if (!linked.exportMaps.has(target)) return;
+        out.add(target);
+    };
     for (const mod of graph.modules)
         for (const [, imp] of mod.namedImports) {
             if (imp.name !== NAME_NAMESPACE) continue;
             const rec = mod.importRecords[imp.rec];
             if (rec.external || rec.resolved < 0) continue;
-            if (linked.dynamicExports.has(rec.resolved) || linked.cjsWrap.has(rec.resolved)) continue;
-            if (!linked.exportMaps.has(rec.resolved)) continue;
-            out.add(rec.resolved);
+            admit(rec.resolved);
         }
+    // A namespace does not have to be written `import * as ns`. A barrel of `export * as vec3 from
+    // './vec3.js'` publishes one, and a consumer reaches it with a NAMED import — which is how a
+    // numeric package is actually imported, and how crashcat imports every one of its math modules.
+    // Binding it resolves to `kind: 'namespace'`, so the target is already known here; collecting only
+    // the `import * as` form left 3524 hot-path `ns.member(…)` property loads standing on crashcat.
+    for (const [, bind] of linked.binds) if (bind.kind === 'namespace') admit(bind.module);
     return out;
 }
 

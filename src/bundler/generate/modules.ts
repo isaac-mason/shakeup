@@ -22,13 +22,12 @@ import {
     type ImportRecord,
     isEsmFormat,
     type Linked,
-    NAME_NAMESPACE,
     packRef,
     refMod,
     refSym,
 } from '../graph-types.ts';
 import { initRefForRecord, recordIsInitObligation } from '../init-obligations.ts';
-import { finalNameOf } from '../link.ts';
+import { finalNameOf, namespaceLocals } from '../link.ts';
 import { effectiveComments, type RenderedModule } from '../output-options.ts';
 import { isRequireCall } from '../scan.ts';
 import {
@@ -226,12 +225,8 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     // {@link namespaceTargets}.
     const elidedNs = new Map<number, number>(); // local ns symbol → target module idx
     if (ctx.rewrittenNs.size > 0)
-        for (const [localSym, imp] of mod.namedImports) {
-            if (imp.name !== NAME_NAMESPACE) continue;
-            const rec = mod.importRecords[imp.rec];
-            if (rec.external || rec.resolved < 0) continue;
-            if (ctx.rewrittenNs.has(rec.resolved)) elidedNs.set(localSym, rec.resolved);
-        }
+        for (const [localSym, target] of namespaceLocals(mod, ctx.linked))
+            if (ctx.rewrittenNs.has(target)) elidedNs.set(localSym, target);
     // Only `import()` and `new URL(...)` produce the OTHER overrides, and the scan already recorded
     // both as import records — so a module with neither, and no elided namespace, cannot contribute
     // one and the whole-program walk is skipped. Checking is O(records).

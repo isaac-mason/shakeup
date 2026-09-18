@@ -11,12 +11,11 @@ import {
     type ImportBind,
     type Linked,
     type Module,
-    NAME_NAMESPACE,
     packRef,
     refMod,
     refSym,
 } from './graph-types.ts';
-import { finalNameOf } from './link.ts';
+import { finalNameOf, namespaceLocals } from './link.ts';
 
 export const RESERVED = new Set([
     'break',
@@ -271,18 +270,14 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         if (memberSet !== null && !memberSet.has(mod.idx)) continue;
         if (mod.external) continue;
         const sem = mod.semantic;
-        /** This module's `import * as ns` locals whose `ns.foo` reads get rewritten to the producer's
+        /** This module's NAMESPACE locals whose `ns.foo` reads get rewritten to the producer's
          *  binding, mapped to that target. Each such read is a reference to the producer from
          *  whatever scope it sits in — the reference the renamer would otherwise never see. Same
          *  table `collectLinkOverrides` builds at emit. */
         const elidedLocal = new Map<number, number>();
         if (linked.rewritableNs.size > 0)
-            for (const [localSym, imp] of mod.namedImports) {
-                if (imp.name !== NAME_NAMESPACE) continue;
-                const rec = mod.importRecords[imp.rec];
-                if (rec.external || rec.resolved < 0) continue;
-                if (linked.rewritableNs.has(rec.resolved)) elidedLocal.set(localSym, rec.resolved);
-            }
+            for (const [localSym, target] of namespaceLocals(mod, linked))
+                if (linked.rewritableNs.has(target)) elidedLocal.set(localSym, target);
         /**
          * The name the PRINTER will emit for a symbol — which for an import is NOT `finalNameOf` on
          * the local. `import { foo as _foo }` keeps the local symbol `_foo`, and the printer resolves

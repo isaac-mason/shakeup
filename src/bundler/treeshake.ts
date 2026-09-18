@@ -3,8 +3,9 @@ import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from '../analysis/n
 import { walkRefIdents } from '../analysis/refs.ts';
 import { scopeOf, symbolOf } from '../analysis/semantic.ts';
 import { N, type Node, walk } from '../ast/index.ts';
-import { type Graph, type ImportBind, type Linked, type Module, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
+import { type Graph, type ImportBind, type Linked, type Module, packRef, refMod, refSym } from './graph-types.ts';
 import { staticImportRunsTarget } from './init-obligations.ts';
+import { namespaceLocals } from './link.ts';
 
 export type TreeshakeResult = {
     live: Set<number>[];
@@ -266,6 +267,7 @@ const NS_MARKER = 0x1fffff;
  *  outright. Returns target idx → the union of member names read across all its consumers. */
 function computeNsUsage(
     graph: Graph,
+    linked: Linked,
     dynUsage: Map<number, NsUsage>,
     deadDynamic: Set<number>,
     /** Out-param: target → the member names some consumer CALLED off it. */
@@ -275,12 +277,28 @@ function computeNsUsage(
 ): Map<number, Set<string>> {
     const forceWhole = new Set<number>();
     for (const { module } of graph.entries) forceWhole.add(module);
-    // `export * as ns from './m'` re-exports m's whole namespace opaquely.
-    for (const mod of graph.modules) {
-        for (const exp of mod.namedExports.values()) {
-            if (exp.sourceName !== NAME_NAMESPACE || exp.rec < 0) continue;
-            const rec = mod.importRecords[exp.rec];
-            if (!rec.external && rec.resolved >= 0) forceWhole.add(rec.resolved);
+    // A namespace on an ENTRY'S EXPORT SURFACE is opaque: it leaves the bundle, and whoever receives it
+    // can read any member off it, so the whole surface has to survive. Followed transitively, because
+    // a namespace can be re-exported through several barrels before it reaches an entry.
+    //
+    // NOT every `export * as ns from './m'`, which is what this used to be. A package barrel is
+    // written that way — `export * as vec3 from './vec3.js'` — and treating the re-export ITSELF as
+    // the escape meant importing one function out of a math package retained all sixty of them (389
+    // functions on crashcat). A barrel that no entry publishes is internal plumbing, and its consumers
+    // are analyzable like any other namespace consumer: `analyzeNsUsage` already decides whether their
+    // uses are static member reads, and already forces the whole surface when one is not.
+    const queue = graph.entries.map((e) => e.module);
+    const seen = new Set<number>(queue);
+    for (let i = 0; i < queue.length; i++) {
+        const map = linked.exportMaps.get(queue[i]);
+        if (map === undefined) continue;
+        for (const [, bind] of map) {
+            if (bind.kind !== 'namespace') continue;
+            forceWhole.add(bind.module);
+            if (!seen.has(bind.module)) {
+                seen.add(bind.module);
+                queue.push(bind.module);
+            }
         }
     }
     // A `require()` of an ES MODULE reads its whole namespace object: the emitter lowers the call to
@@ -313,13 +331,7 @@ function computeNsUsage(
         for (const m of u.members) a.members.add(m);
     };
     for (const mod of graph.modules) {
-        const nsSyms = new Map<number, number>(); // local ns symbol → target module idx
-        for (const [localSym, imp] of mod.namedImports) {
-            if (imp.name !== NAME_NAMESPACE) continue;
-            const rec = mod.importRecords[imp.rec];
-            if (rec.external || rec.resolved < 0) continue;
-            nsSyms.set(localSym, rec.resolved);
-        }
+        const nsSyms = namespaceLocals(mod, linked); // local ns symbol → target module idx
         if (nsSyms.size === 0) continue;
         const usage = analyzeNsUsage(mod.program, mod.semantic, new Set(nsSyms.keys()), (sym, name, at) =>
             reads.push({ mod: mod.idx, target: nsSyms.get(sym) as number, name, at }),
@@ -508,7 +520,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
     const thisCache = new Map<number, boolean>();
     const nsCalled = new Map<number, Set<string>>();
     const nsReads: NsRead[] = [];
-    const nsUsage = computeNsUsage(graph, dynUsage, deadDynamic, nsCalled, nsReads);
+    const nsUsage = computeNsUsage(graph, linked, dynUsage, deadDynamic, nsCalled, nsReads);
     const elidableNs = computeElidableNs(graph, linked, nsUsage);
     // A namespace some consumer CALLS a member off (`ns.foo()`) and that still gets built keeps its
     // WHOLE surface: the callee receives the object as `this`, so `this.other` must find `other`.

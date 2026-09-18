@@ -60,6 +60,16 @@ export function analyzeNsUsage(
     };
 
     const visit = (node: Node): void => {
+        // `export { vec3 }` FORWARDS the namespace; it does not observe it. A package barrel is
+        // written `import * as vec3 from './core/vec3.js'; export { vec3 };`, so counting the
+        // specifier's bare reference as an escape marked every barrel namespace unanalyzable — which
+        // pinned every member of every math module alive in anything that imported one function.
+        //
+        // Whether the forwarding ends somewhere that really does observe it is a REACHABILITY
+        // question, answered where the escape analysis cannot see: a namespace on an entry's export
+        // surface is forced whole by `computeNsUsage`, transitively through as many barrels as it
+        // takes. Here it is just a re-export.
+        if (node.type === N.ExportSpecifier) return;
         if (node.type === N.AssignmentExpression) markTarget(node.data.left);
         else if (node.type === N.UpdateExpression) markTarget(node.data.argument);
         else if (node.type === N.ForInStatement || node.type === N.ForOfStatement) markTarget(node.data.left);
