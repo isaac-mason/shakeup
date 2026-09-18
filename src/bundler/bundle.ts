@@ -1,6 +1,9 @@
 import { resetInferredPure } from '../analysis/effects.ts';
 import { runCompress } from '../passes/compress/index.ts';
+import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
+import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
 import { inlineCrossModule } from '../passes/optimize/inline-functions.ts';
+import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
 import type { SourceMap } from '../util/sourcemap.ts';
 import * as Timer from '../util/timer.ts';
 import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph.ts';
@@ -542,15 +545,30 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // annotated helper can be inlined natively — no plugin re-read of the donor file. Runs BEFORE
     // purity and treeshake so both see the expanded code; each touched module is then re-analysed and
     // re-compressed, since scan's compress ran before the graph existed.
-    {
+    //
+    // GATED ON THE SAME OPTION `scan` reads. This half used to read nothing, so `optimize: false`
+    // turned off the per-module tier and left the cross-module one running — a build that asked for no
+    // optimization still got imported helpers inlined and its buffers scalarized.
+    if ((options.output?.optimize ?? true) !== false) {
         const compressMode = resolveMinify(options.output?.minify).compress === false ? false : ('dce' as const);
         const resolveImport = (idx: number, sym: number): { mod: number; sym: number } | null => {
             const bind = linked.binds.get(packRef(idx, sym));
             if (bind === undefined || bind.kind !== 'found') return null;
             return { mod: refMod(bind.ref), sym: refSym(bind.ref) };
         };
+        /** `ns.name` where `ns` is a namespace import: follow the bind to the module it names, then
+         *  that module's resolved export surface. */
+        const resolveMember = (idx: number, sym: number, name: string): { mod: number; sym: number } | null => {
+            const bind = linked.binds.get(packRef(idx, sym));
+            if (bind === undefined || bind.kind !== 'namespace') return null;
+            const map = linked.exportMaps.get(bind.module);
+            if (map === undefined) return null;
+            const target = map.get(name);
+            if (target === undefined || target.kind !== 'found') return null;
+            return { mod: refMod(target.ref), sym: refSym(target.ref) };
+        };
         // consumer module idx → the producer modules whose SOURCE its AST now depends on.
-        const touched = inlineCrossModule(graph.modules, resolveImport);
+        const touched = inlineCrossModule(graph.modules, resolveImport, resolveMember);
         // Cross-module constant propagation (`passes/compress/cross-module-constants.ts`) is written
         // but NOT wired — see the roadmap. Being ungated, it would make almost every importer a cache
         // dependent; keeping it out means the only cross-module derived state in the system comes from
@@ -592,6 +610,28 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             // Neither corpus takes this branch (both run exactly one `analyze` per module), so
             // `tst/cross-module-inline-semantic.test.ts` exists to exercise it: a green gate proves
             // nothing about a path nothing walks.
+            // RE-RUN THE STRUCTURAL HALF OF THE OPTIMIZE TIER, because the splice just changed what
+            // it can see. scan runs the tier per module, before the graph exists; the cross-module
+            // splice lands after it. So a scratch buffer handed to an imported helper —
+            //
+            //   const _m = [0, 0, 0];            // module scratch, the house style for a hot path
+            //   /* @optimize */ f() { vec3.subtract(_m, a, b); return _m[0]; }
+            //
+            // — is still sitting under a CALL when SROA looks at it, which reads as "used as a whole
+            // object" and refuses the rewrite. Once the call is spliced the buffer is plain indexing
+            // and SROA can take it apart, but by then the tier is over and nothing runs again. That
+            // is the whole reason crashcat scalarized zero buffers while compilecat scalarized 442.
+            //
+            // The tier's own order, minus the two passes that have nothing new to look at: another
+            // `inlineFunctions` round would re-walk a module whose local calls are already inlined,
+            // and `unrollLoops` unrolls counted loops that the splice did not create. SROA onwards is
+            // where the new information is. `shapes` is empty here by necessity — the TYPE table is
+            // captured before `tsStrip`, during scan — so this round approves buffers by their
+            // LITERAL initialiser, which is what the house style writes.
+            if (scalarReplaceAggregates(mod.program, mod.semantic, mod.source)) {
+                flowInlineVariables(mod.program, mod.semantic, mod.source);
+                eliminateDeadStores(mod.program, mod.semantic, mod.source);
+            }
             if (compressMode !== false) {
                 const refreshed = runCompress(mod.program, mod.semantic, compressMode);
                 if (refreshed !== null) mod.semantic = refreshed;
