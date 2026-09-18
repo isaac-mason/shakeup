@@ -121,7 +121,7 @@ function blockFlattenable(block: Node): boolean {
 /** The taken branch of a constant `if`, expanded into a list of statements to splice in place of the
  *  `if`. Returns `null` when the `if` must be left alone (non-constant test, or a hoisting hazard in
  *  the dropped branch). An empty array means "delete the `if` entirely" (falsy test, no `else`). */
-function collapseIf(stmt: Node): Node[] | null {
+function collapseIf(stmt: Node): { kept: Node[]; dropped: Node | null } | null {
     if (stmt.type !== N.IfStatement) return null;
     const v = constTruthiness(stmt.data.test);
     if (v === -1) return null;
@@ -129,9 +129,13 @@ function collapseIf(stmt: Node): Node[] | null {
     const dropped = v === 1 ? stmt.data.alternate : stmt.data.consequent;
     // Bail if the branch we're about to delete hoists a `var`/`function` (would change scope).
     if (hasHoistedDecl(dropped)) return null;
-    if (taken === null) return []; // falsy test, no else → the whole `if` disappears.
-    if (taken.type === N.BlockStatement && blockFlattenable(taken)) return taken.data.body.slice();
-    return [taken];
+    // The untaken branch is REPORTED, not just skipped: it leaves the tree for good, so whatever it
+    // declared has to stop being a binding. Reference accounting does not cover that — a declaration
+    // is not a reference — and the caller cannot recover the branch from the result otherwise.
+    if (taken === null) return { kept: [], dropped }; // falsy test, no else → the whole `if` goes
+    if (taken.type === N.BlockStatement && blockFlattenable(taken))
+        return { kept: taken.data.body.slice(), dropped };
+    return { kept: [taken], dropped };
 }
 
 /** Rewrite one statement list in place: collapse constant `if`s (flattening safe blocks) and drop
@@ -143,10 +147,12 @@ function rewriteList(body: Node[], ctx: TransformCtx): boolean {
         const stmt = body[i];
         const collapsed = collapseIf(stmt);
         if (collapsed !== null) {
-            // `collapsed` are subtrees LIFTED OUT of `stmt`, so dropping `stmt` and adding each one
-            // back nets the survivors to zero and subtracts only the discarded branch.
+            // `kept` are subtrees LIFTED OUT of `stmt`, so dropping `stmt` and adding each one back
+            // nets the survivors to zero and subtracts only the discarded branch. Its BINDINGS need the
+            // same treatment, which reference accounting does not give them.
+            if (collapsed.dropped !== null) ctx.evictBindings(collapsed.dropped);
             ctx.dropRefs(stmt);
-            for (const s of collapsed) {
+            for (const s of collapsed.kept) {
                 ctx.addRefs(s);
                 out.push(s);
             }
@@ -205,9 +211,12 @@ export const deadCode: Visitor = {
         [N.IfStatement]: (n, ctx) => {
             const collapsed = collapseIf(n);
             if (collapsed === null) return;
-            if (collapsed.length === 1) ctx.replaceWith(collapsed[0]);
-            else if (collapsed.length === 0) ctx.replaceWith(create.EmptyStatement(n.start, n.end, 0));
-            else ctx.replaceWith(create.BlockStatement(n.start, n.end, 0, collapsed));
+            // The branch that did not survive is gone for good; evict what it declared.
+            if (collapsed.dropped !== null) ctx.evictBindings(collapsed.dropped);
+            const kept = collapsed.kept;
+            if (kept.length === 1) ctx.replaceWith(kept[0]);
+            else if (kept.length === 0) ctx.replaceWith(create.EmptyStatement(n.start, n.end, 0));
+            else ctx.replaceWith(create.BlockStatement(n.start, n.end, 0, kept));
         },
         // Ternary with a constant test → the taken branch (pure expression rewrite).
         [N.ConditionalExpression]: (n, ctx) => {
@@ -215,6 +224,8 @@ export const deadCode: Visitor = {
             const v = constTruthiness(d.test);
             if (v === -1) return;
             // `(1 ? a.b : 0)()` folds to `(0, a.b)()`, not `a.b()` — see `keepIndirectAccess`.
+            // The untaken branch is discarded; the test is a constant and declares nothing.
+            ctx.evictBindings((v === 1 ? d.alternate : d.consequent) as Node);
             ctx.replaceWith(keepIndirectAccess(v === 1 ? d.consequent : (d.alternate as Node), n, ctx.parent));
         },
     }),

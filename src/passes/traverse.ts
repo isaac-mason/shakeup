@@ -201,12 +201,24 @@ class Ctx {
      */
     retire(dropped: Node): void {
         this.dropRefs(dropped);
+        this.evictBindings(dropped);
+    }
+    /**
+     * Evict the bindings declared under `dropped`: their declarations are erased, so the table must
+     * stop listing them. References are NOT touched — use this where the caller has already accounted
+     * for them (`replaceWith` subtracts the old subtree and adds the replacement).
+     *
+     * oxc's `Scoping::remove_binding`, which its TypeScript transformer calls whenever it erases a
+     * declaration (`typescript/annotations.rs`, `typescript/enum.rs`). Closure answers the same
+     * question by invalidating instead — `NodeUtil.deleteNode` reports the change and the enclosing
+     * scope is rebuilt — which is the model this file deliberately does not use.
+     */
+    evictBindings(dropped: Node): void {
         walk(dropped, (n) => {
-            if (n.type === N.BindingIdentifier) {
-                const sym = (n as { sym: number }).sym;
-                const rec = sym > 0 ? this.semantic.symbols[sym] : undefined;
-                if (rec !== undefined) rec.scope = 0;
-            }
+            if (n.type !== N.BindingIdentifier) return undefined;
+            const sym = (n as { sym: number }).sym;
+            const rec = sym > 0 ? this.semantic.symbols[sym] : undefined;
+            if (rec !== undefined) rec.scope = 0;
             return undefined;
         });
     }
