@@ -715,13 +715,17 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // for `./bar`). The file arriving is `/src/bar.ts` or `/src/bar/index.ts`, not that id, so
         // nothing above reaches the importer: it would stay broken until its own next save. Re-apply
         // the importers of every missing node this change could satisfy; they re-resolve fresh.
+        // ids are compared without a leading slash: a host's change ids may carry none while the
+        // unresolvable id was joined with one.
+        const bare = id.replace(/^\/+/, '');
         for (const id0 of [...missing]) {
             const node = graph.get(id0);
             if (node === undefined || node.importers.size === 0) {
                 missing.delete(id0);
                 continue;
             }
-            if (id !== id0 && !id.startsWith(`${id0}.`) && !id.startsWith(`${id0}/`)) continue;
+            const bare0 = id0.replace(/^\/+/, '');
+            if (bare !== bare0 && !bare.startsWith(`${bare0}.`) && !bare.startsWith(`${bare0}/`)) continue;
             for (const importer of node.importers) if (!changed.includes(importer)) changed.push(importer);
         }
         const out: { env: string; update: HmrUpdate }[] = [];

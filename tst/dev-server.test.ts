@@ -309,6 +309,21 @@ describe('dev server — an import of a file that does not exist yet', () => {
         expect(applied.filter((id) => id === '/src/entry.ts')).toHaveLength(1);
     });
 
+    it('matches when the host names files without a leading slash', async () => {
+        // bongle's ids are fs-relative (`src/entry.ts`); the unresolvable id still gets a slash.
+        const files: Record<string, string> = { 'src/entry.ts': `import { bar } from './bar';\nexport const r = bar;` };
+        const { server } = setup(files);
+        const applied: string[] = [];
+        server.register({ name: 'e', applyEdit: async (id) => (applied.push(id), { type: 'update', boundaries: [] }) });
+        const first = await server.fetchModule('src/entry.ts');
+        const missingId = first.deps[0];
+        await server.fetchModule(missingId);
+        files['src/bar.ts'] = 'export const bar = 1;';
+        await server.handleChange('src/bar.ts');
+        expect(applied).toContain('src/entry.ts');
+        expect((await server.fetchModule('src/entry.ts')).deps).not.toContain(missingId);
+    });
+
     it('a directory index satisfies it too', async () => {
         const files: Record<string, string> = { '/src/entry.ts': `import { g } from './grid';\nexport const r = g;` };
         const { server } = setup(files);
