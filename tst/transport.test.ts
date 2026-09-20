@@ -36,6 +36,22 @@ describe('transport — environment over a frame bridge', () => {
         expect((await env.import('/entry.ts')).r).toBe(42);
     });
 
+    it('survives a JSON lane, where an absent argument arrives as null', async () => {
+        // a relay between machines JSON-encodes every frame: `[spec, importer, undefined]`
+        // lands as `[spec, importer, null]`, and null must read as "no extra".
+        const files = { '/entry.ts': `import { v } from './dep';\nexport const r: number = v * 2;`, '/dep.ts': `export const v = 21;` };
+        const fs: Fs = { read: (id) => files[id] ?? null, exists: (id) => id in files };
+        const server = createDevServer({ fs });
+        let toRemote!: (f: TransportFrame) => void;
+        let toServer!: (f: TransportFrame) => void;
+        const conduit = attachEnvironment(server, 'e', (f) => toRemote(JSON.parse(JSON.stringify(f))));
+        const bridge = createEnvironmentBridge((f) => toServer(JSON.parse(JSON.stringify(f))));
+        toRemote = bridge.handleFrame;
+        toServer = conduit.handleFrame;
+        const env = connectEnvironment(bridge, { name: 'e', createImportMeta: (id) => ({ url: id }) });
+        expect((await env.import('/entry.ts')).r).toBe(42);
+    });
+
     it('a dead conduit fails the call instead of hanging forever', async () => {
         // A port whose far side was terminated delivers no event — it just stops replying. Without
         // a timeout the promise never settles and the realm's import() waits forever, showing

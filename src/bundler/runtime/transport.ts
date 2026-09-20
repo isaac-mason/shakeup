@@ -35,11 +35,13 @@ export function attachEnvironment(
                             // entry resolved across the bridge still reaches plugins as
                             // `{isEntry: true, kind: 'entry'}`. Only the runner sends it, and only
                             // with those two JSON-safe fields; `custom` never crosses (a plugin's
-                            // `this.resolve` runs server-side).
+                            // `this.resolve` runs server-side). A JSON transport (a relay lane)
+                            // turns an absent third argument into `null`, which must read as absent
+                            // too: the server's default only fires for `undefined`.
                             await server.resolveId(
                                 frame.args[0] as string,
                                 frame.args[1] as string | null,
-                                frame.args[2] as ResolveIdExtra | undefined,
+                                (frame.args[2] as ResolveIdExtra | null | undefined) ?? undefined,
                             ),
                         );
                     else respond(frame.id, undefined, `unknown call: ${frame.call}`);
