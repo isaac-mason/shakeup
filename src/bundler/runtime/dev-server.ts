@@ -4,9 +4,9 @@ import type { SourceMap } from '../../util/sourcemap.ts';
 import type { Fs } from '../fs.ts';
 import { EMPTY_MODULE_ID } from '../node-resolve.ts';
 import {
-    compilePipeline,
     type CtxFor,
     type CustomPluginOptions,
+    compilePipeline,
     type ImportKind,
     type ModuleInfo,
     normalizePluginOptionSync,
@@ -258,6 +258,9 @@ export function createDevServer(options: DevServerOptions): DevServer {
     // (spec, importer) → resolution, cleared on any fs change (create/update can shift resolution).
     // Keeps boot from re-probing OPFS for the same specifiers across the graph.
     const resolveCache = new Map<string, ResolveResult>();
+    /** ids fetched and found to have no source: an import written before its file existed. Their
+     *  importers re-resolve when a file that could satisfy them appears (see handleChange). */
+    const missing = new Set<string>();
     const preTransform = options.preTransform !== false;
     const graph = new Map<string, ModuleNode>();
 
@@ -531,7 +534,11 @@ export function createDevServer(options: DevServerOptions): DevServer {
             (loaded === null || loaded === undefined ? null : typeof loaded === 'string' ? loaded : loaded.code) ??
             (await fs.read(id));
         perf.ioMs += performance.now() - tIo;
-        if (source === null) return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
+        if (source === null) {
+            missing.add(id);
+            return { code: '', deps: [], dynamicDeps: [], hmr: EMPTY_HMR, errors: [`${id}: not found`] };
+        }
+        missing.delete(id);
         // COMMONJS IS NOT A DEV-SERVER GOAL — the module runner evaluates ESM, and `module`/`exports`
         // do not exist there. shakeup's position (`llm/notes/cjs.md`) is that npm dependencies are
         // pre-seeded as ESM by an offline step rather than translated on the hot path.
@@ -704,6 +711,19 @@ export function createDevServer(options: DevServerOptions): DevServer {
         // the declaration is inert and a codegen plugin's input can change with nothing rebuilding.
         const declarers = watchedBy.get(id);
         const changed = declarers === undefined ? [id] : [id, ...declarers];
+        // A module that imported a file before it existed holds a dep node with no source (`/src/bar`
+        // for `./bar`). The file arriving is `/src/bar.ts` or `/src/bar/index.ts`, not that id, so
+        // nothing above reaches the importer: it would stay broken until its own next save. Re-apply
+        // the importers of every missing node this change could satisfy; they re-resolve fresh.
+        for (const id0 of [...missing]) {
+            const node = graph.get(id0);
+            if (node === undefined || node.importers.size === 0) {
+                missing.delete(id0);
+                continue;
+            }
+            if (id !== id0 && !id.startsWith(`${id0}.`) && !id.startsWith(`${id0}/`)) continue;
+            for (const importer of node.importers) if (!changed.includes(importer)) changed.push(importer);
+        }
         const out: { env: string; update: HmrUpdate }[] = [];
         for (const dep of changed) {
             if (dep !== id) invalidate(dep);

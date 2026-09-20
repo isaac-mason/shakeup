@@ -35,6 +35,10 @@ export type EnvironmentOptions = {
      *  thrown, so one bad handler can't withhold the update from the other
      *  boundaries in this env (or from the other realms this change fans to). */
     onHotError?: (err: unknown, ctx: { id: string; phase: 'accept' | 'dispose' | 'prune' }) => void;
+    /** a pushed edit could not be applied at all (its module imports a file that does not
+     *  exist yet). Reported rather than left as an unhandled rejection; the edit is retried
+     *  when the server pushes again (the file appearing re-applies its importers). */
+    onEditError?: (id: string, err: unknown) => void;
 };
 
 type EnvNode = {

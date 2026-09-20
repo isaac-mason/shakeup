@@ -132,6 +132,9 @@ export function createEnvironmentBridge(
     };
 }
 
+const defaultEditError = (id: string, err: unknown): void =>
+    console.error(`[hmr] the edit to ${id} could not be applied: ${err instanceof Error ? err.message : String(err)}`);
+
 export function connectEnvironment(
     bridge: EnvironmentBridge,
     options: Omit<EnvironmentOptions, 'fetchModule' | 'resolveId'>,
@@ -143,7 +146,11 @@ export function connectEnvironment(
     });
     bridge.onPush((payload) => {
         const changed = (payload as { changed?: string }).changed;
-        if (changed !== undefined) void env.applyEdit(changed);
+        if (changed !== undefined) {
+            // an edit that cannot be applied (an import of a file that does not exist) is reported,
+            // not left as an unhandled rejection in the realm.
+            env.applyEdit(changed).catch((e) => (options.onEditError ?? defaultEditError)(changed, e));
+        }
     });
     return env;
 }

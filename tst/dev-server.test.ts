@@ -289,6 +289,39 @@ describe('dev server — cache + invalidation', () => {
     });
 });
 
+describe('dev server — an import of a file that does not exist yet', () => {
+    it('re-applies the importer once the file appears', async () => {
+        const files: Record<string, string> = { '/src/entry.ts': `import { bar } from './bar';\nexport const r = bar;` };
+        const { server } = setup(files);
+        const applied: string[] = [];
+        server.register({ name: 'e', applyEdit: async (id) => (applied.push(id), { type: 'update', boundaries: [] }) });
+        // the unresolved import stays a bare dep id, and fetching it says so
+        expect((await server.fetchModule('/src/entry.ts')).deps).toContain('/src/bar');
+        expect((await server.fetchModule('/src/bar')).errors.join()).toMatch(/not found/);
+        // the file arrives under a different id than the dep node's: the importer must re-resolve
+        files['/src/bar.ts'] = 'export const bar = 1;';
+        await server.handleChange('/src/bar.ts');
+        expect(applied).toContain('/src/entry.ts');
+        expect((await server.fetchModule('/src/entry.ts')).deps).toContain('/src/bar.ts');
+        // and an unrelated change afterwards does not keep re-applying it
+        files['/src/other.ts'] = 'export const o = 1;';
+        await server.handleChange('/src/other.ts');
+        expect(applied.filter((id) => id === '/src/entry.ts')).toHaveLength(1);
+    });
+
+    it('a directory index satisfies it too', async () => {
+        const files: Record<string, string> = { '/src/entry.ts': `import { g } from './grid';\nexport const r = g;` };
+        const { server } = setup(files);
+        const applied: string[] = [];
+        server.register({ name: 'e', applyEdit: async (id) => (applied.push(id), { type: 'update', boundaries: [] }) });
+        await server.fetchModule('/src/entry.ts');
+        await server.fetchModule('/src/grid');
+        files['/src/grid/index.ts'] = 'export const g = 1;';
+        await server.handleChange('/src/grid/index.ts');
+        expect(applied).toContain('/src/entry.ts');
+    });
+});
+
 describe('dev server — watch (change source)', () => {
     it('batches + de-dups changed paths and drives handleChange', async () => {
         const { createDevServer } = await import('../src/bundler/runtime/dev-server.ts');
