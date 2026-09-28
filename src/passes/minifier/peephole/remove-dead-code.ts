@@ -1,7 +1,7 @@
 // Port of oxc_minifier/src/peephole/remove_dead_code.rs.
 
 import { evaluateValueToBoolean, numericLiteralValue } from '../../../analysis/const-eval.ts';
-import { mayHaveSideEffects } from '../../../analysis/side-effects.ts';
+import { mayHaveSideEffects, someMayHaveSideEffects } from '../../../analysis/side-effects.ts';
 import { create, type DataOf, N, type Node, node } from '../../../ast/index.ts';
 import {
     createKeepVar,
@@ -48,7 +48,7 @@ export function keepTrackOfPureFunctions(ctx: DceCtx, statement: Node): void {
                 statement.data.params,
                 statement.data.async,
                 statement.data.generator,
-                statements.some((bodyStatement) => mayHaveSideEffects(bodyStatement, ctx)),
+                someMayHaveSideEffects(statements, ctx),
                 statements.length === 0,
             );
             return;
@@ -61,7 +61,7 @@ export function keepTrackOfPureFunctions(ctx: DceCtx, statement: Node): void {
                     const body = init.data.body as Node;
                     const isBlock = body.type === N.BlockStatement;
                     const bodyHasSideEffects = isBlock
-                        ? (body.data.body as Node[]).some((bodyStatement) => mayHaveSideEffects(bodyStatement, ctx))
+                        ? someMayHaveSideEffects(body.data.body as Node[], ctx)
                         : mayHaveSideEffects(body, ctx);
                     const bodyIsEmpty = isBlock && (body.data.body as Node[]).length === 0;
                     trySavePureFunction(ctx, id, init.data.params, init.data.async, false, bodyHasSideEffects, bodyIsEmpty);
@@ -75,7 +75,7 @@ export function keepTrackOfPureFunctions(ctx: DceCtx, statement: Node): void {
                         init.data.params,
                         init.data.async,
                         init.data.generator,
-                        statements.some((bodyStatement) => mayHaveSideEffects(bodyStatement, ctx)),
+                        someMayHaveSideEffects(statements, ctx),
                         statements.length === 0,
                     );
                 }

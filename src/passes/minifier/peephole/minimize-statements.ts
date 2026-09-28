@@ -319,6 +319,11 @@ function joinSequence(ctx: DceCtx, aSlot: Node, bSlot: Node): Node {
 const jumpStatementsLookTheSame = (left: Node, right: Node): boolean =>
     isJumpStatement(left) && isJumpStatement(right) && contentEq(left, right);
 
+function someDeclaratorIsRemovable(ctx: DceCtx, declarations: Node[], kind: DataOf<'VariableDeclaration'>['kind']): boolean {
+    for (const declarator of declarations) if (shouldRemoveUnusedDeclarator(ctx, declarator, kind)) return true;
+    return false;
+}
+
 /** Merge with the previous declaration of the same kind, remove unused declarators, and keep the
  *  initializers that have side effects. */
 function handleVariableDeclaration(ctx: DceCtx, varDecl: Node, result: Node[]): void {
@@ -331,10 +336,7 @@ function handleVariableDeclaration(ctx: DceCtx, varDecl: Node, result: Node[]): 
     substituteSingleUseSymbolWithinDeclaration(ctx, data.kind, data.declarations);
 
     // With `join_vars` off and no unused declarators, keep the declaration as it is.
-    if (
-        !ctx.state.options.joinVars &&
-        data.declarations.every((declarator) => !shouldRemoveUnusedDeclarator(ctx, declarator, data.kind))
-    ) {
+    if (!ctx.state.options.joinVars && !someDeclaratorIsRemovable(ctx, data.declarations, data.kind)) {
         result.push(varDecl);
         return;
     }
@@ -1051,9 +1053,6 @@ function substituteSingleUseSymbolInExpression(
     replacement: Node,
     replacementHasSideEffect: boolean,
 ): boolean | null {
-    const recurse = (expr: Node): boolean | null =>
-        substituteSingleUseSymbolInExpression(ctx, expr, searchFor, replacement, replacementHasSideEffect);
-
     switch (targetExpr.type) {
         case N.IdentifierReference: {
             if (targetExpr.name === searchFor) {
@@ -1071,21 +1070,33 @@ function substituteSingleUseSymbolInExpression(
             break;
         }
         case N.AwaitExpression: {
-            const changed = recurse(targetExpr.data.argument);
+            const changed = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.argument,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             break;
         }
         case N.YieldExpression: {
             const argument = targetExpr.data.argument as Node | null;
             if (argument !== null) {
-                const changed = recurse(argument);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    argument,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
         }
         case N.ImportExpression: {
             const source = targetExpr.data.source as Node;
-            const changed = recurse(source);
+            const changed = substituteSingleUseSymbolInExpression(ctx, source, searchFor, replacement, replacementHasSideEffect);
             if (changed !== null) return changed;
             // `import()`'s side effects are asynchronous, so they cannot modify the replacement value.
             if (!replacementHasSideEffect && !mayHaveSideEffects(source, ctx)) return null;
@@ -1093,26 +1104,56 @@ function substituteSingleUseSymbolInExpression(
         }
         case N.UnaryExpression: {
             if (targetExpr.data.operator !== 'delete') {
-                const changed = recurse(targetExpr.data.argument);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.argument,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
         }
         case N.StaticMemberExpression: {
-            const changed = recurse(targetExpr.data.object);
+            const changed = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.object,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             break;
         }
         case N.BinaryExpression: {
             // `#x in y` is oxc's `PrivateInExpression`, which only substitutes into its right side.
             if (targetExpr.data.left.type === N.PrivateIdentifier) {
-                const changed = recurse(targetExpr.data.right);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.right,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
                 break;
             }
-            const leftChanged = recurse(targetExpr.data.left);
+            const leftChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.left,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (leftChanged !== null) return leftChanged;
-            const rightChanged = recurse(targetExpr.data.right);
+            const rightChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.right,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (rightChanged !== null) return rightChanged;
             break;
         }
@@ -1145,29 +1186,65 @@ function substituteSingleUseSymbolInExpression(
                 if (mayDependOnSideEffect) return false;
             }
             // It is safe to substitute past the left operand into the right operand.
-            const changed = recurse(targetExpr.data.right);
+            const changed = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.right,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             break;
         }
         case N.LogicalExpression: {
-            const leftChanged = recurse(targetExpr.data.left);
+            const leftChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.left,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (leftChanged !== null) return leftChanged;
             // Only a side-effect-free value may move into a conditionally executed branch.
             if (!replacementHasSideEffect) {
-                const rightChanged = recurse(targetExpr.data.right);
+                const rightChanged = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.right,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (rightChanged !== null) return rightChanged;
             }
             break;
         }
         case N.ConditionalExpression: {
-            const testChanged = recurse(targetExpr.data.test);
+            const testChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.test,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (testChanged !== null) return testChanged;
             // Only a side-effect-free value may move into a conditionally executed branch. Both
             // branches may evaluate, so try either; side effects in one don't block the other.
             if (!replacementHasSideEffect) {
-                const consequentChanged = recurse(targetExpr.data.consequent);
+                const consequentChanged = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.consequent,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (consequentChanged === true) return consequentChanged;
-                const alternateChanged = recurse(targetExpr.data.alternate);
+                const alternateChanged = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.alternate,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (alternateChanged === true) return alternateChanged;
                 // Side effects in either branch stop the substitution after the branches merge.
                 if (consequentChanged === false || alternateChanged === false) return false;
@@ -1175,28 +1252,58 @@ function substituteSingleUseSymbolInExpression(
             break;
         }
         case N.ComputedMemberExpression: {
-            const objectChanged = recurse(targetExpr.data.object);
+            const objectChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.object,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (objectChanged !== null) return objectChanged;
             // Only a side-effect-free value may move into a conditionally executed branch.
             if (!replacementHasSideEffect || !targetExpr.data.optional) {
-                const expressionChanged = recurse(targetExpr.data.expression);
+                const expressionChanged = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    targetExpr.data.expression,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (expressionChanged !== null) return expressionChanged;
             }
             break;
         }
         case N.PrivateFieldExpression: {
-            const changed = recurse(targetExpr.data.object);
+            const changed = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.object,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             break;
         }
         case N.CallExpression: {
             // Don't substitute something into a call target that could change `this`.
             if (replacementChangesThis(replacement, targetExpr.data.callee)) break;
-            const calleeChanged = recurse(targetExpr.data.callee);
+            const calleeChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.callee,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (calleeChanged !== null) return calleeChanged;
             // Only a side-effect-free value may move into a conditionally executed branch.
             if (!replacementHasSideEffect || !targetExpr.data.optional) {
-                const changed = substituteIntoArguments(targetExpr.data.arguments, recurse);
+                const changed = substituteIntoArguments(
+                    ctx,
+                    targetExpr.data.arguments,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
@@ -1204,9 +1311,21 @@ function substituteSingleUseSymbolInExpression(
         case N.NewExpression: {
             // Don't substitute something into a call target that could change `this`.
             if (replacementChangesThis(replacement, targetExpr.data.callee)) break;
-            const calleeChanged = recurse(targetExpr.data.callee);
+            const calleeChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.callee,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (calleeChanged !== null) return calleeChanged;
-            const changed = substituteIntoArguments(targetExpr.data.arguments, recurse);
+            const changed = substituteIntoArguments(
+                ctx,
+                targetExpr.data.arguments,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             break;
         }
@@ -1214,12 +1333,24 @@ function substituteSingleUseSymbolInExpression(
             for (const element of targetExpr.data.elements as (Node | null)[]) {
                 if (element === null) continue;
                 if (element.type === N.SpreadElement) {
-                    const changed = recurse(element.data.argument);
+                    const changed = substituteSingleUseSymbolInExpression(
+                        ctx,
+                        element.data.argument,
+                        searchFor,
+                        replacement,
+                        replacementHasSideEffect,
+                    );
                     if (changed !== null) return changed;
                     // A spread element may have side effects.
                     return false;
                 }
-                const changed = recurse(element);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    element,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
@@ -1229,12 +1360,24 @@ function substituteSingleUseSymbolInExpression(
                 if (property.type === N.ObjectProperty) {
                     const propertyData = property.data as DataOf<'ObjectProperty'>;
                     if (propertyData.computed) {
-                        const changed = recurse(propertyData.key);
+                        const changed = substituteSingleUseSymbolInExpression(
+                            ctx,
+                            propertyData.key,
+                            searchFor,
+                            replacement,
+                            replacementHasSideEffect,
+                        );
                         if (changed !== null) return changed;
                         // Computed keys have side effects.
                         return false;
                     }
-                    const changed = recurse(propertyData.value);
+                    const changed = substituteSingleUseSymbolInExpression(
+                        ctx,
+                        propertyData.value,
+                        searchFor,
+                        replacement,
+                        replacementHasSideEffect,
+                    );
                     if (changed !== null) {
                         const key = propertyData.key;
                         if (propertyData.shorthand && key.type === N.IdentifierName && key.name === '__proto__') {
@@ -1246,7 +1389,13 @@ function substituteSingleUseSymbolInExpression(
                         return changed;
                     }
                 } else {
-                    const changed = recurse((property.data as DataOf<'SpreadElement'>).argument);
+                    const changed = substituteSingleUseSymbolInExpression(
+                        ctx,
+                        (property.data as DataOf<'SpreadElement'>).argument,
+                        searchFor,
+                        replacement,
+                        replacementHasSideEffect,
+                    );
                     if (changed !== null) return changed;
                     // Spread properties have side effects.
                     return false;
@@ -1255,26 +1404,56 @@ function substituteSingleUseSymbolInExpression(
             break;
         }
         case N.TaggedTemplateExpression: {
-            const tagChanged = recurse(targetExpr.data.tag);
+            const tagChanged = substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.tag,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (tagChanged !== null) return tagChanged;
             for (const element of (targetExpr.data.quasi.data as DataOf<'TemplateLiteral'>).expressions) {
-                const changed = recurse(element);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    element,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
         }
         case N.TemplateLiteral: {
             for (const element of targetExpr.data.expressions as Node[]) {
-                const changed = recurse(element);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    element,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
         }
         case N.ChainExpression:
-            return recurse(targetExpr.data.expression);
+            return substituteSingleUseSymbolInExpression(
+                ctx,
+                targetExpr.data.expression,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
         case N.SequenceExpression: {
             for (const item of targetExpr.data.expressions as Node[]) {
-                const changed = recurse(item);
+                const changed = substituteSingleUseSymbolInExpression(
+                    ctx,
+                    item,
+                    searchFor,
+                    replacement,
+                    replacementHasSideEffect,
+                );
                 if (changed !== null) return changed;
             }
             break;
@@ -1300,15 +1479,27 @@ const isMemberExpression = (expr: Node): boolean =>
 const replacementChangesThis = (replacement: Node, callee: Node): boolean =>
     (isMemberExpression(replacement) || replacement.type === N.ChainExpression) && callee.type === N.IdentifierReference;
 
-function substituteIntoArguments(argumentList: Node[], recurse: (expr: Node) => boolean | null): boolean | null {
+function substituteIntoArguments(
+    ctx: DceCtx,
+    argumentList: Node[],
+    searchFor: string,
+    replacement: Node,
+    replacementHasSideEffect: boolean,
+): boolean | null {
     for (const argument of argumentList) {
         if (argument.type === N.SpreadElement) {
-            const changed = recurse(argument.data.argument);
+            const changed = substituteSingleUseSymbolInExpression(
+                ctx,
+                argument.data.argument,
+                searchFor,
+                replacement,
+                replacementHasSideEffect,
+            );
             if (changed !== null) return changed;
             // A spread element may have side effects.
             return false;
         }
-        const changed = recurse(argument);
+        const changed = substituteSingleUseSymbolInExpression(ctx, argument, searchFor, replacement, replacementHasSideEffect);
         if (changed !== null) return changed;
     }
     return null;

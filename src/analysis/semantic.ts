@@ -1,4 +1,4 @@
-import { CHILD_FIELDS, isIdentifier, N, type Node, walkChildren } from '../ast/index.ts';
+import { CHILD_FIELDS, isIdentifier, N, type Node, type NodeOf, walkChildren } from '../ast/index.ts';
 import { enumeration } from '../util/enumeration.ts';
 import {
     type CheckError,
@@ -66,8 +66,7 @@ export const SCOPE_UNIQUE_PARAMS = 1 << 5;
 /** The kind of a scope, with the flag bits masked off. */
 export const scopeKind = (flags: number): number => flags & SCOPE_KIND_MASK;
 /** Is this scope strict-mode code? oxc's `SemanticBuilder::strict_mode` (`builder.rs:529`). */
-export const isStrictScope = (sem: Semantic, scope: number): boolean =>
-    (sem.scopes[scope].flags & SCOPE_STRICT) !== 0;
+export const isStrictScope = (sem: Semantic, scope: number): boolean => (sem.scopes[scope].flags & SCOPE_STRICT) !== 0;
 export const hasUniqueParams = (sem: Semantic, scope: number): boolean => (sem.scopes[scope].flags & SCOPE_UNIQUE_PARAMS) !== 0;
 
 /** Does a statement list open with a `"use strict"` directive?
@@ -1176,7 +1175,7 @@ function visitType(state: AnalyseState, node: Node | null): void {
             visitType(state, node.data.typeArguments);
             return;
         case N.TSMappedType:
-            walkChildren(node, (c) => visitType(state, c));
+            descendVisit(state, node, visitType);
             return;
         case N.TSPropertySignature:
             if (node.data.computed) visit(state, node.data.key);
@@ -1184,7 +1183,7 @@ function visitType(state: AnalyseState, node: Node | null): void {
             return;
     }
     if (isIdentifier(node.type)) return;
-    walkChildren(node, (c) => visitType(state, c));
+    descendVisit(state, node, visitType);
 }
 
 /** pattern in value context: the caller already declared the bindings; here collect refs in
@@ -1451,6 +1450,298 @@ const fnFlags = (d: { async: boolean; generator: boolean }): number => SYM.FUNCT
 const isDecl = (n: Node | null): boolean =>
     n !== null && (n.type === N.FunctionDeclaration || n.type === N.ClassDeclaration || n.type === N.LabeledStatement);
 
+function visitFunctionDeclaration(state: AnalyseState, node: NodeOf<'FunctionDeclaration'>): void {
+    // oxc `visit_function` (builder.rs:2028-2050): a function DECLARATION binds its name in the
+    // enclosing (hoist) scope BEFORE `enter_scope`, but the identifier NODE is visited INSIDE the
+    // function scope — "where the symbol is bound" and "where the identifier node lives" are
+    // separate. `hoistTarget` is therefore computed on the OUTER scope and passed in explicitly,
+    // while the `declare` call itself happens inside. `FunctionExpression` below already had
+    // this shape; only the declaration case attributed the id node to the enclosing scope, which
+    // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
+    // WHERE a function declaration binds, ported from oxc's `Function::bind`
+    // (`binder.rs:138-201`) rather than reconstructed. oxc binds it in the CURRENT scope and
+    // then, ONLY for Annex B B.3.3, moves the binding to the enclosing var scope:
+    //
+    //     is_declaration && !async && !generator && !is_typescript()
+    //       && !scope_flags.is_var() && !scope_flags.is_strict_mode()
+    //       && !scope_has_binding(var_scope, name)
+    //
+    // We used to hoist EVERY block function to the var scope, which over-exposed the ones
+    // Annex B excludes: node gives a ReferenceError for `{ async function f(){} } f()` and for
+    // the same shape under `"use strict"`, while we resolved `f` to the block's function. That
+    // is a real mis-resolution, not only a layout difference — a later `f()` meaning a GLOBAL
+    // could bind to the local and be renamed with it.
+    //
+    // The last clause matters too: with the var scope already taken,
+    // `{ function f(){} function f(){} }` leaves the second one in the block, so the two are
+    // distinct bindings and Annex B's tolerance falls out instead of being special-cased.
+    const appear = state.scope;
+    const hoist = hoistTarget(state);
+    const fnData = node.data;
+    // TWO STEPS, in oxc's order. The declaration binds in the scope it is WRITTEN in, which is
+    // what runs the redeclaration check there, and only then does Annex B move the binding to
+    // the var scope. Choosing the destination up front instead skipped the check against the
+    // block: `{ async function f(){} function f(){} }` went unreported, because the async one
+    // sits in the block while the plain one had already been sent to the var scope.
+    const annexBEligible =
+        appear !== hoist && !state.sem.isTs && !fnData.async && !fnData.generator && !isStrictScope(state.sem, appear);
+    const methodParams = state.uniqueParams;
+    state.uniqueParams = false;
+    const methodCtx = state.methodCtx;
+    state.methodCtx = CTX_NONE;
+    // Consumed here so it cannot reach a declaration nested inside this one's body.
+    const stmtPos = state.stmtPos;
+    state.stmtPos = STMT_POS_NONE;
+    declareInScope(state, SCOPE.FUNCTION, node, () => {
+        seedFunctionStrict(state, node.data.body);
+        const id = node.data.id;
+        if (id !== null) {
+            const sym = declare(state, id, fnFlags(node.data), NS_VALUE, appear, stmtPos === STMT_POS_IF);
+            if (annexBEligible) annexBMove(state, sym, appear, hoist, id.name);
+        }
+        // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
+        // setting it around the body alone rejected four valid test262 programs.
+        const outerCtx = state.posCtx;
+        state.posCtx = methodCtx;
+        const paramMark = state.pendNode.length;
+        declareTypeParams(state, node.data.typeParameters);
+        declareCollectParams(state, node.data.params, methodParams);
+        visitType(state, node.data.returnType);
+        resolveEarly(state, paramMark);
+        visitFunctionBody(state, node.data.body);
+        state.posCtx = outerCtx;
+    });
+    return;
+}
+
+function visitFunctionExpression(state: AnalyseState, node: NodeOf<'FunctionExpression'>): void {
+    const methodParams = state.uniqueParams;
+    state.uniqueParams = false;
+    const methodCtx = state.methodCtx;
+    state.methodCtx = CTX_NONE;
+    declareInScope(state, SCOPE.FUNCTION, node, () => {
+        seedFunctionStrict(state, node.data.body);
+        const id = node.data.id;
+        if (id !== null) declare(state, id, SYM.FUNCTION | SYM.FN_EXPR_NAME, NS_VALUE, state.scope);
+        // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
+        // setting it around the body alone rejected four valid test262 programs.
+        const outerCtx = state.posCtx;
+        state.posCtx = methodCtx;
+        const paramMark = state.pendNode.length;
+        declareTypeParams(state, node.data.typeParameters);
+        declareCollectParams(state, node.data.params, methodParams);
+        visitType(state, node.data.returnType);
+        resolveEarly(state, paramMark);
+        visitFunctionBody(state, node.data.body);
+        state.posCtx = outerCtx;
+    });
+    return;
+}
+
+function visitArrowFunctionExpression(state: AnalyseState, node: NodeOf<'ArrowFunctionExpression'>): void {
+    declareInScope(state, SCOPE.FUNCTION, node, () => {
+        seedFunctionStrict(state, node.data.body);
+        declareTypeParams(state, node.data.typeParameters);
+        // An arrow's parameters are `UniqueFormalParameters` in every mode.
+        const paramMark = state.pendNode.length;
+        declareCollectParams(state, node.data.params, true);
+        visitType(state, node.data.returnType);
+        resolveEarly(state, paramMark);
+        visitFunctionBody(state, node.data.body);
+    });
+    return;
+}
+
+function visitClassDeclaration(state: AnalyseState, node: NodeOf<'ClassDeclaration'>): void {
+    // oxc `visit_class` (builder.rs:959-984) enters the class scope FIRST, then visits the `id`
+    // and the heritage INSIDE it. The BINDING still targets the enclosing scope for a class
+    // DECLARATION — oxc keeps "where the symbol is bound" separate from "where the identifier
+    // node lives", which is why `declare` takes an explicit `targetScope`.
+    //
+    // We used to visit both before entering, so `analyze` attributed them to the enclosing
+    // scope while `traverse` (which reads `data.scopeId`) attributed them to the class scope.
+    // That disagreement is spec-visible: `class A extends A {}` is a TDZ error precisely
+    // because the heritage is evaluated inside the class scope.
+    const outer = state.scope;
+    declareInScope(state, SCOPE.CLASS, node, () => {
+        const id = node.data.id;
+        if (id !== null) declareDualNs(state, id, SYM.CLASS | SYM.TYPE, outer);
+        visit(state, node.data.superClass);
+        declareTypeParams(state, node.data.typeParameters);
+        for (const h of node.data.implements) {
+            if (h.type !== N.TSClassImplements) continue;
+            collectEntityName(state, h.data.expression, NS_TYPE);
+            visitType(state, h.data.typeArguments);
+        }
+        visitType(state, node.data.superTypeArguments);
+        const outerPrivates = state.privates;
+        if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
+        const outerDerived = state.classDerived;
+        state.classDerived = node.data.superClass !== null;
+        for (const m of node.data.body) visit(state, m);
+        state.classDerived = outerDerived;
+        state.privates = outerPrivates;
+    });
+    return;
+}
+
+function visitClassExpression(state: AnalyseState, node: NodeOf<'ClassExpression'>): void {
+    declareInScope(state, SCOPE.CLASS, node, () => {
+        // A class EXPRESSION binds its own name INSIDE the class scope (oxc builder.rs:962-964,
+        // "we need to bind class expressions in the class scope before visiting the identifier").
+        const id = node.data.id;
+        if (id !== null) declare(state, id, SYM.CLASS, NS_VALUE, state.scope);
+        visit(state, node.data.superClass);
+        declareTypeParams(state, node.data.typeParameters);
+        for (const h of node.data.implements) {
+            if (h.type !== N.TSClassImplements) continue;
+            collectEntityName(state, h.data.expression, NS_TYPE);
+            visitType(state, h.data.typeArguments);
+        }
+        visitType(state, node.data.superTypeArguments);
+        const outerPrivates = state.privates;
+        if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
+        const outerDerived = state.classDerived;
+        state.classDerived = node.data.superClass !== null;
+        for (const m of node.data.body) visit(state, m);
+        state.classDerived = outerDerived;
+        state.privates = outerPrivates;
+    });
+    return;
+}
+
+function visitStaticBlock(state: AnalyseState, node: NodeOf<'StaticBlock'>): void {
+    // A class static block is a jump boundary exactly like a function body, and it does not go
+    // through `visitFunctionBody`, so it resets here. This is the arm whose absence in the old
+    // `staticBlockDepth` took harmful from 5 to 26 while the PASS count went UP (`1f03586`).
+    declareInScope(state, SCOPE.STATIC_BLOCK, node, () => {
+        const b = state.brk,
+            c = state.cont,
+            l = state.labels;
+        state.brk = false;
+        state.cont = false;
+        state.labels = NO_LABELS;
+        // `class A { static { super.x; } }` is legal; `super()` is not.
+        // `arguments` is banned here too, with its OWN message rather than the field one.
+        const outerCtx = state.posCtx;
+        state.posCtx = CTX_SUPER_PROP | CTX_STATIC_BLOCK;
+        for (const s of node.data.body) visit(state, s);
+        state.posCtx = outerCtx;
+        state.brk = b;
+        state.cont = c;
+        state.labels = l;
+    });
+    return;
+}
+
+function visitForStatement(state: AnalyseState, node: NodeOf<'ForStatement'>): void {
+    declareInScope(state, SCOPE.FOR, node, () => {
+        const b = state.brk,
+            c = state.cont;
+        state.brk = true;
+        state.cont = true;
+        visit(state, node.data.init);
+        visit(state, node.data.test);
+        visit(state, node.data.update);
+        state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
+        visit(state, node.data.body);
+        state.stmtPos = STMT_POS_NONE;
+        state.brk = b;
+        state.cont = c;
+    });
+    return;
+}
+
+function visitForInOfStatement(state: AnalyseState, node: NodeOf<'ForInStatement'> | NodeOf<'ForOfStatement'>): void {
+    declareInScope(state, SCOPE.FOR, node, () => {
+        const b = state.brk,
+            c = state.cont;
+        state.brk = true;
+        state.cont = true;
+        // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
+        if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
+        else {
+            // An assignment target, so the strict `eval`/`arguments` rule applies to it —
+            // `for ([eval] of []) ;` is an error. `checkEnter` cannot see this: the head is
+            // not an AssignmentExpression, it is a bare pattern.
+            if (state.check) checkAssignTarget(state.sem, node.data.left, state.scope, state.sem.errors);
+            collectTarget(state, node.data.left);
+        }
+        visit(state, node.data.right);
+        state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
+        visit(state, node.data.body);
+        state.stmtPos = STMT_POS_NONE;
+        state.brk = b;
+        state.cont = c;
+    });
+    return;
+    // `while`/`do` open no scope, so they had no arm and fell through to the generated descent.
+    // They still make `break` and `continue` legal, so the checker needs them bracketed.
+}
+
+function visitSwitchStatement(state: AnalyseState, node: NodeOf<'SwitchStatement'>): void {
+    // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
+    const b = state.brk;
+    state.brk = true;
+    // The DISCRIMINANT is evaluated in the ENCLOSING scope. oxc's `visit_switch_statement`
+    // makes the order explicit: `visit_expression(&stmt.discriminant)` and only then
+    // `enter_scope(ScopeFlags::empty(), &stmt.scope_id)`. Visiting it inside the switch's
+    // scope let `switch (foo)` bind to a `const foo` declared in one of the cases —
+    // `switch (foo) { case 1: const foo = 2; … }` compiled to `switch (2)`, so the case
+    // never matched. rollupsuite's `switch-scope`.
+    visit(state, node.data.discriminant);
+    declareInScope(state, SCOPE.SWITCH, node, () => {
+        for (const c of node.data.cases) visit(state, c);
+    });
+    state.brk = b;
+    return;
+}
+
+function visitCatchClause(state: AnalyseState, node: NodeOf<'CatchClause'>): void {
+    declareInScope(state, SCOPE.CATCH, node, () => {
+        // A DESTRUCTURING catch parameter is flagged, because Annex B's `var` exemption
+        // below applies only to the `BindingIdentifier` form. See {@link SYM.CATCH_PATTERN}.
+        const param = node.data.param as Node | null;
+        const catchFlags = param !== null && param.type !== N.BindingIdentifier ? SYM.CATCH | SYM.CATCH_PATTERN : SYM.CATCH;
+        declarePattern(state, node.data.param, catchFlags, state.scope);
+        collectPattern(state, node.data.param);
+        visit(state, node.data.body);
+    });
+    return;
+}
+
+function visitTSInterfaceDeclaration(state: AnalyseState, node: NodeOf<'TSInterfaceDeclaration'>): void {
+    declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
+    declareInScope(state, SCOPE.TYPE, node, () => {
+        declareTypeParams(state, node.data.typeParameters);
+        for (const h of node.data.extends) {
+            if (h.type !== N.TSInterfaceHeritage) continue;
+            collectEntityName(state, h.data.expression, NS_TYPE);
+            visitType(state, h.data.typeArguments);
+        }
+        for (const m of node.data.body) visitType(state, m);
+    });
+    return;
+}
+
+function visitTSTypeAliasDeclaration(state: AnalyseState, node: NodeOf<'TSTypeAliasDeclaration'>): void {
+    declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
+    declareInScope(state, SCOPE.TYPE, node, () => {
+        declareTypeParams(state, node.data.typeParameters);
+        visitType(state, node.data.typeAnnotation);
+    });
+    return;
+}
+
+function visitTSModuleDeclaration(state: AnalyseState, node: NodeOf<'TSModuleDeclaration'>): void {
+    const id = node.data.id;
+    if (id.type === N.BindingIdentifier) declare(state, id, SYM.NAMESPACE, NS_VALUE, state.scope);
+    declareInScope(state, SCOPE.NAMESPACE, node, () => {
+        for (const s of node.data.body) visit(state, s);
+    });
+    return;
+}
+
 function visit(state: AnalyseState, node: Node | null): void {
     if (node === null) return;
     // oxc's `checker::check(kind, self)` in `SemanticBuilder::leave_node`. One branch per node when
@@ -1548,158 +1839,20 @@ function visit(state: AnalyseState, node: Node | null): void {
             }
             return;
         }
-        case N.FunctionDeclaration: {
-            // oxc `visit_function` (builder.rs:2028-2050): a function DECLARATION binds its name in the
-            // enclosing (hoist) scope BEFORE `enter_scope`, but the identifier NODE is visited INSIDE the
-            // function scope — "where the symbol is bound" and "where the identifier node lives" are
-            // separate. `hoistTarget` is therefore computed on the OUTER scope and passed in explicitly,
-            // while the `declare` call itself happens inside. `FunctionExpression` below already had
-            // this shape; only the declaration case attributed the id node to the enclosing scope, which
-            // is what made `analyze` disagree with `traverse` (which reads `data.scopeId`).
-            // WHERE a function declaration binds, ported from oxc's `Function::bind`
-            // (`binder.rs:138-201`) rather than reconstructed. oxc binds it in the CURRENT scope and
-            // then, ONLY for Annex B B.3.3, moves the binding to the enclosing var scope:
-            //
-            //     is_declaration && !async && !generator && !is_typescript()
-            //       && !scope_flags.is_var() && !scope_flags.is_strict_mode()
-            //       && !scope_has_binding(var_scope, name)
-            //
-            // We used to hoist EVERY block function to the var scope, which over-exposed the ones
-            // Annex B excludes: node gives a ReferenceError for `{ async function f(){} } f()` and for
-            // the same shape under `"use strict"`, while we resolved `f` to the block's function. That
-            // is a real mis-resolution, not only a layout difference — a later `f()` meaning a GLOBAL
-            // could bind to the local and be renamed with it.
-            //
-            // The last clause matters too: with the var scope already taken,
-            // `{ function f(){} function f(){} }` leaves the second one in the block, so the two are
-            // distinct bindings and Annex B's tolerance falls out instead of being special-cased.
-            const appear = state.scope;
-            const hoist = hoistTarget(state);
-            const fnData = node.data;
-            // TWO STEPS, in oxc's order. The declaration binds in the scope it is WRITTEN in, which is
-            // what runs the redeclaration check there, and only then does Annex B move the binding to
-            // the var scope. Choosing the destination up front instead skipped the check against the
-            // block: `{ async function f(){} function f(){} }` went unreported, because the async one
-            // sits in the block while the plain one had already been sent to the var scope.
-            const annexBEligible =
-                appear !== hoist && !state.sem.isTs && !fnData.async && !fnData.generator && !isStrictScope(state.sem, appear);
-            const methodParams = state.uniqueParams;
-            state.uniqueParams = false;
-            const methodCtx = state.methodCtx;
-            state.methodCtx = CTX_NONE;
-            // Consumed here so it cannot reach a declaration nested inside this one's body.
-            const stmtPos = state.stmtPos;
-            state.stmtPos = STMT_POS_NONE;
-            declareInScope(state, SCOPE.FUNCTION, node, () => {
-                seedFunctionStrict(state, node.data.body);
-                const id = node.data.id;
-                if (id !== null) {
-                    const sym = declare(state, id, fnFlags(node.data), NS_VALUE, appear, stmtPos === STMT_POS_IF);
-                    if (annexBEligible) annexBMove(state, sym, appear, hoist, id.name);
-                }
-                // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
-                // setting it around the body alone rejected four valid test262 programs.
-                const outerCtx = state.posCtx;
-                state.posCtx = methodCtx;
-                const paramMark = state.pendNode.length;
-                declareTypeParams(state, node.data.typeParameters);
-                declareCollectParams(state, node.data.params, methodParams);
-                visitType(state, node.data.returnType);
-                resolveEarly(state, paramMark);
-                visitFunctionBody(state, node.data.body);
-                state.posCtx = outerCtx;
-            });
+        case N.FunctionDeclaration:
+            visitFunctionDeclaration(state, node);
             return;
-        }
-        case N.FunctionExpression: {
-            const methodParams = state.uniqueParams;
-            state.uniqueParams = false;
-            const methodCtx = state.methodCtx;
-            state.methodCtx = CTX_NONE;
-            declareInScope(state, SCOPE.FUNCTION, node, () => {
-                seedFunctionStrict(state, node.data.body);
-                const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.FUNCTION | SYM.FN_EXPR_NAME, NS_VALUE, state.scope);
-                // The context covers the PARAMETERS too: `({ m(x = super.toString){} })` is legal, and
-                // setting it around the body alone rejected four valid test262 programs.
-                const outerCtx = state.posCtx;
-                state.posCtx = methodCtx;
-                const paramMark = state.pendNode.length;
-                declareTypeParams(state, node.data.typeParameters);
-                declareCollectParams(state, node.data.params, methodParams);
-                visitType(state, node.data.returnType);
-                resolveEarly(state, paramMark);
-                visitFunctionBody(state, node.data.body);
-                state.posCtx = outerCtx;
-            });
+        case N.FunctionExpression:
+            visitFunctionExpression(state, node);
             return;
-        }
         case N.ArrowFunctionExpression:
-            declareInScope(state, SCOPE.FUNCTION, node, () => {
-                seedFunctionStrict(state, node.data.body);
-                declareTypeParams(state, node.data.typeParameters);
-                // An arrow's parameters are `UniqueFormalParameters` in every mode.
-                const paramMark = state.pendNode.length;
-                declareCollectParams(state, node.data.params, true);
-                visitType(state, node.data.returnType);
-                resolveEarly(state, paramMark);
-                visitFunctionBody(state, node.data.body);
-            });
+            visitArrowFunctionExpression(state, node);
             return;
-        case N.ClassDeclaration: {
-            // oxc `visit_class` (builder.rs:959-984) enters the class scope FIRST, then visits the `id`
-            // and the heritage INSIDE it. The BINDING still targets the enclosing scope for a class
-            // DECLARATION — oxc keeps "where the symbol is bound" separate from "where the identifier
-            // node lives", which is why `declare` takes an explicit `targetScope`.
-            //
-            // We used to visit both before entering, so `analyze` attributed them to the enclosing
-            // scope while `traverse` (which reads `data.scopeId`) attributed them to the class scope.
-            // That disagreement is spec-visible: `class A extends A {}` is a TDZ error precisely
-            // because the heritage is evaluated inside the class scope.
-            const outer = state.scope;
-            declareInScope(state, SCOPE.CLASS, node, () => {
-                const id = node.data.id;
-                if (id !== null) declareDualNs(state, id, SYM.CLASS | SYM.TYPE, outer);
-                visit(state, node.data.superClass);
-                declareTypeParams(state, node.data.typeParameters);
-                for (const h of node.data.implements) {
-                    if (h.type !== N.TSClassImplements) continue;
-                    collectEntityName(state, h.data.expression, NS_TYPE);
-                    visitType(state, h.data.typeArguments);
-                }
-                visitType(state, node.data.superTypeArguments);
-                const outerPrivates = state.privates;
-                if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
-                const outerDerived = state.classDerived;
-                state.classDerived = node.data.superClass !== null;
-                for (const m of node.data.body) visit(state, m);
-                state.classDerived = outerDerived;
-                state.privates = outerPrivates;
-            });
+        case N.ClassDeclaration:
+            visitClassDeclaration(state, node);
             return;
-        }
         case N.ClassExpression:
-            declareInScope(state, SCOPE.CLASS, node, () => {
-                // A class EXPRESSION binds its own name INSIDE the class scope (oxc builder.rs:962-964,
-                // "we need to bind class expressions in the class scope before visiting the identifier").
-                const id = node.data.id;
-                if (id !== null) declare(state, id, SYM.CLASS, NS_VALUE, state.scope);
-                visit(state, node.data.superClass);
-                declareTypeParams(state, node.data.typeParameters);
-                for (const h of node.data.implements) {
-                    if (h.type !== N.TSClassImplements) continue;
-                    collectEntityName(state, h.data.expression, NS_TYPE);
-                    visitType(state, h.data.typeArguments);
-                }
-                visitType(state, node.data.superTypeArguments);
-                const outerPrivates = state.privates;
-                if (state.check) state.privates = classPrivateNames(node.data.body, outerPrivates, state.sem.errors);
-                const outerDerived = state.classDerived;
-                state.classDerived = node.data.superClass !== null;
-                for (const m of node.data.body) visit(state, m);
-                state.classDerived = outerDerived;
-                state.privates = outerPrivates;
-            });
+            visitClassExpression(state, node);
             return;
         case N.BlockStatement: {
             // Inlined rather than routed through `declareInScope`, which costs TWO extra frames per
@@ -1714,69 +1867,15 @@ function visit(state: AnalyseState, node: Node | null): void {
             return;
         }
         case N.StaticBlock:
-            // A class static block is a jump boundary exactly like a function body, and it does not go
-            // through `visitFunctionBody`, so it resets here. This is the arm whose absence in the old
-            // `staticBlockDepth` took harmful from 5 to 26 while the PASS count went UP (`1f03586`).
-            declareInScope(state, SCOPE.STATIC_BLOCK, node, () => {
-                const b = state.brk,
-                    c = state.cont,
-                    l = state.labels;
-                state.brk = false;
-                state.cont = false;
-                state.labels = NO_LABELS;
-                // `class A { static { super.x; } }` is legal; `super()` is not.
-                // `arguments` is banned here too, with its OWN message rather than the field one.
-                const outerCtx = state.posCtx;
-                state.posCtx = CTX_SUPER_PROP | CTX_STATIC_BLOCK;
-                for (const s of node.data.body) visit(state, s);
-                state.posCtx = outerCtx;
-                state.brk = b;
-                state.cont = c;
-                state.labels = l;
-            });
+            visitStaticBlock(state, node);
             return;
         case N.ForStatement:
-            declareInScope(state, SCOPE.FOR, node, () => {
-                const b = state.brk,
-                    c = state.cont;
-                state.brk = true;
-                state.cont = true;
-                visit(state, node.data.init);
-                visit(state, node.data.test);
-                visit(state, node.data.update);
-                state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
-                visit(state, node.data.body);
-                state.stmtPos = STMT_POS_NONE;
-                state.brk = b;
-                state.cont = c;
-            });
+            visitForStatement(state, node);
             return;
         case N.ForInStatement:
         case N.ForOfStatement:
-            declareInScope(state, SCOPE.FOR, node, () => {
-                const b = state.brk,
-                    c = state.cont;
-                state.brk = true;
-                state.cont = true;
-                // `for (x of xs)` ASSIGNS to `x` each turn; only a VariableDeclaration head declares.
-                if (node.data.left.type === N.VariableDeclaration) visit(state, node.data.left);
-                else {
-                    // An assignment target, so the strict `eval`/`arguments` rule applies to it —
-                    // `for ([eval] of []) ;` is an error. `checkEnter` cannot see this: the head is
-                    // not an AssignmentExpression, it is a bare pattern.
-                    if (state.check) checkAssignTarget(state.sem, node.data.left, state.scope, state.sem.errors);
-                    collectTarget(state, node.data.left);
-                }
-                visit(state, node.data.right);
-                state.stmtPos = isDecl(node.data.body) ? STMT_POS_LOOP : STMT_POS_NONE;
-                visit(state, node.data.body);
-                state.stmtPos = STMT_POS_NONE;
-                state.brk = b;
-                state.cont = c;
-            });
+            visitForInOfStatement(state, node);
             return;
-        // `while`/`do` open no scope, so they had no arm and fell through to the generated descent.
-        // They still make `break` and `continue` legal, so the checker needs them bracketed.
         case N.WhileStatement:
         case N.DoWhileStatement: {
             const b = state.brk,
@@ -1809,33 +1908,11 @@ function visit(state: AnalyseState, node: Node | null): void {
             visit(state, node.data.body);
             state.stmtPos = STMT_POS_NONE;
             return;
-        case N.SwitchStatement: {
-            // A switch is breakable but NOT continuable — `continue` inside one still needs a loop.
-            const b = state.brk;
-            state.brk = true;
-            // The DISCRIMINANT is evaluated in the ENCLOSING scope. oxc's `visit_switch_statement`
-            // makes the order explicit: `visit_expression(&stmt.discriminant)` and only then
-            // `enter_scope(ScopeFlags::empty(), &stmt.scope_id)`. Visiting it inside the switch's
-            // scope let `switch (foo)` bind to a `const foo` declared in one of the cases —
-            // `switch (foo) { case 1: const foo = 2; … }` compiled to `switch (2)`, so the case
-            // never matched. rollupsuite's `switch-scope`.
-            visit(state, node.data.discriminant);
-            declareInScope(state, SCOPE.SWITCH, node, () => {
-                for (const c of node.data.cases) visit(state, c);
-            });
-            state.brk = b;
+        case N.SwitchStatement:
+            visitSwitchStatement(state, node);
             return;
-        }
         case N.CatchClause:
-            declareInScope(state, SCOPE.CATCH, node, () => {
-                // A DESTRUCTURING catch parameter is flagged, because Annex B's `var` exemption
-                // below applies only to the `BindingIdentifier` form. See {@link SYM.CATCH_PATTERN}.
-                const param = node.data.param as Node | null;
-                const catchFlags = param !== null && param.type !== N.BindingIdentifier ? SYM.CATCH | SYM.CATCH_PATTERN : SYM.CATCH;
-                declarePattern(state, node.data.param, catchFlags, state.scope);
-                collectPattern(state, node.data.param);
-                visit(state, node.data.body);
-            });
+            visitCatchClause(state, node);
             return;
         case N.ImportDeclaration: {
             for (const spec of node.data.specifiers) {
@@ -1913,23 +1990,10 @@ function visit(state: AnalyseState, node: Node | null): void {
         case N.ContinueStatement:
             return;
         case N.TSInterfaceDeclaration:
-            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
-            declareInScope(state, SCOPE.TYPE, node, () => {
-                declareTypeParams(state, node.data.typeParameters);
-                for (const h of node.data.extends) {
-                    if (h.type !== N.TSInterfaceHeritage) continue;
-                    collectEntityName(state, h.data.expression, NS_TYPE);
-                    visitType(state, h.data.typeArguments);
-                }
-                for (const m of node.data.body) visitType(state, m);
-            });
+            visitTSInterfaceDeclaration(state, node);
             return;
         case N.TSTypeAliasDeclaration:
-            declare(state, node.data.id, SYM.TYPE, NS_TYPE, state.scope);
-            declareInScope(state, SCOPE.TYPE, node, () => {
-                declareTypeParams(state, node.data.typeParameters);
-                visitType(state, node.data.typeAnnotation);
-            });
+            visitTSTypeAliasDeclaration(state, node);
             return;
         case N.TSEnumDeclaration:
             declareDualNs(state, node.data.id, SYM.ENUM | SYM.TYPE, state.scope);
@@ -1937,14 +2001,9 @@ function visit(state: AnalyseState, node: Node | null): void {
                 if (member.type === N.TSEnumMember) visit(state, member.data.initializer);
             }
             return;
-        case N.TSModuleDeclaration: {
-            const id = node.data.id;
-            if (id.type === N.BindingIdentifier) declare(state, id, SYM.NAMESPACE, NS_VALUE, state.scope);
-            declareInScope(state, SCOPE.NAMESPACE, node, () => {
-                for (const s of node.data.body) visit(state, s);
-            });
+        case N.TSModuleDeclaration:
+            visitTSModuleDeclaration(state, node);
             return;
-        }
         case N.TSImportEqualsDeclaration: {
             const id = node.data.id;
             // Mirror ImportDeclaration: a value alias binds in the value ns; a `import type X =`

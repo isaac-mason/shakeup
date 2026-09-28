@@ -6,7 +6,7 @@
 // things by position (a `SpreadElement` in arguments, array literals and object literals; an
 // `ObjectExpression` used as an assignment target), the positional impl is its own export.
 
-import { N, type Node } from '../ast/index.ts';
+import { N, type Node, type NodeOf } from '../ast/index.ts';
 import {
     bigIntLiteralValue,
     type GlobalContext,
@@ -99,7 +99,7 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
             return mayHaveSideEffects(consequent, ctx) || mayHaveSideEffects(alternate, ctx);
         }
         case N.SequenceExpression:
-            return node.data.expressions.some((expression) => mayHaveSideEffects(expression, ctx));
+            return someMayHaveSideEffects(node.data.expressions, ctx);
         case N.BinaryExpression:
             // `#x in y` is oxc's `PrivateInExpression`.
             if (node.data.left.type === N.PrivateIdentifier) {
@@ -109,7 +109,7 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
             }
             return binaryExpressionMayHaveSideEffects(node, ctx);
         case N.ObjectExpression:
-            return node.data.properties.some((property) => objectPropertyKindMayHaveSideEffects(property, ctx));
+            return objectExpressionMayHaveSideEffects(node, ctx);
         case N.ArrayExpression:
             return arrayExpressionMayHaveSideEffects(node, ctx);
         case N.ClassExpression:
@@ -142,7 +142,7 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
 
         // statements.rs
         case N.BlockStatement:
-            return node.data.body.some((statement) => mayHaveSideEffects(statement, ctx));
+            return someMayHaveSideEffects(node.data.body, ctx);
         case N.DoWhileStatement:
         case N.WhileStatement:
             return mayHaveSideEffects(node.data.test, ctx) || mayHaveSideEffects(node.data.body, ctx);
@@ -161,15 +161,7 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
         case N.ReturnStatement:
             return node.data.argument !== null && mayHaveSideEffects(node.data.argument, ctx);
         case N.SwitchStatement:
-            return (
-                mayHaveSideEffects(node.data.discriminant, ctx) ||
-                node.data.cases.some(
-                    (switchCase) =>
-                        switchCase.type === N.SwitchCase &&
-                        ((switchCase.data.test !== null && mayHaveSideEffects(switchCase.data.test, ctx)) ||
-                            switchCase.data.consequent.some((statement) => mayHaveSideEffects(statement, ctx))),
-                )
-            );
+            return switchStatementMayHaveSideEffects(node, ctx);
         case N.TryStatement:
             return tryStatementMayHaveSideEffects(node, ctx);
         case N.BreakStatement:
@@ -182,21 +174,9 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
 
         // BindingPattern
         case N.ArrayPattern:
-            return (
-                ctx.propertyReadSideEffects !== 'none' ||
-                node.data.elements.some(
-                    (element) => element !== null && element.type !== N.RestElement && mayHaveSideEffects(element, ctx),
-                )
-            );
+            return ctx.propertyReadSideEffects !== 'none' || arrayPatternMayHaveSideEffects(node, ctx);
         case N.ObjectPattern:
-            return (
-                ctx.propertyReadSideEffects !== 'none' ||
-                node.data.properties.some(
-                    (property) =>
-                        property.type === N.ObjectProperty &&
-                        (propertyKeyMayHaveSideEffects(property.data.key, ctx) || mayHaveSideEffects(property.data.value, ctx)),
-                )
-            );
+            return ctx.propertyReadSideEffects !== 'none' || objectPatternMayHaveSideEffects(node, ctx);
         case N.AssignmentPattern:
             return mayHaveSideEffects(node.data.left, ctx) || mayHaveSideEffects(node.data.right, ctx);
         case N.BindingIdentifier:
@@ -204,7 +184,7 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
 
         // ClassElement
         case N.StaticBlock:
-            return node.data.body.some((statement) => mayHaveSideEffects(statement, ctx));
+            return someMayHaveSideEffects(node.data.body, ctx);
         case N.MethodDefinition:
             // oxc also counts decorated parameters, which shakeup's parser does not accept.
             return node.data.decorators.length > 0 || propertyKeyMayHaveSideEffects(node.data.key, ctx);
@@ -223,6 +203,43 @@ export function mayHaveSideEffects(node: Node, ctx: SideEffectsContext): boolean
         default:
             return true;
     }
+}
+
+// The list walks below are loops rather than `.some` callbacks: a callback capturing `ctx` would make
+// every `mayHaveSideEffects` call allocate a context for it, and it recurses once per subexpression.
+
+export function someMayHaveSideEffects(nodes: readonly Node[], ctx: SideEffectsContext): boolean {
+    for (const item of nodes) if (mayHaveSideEffects(item, ctx)) return true;
+    return false;
+}
+
+function objectExpressionMayHaveSideEffects(node: NodeOf<'ObjectExpression'>, ctx: SideEffectsContext): boolean {
+    for (const property of node.data.properties) if (objectPropertyKindMayHaveSideEffects(property, ctx)) return true;
+    return false;
+}
+
+function switchStatementMayHaveSideEffects(node: NodeOf<'SwitchStatement'>, ctx: SideEffectsContext): boolean {
+    if (mayHaveSideEffects(node.data.discriminant, ctx)) return true;
+    for (const switchCase of node.data.cases) {
+        if (switchCase.type !== N.SwitchCase) continue;
+        if (switchCase.data.test !== null && mayHaveSideEffects(switchCase.data.test, ctx)) return true;
+        if (someMayHaveSideEffects(switchCase.data.consequent, ctx)) return true;
+    }
+    return false;
+}
+
+function arrayPatternMayHaveSideEffects(node: NodeOf<'ArrayPattern'>, ctx: SideEffectsContext): boolean {
+    for (const element of node.data.elements)
+        if (element !== null && element.type !== N.RestElement && mayHaveSideEffects(element, ctx)) return true;
+    return false;
+}
+
+function objectPatternMayHaveSideEffects(node: NodeOf<'ObjectPattern'>, ctx: SideEffectsContext): boolean {
+    for (const property of node.data.properties) {
+        if (property.type !== N.ObjectProperty) continue;
+        if (propertyKeyMayHaveSideEffects(property.data.key, ctx) || mayHaveSideEffects(property.data.value, ctx)) return true;
+    }
+    return false;
 }
 
 // --- expressions.rs ------------------------------------------------------------------------------

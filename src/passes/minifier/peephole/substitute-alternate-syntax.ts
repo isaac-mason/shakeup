@@ -1366,6 +1366,13 @@ function isExpressionResultUnused(ctx: DceCtx): boolean {
     }
 }
 
+/** `body` without its directive prologue. */
+function withoutDirectives(ctx: DceCtx, body: Node[]): Node[] {
+    const statements: Node[] = [];
+    for (const statement of body) if (!ctx.directives.has(statement)) statements.push(statement);
+    return statements;
+}
+
 /** Simplify IIFEs: empty ones become `undefined`, and a parameterless non-async arrow whose body is
  *  one expression, one expression statement or one `return` is inlined. */
 export function substituteIifeCall(ctx: DceCtx, expr: Node): void {
@@ -1417,7 +1424,7 @@ export function substituteIifeCall(ctx: DceCtx, expr: Node): void {
         if (newValue !== null) replaceExpression(ctx, expr, newValue);
         return;
     }
-    const statements = (body.data as DataOf<'BlockStatement'>).body.filter((statement) => !ctx.directives.has(statement));
+    const statements = withoutDirectives(ctx, (body.data as DataOf<'BlockStatement'>).body);
     if (statements.length !== 1) return;
     const statement = statements[0];
     switch (statement.type) {

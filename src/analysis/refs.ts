@@ -15,6 +15,9 @@ export function walkRefIdents(node: Node, cb: (ident: Node, shorthandProp: Node 
     // program overflowed the stack here — 300 nested blocks was enough. It was the last walker still
     // capping what the bundler could handle.
     const stack: Node[] = [node];
+    const pushChild = (child: Node): void => {
+        stack.push(child);
+    };
     while (stack.length > 0) {
         const n = stack.pop() as Node;
         if (n.type === N.BindingIdentifier || n.type === N.IdentifierReference) {
@@ -36,9 +39,7 @@ export function walkRefIdents(node: Node, cb: (ident: Node, shorthandProp: Node 
         // in place — callers see identifiers in the same order as before. Reversing the segment
         // rather than buffering into a per-node array keeps this allocation-free.
         const from = stack.length;
-        walkChildren(n, (child) => {
-            stack.push(child);
-        });
+        walkChildren(n, pushChild);
         for (let i = from, j = stack.length - 1; i < j; i++, j--) {
             const t = stack[i];
             stack[i] = stack[j];

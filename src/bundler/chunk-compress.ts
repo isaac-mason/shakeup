@@ -53,8 +53,19 @@ export function compressChunk(
         const semantic = createSemantic();
         analyze(semantic, program);
         const noSideEffects = resolveNoSideEffects(program, chunk.noSideEffectsAt);
-        if (compress === 'dce') eliminateDeadCode(program, semantic, rolldownChunkDceOptions(), 'module', noSideEffects);
-        else buildWithScoping(program, semantic, rolldownMinifyOptions(undefined, keepNames), 'module', noSideEffects);
+        // the semantic is discarded after: the mangler builds its own
+        if (compress === 'dce')
+            eliminateDeadCode(program, semantic, rolldownChunkDceOptions(), 'module', noSideEffects, false, false);
+        else
+            buildWithScoping(
+                program,
+                semantic,
+                rolldownMinifyOptions(undefined, keepNames),
+                'module',
+                noSideEffects,
+                false,
+                false,
+            );
     }
     // A second, fresh semantic for the mangler, as oxc's `Minifier::build` makes one: the compressor keeps
     // reference counts as it mutates but not the scope each reference sits in.

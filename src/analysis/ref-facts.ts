@@ -44,6 +44,9 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
         modes.push(mode);
     };
 
+    const pushVisit = (child: Node): void => {
+        push(child, VISIT);
+    };
     const shorthandProp = (data: { shorthand: boolean; value: Node }, base: number): boolean => {
         if (!data.shorthand) return false;
         const v = data.value;
@@ -154,9 +157,7 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
                 break;
         }
         const from = nodes.length;
-        walkChildren(n, (child) => {
-            push(child, VISIT);
-        });
+        walkChildren(n, pushVisit);
         for (let i = from, j = nodes.length - 1; i < j; i++, j--) {
             const t = nodes[i];
             nodes[i] = nodes[j];

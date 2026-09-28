@@ -1044,7 +1044,8 @@ export function isLiteralValue(expr: Node, includeFunctions: boolean, ctx: Globa
                 isLiteralValue(expr.data.alternate, includeFunctions, ctx)
             );
         case N.SequenceExpression:
-            return (expr.data.expressions as Node[]).every((item) => isLiteralValue(item, includeFunctions, ctx));
+            for (const item of expr.data.expressions as Node[]) if (!isLiteralValue(item, includeFunctions, ctx)) return false;
+            return true;
         default:
             return false;
     }

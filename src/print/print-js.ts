@@ -1275,7 +1275,11 @@ export function printStmt(p: Printer, n: Node): void {
         }
         case N.ExpressionStatement: {
             const expr = d.expression as Node;
-            parens(p, exprStmtNeedsParens(expr), () => printExpr(p, expr, Prec.Lowest));
+            // not `parens`: its callback would capture `p` and cost every `printStmt` call a context
+            const wrap = exprStmtNeedsParens(expr);
+            if (wrap) write(p, '(');
+            printExpr(p, expr, Prec.Lowest);
+            if (wrap) write(p, ')');
             semi(p);
             return;
         }

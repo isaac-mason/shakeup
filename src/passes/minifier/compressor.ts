@@ -110,7 +110,8 @@ function finalizeSemantic(program: Node, ctx: DceCtx): void {
 /**
  * oxc `Compressor::dead_code_elimination_with_scoping`, the tree-shake-only compressor rolldown runs
  * per module: Normalize with rolldown's `NormalizeOptions`, then the peephole loop to a fixed point.
- * `semantic` must describe `program`; its reference counts are rewritten from the result.
+ * `semantic` must describe `program`; unless `updateSemantic` is false, its reference counts are rewritten from
+ * the result.
  */
 export function eliminateDeadCode(
     program: Node,
@@ -119,14 +120,17 @@ export function eliminateDeadCode(
     sourceType: SourceType,
     noSideEffectSymbols: ReadonlySet<number> = new Set(),
     verify = false,
+    /** Rewrite `semantic` from the result; false when the caller discards it. */
+    updateSemantic = true,
 ): DeadCodeEliminationResult {
-    return compress(program, semantic, options, 'tree-shake-only', sourceType, noSideEffectSymbols, verify);
+    return compress(program, semantic, options, 'tree-shake-only', sourceType, noSideEffectSymbols, verify, updateSemantic);
 }
 
 /**
  * oxc `Compressor::build_with_scoping`, the full minifier's compressor: Normalize converting `while` to
  * `for`, `const` to `let` and dropping redundant `"use strict"`, then the peephole loop in full mode.
- * `semantic` must describe `program`; its reference counts are rewritten from the result.
+ * `semantic` must describe `program`; unless `updateSemantic` is false, its reference counts are rewritten from
+ * the result.
  */
 export function buildWithScoping(
     program: Node,
@@ -135,8 +139,10 @@ export function buildWithScoping(
     sourceType: SourceType,
     noSideEffectSymbols: ReadonlySet<number> = new Set(),
     verify = false,
+    /** Rewrite `semantic` from the result; false when the caller discards it. */
+    updateSemantic = true,
 ): DeadCodeEliminationResult {
-    return compress(program, semantic, options, 'full', sourceType, noSideEffectSymbols, verify);
+    return compress(program, semantic, options, 'full', sourceType, noSideEffectSymbols, verify, updateSemantic);
 }
 
 function compress(
@@ -147,6 +153,7 @@ function compress(
     sourceType: SourceType,
     noSideEffectSymbols: ReadonlySet<number>,
     verify: boolean,
+    updateSemantic: boolean,
 ): DeadCodeEliminationResult {
     const ctx = createDceCtx(program, semantic, options, mode, sourceType, noSideEffectSymbols, verify);
     const full = mode === 'full';
@@ -156,6 +163,6 @@ function compress(
         removeUnnecessaryUseStrict: full,
     });
     const loop = runInLoop(options.maxIterations, program, ctx);
-    finalizeSemantic(program, ctx);
+    if (updateSemantic) finalizeSemantic(program, ctx);
     return { iterations: loop.iterations, changed: normalized || loop.changed };
 }
