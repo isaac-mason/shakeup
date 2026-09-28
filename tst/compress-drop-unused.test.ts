@@ -98,16 +98,63 @@ describe('drop-unused (compress)', () => {
         expect(m.out).toBe('ok');
     });
 
-    it('does NOT touch `var` (hoisting/redeclaration hazard)', async () => {
+    // oxc `remove_unused_variable_declaration`: `var x = 1` → ``, `var x = foo` → `foo`, and `remove_unused_pure_iife_init`:
+    // `var x = /* @__PURE__ */ foo()` → ``.
+    it('removes an unused `var` like a `let`, keeping what its init does', async () => {
         const src = `
+            export const log = [];
+            function eff() { log.push('eff'); return 1; }
+            function make() { log.push('make'); return 1; }
             export function f() {
-                var v = 5;   // unused, but a var — never removed in v1
-                return 'v-kept';
+                var unusedLiteral = 5;
+                var unusedEffect = eff();
+                var unusedPure = /* @__PURE__ */ make();
+                return log.join(',');
             }
             export const out = f();`;
-        const { compressed, out } = await parity(src, 'v-kept');
-        expect(out).toBe('v-kept');
-        expect(compressed).toMatch(/\bvar\b/); // the var declaration survives
+        const { compressed, out } = await parity(src, 'eff');
+        expect(out).toBe('eff');
+        expect(compressed).not.toMatch(/unusedLiteral|unusedEffect|unusedPure/);
+    });
+
+    // oxc `minimize_statements` (`handle_variable_declaration`): a dead declarator among live ones leaves its init's
+    // effects where it stood, so everything still runs in source order.
+    it('splits a declaration around a dead declarator whose init has effects, keeping the order', async () => {
+        const src = `
+            export const log = [];
+            function eff(x) { log.push(x); return x; }
+            export function f() {
+                let a = eff('a'), unused = eff('dead'), b = eff('b');
+                return a + b + ':' + log.join(',');
+            }
+            export const out = f();`;
+        const { compressed, out } = await parity(src, 'ab:a,dead,b');
+        expect(out).toBe('ab:a,dead,b');
+        expect(compressed).not.toMatch(/unused/);
+    });
+
+    it('leaves a `var` that is a lone statement body in place (a single slot holds one statement)', async () => {
+        const src = `
+            export const log = [];
+            function eff(x) { log.push(x); return x; }
+            export function f(c) {
+                if (c) var first = eff('first'), second = 2;
+                return log.join(',');
+            }
+            export const out = f(true);`;
+        const { out } = await parity(src, 'first');
+        expect(out).toBe('first');
+    });
+
+    it('keeps an unused binding in a program with a direct `eval`, which can reach it by name', async () => {
+        const src = `
+            export function f() {
+                var hidden = 'found';
+                return eval('hidden');
+            }
+            export const out = f();`;
+        const { out } = await parity(src, 'found');
+        expect(out).toBe('found');
     });
 
     it('does NOT touch destructuring patterns (possible getter/iterator side effects)', async () => {

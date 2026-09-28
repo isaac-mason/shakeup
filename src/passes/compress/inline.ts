@@ -1,4 +1,4 @@
-import type { Semantic } from '../../analysis/semantic.ts';
+import { hasDirectEval } from '../../analysis/direct-eval.ts';
 // Single-use movement inline (oxc `substitute_single_use_symbol_in_statement`,
 // minimize_statements.rs:1300+). When a `const`/`let` binding is declared and then used EXACTLY once
 // in the immediately-following statement, move its initializer into that single use and drop the
@@ -32,6 +32,7 @@ import type { Semantic } from '../../analysis/semantic.ts';
 // TDZ is never a concern: the init only ever moves LATER.
 import { mayHaveSideEffects } from '../../analysis/effects.ts';
 import { type RefCounts, readsMutableSymbol, substituteSingleUse } from '../../analysis/movement.ts';
+import type { Semantic } from '../../analysis/semantic.ts';
 import { N, type Node, statementListOf, walkChildren } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
@@ -40,43 +41,6 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 // module uses `eval`/`with`.
 let REFS: (RefCounts | undefined)[] | null = null;
 let DYNAMIC_SCOPE = false;
-
-/** True if the module contains a direct `eval(...)` call — it can resolve a name dynamically, so
- *  removing a binding (even a single-use local) is unsafe. Coarse module-wide check (oxc uses a
- *  per-scope `contains_direct_eval` flag; module-wide is a safe over-approximation). `with` can't
- *  occur — bundled input is ESM, i.e. always strict mode. */
-function hasDynamicScope(program: Node, semantic: Semantic): boolean {
-    // FAST REJECT, and an exact one. The call below only matches a callee with `sym === 0`, i.e. an
-    // UNRESOLVED value reference — and `analyze` files every one of those in `semantic.unresolved`.
-    // So if nothing unresolved is named `eval`, no call site can match and the whole-program walk is
-    // skipped entirely. This runs at every Program enter, once per compress round per module, and it
-    // was walking every node of the program to answer a question that is almost always "no": 2.89% of
-    // a bundling profile. Not an over-approximation — when an `eval` reference IS present, the exact
-    // walk below still runs to confirm it is actually a callee.
-    let mentionsEval = false;
-    for (const u of semantic.unresolved) {
-        if (u.name === 'eval') {
-            mentionsEval = true;
-            break;
-        }
-    }
-    if (!mentionsEval) return false;
-
-    let found = false;
-    const visit = (n: Node): void => {
-        if (found) return;
-        if (n.type === N.CallExpression) {
-            const callee = (n.data as { callee: Node }).callee;
-            if (callee.type === N.IdentifierReference && callee.name === 'eval' && callee.sym === 0) {
-                found = true;
-                return;
-            }
-        }
-        walkChildren(n, visit);
-    };
-    visit(program);
-    return found;
-}
 
 /** If `prev` is an inlinable single-declarator `const`/`let` whose binding is single-read / zero-write,
  *  return its symbol + initializer (+ whether the init is impure); else null. */
@@ -197,7 +161,7 @@ export const inline: Visitor = {
     name: 'inline',
     enter: hookTable({
         [N.Program]: (program, ctx: TransformCtx) => {
-            DYNAMIC_SCOPE = hasDynamicScope(program, ctx.semantic);
+            DYNAMIC_SCOPE = hasDirectEval(program, ctx.semantic);
             REFS = DYNAMIC_SCOPE ? null : ctx.semantic.refs;
         },
     }),

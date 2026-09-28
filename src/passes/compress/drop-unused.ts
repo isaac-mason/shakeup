@@ -1,4 +1,4 @@
-// P4 — drop-unused (terser `unused`): remove a `let`/`const` binding that is NEVER referenced, when
+// P4 — drop-unused (terser `unused`): remove a `var`/`let`/`const` binding that is NEVER referenced, when
 // the binding lives in a FUNCTION or BLOCK scope. Top-level/exported bindings are OWNED by treeshake
 // (`src/treeshake.ts`), so this pass deliberately does NOT touch module-scope bindings — it only
 // reaches the function/block locals treeshake can't see.
@@ -14,7 +14,7 @@
 //     this round is caught on the next.
 //
 // WHAT WE REMOVE (all must hold):
-//   - a `let`/`const` VariableDeclarator whose `id` is a PLAIN BindingIdentifier (no destructuring),
+//   - a `var`/`let`/`const` VariableDeclarator whose `id` is a PLAIN BindingIdentifier (no destructuring),
 //   - whose symbol has ZERO `IdentifierReference` uses anywhere in the module (the declaration's own
 //     BindingIdentifier is NOT an IdentifierReference, so it isn't counted; a self-reference in the
 //     init — `const x = x` — IS an IdentifierReference, so it counts as a use → we bail/keep),
@@ -25,12 +25,16 @@
 //     ExpressionStatement. We only do this for a SINGLE-declarator declaration (the clean case);
 //     an impure-unused declarator mixed among other declarators BAILS the whole declaration.
 //
-// HARD BAILS (do nothing): `var` (hoisting/redeclaration), destructuring patterns (getter/iterator
-// side effects), any module-scope or exported binding, any binding with ≥1 use, function/class
-// declarations (hoisting subtlety — v1 handles only `let`/`const` declarators).
+// `var` too, as oxc's `should_remove_unused_declarator` does: however many times it hoists or is redeclared, it is one
+// symbol, and zero references to that symbol is zero references.
+//
+// HARD BAILS (do nothing): a program with a direct `eval` (it can reach any binding by name; oxc's
+// `can_remove_unused_declarators`), `using`, destructuring patterns (getter/iterator side effects), any
+// module-scope or exported binding, any binding with ≥1 use, function/class declarations.
+import { hasDirectEval } from '../../analysis/direct-eval.ts';
 import { isPureExpr } from '../../analysis/effects.ts';
-import { SCOPE, scopeKind, type Semantic } from '../../analysis/semantic.ts';
-import { create, N, type Node } from '../../ast/index.ts';
+import { SCOPE, type Semantic, scopeKind } from '../../analysis/semantic.ts';
+import { create, N, type Node, statementListOf, VAR_KIND } from '../../ast/index.ts';
 import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 
 // Use-count snapshot for the current traversal, keyed by SymbolId. Set on Program-enter (fires once,
@@ -38,6 +42,8 @@ import { hookTable, type TransformCtx, type Visitor } from '../traverse.ts';
 // `semantic` is captured alongside so scope lookups use the exact table the counts were built from.
 let USES: number[] | null = null;
 let SEM: Semantic | null = null;
+/** The program has a direct `eval`, so no binding is provably unread. Set with the snapshot above. */
+let DIRECT_EVAL = false;
 
 /**
  * May this pass touch MODULE-SCOPE bindings? Off by default, and that default is the whole reason the
@@ -96,12 +102,15 @@ function inModuleScope(sem: Semantic, sym: number): boolean {
     return scopeKind(scope.flags) === SCOPE.MODULE;
 }
 
+/** A declaration's `kind` as the flag `create.VariableDeclaration` takes. `using` never gets this far. */
+const DECLARATION_KIND = { var: VAR_KIND.VAR, let: VAR_KIND.LET, const: VAR_KIND.CONST } as const;
+
 /** Per-declarator verdict. */
-const KEEP = 0; // referenced, or a bail case (var/destructuring/module-scope/self-ref) — leave as-is
+const KEEP = 0; // referenced, or a bail case (destructuring/module-scope/self-ref/direct eval) — leave as-is
 const DROP_PURE = 1; // dead binding, pure init — delete the declarator outright
 const DROP_IMPURE = 2; // dead binding, impure init — the init's side effect must be preserved
 
-/** Classify a single declarator of a `let`/`const` declaration. */
+/** Classify a single declarator of a `var`/`let`/`const` declaration. */
 function classify(decl: Node, sem: Semantic, uses: number[]): number {
     if (decl.type !== N.VariableDeclarator) return KEEP;
     const id = decl.data.id;
@@ -110,6 +119,7 @@ function classify(decl: Node, sem: Semantic, uses: number[]): number {
     if (id.type !== N.BindingIdentifier) return KEEP;
     const sym = id.sym;
     if (sym === 0) return KEEP; // no resolved symbol — bail
+    if (DIRECT_EVAL) return KEEP;
     if (!ALLOW_MODULE_SCOPE && inModuleScope(sem, sym)) return KEEP; // per-module: treeshake owns these
     if ((uses[sym] ?? 0) !== 0) return KEEP; // ≥1 reference (incl. a self-ref in its own init)
     // Dead binding in a function/block scope. Pure init → drop; impure init → keep the effect.
@@ -125,7 +135,7 @@ function classify(decl: Node, sem: Semantic, uses: number[]): number {
  *
  *     for (const _ in b) { bLength += 1; }
  *
- * `var` never reached it only because `var` is hard-bailed two lines below.
+ * `var` reaches it too: `for (var _ in b)` is the same required head.
  *
  * A parent hook rather than a parent POINTER because the traversal does not carry one, and this is
  * the shape the sibling passes already use (`normalize`'s `clauseHook`, `deadCode`'s direct
@@ -139,7 +149,6 @@ let LOOP_HEADS: Set<Node> = new Set();
  *  Shared by the statement hook and the `for(;;)` head hook so both refuse the same things. */
 function verdicts(n: Node, sem: Semantic, uses: number[]): number[] | null {
     if (n.type !== N.VariableDeclaration) return null;
-    if (n.data.kind === 'var') return null; // HARD BAIL: `var` hoists / can redeclare
     // HARD BAIL on `using` / `await using`: the BINDING is the observable thing (see below).
     if (n.data.kind === 'using' || n.data.kind === 'await using') return null;
     const decls = n.data.declarations;
@@ -208,13 +217,11 @@ function onForInOf(n: Node, _ctx: TransformCtx): void {
     if (left.type === N.VariableDeclaration) LOOP_HEADS.add(left);
 }
 
-/** VariableDeclaration hook: only `let`/`const`; compute per-declarator verdicts and rewrite the
- *  statement conservatively. */
+/** VariableDeclaration hook: compute per-declarator verdicts and rewrite the statement conservatively. */
 function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
     if (n.type !== N.VariableDeclaration) return;
     if (LOOP_HEADS.has(n)) return; // a loop head — see LOOP_HEADS
     if (EXPORTED_DECLS.has(n)) return; // `export const c = 3` — the binding is observable
-    if (n.data.kind === 'var') return; // HARD BAIL: `var` hoists / can redeclare
     // HARD BAIL on `using` / `await using`: the BINDING is the observable thing. Dropping an unused
     // one and keeping its initializer for side effects — correct for `let`/`const` — deletes the
     // `[Symbol.dispose]()` call that runs at scope exit, which is the entire purpose of the
@@ -247,9 +254,40 @@ function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
         return;
     }
 
-    // Any impure drop mixed among MULTIPLE declarators is fiddly to order-preserve — BAIL the whole
-    // declaration (always correct). We only auto-drop PURE-unused declarators below.
-    if (impureCount > 0) return;
+    // Everything below takes the statement out or turns it into several, which only a statement list can hold.
+    // `var` can also be a lone statement body (`if (c) var x = f(), y;`), and there it stays as it is.
+    const list = ctx.parent === null ? null : statementListOf(ctx.parent);
+    if (list === null || !list.includes(n)) return;
+
+    // oxc `minimize_statements` (`handle_variable_declaration`): each dead declarator leaves its init's effects as an
+    // expression statement where it stood, and the live ones around it regroup into declarations of the same kind, so
+    // everything still runs in source order. `removeUnusedExpr` then reduces each init to what it does.
+    if (impureCount > 0) {
+        const kind = DECLARATION_KIND[n.data.kind as keyof typeof DECLARATION_KIND];
+        const statements: Node[] = [];
+        let live: Node[] = [];
+        const flushLive = (): void => {
+            if (live.length === 0) return;
+            statements.push(create.VariableDeclaration(live[0].start, live[live.length - 1].end, kind, live));
+            live = [];
+        };
+        for (let i = 0; i < decls.length; i++) {
+            const decl = decls[i];
+            if (verdicts[i] === KEEP) {
+                live.push(decl);
+                continue;
+            }
+            // the statement's references move with it (`replaceWithMultiple`); the dead bindings are gone for good
+            ctx.evictBindings(decl.data.id);
+            if (verdicts[i] === DROP_IMPURE) {
+                flushLive();
+                statements.push(create.ExpressionStatement(decl.start, decl.end, 0, decl.data.init as Node));
+            }
+        }
+        flushLive();
+        ctx.replaceWithMultiple(statements);
+        return;
+    }
 
     // Drop every DROP_PURE declarator (pure inits are effect-free, so removal is order-independent).
     const kept: Node[] = [];
@@ -277,6 +315,7 @@ export const dropUnused: Visitor = {
         [N.Program]: (_n, ctx) => {
             SEM = ctx.semantic;
             USES = ctx.semantic.uses;
+            DIRECT_EVAL = hasDirectEval(_n, ctx.semantic);
             // Fresh per traversal: the compress fixed point runs this many times over the same
             // module, and a stale entry would silently protect a declaration that is no longer a
             // loop head.

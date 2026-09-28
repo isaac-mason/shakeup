@@ -42,6 +42,11 @@ export const resetInferredPure = (): void => {
     INFERRED_PURE = new WeakSet<object>();
 };
 
+/** A call or `new` known to be side-effect-free apart from its arguments: annotated `@__PURE__` in source, or (a call)
+ *  proven pure by the purity analysis. oxc's `call_expr.pure || function_summary.is_side_effect_free()`. */
+export const isPureCall = (node: Node): boolean =>
+    (node.data as { pure?: boolean }).pure === true || (node.type === N.CallExpression && INFERRED_PURE.has(node));
+
 export function isPureExpr(node: Node | null): boolean {
     if (node === null) return true;
     switch (node.type) {
@@ -103,25 +108,36 @@ export function isPureExpr(node: Node | null): boolean {
             // An annotated `new` is side-effect-free exactly when its arguments are — same rule the
             // annotated CallExpression case uses below. Unannotated construction stays impure.
             if (node.data.pure !== true) return false;
-            for (const arg of node.data.arguments as Node[]) {
-                if (arg.type === N.SpreadElement) return false;
-                if (!isPureExpr(arg)) return false;
-            }
+            for (const arg of node.data.arguments as Node[]) if (!isPureArgument(arg)) return false;
             return true;
         }
         case N.CallExpression: {
             // A `/*@__PURE__*/`-annotated call (oxc `CallExpression.pure`) is side-effect-free iff
             // its arguments are. Lowering passes set this on the enum/namespace IIFE.
             if (node.data.pure !== true && !INFERRED_PURE.has(node)) return false;
-            for (const a of node.data.arguments) {
-                const arg = a.type === N.SpreadElement ? a.data.argument : a;
-                if (!isPureExpr(arg)) return false;
-            }
+            for (const arg of node.data.arguments) if (!isPureArgument(arg)) return false;
             return true;
         }
         // JSX is lowered to `jsx(...)` calls before any effect analysis runs (jsxLower, transform
         // stage), so JSXElement/JSXFragment never reach here — their purity is the CallExpression's,
         // judged by standard side-effect rules (oxc/rolldown default; no bespoke JSX-spread optimism).
+        default:
+            return false;
+    }
+}
+
+/** A call or `new` argument, oxc's `Argument::may_have_side_effects`: a spread iterates its operand, which runs only the
+ *  built-in iterator for an array or template literal (so their own effects are all) and nothing for a string literal;
+ *  any other operand may run a user `Symbol.iterator`. */
+function isPureArgument(arg: Node): boolean {
+    if (arg.type !== N.SpreadElement) return isPureExpr(arg);
+    const operand = (arg.data as { argument: Node }).argument;
+    switch (operand.type) {
+        case N.ArrayExpression:
+        case N.TemplateLiteral:
+            return isPureExpr(operand);
+        case N.StringLiteral:
+            return true;
         default:
             return false;
     }

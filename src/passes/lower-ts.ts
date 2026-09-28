@@ -1,7 +1,6 @@
 // TS lowering passes (transform stage). First responsibility: value `enum` → IIFE, porting the
 // print-time `emitEnum` (print-js.ts) to a mutation pass that emits real AST. Namespace lowering and
 // type-strip join this pass next. `declare` enums are erased elsewhere (they emit no JS).
-import { isPureExpr } from '../analysis/effects.ts';
 import { attachScopeNode, createScope, declareLocal, SCOPE, type Semantic, SYM, scopeOf } from '../analysis/semantic.ts';
 import {
     assign,
@@ -69,14 +68,14 @@ function forEachBoundName(pat: Node, fn: (name: string, sym: number) => void): v
  *  single-statement IIFE-var form both enum and namespace lower to:
  *  `var X = /*@__PURE__*​/ (function(_X){ …body… })(<init>)`. `init` is `X || {}` at the top level, or
  *  `_P.X || (_P.X = {})` when nested inside a namespace whose param is `parentParam` (oxc's parent-
- *  linking). `id`/`sym`/`name` describe the outer binding; the call is PURE unless `sideEffect`. */
+ *  linking). `id`/`sym`/`name` describe the outer binding; `pure` marks the call, as oxc marks an enum's. */
 function iifeVarDecl(
     id: Node,
     name: string,
     sym: number,
     param: Uid,
     bodyStmts: Node[],
-    sideEffect: boolean,
+    pure: boolean,
     parent: Uid | null,
     semantic: Semantic,
 ): Node {
@@ -105,7 +104,7 @@ function iifeVarDecl(
                   member(boundRef(parent.name, parent.sym), idName(name)),
                   assign(member(boundRef(parent.name, parent.sym), idName(name)), emptyObject()),
               );
-    const call = create.CallExpression(SPAN, SPAN, sideEffect ? 0 : FL.PURE, fn, [arg], null);
+    const call = create.CallExpression(SPAN, SPAN, pure ? FL.PURE : 0, fn, [arg], null);
     // `analyze` files a declarator's init under its symbol (`Semantic.symbolInit`, oxc's
     // `SymbolValue`); compress reads it (alias-inline, const-prop). This declaration is minted
     // AFTER that walk, so record it here or the symbol looks initialiser-less and those passes
@@ -203,7 +202,8 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
         prior.add(key);
     }
     stmts.push(create.ReturnStatement(SPAN, SPAN, 0, pRef())); // `return _E;`
-    return iifeVarDecl(enumId, enumName, enumSym, param, stmts, sideEffect, null, ctx.semantic);
+    // oxc `enum.rs`: `new_call_expression_with_pure(.., !has_potential_side_effect)`
+    return iifeVarDecl(enumId, enumName, enumSym, param, stmts, !sideEffect, null, ctx.semantic);
 }
 
 /** Convert a value entity name (`A` / `A.B.C`) to the equivalent value expression: an
@@ -319,35 +319,17 @@ function lowerNamespace(nsNode: Node, ctx: TransformCtx, parent: Uid | null): No
     const pRef = (): Node => boundRef(param.name, param.sym);
 
     const body: Node[] = [];
-    let sideEffect = false;
     for (const stmt of d.body) {
         const lowered = lowerNsMember(stmt, param, ctx);
         if (lowered === null) return null; // unhandled member → don't lower this namespace
         for (const s of lowered) body.push(s);
-        if (!sideEffect) for (const s of lowered) if (!isPureNsStmt(s)) sideEffect = true;
     }
     if (body.length === 0) return ERASE; // type-only namespace → emits nothing
     body.push(create.ReturnStatement(SPAN, SPAN, 0, pRef()));
-    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, sideEffect, parent, ctx.semantic);
-}
-
-/** A lowered namespace body statement with no side effects (declarations + member mirrors of pure
- *  values). Conservative — anything else marks the namespace IIFE effectful (kept even if unused). */
-function isPureNsStmt(stmt: Node): boolean {
-    if (stmt.type === N.FunctionDeclaration || stmt.type === N.ClassDeclaration) return true;
-    if (stmt.type === N.VariableDeclaration) {
-        for (const dc of (stmt.data as { declarations: Node[] }).declarations) {
-            const init = (dc.data as { init: Node | null }).init;
-            if (init !== null && !isPureExpr(init)) return false;
-        }
-        return true;
-    }
-    // mirror `_Foo.x = <local ident>` is pure (assign to the local object).
-    if (stmt.type === N.ExpressionStatement) {
-        const e = (stmt.data as { expression: Node }).expression;
-        if (e.type === N.AssignmentExpression) return isPureExpr((e.data as { right: Node }).right);
-    }
-    return false;
+    // never pure: oxc `namespace.rs` builds the call with `new_call_expression`, no pure flag. A namespace body writes
+    // into an object other code shares (a nested one into its parent's), so its value going unused is no reason to
+    // drop it.
+    return iifeVarDecl(nsId, nsName, (nsId as { sym: number }).sym, param, body, false, parent, ctx.semantic);
 }
 
 /**

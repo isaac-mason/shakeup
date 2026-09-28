@@ -82,7 +82,7 @@ describe('remove-unused-expression (compress)', () => {
         expect((await run(code)).out).toBe(1);
     });
 
-    it('KEEPS a call (its effect cannot be stripped)', async () => {
+    it('KEEPS an impure call (its effect cannot be stripped)', async () => {
         const src = [
             'export const log = [];',
             'function eff() { log.push(1); }',
@@ -92,6 +92,69 @@ describe('remove-unused-expression (compress)', () => {
         const code = await parity(src);
         expect((await run(code)).out).toBe(1);
         expect(code).toMatch(/eff|push/);
+    });
+
+    // oxc `test_fold_call_expression`: `/* @__PURE__ */ foo(a, b)` → `a, b`, `foo(...a)` → `[...a]`, `foo(...'a')` → ``.
+    it('reduces a discarded pure call to what its arguments do, in order', async () => {
+        const src = [
+            'export const log = [];',
+            'function make(...parts) { log.push("make"); return parts; }',
+            'function eff(x) { log.push(x); return x; }',
+            'export function f() { /* @__PURE__ */ make(eff("a"), 1, eff("b")); /* @__PURE__ */ make(); return log.join(","); }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('a,b');
+    });
+
+    it("keeps a pure call's spread of an unknown iterable, and drops one of a string", async () => {
+        const src = [
+            'export const log = [];',
+            'function make() { log.push("make"); }',
+            'const iterable = { *[Symbol.iterator]() { log.push("iterated"); } };',
+            'export function f() { /* @__PURE__ */ make(...iterable); /* @__PURE__ */ make(..."ab"); return log.join(","); }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('iterated');
+    });
+
+    it('reduces a discarded pure `new` to its arguments', async () => {
+        const src = [
+            'export const log = [];',
+            'class Thing { constructor() { log.push("built"); } }',
+            'function eff(x) { log.push(x); }',
+            'export function f() { /* @__PURE__ */ new Thing(eff("arg")); return log.join(","); }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('arg');
+    });
+
+    // oxc `test_object_literal`: `({ ...baz, [bar()]: foo() })` → `({ ...baz }), bar(), foo()`.
+    it('keeps only the effectful keys, values and spreads of a discarded object, in order', async () => {
+        const src = [
+            'export const log = [];',
+            'function eff(x) { log.push(x); return x; }',
+            'const source = { get a() { log.push("spread"); return 1; } };',
+            'export function f() { ({ plain: 1, ...source, [eff("key")]: eff("value"), nested: { deep: eff("deep") } }); return log.join(","); }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('spread,key,value,deep');
+        expect(code).not.toMatch(/plain/);
+    });
+
+    // oxc `test_fold_conditional_expression`: `foo() ? 1 : bar()` → `foo() || bar()`, `foo() ? bar() : 2` → `foo() && bar()`.
+    it('reduces a discarded conditional to its test and the effectful branch', async () => {
+        const src = [
+            'export const log = [];',
+            'function eff(x) { log.push(x); return x; }',
+            'export function f() { eff(true) ? 1 : eff("else"); eff(false) ? 1 : eff("else"); eff(true) ? eff("then") : 2; eff(0) ? 1 : 2; return log.join(","); }',
+            'export const out = f();',
+        ].join('\n');
+        const code = await parity(src);
+        expect((await run(code)).out).toBe('true,false,else,true,then,0');
     });
 
     it('does not fire when compress is explicitly disabled', async () => {
