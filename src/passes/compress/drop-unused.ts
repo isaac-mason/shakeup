@@ -277,6 +277,7 @@ function onVariableDeclaration(n: Node, ctx: TransformCtx): void {
                 live.push(decl);
                 continue;
             }
+            if (decl.type !== N.VariableDeclarator) continue;
             // the statement's references move with it (`replaceWithMultiple`); the dead bindings are gone for good
             ctx.evictBindings(decl.data.id);
             if (verdicts[i] === DROP_IMPURE) {
