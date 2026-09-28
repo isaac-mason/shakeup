@@ -372,7 +372,8 @@ function logicalExpressionMayHaveSideEffects(logical: Node, ctx: SideEffectsCont
 
 function arrayExpressionMayHaveSideEffects(array: Node, ctx: SideEffectsContext): boolean {
     if (array.type !== N.ArrayExpression) return true;
-    return array.data.elements.some((element) => arrayExpressionElementMayHaveSideEffects(element, ctx));
+    for (const element of array.data.elements) if (arrayExpressionElementMayHaveSideEffects(element, ctx)) return true;
+    return false;
 }
 
 /** oxc `ArrayExpressionElement::may_have_side_effects`; null is an elision. */
@@ -405,12 +406,12 @@ export function objectPropertyKindMayHaveSideEffects(property: Node, ctx: SideEf
         case N.ArrayExpression:
             return arrayExpressionMayHaveSideEffects(argument, ctx);
         case N.ObjectExpression:
-            return argument.data.properties.some((inner) => {
+            for (const inner of argument.data.properties) {
                 if (inner.type === N.ObjectProperty) {
-                    return inner.data.kind === 'get' || objectPropertyMayHaveSideEffects(inner, ctx);
-                }
-                return inner.type !== N.SpreadElement || mayHaveSideEffects(inner.data.argument, ctx);
-            });
+                    if (inner.data.kind === 'get' || objectPropertyMayHaveSideEffects(inner, ctx)) return true;
+                } else if (inner.type !== N.SpreadElement || mayHaveSideEffects(inner.data.argument, ctx)) return true;
+            }
+            return false;
         case N.StringLiteral:
             return false;
         case N.TemplateLiteral:
@@ -442,7 +443,7 @@ function classMayHaveSideEffects(klass: Node, ctx: SideEffectsContext): boolean 
     if (superClass !== null && (superClass.type === N.ArrowFunctionExpression || mayHaveSideEffects(superClass, ctx))) {
         return true;
     }
-    return klass.data.body.some((element) => mayHaveSideEffects(element, ctx));
+    return someMayHaveSideEffects(klass.data.body, ctx);
 }
 
 /** oxc `ToIntegerIndex` for `f64`. */
@@ -574,14 +575,12 @@ function iifeCallMayHaveSideEffects(call: Node, ctx: SideEffectsContext): boolea
         const body = callee.data.body;
         if (body === null || body.type !== N.BlockStatement) return null;
         params = callee.data.params;
-        bodyMayHaveSideEffects = body.data.body.some((statement) => mayHaveSideEffects(statement, ctx));
+        bodyMayHaveSideEffects = someMayHaveSideEffects(body.data.body, ctx);
     } else if (callee.type === N.ArrowFunctionExpression && !callee.data.async) {
         const body = callee.data.body;
         params = callee.data.params;
         bodyMayHaveSideEffects =
-            body.type === N.BlockStatement
-                ? body.data.body.some((statement) => mayHaveSideEffects(statement, ctx))
-                : mayHaveSideEffects(body, ctx);
+            body.type === N.BlockStatement ? someMayHaveSideEffects(body.data.body, ctx) : mayHaveSideEffects(body, ctx);
     } else {
         return null;
     }
@@ -593,12 +592,14 @@ function iifeCallMayHaveSideEffects(call: Node, ctx: SideEffectsContext): boolea
         if (param.type === N.RestElement) return param.data.argument.type === N.BindingIdentifier;
         return false;
     });
-    if (!paramsSimple || call.data.arguments.some((argument) => argumentMayHaveSideEffects(argument, ctx))) return true;
+    if (!paramsSimple || anyArgumentMayHaveSideEffects(call.data.arguments, ctx)) return true;
     return bodyMayHaveSideEffects;
 }
 
-const anyArgumentMayHaveSideEffects = (args: Node[], ctx: SideEffectsContext): boolean =>
-    args.some((argument) => argumentMayHaveSideEffects(argument, ctx));
+function anyArgumentMayHaveSideEffects(args: Node[], ctx: SideEffectsContext): boolean {
+    for (const argument of args) if (argumentMayHaveSideEffects(argument, ctx)) return true;
+    return false;
+}
 
 /** oxc `Expression::get_identifier_reference`. */
 function getIdentifierReference(expr: Node): Node | null {
@@ -940,20 +941,21 @@ function variableDeclarationMayHaveSideEffects(declaration: Node, ctx: SideEffec
     const { kind, declarations } = declaration.data;
     if (kind === 'await using') return true;
     if (kind === 'using') {
-        return declarations.some((declarator) => {
+        for (const declarator of declarations) {
             if (declarator.type !== N.VariableDeclarator) return true;
             const init = declarator.data.init;
             if (init === null) return true;
             const initType = valueType(init, ctx);
-            return !(initType === 'null' || initType === 'undefined') || mayHaveSideEffects(init, ctx);
-        });
+            if (!(initType === 'null' || initType === 'undefined') || mayHaveSideEffects(init, ctx)) return true;
+        }
+        return false;
     }
-    return declarations.some(
-        (declarator) =>
-            declarator.type !== N.VariableDeclarator ||
-            mayHaveSideEffects(declarator.data.id, ctx) ||
-            (declarator.data.init !== null && mayHaveSideEffects(declarator.data.init, ctx)),
-    );
+    for (const declarator of declarations) {
+        if (declarator.type !== N.VariableDeclarator) return true;
+        if (mayHaveSideEffects(declarator.data.id, ctx)) return true;
+        if (declarator.data.init !== null && mayHaveSideEffects(declarator.data.init, ctx)) return true;
+    }
+    return false;
 }
 
 // --- pure_function.rs ----------------------------------------------------------------------------

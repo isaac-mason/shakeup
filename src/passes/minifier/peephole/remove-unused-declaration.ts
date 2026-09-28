@@ -50,9 +50,9 @@ function selfRecursiveFunctionDeclaratorIsUnused(ctx: DceCtx, declarator: Node, 
     // Covers exports, Script-root bindings, Annex B aliases and `using`.
     if (isImplicitlyObservable(ctx.state.symbols, symbolId)) return false;
 
-    return getResolvedReferences(ctx, symbolId).every((reference) =>
-        scopeAncestors(ctx.scoping, reference.scopeId).includes(functionScopeId),
-    );
+    for (const reference of getResolvedReferences(ctx, symbolId))
+        if (!scopeAncestors(ctx.scoping, reference.scopeId).includes(functionScopeId)) return false;
+    return true;
 }
 
 function isSyncIteratorExpr(ctx: DceCtx, expr: Node): boolean {

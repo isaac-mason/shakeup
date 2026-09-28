@@ -1051,20 +1051,20 @@ export function isLiteralValue(expr: Node, includeFunctions: boolean, ctx: Globa
     }
 }
 
-const arrayExpressionIsLiteralValue = (array: Node, includeFunctions: boolean, ctx: GlobalContext): boolean =>
-    (array.data as DataOf<'ArrayExpression'>).elements.every((element) =>
-        element === null
-            ? true
-            : element.type === N.SpreadElement
-              ? // A spread element triggers a `Symbol.iterator` call.
-                false
-              : isLiteralValue(element, includeFunctions, ctx),
-    );
+function arrayExpressionIsLiteralValue(array: Node, includeFunctions: boolean, ctx: GlobalContext): boolean {
+    for (const element of (array.data as DataOf<'ArrayExpression'>).elements) {
+        if (element === null) continue;
+        // A spread element triggers a `Symbol.iterator` call.
+        if (element.type === N.SpreadElement || !isLiteralValue(element, includeFunctions, ctx)) return false;
+    }
+    return true;
+}
 
-const objectExpressionIsLiteralValue = (object: Node, includeFunctions: boolean, ctx: GlobalContext): boolean =>
-    (object.data as DataOf<'ObjectExpression'>).properties.every((property) =>
-        objectPropertyKindIsLiteralValue(property, includeFunctions, ctx),
-    );
+function objectExpressionIsLiteralValue(object: Node, includeFunctions: boolean, ctx: GlobalContext): boolean {
+    for (const property of (object.data as DataOf<'ObjectExpression'>).properties)
+        if (!objectPropertyKindIsLiteralValue(property, includeFunctions, ctx)) return false;
+    return true;
+}
 
 function objectPropertyKindIsLiteralValue(property: Node, includeFunctions: boolean, ctx: GlobalContext): boolean {
     if (property.type === N.ObjectProperty) {
