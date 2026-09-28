@@ -246,8 +246,8 @@ export type Scoping = {
     symbolFlags: number[];
     /** oxc `symbol_redeclarations`: the `SymbolFlags` of each declaration of a symbol declared more than once. */
     symbolRedeclarations: Map<number, number[]>;
-    /** oxc `resolved_references`, per symbol. */
-    resolvedReferences: Reference[][];
+    /** oxc `resolved_references`, per symbol; absent for a symbol never referenced. */
+    resolvedReferences: (Reference[] | undefined)[];
     /** Every reference, indexed by id; an identifier holds its id in `ref`. */
     references: Reference[];
     /** Parent of each scope, 0 for the root. */
@@ -1104,7 +1104,6 @@ export function buildScoping(
     for (let symbolId = 0; symbolId < symbolCount; symbolId++) {
         scoping.symbolScopeIds[symbolId] = semantic.symbols[symbolId].scope;
         scoping.symbolFlags[symbolId] = 0;
-        scoping.resolvedReferences[symbolId] = [];
     }
     for (let scopeId = 0; scopeId < scopeCount; scopeId++) {
         scoping.scopeParentIds[scopeId] = scopeId === rootScopeId ? 0 : semantic.scopes[scopeId].parent;

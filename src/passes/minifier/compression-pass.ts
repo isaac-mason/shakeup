@@ -61,6 +61,7 @@ export function assertNoUnderPrune(program: Node, ctx: DceCtx, initialReferenceC
         if (visited.type === N.IdentifierReference) live.add(visited);
     });
     for (const list of ctx.scoping.resolvedReferences) {
+        if (list === undefined) continue;
         for (const reference of list) {
             if (reference.id < initialReferenceCount && !live.has(reference.node))
                 throw new Error(
@@ -103,7 +104,7 @@ export function flushPassChanges(program: Node, ctx: DceCtx): boolean {
         }
         for (const symbolId of affectedSymbols) {
             const list = ctx.scoping.resolvedReferences[symbolId];
-            ctx.scoping.resolvedReferences[symbolId] = list.filter((reference) => !reference.pruned);
+            if (list !== undefined) ctx.scoping.resolvedReferences[symbolId] = list.filter((reference) => !reference.pruned);
         }
     }
 
