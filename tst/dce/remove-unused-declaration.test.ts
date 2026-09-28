@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { verifyRefFacts } from '../../src/analysis/ref-facts.ts';
 import { analyze, createSemantic } from '../../src/analysis/semantic.ts';
 import { type Node, parse } from '../../src/ast.ts';
-import { eliminateDeadCode } from '../../src/passes/dce/compressor.ts';
-import { type CompressOptions, dceOptions } from '../../src/passes/dce/options.ts';
-import type { SourceType } from '../../src/passes/dce/state.ts';
+import { eliminateDeadCode } from '../../src/passes/minifier/compressor.ts';
+import { type CompressOptions, dceOptions } from '../../src/passes/minifier/options.ts';
+import type { SourceType } from '../../src/passes/minifier/state.ts';
 import { printModule } from '../../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../src/print/printer.ts';
 

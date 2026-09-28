@@ -1,6 +1,6 @@
 // Port of oxc_minifier/tests/peephole/replace_known_methods.rs.
 import { describe, it } from 'vitest';
-import type { CompressTargets } from '../../src/passes/dce/options.ts';
+import type { CompressTargets } from '../../src/passes/minifier/options.ts';
 import { defaultOptions, esTargets, testOptions } from './harness.ts';
 
 /** oxc `EngineTargets::default()`, which `default_options()` uses: no engines, so `has_feature` is

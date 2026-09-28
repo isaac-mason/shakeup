@@ -1,6 +1,6 @@
 import { resetInferredPure } from '../analysis/effects.ts';
-import { eliminateDeadCode } from '../passes/dce/compressor.ts';
-import { rolldownDceOptions } from '../passes/dce/options.ts';
+import { eliminateDeadCode } from '../passes/minifier/compressor.ts';
+import { rolldownDceOptions } from '../passes/minifier/options.ts';
 import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
 import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
 import { inlineCrossModule } from '../passes/optimize/inline-functions.ts';

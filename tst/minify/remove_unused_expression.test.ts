@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: the fixtures are JS source under test.
 // Ported from oxc_minifier/tests/peephole/remove_unused_expression.rs by conversion: the same cases, expectations verbatim.
 import { describe, it } from 'vitest';
-import { type CompressOptions, defaultTreeShakeOptions, smallestOptions } from '../../src/passes/dce/options.ts';
+import { type CompressOptions, defaultTreeShakeOptions, smallestOptions } from '../../src/passes/minifier/options.ts';
 import { defaultOptions, test, testOptions, testSame, testSameOptions, testSameSmallest, testSmallest } from './harness.ts';
 
 describe('test_remove_unused_expression', () => {

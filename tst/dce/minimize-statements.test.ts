@@ -6,8 +6,8 @@
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../../src/analysis/semantic.ts';
 import { type Node, parse } from '../../src/ast.ts';
-import { eliminateDeadCode } from '../../src/passes/dce/compressor.ts';
-import { type CompressOptions, dceOptions, rolldownDceOptions } from '../../src/passes/dce/options.ts';
+import { eliminateDeadCode } from '../../src/passes/minifier/compressor.ts';
+import { type CompressOptions, dceOptions, rolldownDceOptions } from '../../src/passes/minifier/options.ts';
 import { printModule } from '../../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../src/print/printer.ts';
 

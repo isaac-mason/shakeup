@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: the fixtures are JS source under test.
 // Ported from oxc_minifier/tests/peephole/normalize.rs by conversion: the same cases, expectations verbatim.
 import { describe, it } from 'vitest';
-import { type CompressOptions, smallestOptions } from '../../src/passes/dce/options.ts';
+import { type CompressOptions, smallestOptions } from '../../src/passes/minifier/options.ts';
 import { defaultOptions, test, testOptions, testSame } from './harness.ts';
 
 describe('test_while', () => {

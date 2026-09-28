@@ -4,8 +4,8 @@ import { expect } from 'vitest';
 import { resolveNoSideEffects } from '../../src/analysis/purity.ts';
 import { analyze, createSemantic } from '../../src/analysis/semantic.ts';
 import { type Node, parse } from '../../src/ast.ts';
-import { buildWithScoping } from '../../src/passes/dce/compressor.ts';
-import { type CompressOptions, type CompressTargets, smallestOptions } from '../../src/passes/dce/options.ts';
+import { buildWithScoping } from '../../src/passes/minifier/compressor.ts';
+import { type CompressOptions, type CompressTargets, smallestOptions } from '../../src/passes/minifier/options.ts';
 import { printModule } from '../../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../src/print/printer.ts';
 

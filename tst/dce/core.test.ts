@@ -2,16 +2,16 @@ import { describe, expect, it } from 'vitest';
 import { verifyRefFacts } from '../../src/analysis/ref-facts.ts';
 import { analyze, createSemantic, type Semantic } from '../../src/analysis/semantic.ts';
 import { create, N, type Node, parse, TYPE_NAME, walk } from '../../src/ast.ts';
-import { finishNormalizePass, flushPassChanges, runPeepholePass } from '../../src/passes/dce/compression-pass.ts';
-import { eliminateDeadCode } from '../../src/passes/dce/compressor.ts';
-import { statementsAreTerminated } from '../../src/passes/dce/is-terminated.ts';
-import { createKeepVar, keepVarVariableDeclaration, keepVarVisitStatement } from '../../src/passes/dce/keep-var.ts';
-import { dceOptions, rolldownDceOptions } from '../../src/passes/dce/options.ts';
-import { normalize } from '../../src/passes/dce/peephole/normalize.ts';
-import type { SourceType } from '../../src/passes/dce/state.ts';
-import { functionIsDead, isImplicitlyObservable, symbolValueOf } from '../../src/passes/dce/symbol-state.ts';
-import { canInlineInitializedConstant } from '../../src/passes/dce/symbol-value.ts';
-import { ReferenceFlags, ScopeFlags, SymbolFlags } from '../../src/passes/dce/syntax.ts';
+import { finishNormalizePass, flushPassChanges, runPeepholePass } from '../../src/passes/minifier/compression-pass.ts';
+import { eliminateDeadCode } from '../../src/passes/minifier/compressor.ts';
+import { statementsAreTerminated } from '../../src/passes/minifier/is-terminated.ts';
+import { createKeepVar, keepVarVariableDeclaration, keepVarVisitStatement } from '../../src/passes/minifier/keep-var.ts';
+import { dceOptions, rolldownDceOptions } from '../../src/passes/minifier/options.ts';
+import { normalize } from '../../src/passes/minifier/peephole/normalize.ts';
+import type { SourceType } from '../../src/passes/minifier/state.ts';
+import { functionIsDead, isImplicitlyObservable, symbolValueOf } from '../../src/passes/minifier/symbol-state.ts';
+import { canInlineInitializedConstant } from '../../src/passes/minifier/symbol-value.ts';
+import { ReferenceFlags, ScopeFlags, SymbolFlags } from '../../src/passes/minifier/syntax.ts';
 import {
     createDceCtx,
     createIdentExpr,
@@ -23,8 +23,8 @@ import {
     replaceExpression,
     symbolIsUnused,
     takeNode,
-} from '../../src/passes/dce/traverse-context.ts';
-import { type Traverser, traverseProgram } from '../../src/passes/dce/traverse.ts';
+} from '../../src/passes/minifier/traverse-context.ts';
+import { type Traverser, traverseProgram } from '../../src/passes/minifier/traverse.ts';
 import { printModule } from '../../src/print/print-js.ts';
 import { createPrinter, finishPrinter } from '../../src/print/printer.ts';
 

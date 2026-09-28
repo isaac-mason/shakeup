@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { setVerifyExtras, verifySemantic } from '../src/analysis/ref-facts.ts';
 import { parseProgram } from '../src/parser/index.ts';
-import { eliminateDeadCode } from '../src/passes/dce/compressor.ts';
-import { rolldownDceOptions } from '../src/passes/dce/options.ts';
+import { eliminateDeadCode } from '../src/passes/minifier/compressor.ts';
+import { rolldownDceOptions } from '../src/passes/minifier/options.ts';
 import { scalarReplaceAggregates } from '../src/passes/optimize/sroa.ts';
 
 // SROA MAINTAINS the semantic rather than rebuilding it, so every scalar it mints has to be a real

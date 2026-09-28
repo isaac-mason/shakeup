@@ -1,7 +1,7 @@
 // biome-ignore-all lint/suspicious/noTemplateCurlyInString: the fixtures are JS source under test.
 // Ported from oxc_minifier/tests/peephole/remove_dead_code.rs by conversion: the same cases, expectations verbatim.
 import { describe, it } from 'vitest';
-import { smallestOptions } from '../../src/passes/dce/options.ts';
+import { smallestOptions } from '../../src/passes/minifier/options.ts';
 import { defaultOptions, test, testOptions, testSame, testSameOptions } from './harness.ts';
 
 const testUnused = (source: string, expected: string): void =>
