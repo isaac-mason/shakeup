@@ -682,9 +682,10 @@ export function valueToExpr(ctx: DceCtx, span: Span, value: ConstantValue): Node
 }
 
 export function evalBinary(ctx: DceCtx, binary: Node): Node | null {
-    if (binary.type !== N.BinaryExpression || mayHaveSideEffects(binary, ctx)) return null;
+    if (binary.type !== N.BinaryExpression) return null;
+    // oxc checks side effects first; evaluation only reads, so the order does not change the answer
     const value = evalBinaryOperation(ctx, binary.data.operator, binary.data.left, binary.data.right);
-    if (value === null) return null;
+    if (value === null || mayHaveSideEffects(binary, ctx)) return null;
     if (value.kind === 'number' && nonFiniteGlobalShadowed(ctx, value.value)) return null;
     return valueToExpr(ctx, binary, value);
 }

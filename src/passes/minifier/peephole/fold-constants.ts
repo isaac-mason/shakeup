@@ -133,9 +133,10 @@ export function foldUnaryExpr(ctx: DceCtx, expr: Node): void {
     }
     // Do not fold big int.
     if (operator === '-' && argument.type === N.BigIntLiteral) return;
-    if (mayHaveSideEffects(expr, ctx)) return;
+    // oxc checks side effects first; evaluation only reads, so the order does not change the answer
     const value = evaluateValueInContext(expr, ctx);
-    if (value !== null) replaceExpression(ctx, expr, valueToExpr(ctx, expr, value));
+    if (value === null || mayHaveSideEffects(expr, ctx)) return;
+    replaceExpression(ctx, expr, valueToExpr(ctx, expr, value));
 }
 
 export function foldStaticMemberExpr(ctx: DceCtx, expr: Node): void {
@@ -541,7 +542,10 @@ function stringExpressionSizeLowerBound(ctx: DceCtx, expr: Node): [number, boole
 /** Simplified version of `tryFoldAdd` from closure compiler. */
 function tryFoldAdd(ctx: DceCtx, binary: Node): Node | null {
     const data = binary.data as DataOf<'BinaryExpression'>;
-    const value = mayHaveSideEffects(binary, ctx) ? null : evaluateValueInContext(binary, ctx);
+    // oxc checks side effects first; evaluation only reads, so checking them only for a value that folds is
+    // the same answer without the subtree walk for every `+` that does not.
+    const evaluated = evaluateValueInContext(binary, ctx);
+    const value = evaluated === null || mayHaveSideEffects(binary, ctx) ? null : evaluated;
     if (value !== null) {
         if (value.kind === 'number' && foldedNumericExpressionIsShorter(binary, value.value) === false) return null;
         if (value.kind === 'string') {
