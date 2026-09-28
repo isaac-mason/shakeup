@@ -1,6 +1,6 @@
 // Reference-fact ORACLE for `tst/semantic-refs-differential.test.ts`. NOT part of the pipeline.
 //
-// It derives the four facts `analyze` maintains (`refs`/`uses`/`shorthand`/`exported`) from a RESOLVED tree
+// It derives the facts `analyze` maintains (`refs`/`uses`) from a RESOLVED tree
 // (`analysis/ref-facts.ts`) rather than from the semantic builder's deferred-resolution queue. Those two routes
 // stay independent, which is what the differential tests. Do not "simplify" this to call into `analyze`: that
 // would delete the test's only evidence.
@@ -18,10 +18,6 @@ import { emitRefFacts, REF } from '../src/analysis/ref-facts.ts';
 export type Prelude = {
     /** Read/write counts per symbol — replaces `tallyRefs(program)`. */
     refs: (RefCounts | undefined)[];
-    /** Symbols read as a shorthand-property VALUE (`{ x }`), which cannot be substituted by span. */
-    shorthand: Set<number>;
-    /** Locals re-exported by a bare `export { X }` specifier — never rename or substitute these. */
-    exported: Set<number>;
     /** Use counts per symbol (reference nodes only, not declarations) — replaces `countUses`. */
     uses: number[];
 };
@@ -36,8 +32,6 @@ export type Prelude = {
  */
 export function computePrelude(program: Node): Prelude {
     const refs: (RefCounts | undefined)[] = [];
-    const shorthand = new Set<number>();
-    const exported = new Set<number>();
     const uses: number[] = [];
     emitRefFacts(program, (sym, flags) => {
         if ((flags & (REF.READ | REF.WRITE)) !== 0) {
@@ -50,8 +44,6 @@ export function computePrelude(program: Node): Prelude {
             if ((flags & REF.WRITE) !== 0) c.writes++;
         }
         uses[sym] = (uses[sym] ?? 0) + 1;
-        if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
-        if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
     });
-    return { refs, shorthand, exported, uses };
+    return { refs, uses };
 }

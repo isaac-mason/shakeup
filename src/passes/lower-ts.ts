@@ -105,11 +105,6 @@ function iifeVarDecl(
                   assign(member(boundRef(parent.name, parent.sym), idName(name)), emptyObject()),
               );
     const call = create.CallExpression(SPAN, SPAN, pure ? FL.PURE : 0, fn, [arg], null);
-    // `analyze` files a declarator's init under its symbol (`Semantic.symbolInit`, oxc's
-    // `SymbolValue`); compress reads it (alias-inline, const-prop). This declaration is minted
-    // AFTER that walk, so record it here or the symbol looks initialiser-less and those passes
-    // decline to fire — a size regression, not a miscompile.
-    if (sym !== 0) semantic.symbolInit.set(sym, call);
     return create.VariableDeclaration(SPAN, SPAN, VAR_KIND.VAR, [create.VariableDeclarator(SPAN, SPAN, 0, id, null, call)]);
 }
 
@@ -219,12 +214,10 @@ function entityToValue(ref: Node): Node {
  *  `import X = require("m")` external form — CommonJS interop is out of scope for an ESM browser
  *  bundler, so it's left un-lowered to reject loudly. Type-only (`import type X =`) is erased by the
  *  caller before this. */
-function lowerImportEquals(node: Node, semantic: Semantic): Node | null {
+function lowerImportEquals(node: Node): Node | null {
     const d = node.data as { id: Node; moduleReference: Node };
     if (d.moduleReference.type === N.TSExternalModuleReference) return null; // require() — reject
     const init = entityToValue(d.moduleReference);
-    const sym = (d.id as { sym: number }).sym;
-    if (sym !== 0) semantic.symbolInit.set(sym, init); // see the note in `iifeVarDecl`
     return create.VariableDeclaration(SPAN, SPAN, VAR_KIND.VAR, [create.VariableDeclarator(SPAN, SPAN, 0, d.id, null, init)]);
 }
 
@@ -239,7 +232,7 @@ function lowerNsMember(stmt: Node, thisParam: Uid, ctx: TransformCtx): Node[] | 
     // bare (non-exported) `import X = A.B` → `var X = A.B` (no mirror); `import type X =` erased.
     if (stmt.type === N.TSImportEqualsDeclaration) {
         if ((stmt.data as { importKind: string }).importKind === 'type') return [];
-        const lowered = lowerImportEquals(stmt, ctx.semantic);
+        const lowered = lowerImportEquals(stmt);
         return lowered === null ? null : [lowered];
     }
     // bare (non-exported) nested namespace → a local `var M = (…)(M || {})`, not on `_N`.
@@ -261,7 +254,7 @@ function lowerNsMember(stmt: Node, thisParam: Uid, ctx: TransformCtx): Node[] | 
     // `export import X = A.B` → `var X = A.B` + mirror `_N.X = X`; `export import type X =` erased.
     if (decl.type === N.TSImportEqualsDeclaration) {
         if ((decl.data as { importKind: string }).importKind === 'type') return [];
-        const lowered = lowerImportEquals(decl, ctx.semantic);
+        const lowered = lowerImportEquals(decl);
         if (lowered === null) return null;
         const id = (decl.data as { id: Node }).id;
         return [lowered, exprStmt(assign(member(pRef(), idName(id.name)), boundRef(id.name, (id as { sym: number }).sym)))];
@@ -503,7 +496,7 @@ export const tsLower: Visitor = {
             // `import X = A.B` → `var X = A.B`; `import type X =` erased; `= require()` left to reject.
             if ((node.data as { importKind: string }).importKind === 'type') ctx.remove();
             else {
-                const lowered = lowerImportEquals(node, ctx.semantic);
+                const lowered = lowerImportEquals(node);
                 if (lowered !== null) ctx.replaceWith(lowered);
                 else SAW_UNLOWERED = true; // `= require(...)` — left for the diagnostic
             }
@@ -517,7 +510,7 @@ export const tsLower: Visitor = {
                 // `export import X = A.B` → `export var X = A.B`; type-only erased; require() rejects.
                 if ((decl.data as { importKind: string }).importKind === 'type') ctx.remove();
                 else {
-                    const lowered = lowerImportEquals(decl, ctx.semantic);
+                    const lowered = lowerImportEquals(decl);
                     if (lowered !== null) ctx.replaceWith(create.ExportNamedDeclaration(SPAN, SPAN, 0, lowered, null, null));
                     else SAW_UNLOWERED = true; // `export import X = require(...)` — left for the diagnostic
                 }

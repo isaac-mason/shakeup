@@ -10,8 +10,8 @@
 // Both go through this one walker so the two directions can never disagree about what a reference IS.
 // That symmetry is the whole safety argument: a subtree's contribution is subtracted using the same
 // classification that added it. Getting `writes` wrong in particular is not a size regression — an
-// under-counted write makes `aliasInline` believe a binding is never reassigned, and it will happily
-// substitute across the reassignment.
+// under-counted write makes a binding look never reassigned, and a pass trusting that will substitute
+// across the reassignment.
 import { N, type Node, walk, walkChildren } from '../ast/index.ts';
 import { analyze, createSemantic, type Semantic } from './semantic.ts';
 
@@ -166,19 +166,15 @@ export function emitRefFacts(root: Node, emit: RefEmit): void {
     }
 }
 
-/** Recompute the four reference facts for `program` from scratch. Ground truth. */
+/** Recompute the reference facts for `program` from scratch. Ground truth. */
 export function computeRefFacts(program: Node): {
     refs: ({ reads: number; writes: number } | undefined)[];
     uses: number[];
-    shorthand: Set<number>;
-    exported: Set<number>;
 } {
     // Symbol-INDEXED, matching `Semantic`. See the field docs there for why `undefined` (absent) must
     // stay distinguishable from a zeroed record.
     const refs: ({ reads: number; writes: number } | undefined)[] = [];
     const uses: number[] = [];
-    const shorthand = new Set<number>();
-    const exported = new Set<number>();
     emitRefFacts(program, (sym, flags) => {
         if ((flags & (REF.READ | REF.WRITE)) !== 0) {
             let c = refs[sym];
@@ -190,10 +186,8 @@ export function computeRefFacts(program: Node): {
             if ((flags & REF.WRITE) !== 0) c.writes++;
         }
         uses[sym] = (uses[sym] ?? 0) + 1;
-        if ((flags & REF.SHORTHAND) !== 0) shorthand.add(sym);
-        if ((flags & REF.EXPORTED) !== 0) exported.add(sym);
     });
-    return { refs, uses, shorthand, exported };
+    return { refs, uses };
 }
 
 /**
@@ -484,9 +478,5 @@ export function verifySemantic(maintained: Semantic, program: Node): string[] {
             out.push(`EXTRAS(safe): maintained has ${liveM} live symbols, truth ${liveT} (delta ${liveM - liveT})`);
     }
     for (const p of verifyRefFacts(maintained, program)) if (p.includes('UNDER(unsafe)')) out.push(p);
-
-    // `symbolInit` / `shorthand` / `exported` are read by compress passes (alias-inline, const-prop)
-    // and are NOT covered by the RefDelta, which carries only reads/writes/uses. A stale entry here
-    // points at a node the lowering may have detached, so it is reported as unsafe.
     return out;
 }

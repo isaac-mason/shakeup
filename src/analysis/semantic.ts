@@ -259,25 +259,6 @@ export type Semantic = {
     /** Reference-node count per symbol — NOT reads+writes (`x += 1` is 2 there, 1 here).
      *  Indexed by symbol id; absent reads as 0, which is what every consumer already means by `?? 0`. */
     uses: number[];
-    /** Symbols read as a shorthand-property VALUE (`{ x }`), which cannot be substituted by span. */
-    shorthand: Set<number>;
-    /** Locals re-exported by a bare `export { X }` — renaming one would rewrite the public name. */
-    exported: Set<number>;
-    /**
-     * The INIT expression of the declarator that bound each symbol, for plain-identifier bindings.
-     *
-     * oxc's `SymbolValue` / `init_symbol_value`: record what a binding was initialized with as the
-     * declarator is walked, so consumers read a table instead of hunting for declarations. `constProp`
-     * and `aliasInline` each used to walk the WHOLE PROGRAM at `[N.Program]` enter to build their own
-     * candidate map — 5.9% of profile between them, every round, the same shape as the prelude walks
-     * this file already absorbed. They now filter this table by their own policy instead.
-     *
-     * Deliberately UNFILTERED: it records the init for every `BindingIdentifier` declarator regardless
-     * of kind, literalness or reference counts, because the two consumers want different subsets
-     * (`constProp` wants primitive literals, `aliasInline` wants bare identifiers). Kind lives on
-     * `symbols[sym].flags` (`SYM.VAR`/`LET`/`CONST`), so a consumer that cares still has it.
-     */
-    symbolInit: Map<number, Node>;
 
     /**
      * Per-symbol `(nodeId, scope)` pairs — where each symbol is REFERENCED and where it is DECLARED.
@@ -331,7 +312,6 @@ export type RefCounts = { reads: number; writes: number };
 // the role is known when we collect and the symbol only when we resolve).
 const REF_READ = 1;
 const REF_WRITE = 2;
-const REF_SHORTHAND = 4;
 const REF_EXPORTED = 8;
 /** Already resolved by {@link resolveEarly}; the deferred pass must TALLY it but not re-resolve it. */
 const REF_EARLY = 16;
@@ -463,9 +443,6 @@ export function createSemantic(withReferenceScopes = false): Semantic {
         refs: [],
         refsPool: [],
         uses: [],
-        shorthand: new Set(),
-        exported: new Set(),
-        symbolInit: new Map(),
         unresolved: [],
         redeclarations: new Map(),
         names: new Map(),
@@ -1015,9 +992,6 @@ function resetSem(out: Semantic): void {
     // objects survive to be reused.
     for (let i = 1; i < out.refs.length; i++) out.refs[i] = undefined;
     for (let i = 1; i < out.uses.length; i++) out.uses[i] = 0;
-    out.shorthand.clear();
-    out.exported.clear();
-    out.symbolInit.clear();
     if (out.refPairs !== null) out.refPairs.length = 0;
     if (out.declPairs !== null) out.declPairs.length = 0;
 }
@@ -1086,8 +1060,6 @@ export function analyze(out: Semantic, program: Node, sourceIsModule = false, ch
             if ((f & REF_WRITE) !== 0) c.writes++;
         }
         out.uses[sym] = (out.uses[sym] ?? 0) + 1;
-        if ((f & REF_SHORTHAND) !== 0) out.shorthand.add(sym);
-        if ((f & REF_EXPORTED) !== 0) out.exported.add(sym);
     }
     if (check) {
         // Redeclaration does NOT move onto the walk. It needs the symbol table, and whether a
@@ -1244,12 +1216,12 @@ function collectShorthandProp(state: AnalyseState, data: { shorthand: boolean; v
     if (!data.shorthand) return false;
     const v = data.value;
     if (v.type === N.IdentifierReference) {
-        collect(state, v, NS_VALUE, base | REF_SHORTHAND);
+        collect(state, v, NS_VALUE, base);
         return true;
     }
     if (v.type === N.AssignmentPattern) {
         const l = v.data.left;
-        if (l.type === N.IdentifierReference) collect(state, l, NS_VALUE, base | REF_SHORTHAND);
+        if (l.type === N.IdentifierReference) collect(state, l, NS_VALUE, base);
         else collectTarget(state, l);
         visit(state, v.data.right);
         return true;
@@ -1829,10 +1801,6 @@ function visit(state: AnalyseState, node: Node | null): void {
             for (const d of node.data.declarations) {
                 if (d.type !== N.VariableDeclarator) continue;
                 declarePattern(state, d.data.id, flags, target);
-                // `declarePattern` has assigned `id.sym` by here, so the init can be filed against it.
-                const dId = d.data.id;
-                if (dId.type === N.BindingIdentifier && d.data.init !== null && dId.sym !== 0)
-                    state.sem.symbolInit.set(dId.sym, d.data.init);
                 collectPattern(state, d.data.id);
                 visitType(state, d.data.typeAnnotation);
                 visit(state, d.data.init);

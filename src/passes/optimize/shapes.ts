@@ -71,8 +71,8 @@ function shapeOf(type: Node, aliases: ReadonlyMap<string, Node>, depth = 0): str
  * detached, and still readable. The collector is also ordered FIRST in the pass list, so it sees each
  * node before `tsStrip` touches it.
  *
- * Module-level state, reset at Program enter — the same single-threaded-traversal pattern
- * `alias-inline` uses. That keeps the visitor a SHARED CONSTANT, which matters because `traverse`
+ * Module-level state, reset at Program enter, for a single-threaded traversal. That keeps the visitor a
+ * SHARED CONSTANT, which matters because `traverse`
  * caches its per-node-type hook tables on the visitor array's identity.
  */
 let ALIASES: Map<string, Node> | null = null;

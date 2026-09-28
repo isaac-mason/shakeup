@@ -147,7 +147,6 @@ function evictDeclSymbol(ctx: TransformCtx, decl: Node): void {
  *  local name because the call sites read better as "evict this binding". */
 const evictSym = (ctx: TransformCtx, sym: number): void => ctx.retireSymbol(sym);
 
-
 function stripExport(n: Node): boolean {
     const d = n.data as { exportKind: string; declaration: Node | null; specifiers: Node[]; source: Node | null };
     if (d.exportKind === 'type') return true;
@@ -289,7 +288,9 @@ function markAmbient(root: Node): void {
 export const tsStrip: Visitor = {
     name: 'tsStrip',
     enter: hookTable({
-        [N.Program]: () => { AMBIENT.clear(); },
+        [N.Program]: () => {
+            AMBIENT.clear();
+        },
         // Type-assertion / non-null / instantiation wrappers → the inner expression (all layers).
         [N.TSAsExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
         [N.TSSatisfiesExpression]: (n, ctx) => ctx.replaceWith(unwrapAssertions(n)),
@@ -348,7 +349,12 @@ export const tsStrip: Visitor = {
             // so any such parameter is the TS pseudo-parameter. `ctx.remove()` in a list slot
             // retires the subtree's bindings, so the symbol goes with it.
             const pat = (n.data as { pattern?: Node }).pattern;
-            if (pat !== null && pat !== undefined && pat.type === N.BindingIdentifier && (pat as { name: string }).name === 'this') {
+            if (
+                pat !== null &&
+                pat !== undefined &&
+                pat.type === N.BindingIdentifier &&
+                (pat as { name: string }).name === 'this'
+            ) {
                 ctx.remove();
                 return;
             }
@@ -399,7 +405,7 @@ export const tsStrip: Visitor = {
                     if (isTypeOnlyDecl(inner)) evictSubtreeBindings(ctx, inner);
                     else evictDeclSymbol(ctx, inner);
                 }
-                for (const sp of ((n.data as { specifiers?: Node[] }).specifiers ?? [])) evictSymbol(ctx, sp);
+                for (const sp of (n.data as { specifiers?: Node[] }).specifiers ?? []) evictSymbol(ctx, sp);
                 ctx.remove();
             }
         },
@@ -419,12 +425,6 @@ export const tsStrip: Visitor = {
         },
     }),
     exit: hookTable({
-        // `Semantic.symbolInit` holds the declarator init NODE per symbol, recorded by `analyze`
-        // before this pass ran. Unwrapping `x!` / `x as T` replaces that node, leaving the entry
-        // pointing at a detached wrapper — so `alias-inline` and `const-prop` see a
-        // `TSNonNullExpression` where the tree now has the `CallExpression` it wrapped, and decline
-        // to fire. Repairing is O(symbols-with-inits) (median 94 per module), not a tree walk,
-        // because the replacement is always a DESCENDANT reachable by the same unwrap.
         [N.Program]: (n, ctx) => {
             const sem = ctx.semantic;
             // An erased `declare` form leaves an AMBIENT GLOBAL: `declare const g` names something the
@@ -448,11 +448,6 @@ export const tsStrip: Visitor = {
                 for (const sym of AMBIENT) evictSym(ctx, sym);
                 AMBIENT.clear();
             }
-            const si = sem.symbolInit;
-            for (const [sym, init] of si) {
-                const inner = unwrapAssertions(init);
-                if (inner !== init) si.set(sym, inner);
-            }
             // `Semantic.unresolved` holds the reference NODES that resolved to nothing; `deconflict`
             // seeds its taken-name set from them. `lowerEnum`'s `qualifyMemberRefs` rewrites a bare
             // member reference (`C = B`) into `_E.B` by RETYPING the node in place, so an entry here
@@ -460,7 +455,7 @@ export const tsStrip: Visitor = {
             // stale name then reserves a name nothing uses. Dropping the retyped ones is
             // O(unresolved), and it generalises to any in-place retype a lowering performs.
             const live = sem.unresolved.filter((n) => n.type === N.IdentifierReference && n.sym === 0);
-            if (live.length !== sem.unresolved.length) sem.unresolved.length = 0, sem.unresolved.push(...live);
+            if (live.length !== sem.unresolved.length) (sem.unresolved.length = 0), sem.unresolved.push(...live);
         },
     }),
 };

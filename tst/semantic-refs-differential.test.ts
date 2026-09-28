@@ -31,15 +31,15 @@ function diff(src: string, ts: boolean): string[] {
                 `sym ${s}: refs analyze={r:${a?.reads ?? 0},w:${a?.writes ?? 0}} prelude={r:${b?.reads ?? 0},w:${b?.writes ?? 0}}`,
             );
     }
-    const useSyms = (() => { const o: number[] = []; for (let i = 1; i < Math.max(p.uses.length, sem.uses.length); i++) o.push(i); return o; })();
+    const useSyms = (() => {
+        const o: number[] = [];
+        for (let i = 1; i < Math.max(p.uses.length, sem.uses.length); i++) o.push(i);
+        return o;
+    })();
     for (const s of useSyms) {
         if ((sem.uses[s] ?? 0) !== (p.uses[s] ?? 0))
             problems.push(`sym ${s}: uses analyze=${sem.uses[s] ?? 0} prelude=${p.uses[s] ?? 0}`);
     }
-    for (const s of new Set([...p.shorthand, ...sem.shorthand]))
-        if (p.shorthand.has(s) !== sem.shorthand.has(s)) problems.push(`sym ${s}: shorthand mismatch`);
-    for (const s of new Set([...p.exported, ...sem.exported]))
-        if (p.exported.has(s) !== sem.exported.has(s)) problems.push(`sym ${s}: exported mismatch`);
     return problems;
 }
 
@@ -83,9 +83,13 @@ describe('analyze reference facts == computePrelude', () => {
     }
 
     const three = 'llm/spikes/node_modules/three/build/three.core.js';
-    it.skipIf(!existsSync(three))('agrees across three.core.js', () => {
-        expect(diff(readFileSync(three, 'utf8'), false)).toEqual([]);
-    }, 60000);
+    it.skipIf(!existsSync(three))(
+        'agrees across three.core.js',
+        () => {
+            expect(diff(readFileSync(three, 'utf8'), false)).toEqual([]);
+        },
+        60000,
+    );
 
     const tsCases: [string, string][] = [
         ['ts: a type and a value sharing a name', 'type T = number; const T = 1; let x: T = T;'],
@@ -98,7 +102,11 @@ describe('analyze reference facts == computePrelude', () => {
     }
 
     const cc = '/Users/isaacmason/Development/crashcat/src/world.ts';
-    it.skipIf(!existsSync(cc))('agrees across a real TS module', () => {
-        expect(diff(readFileSync(cc, 'utf8'), true)).toEqual([]);
-    }, 60000);
+    it.skipIf(!existsSync(cc))(
+        'agrees across a real TS module',
+        () => {
+            expect(diff(readFileSync(cc, 'utf8'), true)).toEqual([]);
+        },
+        60000,
+    );
 });

@@ -307,17 +307,6 @@ class Ctx {
             sem.uses[to] = (sem.uses[to] ?? 0) + fUses;
             sem.uses[from] = 0;
         }
-        if (sem.shorthand.has(from)) {
-            sem.shorthand.add(to);
-            sem.shorthand.delete(from);
-        }
-        if (sem.exported.has(from)) {
-            sem.exported.add(to);
-            sem.exported.delete(from);
-        }
-        // The merged declaration is gone (or became a plain assignment), so its recorded init no
-        // longer describes a declarator.
-        sem.symbolInit.delete(from);
         this.retireSymbol(from);
     }
     spliceStatements(list: Node[], start: number, deleteCount: number, ...insert: Node[]): void {
