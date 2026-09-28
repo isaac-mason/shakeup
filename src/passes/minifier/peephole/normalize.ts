@@ -26,7 +26,7 @@ import {
 import { MemberWriteEffect } from '../symbol-metadata.ts';
 import { recordMemberWriteEffect } from '../symbol-state.ts';
 import { referenceIsReadOnly, scopeContainsDirectEval, scopeIsStrictMode } from '../syntax.ts';
-import { compileWalker, type HookName, hookNamesOf, type Traverser } from '../traverse.ts';
+import { compileWalker, type HookFilter, type HookName, hookNamesOf, type Traverser } from '../traverse.ts';
 import {
     createChildScopeOfCurrent,
     createVoidZero,
@@ -172,7 +172,15 @@ const NORMALIZE_HOOKS: HookName[] = [
     'exitUnaryExpression',
     'exitAssignmentTarget',
 ];
-const walkNormalize = compileWalker<DceCtx>(NORMALIZE_HOOKS);
+/** The node types the traverser's `exitExpression` and `exitStatement` act on. */
+const NORMALIZE_HOOK_FILTER: HookFilter = {
+    types: {
+        exitExpression: [N.CallExpression, N.IdentifierReference, N.UnaryExpression, N.StaticMemberExpression],
+        exitStatement: [N.WhileStatement],
+    },
+    exitNodeParentKinds: [],
+};
+const walkNormalize = compileWalker<DceCtx>(NORMALIZE_HOOKS, NORMALIZE_HOOK_FILTER);
 
 const memberObject = (member: Node): Node => (member.data as { object: Node }).object;
 

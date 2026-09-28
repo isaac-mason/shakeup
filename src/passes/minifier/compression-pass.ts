@@ -5,8 +5,8 @@
 // direct-eval scope flags, then derive function reachability from the settled references.
 
 import { N, type Node, walk } from '../../ast/index.ts';
-import { peepholeOptimizations } from './peephole/index.ts';
-import { passChangesAreClean, takeRevisitRequested } from './state.ts';
+import { FULL_HOOK_FILTER, peepholeOptimizations, TREE_SHAKE_HOOK_FILTER } from './peephole/index.ts';
+import { isTreeShakeOnly, passChangesAreClean, takeRevisitRequested } from './state.ts';
 import { resetValues } from './symbol-state.ts';
 import { analyze, deadReferencesAffectAnalysis } from './symbol-liveness.ts';
 import { ScopeFlags, scopeContainsDirectEval } from './syntax.ts';
@@ -135,13 +135,14 @@ export function finishNormalizePass(program: Node, ctx: DceCtx): void {
     assertPassChangesClean(ctx);
 }
 
-const walkPeephole = compileWalker<DceCtx>(hookNamesOf(peepholeOptimizations));
+const walkTreeShakePeephole = compileWalker<DceCtx>(hookNamesOf(peepholeOptimizations), TREE_SHAKE_HOOK_FILTER);
+const walkFullPeephole = compileWalker<DceCtx>(hookNamesOf(peepholeOptimizations), FULL_HOOK_FILTER);
 
 /** Run and finish one peephole pass. Returns whether another pass is needed. */
 export function runPeepholePass(program: Node, ctx: DceCtx): boolean {
     assertPassChangesClean(ctx);
     resetValues(ctx.state.symbols);
-    walkPeephole(peepholeOptimizations, program, ctx);
+    (isTreeShakeOnly(ctx.state) ? walkTreeShakePeephole : walkFullPeephole)(peepholeOptimizations, program, ctx);
     const revisitRequested = takeRevisitRequested(ctx.state);
     const newlyDead = finishPass(program, ctx, false);
     if (ctx.verify && newlyDead && !revisitRequested) throw new Error('dce: liveness progress without a recorded pass change');

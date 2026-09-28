@@ -660,72 +660,68 @@ step = ${step + 1}; listIndexes[top] = 0; listStarts[top] = -1;\n`;
     return source;
 }
 
-/** A hook call on `target`, or nothing when the traverser has no such hook. */
-const call = (hooks: ReadonlySet<HookName>, name: HookName, target: string, extra = ''): string =>
-    hooks.has(name) ? `traverser.${name}(ctx, ${target}${extra});\n` : '';
-
-/** oxc's enter hooks for `target` at `position` in `role`. */
-/** The nodes a traverser's `enterNode` and `exitNode` act on, when that is a few kinds: the walk calls them for
- *  those alone, since a call per node costs more than the hook's own work on most of them. */
-export type NodeHookFilter = {
-    enterTypes: readonly number[];
-    exitTypes: readonly number[];
-    /** `exitNode` also fires for a node in one of these child slots. */
-    exitParentKinds: readonly AncestorKind[];
+/** Hooks a traverser calls only for some node types, where the hook acts on those alone: the walk skips the call
+ *  for the rest, which costs more than the hook's own work on most nodes. */
+export type HookFilter = {
+    types: Partial<Record<HookName, readonly number[]>>;
+    /** `exitNode` also fires for a node in one of these child slots, whatever its type. */
+    exitNodeParentKinds: readonly AncestorKind[];
 };
 
-/** Code that calls `enterNode` on `target`, for the nodes `filter` names. */
-function enterNodeSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string): string {
-    if (!hooks.has('enterNode')) return '';
-    const callSource = `traverser.enterNode(ctx, ${target}, position);`;
-    if (filter === null) return callSource;
-    return `switch (${target}.type) { ${filter.enterTypes.map((type) => `case ${type}:`).join(' ')} ${callSource} }`;
+/** A hook call on `target`, for the node types `filter` gives it, or nothing when the traverser has no such hook. */
+function call(hooks: ReadonlySet<HookName>, filter: HookFilter | null, name: HookName, target: string, extra = ''): string {
+    if (!hooks.has(name)) return '';
+    const callSource = `traverser.${name}(ctx, ${target}${extra});`;
+    const types = filter?.types[name];
+    if (types === undefined) return `${callSource}\n`;
+    return `switch (${target}.type) { ${types.map((type) => `case ${type}:`).join(' ')} ${callSource} }\n`;
 }
 
-/** Code that calls `exitNode` on `target`, for the nodes `filter` names. */
-function exitNodeSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string, position: string): string {
-    if (!hooks.has('exitNode')) return '';
-    const callSource = `traverser.exitNode(ctx, ${target}, ${position});`;
-    if (filter === null) return callSource;
-    const kindTest = filter.exitParentKinds.map((kind) => `kind === ${JSON.stringify(kind)}`).join(' || ');
+/** The `exitNode` call on `target`: its filtered types, and any node in one of the filter's child slots. */
+function exitNodeSource(hooks: ReadonlySet<HookName>, filter: HookFilter | null, target: string, position: string): string {
+    const typed = call(hooks, filter, 'exitNode', target, `, ${position}`);
+    if (typed === '' || filter === null || filter.exitNodeParentKinds.length === 0) return typed;
+    const kindTest = filter.exitNodeParentKinds.map((kind) => `kind === ${JSON.stringify(kind)}`).join(' || ');
+    const types = filter.types.exitNode ?? [];
     return `switch (${target}.type) {
-    ${filter.exitTypes.map((type) => `case ${type}:`).join(' ')} ${callSource} break;
+    ${types.map((type) => `case ${type}:`).join(' ')} traverser.exitNode(ctx, ${target}, ${position}); break;
     default: {
         const kind = ctx.ancestorDepth === 0 ? 'None' : ancestorKinds[ctx.ancestorDepth - 1];
-        if (${kindTest === '' ? 'false' : kindTest}) ${callSource}
+        if (${kindTest}) traverser.exitNode(ctx, ${target}, ${position});
     }
-}`;
+}
+`;
 }
 
-function enterSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string): string {
+function enterSource(hooks: ReadonlySet<HookName>, filter: HookFilter | null, target: string): string {
     const P = WalkPosition;
     return `switch (position) {
-    case ${P.Statement}: ${call(hooks, 'enterStatement', target)} break;
-    case ${P.Expression}: ${call(hooks, 'enterExpression', target)} break;
-    case ${P.FunctionBody}: ${call(hooks, 'enterFunctionBody', target)} break;
-    case ${P.ArrowFunctionBlockBody}: ${call(hooks, 'enterArrowFunctionBody', target)}${call(hooks, 'enterFunctionBody', target)} break;
-    case ${P.ArrowFunctionExpressionBody}: ${call(hooks, 'enterArrowFunctionBody', target)}${call(hooks, 'enterExpression', target)} break;
+    case ${P.Statement}: ${call(hooks, filter, 'enterStatement', target)} break;
+    case ${P.Expression}: ${call(hooks, filter, 'enterExpression', target)} break;
+    case ${P.FunctionBody}: ${call(hooks, filter, 'enterFunctionBody', target)} break;
+    case ${P.ArrowFunctionBlockBody}: ${call(hooks, filter, 'enterArrowFunctionBody', target)}${call(hooks, filter, 'enterFunctionBody', target)} break;
+    case ${P.ArrowFunctionExpressionBody}: ${call(hooks, filter, 'enterArrowFunctionBody', target)}${call(hooks, filter, 'enterExpression', target)} break;
 }
 if (role === ${ROLE_DEFAULT}) {
     switch (${target}.type) {
-        case ${N.Program}: ${call(hooks, 'enterProgram', target)} break;
+        case ${N.Program}: ${call(hooks, filter, 'enterProgram', target)} break;
         case ${N.FunctionDeclaration}:
-        case ${N.FunctionExpression}: ${call(hooks, 'enterFunction', target)} break;
-        case ${N.VariableDeclaration}: ${call(hooks, 'enterVariableDeclaration', target)} break;
+        case ${N.FunctionExpression}: ${call(hooks, filter, 'enterFunction', target)} break;
+        case ${N.VariableDeclaration}: ${call(hooks, filter, 'enterVariableDeclaration', target)} break;
         case ${N.ExportNamedDeclaration}:
-            if (${target}.data.declaration !== null) { ${call(hooks, 'enterExportDeclaration', target)} }
-            else if (${target}.data.source === null) { ${call(hooks, 'enterExportNamedDeclaration', target)} }
+            if (${target}.data.declaration !== null) { ${call(hooks, filter, 'enterExportDeclaration', target)} }
+            else if (${target}.data.source === null) { ${call(hooks, filter, 'enterExportNamedDeclaration', target)} }
             break;
-        case ${N.ExportDefaultDeclaration}: ${call(hooks, 'enterExportDefaultDeclaration', target)} break;
+        case ${N.ExportDefaultDeclaration}: ${call(hooks, filter, 'enterExportDefaultDeclaration', target)} break;
     }
 }
-${enterNodeSource(hooks, filter, target)}`;
+${call(hooks, filter, 'enterNode', target, ', position')}`;
 }
 
 /** oxc's exit hooks for `target`, which had `position` and, when walked in the default role, `type`. */
 function exitSource(
     hooks: ReadonlySet<HookName>,
-    filter: NodeHookFilter | null,
+    filter: HookFilter | null,
     target: string,
     position: string,
     type: string,
@@ -733,39 +729,40 @@ function exitSource(
 ): string {
     const P = WalkPosition;
     const byType: [number, string][] = [
-        [N.Program, call(hooks, 'exitProgram', target)],
-        [N.VariableDeclarator, call(hooks, 'exitVariableDeclarator', target)],
-        [N.VariableDeclaration, call(hooks, 'exitVariableDeclaration', target)],
-        [N.CallExpression, call(hooks, 'exitCallExpression', target)],
-        [N.NewExpression, call(hooks, 'exitNewExpression', target)],
-        [N.UpdateExpression, call(hooks, 'exitUpdateExpression', target)],
-        [N.UnaryExpression, call(hooks, 'exitUnaryExpression', target)],
-        [N.ForStatement, call(hooks, 'exitForStatement', target)],
-        [N.ReturnStatement, call(hooks, 'exitReturnStatement', target)],
-        [N.CatchClause, call(hooks, 'exitCatchClause', target)],
-        [N.ObjectProperty, call(hooks, 'exitObjectProperty', target)],
-        [N.MethodDefinition, call(hooks, 'exitMethodDefinition', target)],
+        [N.Program, call(hooks, filter, 'exitProgram', target)],
+        [N.VariableDeclarator, call(hooks, filter, 'exitVariableDeclarator', target)],
+        [N.VariableDeclaration, call(hooks, filter, 'exitVariableDeclaration', target)],
+        [N.CallExpression, call(hooks, filter, 'exitCallExpression', target)],
+        [N.NewExpression, call(hooks, filter, 'exitNewExpression', target)],
+        [N.UpdateExpression, call(hooks, filter, 'exitUpdateExpression', target)],
+        [N.UnaryExpression, call(hooks, filter, 'exitUnaryExpression', target)],
+        [N.ForStatement, call(hooks, filter, 'exitForStatement', target)],
+        [N.ReturnStatement, call(hooks, filter, 'exitReturnStatement', target)],
+        [N.CatchClause, call(hooks, filter, 'exitCatchClause', target)],
+        [N.ObjectProperty, call(hooks, filter, 'exitObjectProperty', target)],
+        [N.MethodDefinition, call(hooks, filter, 'exitMethodDefinition', target)],
         [
             N.PropertyDefinition,
             hooks.has('exitAccessorProperty') || hooks.has('exitPropertyDefinition')
-                ? `if (${target}.data.accessor) { ${call(hooks, 'exitAccessorProperty', target)} } else { ${call(hooks, 'exitPropertyDefinition', target)} }`
+                ? `if (${target}.data.accessor) { ${call(hooks, filter, 'exitAccessorProperty', target)} } else { ${call(hooks, filter, 'exitPropertyDefinition', target)} }`
                 : '',
         ],
-        [N.StaticMemberExpression, call(hooks, 'exitMemberExpression', target)],
-        [N.ComputedMemberExpression, call(hooks, 'exitMemberExpression', target)],
+        [N.StaticMemberExpression, call(hooks, filter, 'exitMemberExpression', target)],
+        [N.ComputedMemberExpression, call(hooks, filter, 'exitMemberExpression', target)],
         [
             N.PrivateFieldExpression,
-            call(hooks, 'exitPrivateFieldExpression', target) + call(hooks, 'exitMemberExpression', target),
+            call(hooks, filter, 'exitPrivateFieldExpression', target) + call(hooks, filter, 'exitMemberExpression', target),
         ],
     ];
     const byPlan: [number, string][] = [
         [
             TARGET_PROPERTY_PROPERTY_PLAN,
-            call(hooks, 'exitAssignmentTargetPropertyProperty', target) + call(hooks, 'exitAssignmentTargetProperty', target),
+            call(hooks, filter, 'exitAssignmentTargetPropertyProperty', target) +
+                call(hooks, filter, 'exitAssignmentTargetProperty', target),
         ],
-        [TARGET_PROPERTY_IDENTIFIER_PLAN, call(hooks, 'exitAssignmentTargetProperty', target)],
-        [BINDING_PROPERTY_PLAN, call(hooks, 'exitBindingProperty', target)],
-        [PRIVATE_IN_PLAN, call(hooks, 'exitPrivateInExpression', target)],
+        [TARGET_PROPERTY_IDENTIFIER_PLAN, call(hooks, filter, 'exitAssignmentTargetProperty', target)],
+        [BINDING_PROPERTY_PLAN, call(hooks, filter, 'exitBindingProperty', target)],
+        [PRIVATE_IN_PLAN, call(hooks, filter, 'exitPrivateInExpression', target)],
     ];
     const cases = (entries: [number, string][]): string =>
         entries
@@ -778,12 +775,12 @@ function exitSource(
 ${typeCases === '' ? '' : `switch (${type}) {\n${typeCases}\n}`}
 ${planCases === '' ? '' : `switch (${plan}) {\n${planCases}\n}`}
 switch (${position}) {
-    case ${P.Statement}: ${call(hooks, 'exitStatement', target)} break;
-    case ${P.Expression}: ${call(hooks, 'exitExpression', target)} break;
-    case ${P.AssignmentTarget}: ${call(hooks, 'exitAssignmentTarget', target)} break;
-    case ${P.FunctionBody}: ${call(hooks, 'exitFunctionBody', target)} break;
-    case ${P.ArrowFunctionBlockBody}: ${call(hooks, 'exitFunctionBody', target)}${call(hooks, 'exitArrowFunctionBody', target)} break;
-    case ${P.ArrowFunctionExpressionBody}: ${call(hooks, 'exitExpression', target)}${call(hooks, 'exitArrowFunctionBody', target)} break;
+    case ${P.Statement}: ${call(hooks, filter, 'exitStatement', target)} break;
+    case ${P.Expression}: ${call(hooks, filter, 'exitExpression', target)} break;
+    case ${P.AssignmentTarget}: ${call(hooks, filter, 'exitAssignmentTarget', target)} break;
+    case ${P.FunctionBody}: ${call(hooks, filter, 'exitFunctionBody', target)} break;
+    case ${P.ArrowFunctionBlockBody}: ${call(hooks, filter, 'exitFunctionBody', target)}${call(hooks, filter, 'exitArrowFunctionBody', target)} break;
+    case ${P.ArrowFunctionExpressionBody}: ${call(hooks, filter, 'exitExpression', target)}${call(hooks, filter, 'exitArrowFunctionBody', target)} break;
 }`;
 }
 
@@ -802,7 +799,7 @@ if (role === ${ROLE_DEFAULT}) {
  * hooks in `hooks` called. Compile once per call site; the traverser passed to the walker must
  * implement exactly these hooks.
  */
-export function compileWalker<C extends WalkState>(hooks: readonly HookName[], filter: NodeHookFilter | null = null): Walker<C> {
+export function compileWalker<C extends WalkState>(hooks: readonly HookName[], filter: HookFilter | null = null): Walker<C> {
     const present = new Set(hooks);
     let cases = '';
     for (let id = 0; id < PLAN_BY_ID.length; id++) {

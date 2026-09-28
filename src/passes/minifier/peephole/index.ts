@@ -28,7 +28,7 @@ import {
     symbolIsMutated,
     symbolScopeId,
 } from '../traverse-context.ts';
-import type { Traverser } from '../traverse.ts';
+import type { HookFilter, Traverser } from '../traverse.ts';
 import {
     foldBinaryExpr,
     foldBinaryTypeofComparison,
@@ -332,6 +332,57 @@ function superCallEndInStatements(statements: readonly Node[]): number | null {
 }
 
 // --- the traverser -------------------------------------------------------------------------------
+
+/** The node types each mode's `exitExpression` has a case for, and those `enterStatement` acts on. */
+export const TREE_SHAKE_HOOK_FILTER: HookFilter = {
+    types: {
+        enterStatement: [N.FunctionDeclaration, N.VariableDeclaration],
+        exitExpression: [
+            N.TemplateLiteral,
+            N.ObjectExpression,
+            N.UnaryExpression,
+            N.StaticMemberExpression,
+            N.ComputedMemberExpression,
+            N.LogicalExpression,
+            N.ChainExpression,
+            N.CallExpression,
+            N.ConditionalExpression,
+            N.SequenceExpression,
+            N.AssignmentExpression,
+            N.BinaryExpression,
+        ],
+    },
+    exitNodeParentKinds: [],
+};
+export const FULL_HOOK_FILTER: HookFilter = {
+    types: {
+        enterStatement: [N.FunctionDeclaration, N.VariableDeclaration],
+        exitExpression: [
+            N.TemplateLiteral,
+            N.ObjectExpression,
+            N.BinaryExpression,
+            N.UnaryExpression,
+            N.YieldExpression,
+            N.AwaitExpression,
+            N.StaticMemberExpression,
+            N.ComputedMemberExpression,
+            N.LogicalExpression,
+            N.ChainExpression,
+            N.CallExpression,
+            N.ConditionalExpression,
+            N.AssignmentExpression,
+            N.SequenceExpression,
+            N.ArrowFunctionExpression,
+            N.FunctionExpression,
+            N.ClassExpression,
+            N.NewExpression,
+            N.BooleanLiteral,
+            N.ArrayExpression,
+            N.IdentifierReference,
+        ],
+    },
+    exitNodeParentKinds: [],
+};
 
 /** `impl Traverse for PeepholeOptimizations`, tree-shake-only branches. */
 export const peepholeOptimizations: Traverser<DceCtx> = {

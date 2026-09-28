@@ -47,7 +47,7 @@ import {
     symbolIsConstVariable,
     symbolIsValue,
 } from './syntax.ts';
-import { compileWalker, hookNamesOf, type NodeHookFilter, type Traverser, WalkPosition } from './traverse.ts';
+import { compileWalker, type HookFilter, hookNamesOf, type Traverser, WalkPosition } from './traverse.ts';
 
 // --- types ---------------------------------------------------------------------------------------
 
@@ -1051,28 +1051,30 @@ const scopingBuilder: Traverser<ScopingBuild> = {
     },
 };
 /** Every node type `scopingBuilder.enterNode` has a case for, and the nodes its `exitNode` acts on. */
-const SCOPING_NODE_FILTER: NodeHookFilter = {
-    enterTypes: [
-        N.IdentifierReference,
-        N.StaticMemberExpression,
-        N.ComputedMemberExpression,
-        N.PrivateFieldExpression,
-        N.TSAsExpression,
-        N.TSSatisfiesExpression,
-        N.TSNonNullExpression,
-        N.AssignmentExpression,
-        N.UpdateExpression,
-        N.UnaryExpression,
-        N.ConditionalExpression,
-        N.CallExpression,
-        N.FunctionExpression,
-        N.FunctionDeclaration,
-        N.BindingIdentifier,
-    ],
-    exitTypes: [N.StaticMemberExpression, N.ComputedMemberExpression, N.PrivateFieldExpression],
-    exitParentKinds: ['ConditionalExpressionTest', 'ComputedMemberExpressionObject', 'ClassHeritageExpression'],
+const SCOPING_HOOK_FILTER: HookFilter = {
+    types: {
+        enterNode: [
+            N.IdentifierReference,
+            N.StaticMemberExpression,
+            N.ComputedMemberExpression,
+            N.PrivateFieldExpression,
+            N.TSAsExpression,
+            N.TSSatisfiesExpression,
+            N.TSNonNullExpression,
+            N.AssignmentExpression,
+            N.UpdateExpression,
+            N.UnaryExpression,
+            N.ConditionalExpression,
+            N.CallExpression,
+            N.FunctionExpression,
+            N.FunctionDeclaration,
+            N.BindingIdentifier,
+        ],
+        exitNode: [N.StaticMemberExpression, N.ComputedMemberExpression, N.PrivateFieldExpression],
+    },
+    exitNodeParentKinds: ['ConditionalExpressionTest', 'ComputedMemberExpressionObject', 'ClassHeritageExpression'],
 };
-const walkScoping = compileWalker<ScopingBuild>(hookNamesOf(scopingBuilder), SCOPING_NODE_FILTER);
+const walkScoping = compileWalker<ScopingBuild>(hookNamesOf(scopingBuilder), SCOPING_HOOK_FILTER);
 
 function scopeFlagsFromSemantic(semantic: Semantic, scopeId: number): number {
     const record = semantic.scopes[scopeId];
