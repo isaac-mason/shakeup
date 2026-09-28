@@ -47,7 +47,7 @@ import {
     symbolIsConstVariable,
     symbolIsValue,
 } from './syntax.ts';
-import { compileWalker, hookNamesOf, type Traverser, WalkPosition } from './traverse.ts';
+import { compileWalker, hookNamesOf, type NodeHookFilter, type Traverser, WalkPosition } from './traverse.ts';
 
 // --- types ---------------------------------------------------------------------------------------
 
@@ -389,8 +389,7 @@ export const createChildScopeOfCurrent = (ctx: DceCtx, flags: number): number =>
  *  registered, where oxc's `reference_id()` panics. */
 export function getReference(ctx: DceCtx, ident: Node): Reference {
     const reference = referenceOf(ctx, ident);
-    if (reference === null)
-        throw new Error(`dce: identifier \`${ident.name}\` has no reference; create it with createReference`);
+    if (reference === null) throw new Error(`dce: identifier \`${ident.name}\` has no reference; create it with createReference`);
     return reference;
 }
 
@@ -477,12 +476,7 @@ function collectDroppedSubtree(ctx: DceCtx, root: Node, survivors: ReadonlySet<N
         if (visited.type === N.IdentifierReference) {
             const reference = referenceOf(ctx, visited);
             // References minted since the last flush are beyond capacity and treated as live.
-            if (
-                reference !== null &&
-                reference.id < changes.referenceCapacity &&
-                !reference.markedRemoved &&
-                !reference.pruned
-            ) {
+            if (reference !== null && reference.id < changes.referenceCapacity && !reference.markedRemoved && !reference.pruned) {
                 reference.markedRemoved = true;
                 changes.removedReferences.push(reference);
             }
@@ -963,7 +957,10 @@ const scopingBuilder: Traverser<ScopingBuild> = {
             case N.IdentifierReference: {
                 // `export { a } from 'm'` names another module's export: oxc parses that `local` as an
                 // IdentifierName, not a reference
-                if (parentKind(build) === 'ExportSpecifierLocal' && (ancestor(build, 1).node.data as { source: Node | null }).source !== null)
+                if (
+                    parentKind(build) === 'ExportSpecifierLocal' &&
+                    (ancestor(build, 1).node.data as { source: Node | null }).source !== null
+                )
                     return;
                 if (position === WalkPosition.AssignmentTargetPropertyIdentifier)
                     build.currentReferenceFlags = ReferenceFlags.Write;
@@ -1053,7 +1050,29 @@ const scopingBuilder: Traverser<ScopingBuild> = {
         }
     },
 };
-const walkScoping = compileWalker<ScopingBuild>(hookNamesOf(scopingBuilder));
+/** Every node type `scopingBuilder.enterNode` has a case for, and the nodes its `exitNode` acts on. */
+const SCOPING_NODE_FILTER: NodeHookFilter = {
+    enterTypes: [
+        N.IdentifierReference,
+        N.StaticMemberExpression,
+        N.ComputedMemberExpression,
+        N.PrivateFieldExpression,
+        N.TSAsExpression,
+        N.TSSatisfiesExpression,
+        N.TSNonNullExpression,
+        N.AssignmentExpression,
+        N.UpdateExpression,
+        N.UnaryExpression,
+        N.ConditionalExpression,
+        N.CallExpression,
+        N.FunctionExpression,
+        N.FunctionDeclaration,
+        N.BindingIdentifier,
+    ],
+    exitTypes: [N.StaticMemberExpression, N.ComputedMemberExpression, N.PrivateFieldExpression],
+    exitParentKinds: ['ConditionalExpressionTest', 'ComputedMemberExpressionObject', 'ClassHeritageExpression'],
+};
+const walkScoping = compileWalker<ScopingBuild>(hookNamesOf(scopingBuilder), SCOPING_NODE_FILTER);
 
 function scopeFlagsFromSemantic(semantic: Semantic, scopeId: number): number {
     const record = semantic.scopes[scopeId];

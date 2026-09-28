@@ -126,7 +126,12 @@ const child = (field: string, slot: number, kind: AncestorKind): Instruction => 
 const list = (field: string, slot: number, kind: AncestorKind): Instruction => ({ op: OP_LIST, field, slot, kind });
 const statements = (field: string, kind: AncestorKind): Instruction => ({ op: OP_STATEMENTS, field, slot: SLOT_STATEMENT, kind });
 const SCOPE: Instruction = { op: OP_SCOPE, field: '', slot: SLOT_NONE, kind: 'None' };
-const hookAt = (name: 'enterClassBody' | 'exitClassBody'): Instruction => ({ op: OP_HOOK, field: name, slot: SLOT_NONE, kind: 'None' });
+const hookAt = (name: 'enterClassBody' | 'exitClassBody'): Instruction => ({
+    op: OP_HOOK,
+    field: name,
+    slot: SLOT_NONE,
+    kind: 'None',
+});
 
 /** Every plan, by id: the generated walker has one straight-line case per plan. */
 const PLAN_BY_ID: Instruction[][] = [];
@@ -463,11 +468,13 @@ function resolveSlot(slot: number, node: Node): number {
         case SLOT_SIMPLE_ASSIGNMENT_TARGET:
             return WalkPosition.SimpleAssignmentTarget;
         case SLOT_TARGET_MAYBE_DEFAULT:
-            if (node.type === N.AssignmentExpression || node.type === N.AssignmentPattern) return pack(WalkPosition.None, ROLE_WITH_DEFAULT);
+            if (node.type === N.AssignmentExpression || node.type === N.AssignmentPattern)
+                return pack(WalkPosition.None, ROLE_WITH_DEFAULT);
             return resolveAssignmentTarget(node);
         case SLOT_ARRAY_TARGET_ELEMENT:
             if (node.type === N.SpreadElement) return pack(WalkPosition.None, ROLE_REST_TARGET);
-            if (node.type === N.AssignmentExpression || node.type === N.AssignmentPattern) return pack(WalkPosition.None, ROLE_WITH_DEFAULT);
+            if (node.type === N.AssignmentExpression || node.type === N.AssignmentPattern)
+                return pack(WalkPosition.None, ROLE_WITH_DEFAULT);
             return resolveAssignmentTarget(node);
         case SLOT_TARGET_PROPERTY:
             return pack(WalkPosition.None, node.type === N.SpreadElement ? ROLE_REST_TARGET : ROLE_TARGET_PROPERTY);
@@ -480,7 +487,9 @@ function resolveSlot(slot: number, node: Node): number {
         case SLOT_BINDING_PROPERTY:
             return node.type === N.ObjectProperty ? pack(WalkPosition.None, ROLE_BINDING_PROPERTY) : WalkPosition.None;
         case SLOT_PROPERTY_KEY:
-            return node.type !== N.IdentifierName && node.type !== N.PrivateIdentifier ? WalkPosition.Expression : WalkPosition.None;
+            return node.type !== N.IdentifierName && node.type !== N.PrivateIdentifier
+                ? WalkPosition.Expression
+                : WalkPosition.None;
         case SLOT_ARGUMENT:
             return node.type !== N.SpreadElement ? WalkPosition.Expression : WalkPosition.None;
         case SLOT_FUNCTION_BODY:
@@ -494,7 +503,9 @@ function resolveSlot(slot: number, node: Node): number {
         case SLOT_FOR_LEFT:
             return node.type !== N.VariableDeclaration ? resolveAssignmentTarget(node) : WalkPosition.None;
         case SLOT_EXPORT_DEFAULT:
-            return node.type !== N.FunctionDeclaration && node.type !== N.ClassDeclaration && node.type !== N.TSInterfaceDeclaration
+            return node.type !== N.FunctionDeclaration &&
+                node.type !== N.ClassDeclaration &&
+                node.type !== N.TSInterfaceDeclaration
                 ? WalkPosition.Expression
                 : WalkPosition.None;
         case SLOT_CHAIN_ELEMENT:
@@ -654,7 +665,39 @@ const call = (hooks: ReadonlySet<HookName>, name: HookName, target: string, extr
     hooks.has(name) ? `traverser.${name}(ctx, ${target}${extra});\n` : '';
 
 /** oxc's enter hooks for `target` at `position` in `role`. */
-function enterSource(hooks: ReadonlySet<HookName>, target: string): string {
+/** The nodes a traverser's `enterNode` and `exitNode` act on, when that is a few kinds: the walk calls them for
+ *  those alone, since a call per node costs more than the hook's own work on most of them. */
+export type NodeHookFilter = {
+    enterTypes: readonly number[];
+    exitTypes: readonly number[];
+    /** `exitNode` also fires for a node in one of these child slots. */
+    exitParentKinds: readonly AncestorKind[];
+};
+
+/** Code that calls `enterNode` on `target`, for the nodes `filter` names. */
+function enterNodeSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string): string {
+    if (!hooks.has('enterNode')) return '';
+    const callSource = `traverser.enterNode(ctx, ${target}, position);`;
+    if (filter === null) return callSource;
+    return `switch (${target}.type) { ${filter.enterTypes.map((type) => `case ${type}:`).join(' ')} ${callSource} }`;
+}
+
+/** Code that calls `exitNode` on `target`, for the nodes `filter` names. */
+function exitNodeSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string, position: string): string {
+    if (!hooks.has('exitNode')) return '';
+    const callSource = `traverser.exitNode(ctx, ${target}, ${position});`;
+    if (filter === null) return callSource;
+    const kindTest = filter.exitParentKinds.map((kind) => `kind === ${JSON.stringify(kind)}`).join(' || ');
+    return `switch (${target}.type) {
+    ${filter.exitTypes.map((type) => `case ${type}:`).join(' ')} ${callSource} break;
+    default: {
+        const kind = ctx.ancestorDepth === 0 ? 'None' : ancestorKinds[ctx.ancestorDepth - 1];
+        if (${kindTest === '' ? 'false' : kindTest}) ${callSource}
+    }
+}`;
+}
+
+function enterSource(hooks: ReadonlySet<HookName>, filter: NodeHookFilter | null, target: string): string {
     const P = WalkPosition;
     return `switch (position) {
     case ${P.Statement}: ${call(hooks, 'enterStatement', target)} break;
@@ -676,11 +719,18 @@ if (role === ${ROLE_DEFAULT}) {
         case ${N.ExportDefaultDeclaration}: ${call(hooks, 'enterExportDefaultDeclaration', target)} break;
     }
 }
-${call(hooks, 'enterNode', target, ', position')}`;
+${enterNodeSource(hooks, filter, target)}`;
 }
 
 /** oxc's exit hooks for `target`, which had `position` and, when walked in the default role, `type`. */
-function exitSource(hooks: ReadonlySet<HookName>, target: string, position: string, type: string, plan: string): string {
+function exitSource(
+    hooks: ReadonlySet<HookName>,
+    filter: NodeHookFilter | null,
+    target: string,
+    position: string,
+    type: string,
+    plan: string,
+): string {
     const P = WalkPosition;
     const byType: [number, string][] = [
         [N.Program, call(hooks, 'exitProgram', target)],
@@ -703,7 +753,10 @@ function exitSource(hooks: ReadonlySet<HookName>, target: string, position: stri
         ],
         [N.StaticMemberExpression, call(hooks, 'exitMemberExpression', target)],
         [N.ComputedMemberExpression, call(hooks, 'exitMemberExpression', target)],
-        [N.PrivateFieldExpression, call(hooks, 'exitPrivateFieldExpression', target) + call(hooks, 'exitMemberExpression', target)],
+        [
+            N.PrivateFieldExpression,
+            call(hooks, 'exitPrivateFieldExpression', target) + call(hooks, 'exitMemberExpression', target),
+        ],
     ];
     const byPlan: [number, string][] = [
         [
@@ -721,7 +774,7 @@ function exitSource(hooks: ReadonlySet<HookName>, target: string, position: stri
             .join('\n');
     const typeCases = cases(byType);
     const planCases = cases(byPlan);
-    return `${hooks.has('exitNode') ? `traverser.exitNode(ctx, ${target}, ${position});` : ''}
+    return `${exitNodeSource(hooks, filter, target, position)}
 ${typeCases === '' ? '' : `switch (${type}) {\n${typeCases}\n}`}
 ${planCases === '' ? '' : `switch (${plan}) {\n${planCases}\n}`}
 switch (${position}) {
@@ -749,7 +802,7 @@ if (role === ${ROLE_DEFAULT}) {
  * hooks in `hooks` called. Compile once per call site; the traverser passed to the walker must
  * implement exactly these hooks.
  */
-export function compileWalker<C extends WalkState>(hooks: readonly HookName[]): Walker<C> {
+export function compileWalker<C extends WalkState>(hooks: readonly HookName[], filter: NodeHookFilter | null = null): Walker<C> {
     const present = new Set(hooks);
     let cases = '';
     for (let id = 0; id < PLAN_BY_ID.length; id++) {
@@ -777,9 +830,9 @@ let node = null;
 walk: {
     {
         const next = program, position = ${WalkPosition.None}, role = ${ROLE_DEFAULT};
-        ${enterSource(present, 'next')}
+        ${enterSource(present, filter, 'next')}
         ${planSelectSource}
-        if (planId === ${NO_CHILDREN}) { const nextType = role === ${ROLE_DEFAULT} ? next.type : 0; ${exitSource(present, 'next', 'position', 'nextType', 'planId')} break walk; }
+        if (planId === ${NO_CHILDREN}) { const nextType = role === ${ROLE_DEFAULT} ? next.type : 0; ${exitSource(present, filter, 'next', 'position', 'nextType', 'planId')} break walk; }
         ${pushSource}
     }
     while (top >= 0) {
@@ -794,12 +847,12 @@ walk: {
 ${cases}
         }
         if (next !== null) {
-            ${enterSource(present, 'next')}
+            ${enterSource(present, filter, 'next')}
             // after the enter hooks, which may have retyped the node in place
             ${planSelectSource}
             if (planId === ${NO_CHILDREN}) {
                 const nextType = role === ${ROLE_DEFAULT} ? next.type : 0;
-                ${exitSource(present, 'next', 'position', 'nextType', 'planId')}
+                ${exitSource(present, filter, 'next', 'position', 'nextType', 'planId')}
                 continue;
             }
             ${pushSource}
@@ -812,7 +865,7 @@ ${cases}
         const leftPlan = planIds[top];
         nodes[top] = null;
         top--;
-        ${exitSource(present, 'node', 'leftPosition', 'leftType', 'leftPlan')}
+        ${exitSource(present, filter, 'node', 'leftPosition', 'leftType', 'leftPlan')}
     }
 }
 spare = frames;`
