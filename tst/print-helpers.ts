@@ -13,9 +13,41 @@ function nameValue(n: Node): string {
     return n.name;
 }
 
-/** Strict structural equality over our AST, ignoring node identity (`id`/`start`/`end`) and the
- *  spelling of a literal's value. The gate for whitespace-faithful (non-minify) round-trips. */
+/**
+ * `n` as its printed text reparses, where the printer re-associates as oxc's codegen does: a sequence
+ * nested in a sequence prints flat, and `a && (b && c)` (any logical operator repeated on the right)
+ * prints without parentheses. Both mean the same; the reparse nests them the other way.
+ */
+function reassociated(n: Node): Node {
+    if (n.type === N.SequenceExpression) {
+        const expressions = n.data.expressions as Node[];
+        if (!expressions.some((e) => e.type === N.SequenceExpression)) return n;
+        const flat: Node[] = [];
+        for (const e of expressions) {
+            const inner = reassociated(e);
+            if (inner.type === N.SequenceExpression) flat.push(...(inner.data.expressions as Node[]));
+            else flat.push(inner);
+        }
+        return { ...n, data: { ...n.data, expressions: flat } } as Node;
+    }
+    if (n.type === N.LogicalExpression) {
+        const { operator, left, right } = n.data as { operator: string; left: Node; right: Node };
+        if (right.type !== N.LogicalExpression || (right.data as { operator: string }).operator !== operator) return n;
+        const inner = right.data as { left: Node; right: Node };
+        const rotatedLeft = { ...n, data: { ...n.data, left, right: inner.left } } as Node;
+        return reassociated({ ...n, data: { ...n.data, left: reassociated(rotatedLeft), right: inner.right } } as Node);
+    }
+    return n;
+}
+
+/** Strict structural equality over our AST, ignoring node identity (`id`/`start`/`end`), the
+ *  spelling of a literal's value, and the re-association the printer does (see {@link reassociated}).
+ *  The gate for whitespace-faithful (non-minify) round-trips. */
 export function astEqual(a: unknown, b: unknown): boolean {
+    if (isNode(a) && isNode(b)) {
+        a = reassociated(a as Node);
+        b = reassociated(b as Node);
+    }
     if (isNode(a) && isNode(b)) {
         if (a.type !== b.type || nameValue(a) !== nameValue(b)) return false;
         return astEqual(a.data, b.data);
@@ -48,6 +80,7 @@ const KEYED = new Set<number>([N.ObjectProperty, N.MethodDefinition, N.PropertyD
  *  freedoms a minifier takes. (Value-level transforms — DCE, folding — are verified by
  *  execution-differential tests, not this.) */
 export function canon(x: unknown): unknown {
+    if (isNode(x)) x = reassociated(x);
     if (isNode(x)) {
         if (x.type === N.EmptyStatement) return EMPTY;
         // Minify prints a string as a template literal wherever that is cheapest, as oxc does.

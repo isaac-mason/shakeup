@@ -284,7 +284,7 @@ function hasLoneSurrogate(value: string): boolean {
 
 /** A string literal's value for the known-method folds, which read oxc's `lit.value` directly.
  *  oxc re-encodes lone surrogates into that value, so those literals are not folded here. */
-function plainStringLiteralValue(expr: Node): string | null {
+export function plainStringLiteralValue(expr: Node): string | null {
     if (expr.type !== N.StringLiteral) return null;
     const literal = stringLiteralValue(expr);
     return literal.loneSurrogates ? null : literal.value;
@@ -744,7 +744,8 @@ function toBoolean(expr: Node, ctx: GlobalContext): boolean | null {
     }
 }
 
-function toNumber(expr: Node, ctx: GlobalContext): number | null {
+/** oxc `ToNumber::to_number`. */
+export function toNumber(expr: Node, ctx: GlobalContext): number | null {
     switch (expr.type) {
         case N.NumericLiteral:
             return numericLiteralValue(expr);
@@ -1982,7 +1983,7 @@ function stringSubstring(value: string, start: number | undefined, end: number |
 }
 
 /** oxc `StringCharAt`: a UTF-16 unit, `invalid` when it is a surrogate. */
-function stringCharAt(value: string, position: number | undefined): { unit: number; invalid: boolean } | null {
+export function stringCharAt(value: string, position: number | undefined): { unit: number; invalid: boolean } | null {
     const integer = position === undefined || Number.isNaN(position) ? 0 : Math.trunc(position);
     if (!(integer >= 0) || integer >= value.length) return null;
     const unit = value.charCodeAt(integer);

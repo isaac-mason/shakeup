@@ -5,7 +5,7 @@ import { N, type Node, walk } from '../../ast/index.ts';
 import { assertNoUnderPrune, finishNormalizePass, runPeepholePass } from './compression-pass.ts';
 import type { CompressOptions } from './options.ts';
 import { normalize } from './peephole/normalize.ts';
-import type { SourceType } from './state.ts';
+import type { CompressionMode, SourceType } from './state.ts';
 import { ReferenceFlags, referenceIsRead, referenceIsWrite } from './syntax.ts';
 import { createDceCtx, type DceCtx, referenceOf } from './traverse-context.ts';
 
@@ -120,11 +120,40 @@ export function eliminateDeadCode(
     noSideEffectSymbols: ReadonlySet<number> = new Set(),
     verify = false,
 ): DeadCodeEliminationResult {
-    const ctx = createDceCtx(program, semantic, options, sourceType, noSideEffectSymbols, verify);
+    return compress(program, semantic, options, 'tree-shake-only', sourceType, noSideEffectSymbols, verify);
+}
+
+/**
+ * oxc `Compressor::build_with_scoping`, the full minifier's compressor: Normalize converting `while` to
+ * `for`, `const` to `let` and dropping redundant `"use strict"`, then the peephole loop in full mode.
+ * `semantic` must describe `program`; its reference counts are rewritten from the result.
+ */
+export function buildWithScoping(
+    program: Node,
+    semantic: Semantic,
+    options: CompressOptions,
+    sourceType: SourceType,
+    noSideEffectSymbols: ReadonlySet<number> = new Set(),
+    verify = false,
+): DeadCodeEliminationResult {
+    return compress(program, semantic, options, 'full', sourceType, noSideEffectSymbols, verify);
+}
+
+function compress(
+    program: Node,
+    semantic: Semantic,
+    options: CompressOptions,
+    mode: CompressionMode,
+    sourceType: SourceType,
+    noSideEffectSymbols: ReadonlySet<number>,
+    verify: boolean,
+): DeadCodeEliminationResult {
+    const ctx = createDceCtx(program, semantic, options, mode, sourceType, noSideEffectSymbols, verify);
+    const full = mode === 'full';
     const normalized = normalize(program, ctx, {
-        convertWhileToFors: false,
-        convertConstToLet: false,
-        removeUnnecessaryUseStrict: false,
+        convertWhileToFors: full,
+        convertConstToLet: full,
+        removeUnnecessaryUseStrict: full,
     });
     const loop = runInLoop(options.maxIterations, program, ctx);
     finalizeSemantic(program, ctx);

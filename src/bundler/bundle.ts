@@ -1,5 +1,4 @@
 import { resetInferredPure } from '../analysis/effects.ts';
-import { runCompress } from '../passes/compress/index.ts';
 import { eliminateDeadCode } from '../passes/dce/compressor.ts';
 import { rolldownDceOptions } from '../passes/dce/options.ts';
 import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
@@ -434,7 +433,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // module on partial information.
     // rolldown runs its per-module dead-code pass whenever tree-shaking is on, whatever `minify` says
     // (`pre_process_ecma_ast.rs` step 5 is gated on `treeshake` alone).
-    const compressForScan = options.treeshake === false ? false : ('dce' as const);
+    const deadCodeElimination = options.treeshake !== false;
     // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
     //
     // A module that received a cross-module substitution has its producers recorded on its cache entry
@@ -470,7 +469,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     graph = await buildGraph(
         {
             ...options,
-            compress: compressForScan,
+            deadCodeElimination,
             optimize: options.output?.optimize ?? true,
             // An OUTPUT option threaded into SCAN — see `GraphOptions.assetFileNames`. An asset's
             // fileName is embedded in module code at transform time, so it cannot wait for generate.
@@ -556,7 +555,6 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // turned off the per-module tier and left the cross-module one running — a build that asked for no
     // optimization still got imported helpers inlined and its buffers scalarized.
     if ((options.output?.optimize ?? true) !== false) {
-        const compressMode = compressForScan;
         const resolveImport = (idx: number, sym: number): { mod: number; sym: number } | null => {
             const bind = linked.binds.get(packRef(idx, sym));
             if (bind === undefined || bind.kind !== 'found') return null;
@@ -575,12 +573,6 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         };
         // consumer module idx → the producer modules whose SOURCE its AST now depends on.
         const touched = inlineCrossModule(graph.modules, resolveImport, resolveMember);
-        // Cross-module constant propagation (`passes/compress/cross-module-constants.ts`) is written
-        // but NOT wired — see the roadmap. Being ungated, it would make almost every importer a cache
-        // dependent; keeping it out means the only cross-module derived state in the system comes from
-        // a DIRECTIVE the author opted into. If it is ever wanted, rolldown's shape is the model:
-        // `optimization.inlineConst: boolean | { mode: 'all' | 'smart' }` — an OPTION, not a directive.
-        void compressMode;
         for (const [idx, producers] of touched) {
             const mod = graph.modules[idx];
             // A cross-module substitution makes this module's AST depend on ANOTHER module's source —
@@ -638,18 +630,14 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 flowInlineVariables(mod.program, mod.semantic, mod.source);
                 eliminateDeadStores(mod.program, mod.semantic, mod.source);
             }
-            if (compressMode === 'dce') {
+            if (deadCodeElimination)
                 eliminateDeadCode(mod.program, mod.semantic, rolldownDceOptions(), dceSourceType(mod.defFormat), mod.noSideEffects);
-            } else if (compressMode !== false) {
-                const refreshed = runCompress(mod.program, mod.semantic, compressMode);
-                if (refreshed !== null) mod.semantic = refreshed;
-            }
         }
     }
 
     // Cross-module purity BEFORE treeshake: proving an imported helper side-effect-free lets
-    // `isPureStatement` (and so treeshake) drop a discarded call to it. The per-module pass inside
-    // `runCompress` cannot see across module boundaries — scan analyses each module before link binds
+    // `isPureStatement` (and so treeshake) drop a discarded call to it. The per-module dead-code
+    // pass cannot see across module boundaries — scan analyses each module before link binds
     // them together — so this is the point where the interprocedural answer becomes available.
     stampPureCallsGraph(graph, linked);
     // BEFORE treeshake, which is the point: an `Enum.MEMBER` read that becomes a constant is not a
@@ -758,7 +746,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     }
     const min = resolveMinify(outputOptions?.minify);
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
-    // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
+    // the chunk compress and the mangler gets to run last (see `chunk-compress.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
     const chunkGraph = buildChunkGraph(
         graph,
@@ -877,8 +865,8 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 wantMap: want,
                 // Emit-glue spacing and module printing both stay readable when the chunk pass will
                 // minify: it re-parses this text, and minified printing loses `@__PURE__`.
-                tight: min.compress === 'full' ? false : min.whitespace,
-                deferMinify: min.compress === 'full',
+                tight: min.chunk === 'full' ? false : min.whitespace,
+                deferMinify: min.chunk === 'full',
                 chunkProgram: min.chunk !== false || min.mangle,
                 pathToChunk,
             },

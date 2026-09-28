@@ -1309,8 +1309,7 @@ function collectTarget(state: AnalyseState, node: Node | null): void {
  * and never enters a scope, so only the function scope covers both — while shakeup reuses
  * `BlockStatement` for bodies, and that case unconditionally opened a `SCOPE.BLOCK`.
  *
- * The consequence was not theoretical. `mangle/slots.ts` is a faithful port of oxc's
- * `SlotAssignment::compute`, where two symbols may share a slot (hence a NAME) when their live ranges
+ * The consequence was not theoretical. The mangler (`mangle/mangler.ts`) ports oxc's slot assignment, where two symbols may share a slot (hence a NAME) when their live ranges
  * do not overlap. A parameter never read in the body has empty liveness, so a body-level `let` was
  * free to take its slot — emitting `onBeforeRender(e,t,n,r,i){ … let e = … }` and a bundle Node
  * refuses to parse. The mangler was right; the scope tree it was given was wrong.

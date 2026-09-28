@@ -110,9 +110,10 @@ describe('known call folds (oxc replace_known_methods)', () => {
         expect(evaluate(code)).toBe('ab"c');
     });
 
-    it('leaves a non-literal concat argument alone', async () => {
+    it('folds a non-literal concat argument into a template literal', async () => {
         const code = await build('o = "a".concat(String(globalThis.x));');
-        expect(code).toContain('concat');
+        // rolldown 1.2.4's output for the same input
+        expect(code).toContain('`a${String(globalThis.x)}`');
         expect(evaluate(code)).toBe('aundefined');
     });
 

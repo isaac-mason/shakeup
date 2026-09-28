@@ -496,6 +496,34 @@ export function shouldKeepIndirectAccess(ctx: DceCtx, accessValue: Node): boolea
     }
 }
 
+/** Wrap `expr` as `(0, expr)` so an access `shouldKeepIndirectAccess` flagged stays indirect. The shape
+ *  is load-bearing: `removeSequenceExpression` recognizes exactly a two-element sequence headed by `0`. */
+export function preserveIndirectAccess(span: Span, expr: Node): Node {
+    return create.SequenceExpression(span.start, span.end, 0, [createNumericLiteral(span, 0), expr]);
+}
+
+/** Drop empty static blocks. `classNode` stands in for oxc's `ClassBody`. */
+export function removeDeadCodeExitClassBody(_ctx: DceCtx, classNode: Node): void {
+    const body = (classNode.data as DataOf<'ClassExpression'>).body;
+    let kept = 0;
+    for (const element of body) {
+        if (element.type === N.StaticBlock && (element.data.body as Node[]).length === 0) continue;
+        body[kept++] = element;
+    }
+    // An empty list may be the parser's shared frozen one.
+    if (kept !== body.length) body.length = kept;
+}
+
+/** `f(...[])` -> `f()` */
+export function removeEmptySpreadArguments(args: Node[]): void {
+    if (args.length !== 1) return;
+    const spread = args[0];
+    if (spread.type !== N.SpreadElement) return;
+    const argument = spread.data.argument as Node;
+    if (argument.type !== N.ArrayExpression) return;
+    if ((argument.data.elements as (Node | null)[]).length === 0) args.length = 0;
+}
+
 const isNumber0 = (expr: Node): boolean => expr.type === N.NumericLiteral && numericLiteralValue(expr) === 0;
 
 const createEmptyStatement = (span: Span): Node => create.EmptyStatement(span.start, span.end, 0);

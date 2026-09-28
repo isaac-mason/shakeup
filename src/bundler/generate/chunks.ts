@@ -4,7 +4,6 @@
 // `renderChunk` — the composition of the module pass and the format renderer — lives here rather
 // than beside either, because this is the only caller and the pipeline reads top-down from it.
 
-import type { CompressMode } from '../../passes/compress/index.ts';
 import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from '../../util/sourcemap.ts';
 import type { OutputAsset, OutputChunk } from '../bundle.ts';
 import { compressChunk } from '../chunk-compress.ts';
@@ -15,6 +14,7 @@ import {
     DEFAULT_HASH_SIZE,
     effectiveComments,
     getHashPlaceholderGenerator,
+    type ChunkCompress,
     type HashPlaceholderGenerator,
     makeUnique,
     type NormalizedOutputNaming,
@@ -263,7 +263,7 @@ export async function renderChunks(
     moduleIdOf: (i: number) => string,
     moduleIdsOf: (c: Chunk) => string[],
     /** What compresses each assembled chunk: `'full'`, `'dce'` (dead code only), or nothing. */
-    chunkCompress: CompressMode | false,
+    chunkCompress: ChunkCompress | false,
     /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
     chunkMangle: boolean,
     inc?: RenderIncremental,
@@ -361,6 +361,7 @@ export async function renderChunks(
                 chunkMangle,
                 chunkCompress,
                 effectiveComments(naming.comments, naming.minify),
+                naming.keepNames,
             );
             // Unminified, the chunk ends on a newline, as rolldown's `dce-only` reprint does.
             rc.code = naming.minify ? done.code : `${done.code}\n`;

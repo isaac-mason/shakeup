@@ -173,7 +173,7 @@ function createParserState(source: string, options: ParseOptions): ParserState {
         // only because Node wraps the body in a function, and `unambiguous` reads one as EVIDENCE of
         // CJS (see `sawTopLevelReturn`) — but a Script has no wrapper, so the spec rejects it, and
         // so does oxc for both `script` and `module` (verified on both).
-        allowTopReturn: options.kind !== 'module' && options.kind !== 'script',
+        allowTopReturn: options.allowReturnOutsideFunction === true || (options.kind !== 'module' && options.kind !== 'script'),
         allowTopNewTarget: options.kind !== 'module' && options.kind !== 'script',
         goalIsModule: options.kind === 'module',
         goalIsScript: options.kind === 'script',
@@ -4840,6 +4840,8 @@ export type ParseOptions = {
      *  comment, and it is pure waste when nothing reads the result. oxc has no such option because a
      *  `Vec<Comment>` of `Copy` structs is nearly free in Rust; in JS it is not. */
     comments?: boolean;
+    /** oxc `ParseOptions::allow_return_outside_function`: a top-level `return` parses in any goal. */
+    allowReturnOutsideFunction?: boolean;
 };
 
 /** Parse `source` into a standalone Program. Source, error sink, intern map and

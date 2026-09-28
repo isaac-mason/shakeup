@@ -10,7 +10,7 @@
 // `llm/notes/bundler-toolchain-split-plan.md`.
 //
 // Runs AFTER link and BEFORE tree-shaking: proving an imported helper side-effect-free is what lets
-// `isPureStatement` drop a discarded call to it. The per-module pass inside `runCompress` cannot see
+// `isPureStatement` drop a discarded call to it. The per-module dead-code pass cannot see
 // across module boundaries — scan analyses each module before link binds them together — so this is
 // the point where the interprocedural answer becomes available.
 import type { Node } from '../ast/index.ts';

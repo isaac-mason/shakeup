@@ -1,17 +1,19 @@
-// Port of oxc_minifier/src/peephole/minimize_statements.rs, tree-shake-only paths: rolldown's DCE
-// options have `sequences` and `join_vars` off, so statement fusion, the return/throw merges and the
-// if-statement exit-point rewrites never run.
+// Port of oxc_minifier/src/peephole/minimize_statements.rs.
 
 import { getSideFreeBooleanValue, isLiteralValue, valueType } from '../../../analysis/const-eval.ts';
+import { attachScopeNode } from '../../../analysis/semantic.ts';
 import { assignmentTargetMayHaveSideEffects, mayHaveSideEffects } from '../../../analysis/side-effects.ts';
-import { create, type DataOf, N, type Node, node } from '../../../ast/index.ts';
-import { statementIsTerminated } from '../is-terminated.ts';
+import { create, type DataOf, N, type Node, node, num, OP } from '../../../ast/index.ts';
+import { isJumpStatement, statementIsTerminated } from '../is-terminated.ts';
 import { createKeepVar, keepVarVariableDeclarationStatement, keepVarVisitStatement } from '../keep-var.ts';
+import { isTreeShakeOnly } from '../state.ts';
 import { isImplicitlyObservable, symbolValueOf } from '../symbol-state.ts';
 import { countsHaveMultipleReads, countsHaveWrites } from '../symbol-value.ts';
 import { scopeContainsDirectEval, symbolIsCatchVariable } from '../syntax.ts';
 import {
     ancestor,
+    contentEq,
+    createChildScopeOfCurrent,
     currentScopeFlags,
     type DceCtx,
     dropExpression,
@@ -24,6 +26,7 @@ import {
     parentKind,
     replaceExpression,
     replaceForStatementLeft,
+    type Span,
     symbolFlags,
     takeNode,
 } from '../traverse-context.ts';
@@ -34,6 +37,11 @@ import {
     isLiteral,
     memberPartBlocksReorder,
 } from './index.ts';
+import { minimizeConditional } from './minimize-conditional-expression.ts';
+import { joinWithLeftAssociativeOp } from './minimize-conditions.ts';
+import { minimizeExpressionInBooleanContext } from './minimize-expression-in-boolean-context.ts';
+import { tryMinimizeIf } from './minimize-if-statement.ts';
+import { minimizeNot } from './minimize-not-expression.ts';
 import { isScriptRootScope, removeUnusedVariableDeclaration, shouldRemoveUnusedDeclarator } from './remove-unused-declaration.ts';
 import {
     derivedConstructorThisScope,
@@ -87,7 +95,8 @@ export function minimizeStatements(ctx: DceCtx, statements: Node[], firstStateme
     let isControlFlowDead = false;
     const keepVar = createKeepVar();
     let identityDrops = 0;
-    for (const statement of oldStatements) {
+    for (let index = 0; index < oldStatements.length; index++) {
+        const statement = oldStatements[index];
         if (isControlFlowDead && !isModuleDeclaration(statement) && statement.type !== N.FunctionDeclaration) {
             // Harvest `var` bindings so they re-emit at the end of the block.
             keepVarVisitStatement(keepVar, statement);
@@ -97,7 +106,7 @@ export function minimizeStatements(ctx: DceCtx, statements: Node[], firstStateme
             else identityDrops++;
             continue;
         }
-        minimizeStatement(ctx, statement, result);
+        if (minimizeStatement(ctx, statement, index, oldStatements, result)) break;
         // A statement that never completes normally makes the rest of the list unreachable.
         if (!isControlFlowDead) {
             const last = lastOf(result);
@@ -124,50 +133,191 @@ export function minimizeStatements(ctx: DceCtx, statements: Node[], firstStateme
         dropStatement(ctx, lastStatement);
     }
 
+    // Merge certain statements in reverse order
+    if (result.length >= 2 && ctx.state.options.sequences) {
+        const last = lastOf(result) as Node;
+        if (last.type === N.ReturnStatement) mergeIntoTrailingReturn(ctx, result);
+        else if (last.type === N.ThrowStatement) mergeIntoTrailingThrow(ctx, result);
+    }
+
     statements.length = firstStatement;
     for (const statement of result) statements.push(statement);
 }
 
-/** oxc `minimize_statement`. Only `handle_if_statement`'s exit-point rewrite, gated on `sequences`,
- *  can end the list early, so this never breaks in tree-shake mode. */
-function minimizeStatement(ctx: DceCtx, statement: Node, result: Node[]): void {
-    switch (statement.type) {
-        case N.EmptyStatement:
-            return;
-        case N.VariableDeclaration:
-            handleVariableDeclaration(ctx, statement, result);
-            return;
-        case N.ExpressionStatement:
-            handleExpressionStatement(ctx, statement, result);
-            return;
-        case N.SwitchStatement:
-            handleSwitchStatement(ctx, statement, result);
-            return;
-        case N.IfStatement:
-            handleIfStatement(ctx, statement, result);
-            return;
-        case N.ReturnStatement:
-            handleReturnStatement(ctx, statement, result);
-            return;
-        case N.ThrowStatement:
-            handleThrowStatement(ctx, statement, result);
-            return;
-        case N.ForStatement:
-            handleForStatement(ctx, statement, result);
-            return;
-        case N.ForInStatement:
-            handleForInStatement(ctx, statement, result);
-            return;
-        case N.ForOfStatement:
-            handleForOfStatement(ctx, statement, result);
-            return;
-        case N.BlockStatement:
-            handleBlock(ctx, result, statement);
-            return;
-        default:
-            result.push(statement);
+/** The argument of a return or throw statement. */
+const jumpArgumentOf = (statement: Node): Node | null => (statement.data as DataOf<'ReturnStatement'>).argument;
+
+const expressionOf = (expressionStatement: Node): Node => (expressionStatement.data as DataOf<'ExpressionStatement'>).expression;
+
+function mergeIntoTrailingReturn(ctx: DceCtx, statements: Node[]): void {
+    while (statements.length >= 2) {
+        const previous = statements[statements.length - 2];
+        if (previous.type === N.ExpressionStatement) {
+            const lastReturnArgument = jumpArgumentOf(lastOf(statements) as Node);
+            if (lastReturnArgument === null) break;
+            noticeChange(ctx);
+            // "a(); return b;" => "return a(), b;"
+            const lastReturn = statements.pop() as Node;
+            const expressionStatement = statements.pop() as Node;
+            const argument = joinSequence(ctx, expressionOf(expressionStatement), lastReturnArgument);
+            statements.push(create.ReturnStatement(lastReturn.start, lastReturn.end, 0, argument));
+        } else if (previous.type === N.IfStatement) {
+            // Merge the last two statements
+            const previousIf = previous.data as DataOf<'IfStatement'>;
+            // The previous statement must be an if statement with no else clause
+            if (previousIf.alternate !== null) break;
+            // The then clause must be a return
+            if (previousIf.consequent.type !== N.ReturnStatement) break;
+            const lastArgument = jumpArgumentOf(lastOf(statements) as Node);
+            if (lastArgument !== null && conditionalExpressionCountExceeded(lastArgument)) break;
+
+            noticeChange(ctx);
+            const lastReturn = statements.pop() as Node;
+            statements.pop();
+            const previousReturn = previousIf.consequent;
+
+            // "if (a) return; return b;" => "return a ? void 0 : b;"
+            const left = jumpArgumentOf(previousReturn) ?? newVoid0(previousReturn);
+            // "if (a) return a; return;" => "return a ? b : void 0;"
+            const right = lastArgument ?? newVoid0(lastReturn);
+            const argument = joinTestWithBranches(ctx, previous, left, right);
+            statements.push(create.ReturnStatement(lastReturn.start, lastReturn.end, 0, argument));
+        } else {
+            break;
+        }
     }
 }
+
+function mergeIntoTrailingThrow(ctx: DceCtx, statements: Node[]): void {
+    while (statements.length >= 2) {
+        const previous = statements[statements.length - 2];
+        if (previous.type === N.ExpressionStatement) {
+            noticeChange(ctx);
+            // "a(); throw b;" => "throw a(), b;"
+            const lastThrow = statements.pop() as Node;
+            const expressionStatement = statements.pop() as Node;
+            const argument = joinSequence(ctx, expressionOf(expressionStatement), jumpArgumentOf(lastThrow) as Node);
+            statements.push(create.ThrowStatement(lastThrow.start, lastThrow.end, 0, argument));
+        } else if (previous.type === N.IfStatement) {
+            // Merge the last two statements
+            const previousIf = previous.data as DataOf<'IfStatement'>;
+            // The previous statement must be an if statement with no else clause
+            if (previousIf.alternate !== null) break;
+            // The then clause must be a throw
+            if (previousIf.consequent.type !== N.ThrowStatement) break;
+            const lastArgument = jumpArgumentOf(lastOf(statements) as Node) as Node;
+            if (conditionalExpressionCountExceeded(lastArgument)) break;
+
+            noticeChange(ctx);
+            const lastThrow = statements.pop() as Node;
+            statements.pop();
+            const argument = joinTestWithBranches(ctx, previous, jumpArgumentOf(previousIf.consequent) as Node, lastArgument);
+            statements.push(create.ThrowStatement(lastThrow.start, lastThrow.end, 0, argument));
+        } else {
+            break;
+        }
+    }
+}
+
+/** The shared tail of oxc's return and throw merges: `if (test) <left>; <right>` as one conditional.
+ *  `ifStatement` has left its list; `left` and `right` are its consequent's and the next statement's
+ *  arguments, detached with their owners. */
+function joinTestWithBranches(ctx: DceCtx, ifStatement: Node, leftArgument: Node, rightArgument: Node): Node {
+    const ifData = ifStatement.data as DataOf<'IfStatement'>;
+    let left = leftArgument;
+    let right = rightArgument;
+    // "if (!a) return b; return c;" => "return a ? c : b;"
+    const test = ifData.test;
+    if (test.type === N.UnaryExpression && test.data.operator === '!') {
+        ifData.test = takeNode(ctx, test.data.argument);
+        const swapped = left;
+        left = right;
+        right = swapped;
+    }
+    if (ifData.test.type === N.SequenceExpression) {
+        // "if (a, b) return c; return d;" => "return a, b ? c : d;"
+        const innerTest = (ifData.test.data.expressions as Node[]).pop() as Node;
+        const conditional = minimizeConditional(ctx, ifStatement, innerTest, left, right);
+        return joinSequence(ctx, ifData.test, conditional);
+    }
+    // "if (a) return b; return c;" => "return a ? b : c;"
+    return minimizeConditional(ctx, ifStatement, takeNode(ctx, ifData.test), left, right);
+}
+
+/** oxc `Expression::new_void_0`. */
+const newVoid0 = (span: Span): Node => create.UnaryExpression(span.start, span.end, OP.VOID, num(0, span.start));
+
+/** Some parsers cannot parse long conditional expressions.
+ *  See <https://bugzilla.mozilla.org/show_bug.cgi?id=2033215> */
+function conditionalExpressionCountExceeded(expr: Node): boolean {
+    let depth = 0;
+    let current = expr;
+    while (current.type === N.ConditionalExpression) {
+        depth++;
+        if (depth === 500) return true;
+        current = current.data.alternate;
+    }
+    return false;
+}
+
+/** oxc `minimize_statement`. `true` ends the list: `handle_if_statement` moved the rest of
+ *  `statements` (from `index + 1`) into the if. */
+function minimizeStatement(ctx: DceCtx, statement: Node, index: number, statements: Node[], result: Node[]): boolean {
+    switch (statement.type) {
+        case N.EmptyStatement:
+            return false;
+        case N.VariableDeclaration:
+            handleVariableDeclaration(ctx, statement, result);
+            return false;
+        case N.ExpressionStatement:
+            handleExpressionStatement(ctx, statement, result);
+            return false;
+        case N.SwitchStatement:
+            handleSwitchStatement(ctx, statement, result);
+            return false;
+        case N.IfStatement:
+            return handleIfStatement(ctx, index, statements, statement, result);
+        case N.ReturnStatement:
+            handleReturnStatement(ctx, statement, result);
+            return false;
+        case N.ThrowStatement:
+            handleThrowStatement(ctx, statement, result);
+            return false;
+        case N.ForStatement:
+            handleForStatement(ctx, statement, result);
+            return false;
+        case N.ForInStatement:
+            handleForInStatement(ctx, statement, result);
+            return false;
+        case N.ForOfStatement:
+            handleForOfStatement(ctx, statement, result);
+            return false;
+        case N.BlockStatement:
+            handleBlock(ctx, result, statement);
+            return false;
+        default:
+            result.push(statement);
+            return false;
+    }
+}
+
+/** oxc `join_sequence`: `a, b` from two expression slots, flattening sequences. Both slots are left
+ *  as placeholders. */
+function joinSequence(ctx: DceCtx, aSlot: Node, bSlot: Node): Node {
+    const a = takeNode(ctx, aSlot);
+    const b = takeNode(ctx, bSlot);
+    if (a.type === N.SequenceExpression) {
+        // `(a, b); c`
+        (a.data.expressions as Node[]).push(b);
+        return a;
+    }
+    // `a; (b, c)` or `a; b`
+    const expressions = b.type === N.SequenceExpression ? [a, ...(b.data.expressions as Node[])] : [a, b];
+    return create.SequenceExpression(a.start, a.end, 0, expressions);
+}
+
+const jumpStatementsLookTheSame = (left: Node, right: Node): boolean =>
+    isJumpStatement(left) && isJumpStatement(right) && contentEq(left, right);
 
 /** Merge with the previous declaration of the same kind, remove unused declarators, and keep the
  *  initializers that have side effects. */
@@ -237,6 +387,13 @@ function handleExpressionStatement(ctx: DceCtx, expressionStatement: Node, resul
         return;
     }
 
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            data.expression = joinSequence(ctx, previous.data.expression, data.expression);
+            dropStatement(ctx, result.pop() as Node);
+        }
+    }
     // "var a; a = b();" => "var a = b();"
     const expression = data.expression;
     if (expression.type === N.AssignmentExpression) {
@@ -322,9 +479,24 @@ function isSwitchCaseRemovable(switchCase: Node, allowBreak: boolean): boolean {
     return isEmpty && (test === null || isLiteral(test));
 }
 
+/** The case's test has no side effects and its statements can be inlined (no unlabeled `break`). */
+export function canSwitchCaseBeInlined(switchCase: Node): boolean {
+    const { test, consequent } = switchCase.data as DataOf<'SwitchCase'>;
+    if (test !== null && !isLiteral(test)) return false;
+    return consequent.length === 0 || !hasUnlabelledBreakInSwitchCase(switchCase);
+}
+
 function handleSwitchStatement(ctx: DceCtx, switchStatement: Node, result: Node[]): void {
     const data = switchStatement.data as DataOf<'SwitchStatement'>;
     substituteSingleUseSymbolInStatement(ctx, data.discriminant, result, false);
+
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            data.discriminant = joinSequence(ctx, previous.data.expression, data.discriminant);
+            dropStatement(ctx, result.pop() as Node);
+        }
+    }
 
     // Remove empty case clauses that don't affect behavior: empty cases before the default, or at the
     // end when there is no default.
@@ -391,14 +563,136 @@ function handleSwitchStatement(ctx: DceCtx, switchStatement: Node, result: Node[
         dropStatement(ctx, lastStatement);
     }
 
+    if (!isTreeShakeOnly(ctx.state) && cases.length === 1 && canSwitchCaseBeInlined(cases[0])) {
+        const switchCase = cases.pop() as Node;
+        const caseData = switchCase.data as DataOf<'SwitchCase'>;
+        noticeChange(ctx);
+
+        let blockStatement: Node;
+        if (caseData.consequent.length === 1 && caseData.consequent[0].type === N.BlockStatement) {
+            blockStatement = caseData.consequent.pop() as Node;
+        } else {
+            blockStatement = create.BlockStatement(switchCase.start, switchCase.end, 0, caseData.consequent);
+            attachScopeNode(ctx.scoping.semantic, data.scopeId, blockStatement);
+        }
+
+        if (caseData.test !== null) {
+            const test = create.BinaryExpression(0, 0, '===', takeNode(ctx, data.discriminant), caseData.test);
+            result.push(create.IfStatement(switchStatement.start, switchStatement.end, 0, test, blockStatement, null));
+            return;
+        }
+
+        if (!isLiteral(data.discriminant)) {
+            const discriminant = data.discriminant;
+            result.push(create.ExpressionStatement(discriminant.start, discriminant.end, 0, takeNode(ctx, discriminant)));
+        }
+
+        result.push(blockStatement);
+        return;
+    }
+
     result.push(switchStatement);
 }
 
-/** oxc `handle_if_statement`. Absorbing previous statements and the exit-point rewrites are gated on
- *  `sequences`; what remains is the single-use substitution into the test. */
-function handleIfStatement(ctx: DceCtx, ifStatement: Node, result: Node[]): void {
-    substituteSingleUseSymbolInStatement(ctx, (ifStatement.data as DataOf<'IfStatement'>).test, result, false);
+/** oxc `handle_if_statement`. `true` when the rest of `statements` moved into the if. */
+function handleIfStatement(ctx: DceCtx, index: number, statements: Node[], ifStatement: Node, result: Node[]): boolean {
+    const data = ifStatement.data as DataOf<'IfStatement'>;
+    substituteSingleUseSymbolInStatement(ctx, data.test, result, false);
+
+    // Absorb a previous expression statement
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            data.test = joinSequence(ctx, previous.data.expression, data.test);
+            dropStatement(ctx, result.pop() as Node);
+        }
+
+        if (isJumpStatement(data.consequent)) {
+            // Absorb a previous if statement
+            const previousIf = lastOf(result);
+            if (
+                previousIf !== null &&
+                previousIf.type === N.IfStatement &&
+                previousIf.data.alternate === null &&
+                jumpStatementsLookTheSame(previousIf.data.consequent, data.consequent)
+            ) {
+                // "if (a) break c; if (b) break c;" => "if (a || b) break c;"
+                // "if (a) continue c; if (b) continue c;" => "if (a || b) continue c;"
+                // "if (a) return c; if (b) return c;" => "if (a || b) return c;"
+                // "if (a) throw c; if (b) throw c;" => "if (a || b) throw c;"
+                const span = { start: data.test.start, end: data.test.end };
+                data.test = joinWithLeftAssociativeOp(
+                    ctx,
+                    span,
+                    '||',
+                    takeNode(ctx, previousIf.data.test),
+                    takeNode(ctx, data.test),
+                );
+                dropStatement(ctx, result.pop() as Node);
+            }
+
+            if (canRemoveTerminationStatement(ctx, data.consequent)) {
+                // Don't do this transformation if the branch condition could potentially access
+                // symbols declared later on in this scope. Inverting the branch condition and nesting
+                // the statements after this in a block would break that access:
+                //
+                //   if (a()) return; function a() {}  =>  if (!a()) { function a() {} }
+                //   if (a(() => b)) return; let b;     =>  if (a(() => b)) { let b; }
+                const canMoveBranchConditionOutsideScope =
+                    !(data.alternate !== null && statementCaresAboutScope(data.alternate)) &&
+                    !statements.slice(index + 1).some(statementCaresAboutScope);
+
+                if (canMoveBranchConditionOutsideScope) {
+                    const drainedStatements = statements.splice(index + 1);
+                    const alternate = data.alternate;
+                    data.alternate = null;
+                    const body = alternate !== null ? [alternate, ...drainedStatements] : drainedStatements;
+
+                    minimizeStatements(ctx, body, 0);
+                    const span: Span = body.length === 0 ? data.consequent : body[0];
+                    const test = takeNode(ctx, data.test);
+                    const notTest = minimizeNot(ctx, test, test);
+                    minimizeExpressionInBooleanContext(ctx, notTest);
+                    let consequent: Node;
+                    if (body.length === 1) {
+                        consequent = body[0];
+                    } else {
+                        const scopeId = createChildScopeOfCurrent(ctx, 0);
+                        consequent = create.BlockStatement(span.start, span.end, 0, body);
+                        attachScopeNode(ctx.scoping.semantic, scopeId, consequent);
+                    }
+                    const newIf = create.IfStatement(notTest.start, notTest.end, 0, notTest, consequent, null);
+                    result.push(tryMinimizeIf(ctx, newIf) ?? newIf);
+                    noticeChange(ctx);
+                    return true;
+                }
+            }
+        }
+
+        if (data.alternate !== null && !statementCaresAboutScope(data.alternate) && statementIsTerminated(data.consequent)) {
+            // "if (a) return b; else if (c) return d; else return e;" => "if (a) return b; if (c) return d; return e;"
+            result.push(ifStatement);
+            for (;;) {
+                const last = lastOf(result);
+                if (last === null || last.type !== N.IfStatement) break;
+                const lastData = last.data as DataOf<'IfStatement'>;
+                const alternate = lastData.alternate;
+                if (alternate === null || statementCaresAboutScope(alternate) || !statementIsTerminated(lastData.consequent))
+                    break;
+                lastData.alternate = null;
+                if (alternate.type === N.BlockStatement) {
+                    handleBlock(ctx, result, alternate);
+                } else {
+                    result.push(alternate);
+                    noticeChange(ctx);
+                }
+            }
+            return false;
+        }
+    }
+
     result.push(ifStatement);
+    return false;
 }
 
 function handleReturnStatement(ctx: DceCtx, returnStatement: Node, result: Node[]): void {
@@ -412,18 +706,42 @@ function handleReturnStatement(ctx: DceCtx, returnStatement: Node, result: Node[
         // `return undefined` has different semantics in an async generator.
         !isClosestFunctionScopeAnAsyncGenerator(ctx)
     ) {
-        if (mayHaveSideEffects(argument, ctx)) result.push(expressionStatementOf(takeNode(ctx, argument)));
+        if (mayHaveSideEffects(argument, ctx)) {
+            const previous = lastOf(result);
+            if (ctx.state.options.sequences && previous !== null && previous.type === N.ExpressionStatement) {
+                previous.data.expression = joinSequence(ctx, previous.data.expression, argument);
+            } else {
+                result.push(expressionStatementOf(takeNode(ctx, argument)));
+            }
+        }
         data.argument = null;
         dropExpression(ctx, argument);
         result.push(returnStatement);
         return;
     }
 
+    if (ctx.state.options.sequences && argument !== null) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            const newArgument = joinSequence(ctx, previous.data.expression, argument);
+            replaceExpression(ctx, argument, newArgument);
+            result.pop();
+        }
+    }
     result.push(returnStatement);
 }
 
 function handleThrowStatement(ctx: DceCtx, throwStatement: Node, result: Node[]): void {
-    substituteSingleUseSymbolInStatement(ctx, (throwStatement.data as DataOf<'ThrowStatement'>).argument, result, false);
+    const data = throwStatement.data as DataOf<'ThrowStatement'>;
+    substituteSingleUseSymbolInStatement(ctx, data.argument, result, false);
+
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            data.argument = joinSequence(ctx, previous.data.expression, data.argument);
+            dropStatement(ctx, result.pop() as Node);
+        }
+    }
     result.push(throwStatement);
 }
 
@@ -469,6 +787,34 @@ function handleForStatement(ctx: DceCtx, forStatement: Node, result: Node[]): vo
         }
     }
 
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            const forInit = data.init;
+            if (forInit !== null) {
+                if (forInit.type !== N.VariableDeclaration) {
+                    const newInit = joinSequence(ctx, previous.data.expression, forInit);
+                    replaceExpression(ctx, forInit, newInit);
+                    dropStatement(ctx, result.pop() as Node);
+                }
+            } else {
+                data.init = takeNode(ctx, previous.data.expression);
+                dropStatement(ctx, result.pop() as Node);
+            }
+        } else if (previous !== null && previous.type === N.VariableDeclaration) {
+            const forInit = data.init;
+            const previousData = previous.data as DataOf<'VariableDeclaration'>;
+            if (forInit !== null) {
+                if (previousData.kind === 'var' && forInit.type === N.VariableDeclaration && forInit.data.kind === 'var') {
+                    (forInit.data.declarations as Node[]).unshift(...previousData.declarations.splice(0));
+                    dropStatement(ctx, result.pop() as Node);
+                }
+            } else if (previousData.kind === 'var') {
+                data.init = result.pop() as Node;
+                noticeChange(ctx);
+            }
+        }
+    }
     result.push(forStatement);
 }
 
@@ -486,6 +832,47 @@ function handleForInStatement(ctx: DceCtx, forInStatement: Node, result: Node[])
     if (!(left.type === N.VariableDeclaration && variableDeclarationHasInit(left))) {
         const isBlockScopedDecl = left.type === N.VariableDeclaration && left.data.kind !== 'var';
         substituteSingleUseSymbolInStatement(ctx, data.right, result, isBlockScopedDecl);
+    }
+
+    if (ctx.state.options.sequences) {
+        const previous = lastOf(result);
+        if (previous !== null && previous.type === N.ExpressionStatement) {
+            // "a; for (var b in c) d" => "for (var b in a, c) d"
+            // Only when the for-in variable is a `var` without a side-effectful initializer (Annex
+            // B.3.5). A block-scoped declaration could shadow a name the inlined expression reads.
+            // <https://github.com/oxc-project/oxc/issues/18650>
+            let canInline = true;
+            if (data.left.type === N.VariableDeclaration) {
+                const leftData = data.left.data as DataOf<'VariableDeclaration'>;
+                if (leftData.declarations.length === 1) {
+                    const init = (leftData.declarations[0].data as DataOf<'VariableDeclarator'>).init;
+                    canInline = leftData.kind === 'var' && !(init !== null && mayHaveSideEffects(init, ctx));
+                } else {
+                    canInline = false;
+                }
+            }
+            if (canInline) {
+                data.right = joinSequence(ctx, previous.data.expression, data.right);
+                dropStatement(ctx, result.pop() as Node);
+            }
+        } else if (previous !== null && previous.type === N.VariableDeclaration) {
+            // "var a; for (a in b) c" => "for (var a in b) c"
+            const left = data.left;
+            if (left.type === N.IdentifierReference) {
+                const previousData = previous.data as DataOf<'VariableDeclaration'>;
+                if (
+                    previousData.kind === 'var' &&
+                    previousData.declarations.length === 1 &&
+                    (previousData.declarations[0].data as DataOf<'VariableDeclarator'>).init === null
+                ) {
+                    const declaratorId = (previousData.declarations[0].data as DataOf<'VariableDeclarator'>).id;
+                    if (declaratorId.type === N.BindingIdentifier && left.name === declaratorId.name) {
+                        result.pop();
+                        replaceForStatementLeft(ctx, left, previous);
+                    }
+                }
+            }
+        }
     }
     result.push(forInStatement);
 }
@@ -950,6 +1337,40 @@ function canRemoveTerminationStatement(ctx: DceCtx, statement: Node): boolean {
         }
         case N.ReturnStatement:
             return statement.data.argument === null && parentKind(ctx) === 'FunctionBodyStatements';
+        default:
+            return false;
+    }
+}
+
+/** oxc `FindNestedBreak::has_unlabelled_break_in_switch_case`: an unlabeled `break` in the case's
+ *  statements that would exit the switch. Expressions, declarations, loops and nested switches are
+ *  not searched. */
+function hasUnlabelledBreakInSwitchCase(switchCase: Node): boolean {
+    return (switchCase.data as DataOf<'SwitchCase'>).consequent.some(findNestedBreak);
+}
+
+function findNestedBreak(statement: Node): boolean {
+    switch (statement.type) {
+        case N.BreakStatement:
+            return statement.data.label === null;
+        case N.BlockStatement:
+            return (statement.data.body as Node[]).some(findNestedBreak);
+        case N.IfStatement:
+            return (
+                findNestedBreak(statement.data.consequent) ||
+                (statement.data.alternate !== null && findNestedBreak(statement.data.alternate))
+            );
+        case N.LabeledStatement:
+        case N.WithStatement:
+            return findNestedBreak(statement.data.body);
+        case N.TryStatement: {
+            const { block, handler, finalizer } = statement.data as DataOf<'TryStatement'>;
+            return (
+                findNestedBreak(block) ||
+                (handler !== null && findNestedBreak((handler.data as DataOf<'CatchClause'>).body)) ||
+                (finalizer !== null && findNestedBreak(finalizer))
+            );
+        }
         default:
             return false;
     }

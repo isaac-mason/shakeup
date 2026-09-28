@@ -40,7 +40,7 @@ function setup(
     const { program } = parse(source, { ts: false, jsx: false, kind: parseKind(sourceType) });
     const semantic = createSemantic();
     analyze(semantic, program, sourceType === 'module');
-    const ctx = createDceCtx(program, semantic, rolldownDceOptions(), sourceType, new Set(), verify);
+    const ctx = createDceCtx(program, semantic, rolldownDceOptions(), 'tree-shake-only', sourceType, new Set(), verify);
     return { program, semantic, ctx };
 }
 
@@ -487,6 +487,78 @@ const symbolValueFor = (source: string, name: string, sourceType: SourceType = '
     const { program, ctx } = valuesAfterPass(source, sourceType);
     return symbolValueOf(ctx.state.symbols, bindingSymbol(program, name));
 };
+
+describe('full-minify walker hooks', () => {
+    /** The hooks only the full minifier uses, in the order they fire, with the node's type. */
+    function recordFullHooks(source: string): string[] {
+        const { program, ctx } = setup(source, 'module', false);
+        const log: string[] = [];
+        const record =
+            (name: string) =>
+            (_context: DceCtx, node: Node): void => {
+                log.push(`${name} ${TYPE_NAME[node.type]}`);
+            };
+        const names = [
+            'exitForStatement',
+            'exitReturnStatement',
+            'exitCatchClause',
+            'exitObjectProperty',
+            'exitAssignmentTargetProperty',
+            'exitAssignmentTargetPropertyProperty',
+            'exitBindingProperty',
+            'exitMethodDefinition',
+            'exitPropertyDefinition',
+            'exitAccessorProperty',
+            'exitMemberExpression',
+            'exitPrivateFieldExpression',
+            'exitPrivateInExpression',
+            'enterClassBody',
+            'exitClassBody',
+        ] as const;
+        const traverser: Traverser<DceCtx> = {};
+        for (const name of names) traverser[name] = record(name);
+        traverseProgram(traverser, program, ctx);
+        return log;
+    }
+
+    it('fires each property kind its own hook', () => {
+        expect(recordFullHooks('({ a: 1, m() {} }); var { a, b: c } = o; ({ a, b: c } = o);')).toEqual([
+            'exitObjectProperty ObjectProperty',
+            'exitObjectProperty ObjectProperty',
+            'exitBindingProperty ObjectProperty',
+            'exitBindingProperty ObjectProperty',
+            'exitAssignmentTargetProperty ObjectProperty',
+            'exitAssignmentTargetPropertyProperty ObjectProperty',
+            'exitAssignmentTargetProperty ObjectProperty',
+        ]);
+    });
+
+    it('fires the class body hooks around the members, and each member and private access its own', () => {
+        expect(recordFullHooks('class C { #x; m() {} accessor y; static z; f() { return #x in this && this.#x; } }')).toEqual([
+            'enterClassBody ClassDeclaration',
+            'exitPropertyDefinition PropertyDefinition',
+            'exitMethodDefinition MethodDefinition',
+            'exitAccessorProperty PropertyDefinition',
+            'exitPropertyDefinition PropertyDefinition',
+            'exitPrivateInExpression BinaryExpression',
+            'exitPrivateFieldExpression PrivateFieldExpression',
+            'exitMemberExpression PrivateFieldExpression',
+            'exitReturnStatement ReturnStatement',
+            'exitMethodDefinition MethodDefinition',
+            'exitClassBody ClassDeclaration',
+        ]);
+    });
+
+    it('fires member expressions inside out, and for, return and catch', () => {
+        expect(recordFullHooks('a.b[c]; for (;;) break; try {} catch (e) {} function f() { return; }')).toEqual([
+            'exitMemberExpression StaticMemberExpression',
+            'exitMemberExpression ComputedMemberExpression',
+            'exitForStatement ForStatement',
+            'exitCatchClause CatchClause',
+            'exitReturnStatement ReturnStatement',
+        ]);
+    });
+});
 
 describe('symbol values (init_symbol_value)', () => {
     it('records constants of lexical declarations', () => {

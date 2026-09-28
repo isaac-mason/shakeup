@@ -44,7 +44,7 @@ describe('minimize-conditions — more if-shapes (compress)', () => {
         expect(compressed).not.toMatch(/\bif\s*\(/); // the if is gone
     });
 
-    it('parenthesizes a sequence operand when flipping `if (!(a, b)) c()` → `(a, b) || c()`', async () => {
+    it('splits the sequence off a negated test: `if (!(a, b)) c()` becomes `a, !b && c()`', async () => {
         const src = [
             'const order = [];',
             'function go(x) { if (!(order.push("a"), x)) order.push("b"); }',
@@ -54,7 +54,7 @@ describe('minimize-conditions — more if-shapes (compress)', () => {
         const { compressed, q } = await parity(src, ['order2']);
         // go(1): pushes "a" then (1 truthy → !truthy falsy) no "b"; go(0): pushes "a" then "b".
         expect(q.order2).toStrictEqual(['a', 'a', 'b']);
-        expect(compressed).toMatch(/\(.*,.*\)\s*\|\|/); // sequence operand kept its parens under `||`
+        expect(compressed).toContain('order.push("a"), !x && order.push("b");'); // rolldown 1.2.4's output
     });
 
     // ---- rewrite 4: empty consequent, no else → `a;` (test kept for side effects) --------------

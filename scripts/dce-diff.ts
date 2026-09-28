@@ -2,6 +2,8 @@
 // minification.
 //
 // Run: `pnpm dcediff` (all cases) or `pnpm dcediff <substring>` (cases whose label matches).
+// `pnpm mindiff [substring]` compares `minify: true` instead: oxc's full compressor, mangler and minified
+// codegen on both sides, so the outputs are expected to be byte-identical.
 //
 // Two columns per case, because rolldown runs oxc's tree-shake-only compressor twice:
 //   `raw`  — `minify: false`: each module through oxc's dead-code pass (`pre_process_ecma_ast.rs`
@@ -82,6 +84,37 @@ const CASES: Case[] = [
         '/dep.js': 'export function g() { return 1; }\nexport function h() { return 2; }\n',
         '/main.js': "import { g, h } from './dep.js';\nconsole.log(g());\n",
     }],
+    // ── full minify only: what the tree-shake tier leaves alone ──
+    ['minify', 'if to ternary', 'export function f(a) { if (a) g(); else h(); }'],
+    ['minify', 'if to logical', 'export function f(a) { if (a) g(); }'],
+    ['minify', 'if return both', 'export function f(a) { if (a) return 1; else return 2; }'],
+    ['minify', 'if return follow', 'export function f(a, b) { if (a) return 1; if (b) return 2; return 3; }'],
+    ['minify', 'join vars', 'export function f() { var a = g(); var b = h(); return a + b; }'],
+    ['minify', 'sequences', 'export function f() { g(); h(); return k(); }'],
+    ['minify', 'dotted property', 'export function f(o) { return o["abc"]; }'],
+    ['minify', 'object constructor', 'export function f() { return new Object(); }'],
+    ['minify', 'array constructor', 'export function f() { return new Array(3); }'],
+    ['minify', 'not in boolean context', 'export function f(a) { if (!!a) g(); }'],
+    ['minify', 'conditional to logical', 'export function f(a) { return a ? a : b(); }'],
+    ['minify', 'assign to compound', 'export function f(a) { a = a + 1; return a; }'],
+    ['minify', 'assign to update', 'export function f(a) { a = a + 1; }'],
+    ['minify', 'typeof undefined', 'export function f(a) { return typeof a === "undefined"; }'],
+    ['minify', 'loose null', 'export function f(a) { return a === null || a === undefined; }'],
+    ['minify', 'while to for', 'export function f() { while (g()) h(); }'],
+    ['minify', 'const to let', 'export function f() { const a = g(); h(a); h(a); }'],
+    ['minify', 'arrow body', 'export const f = () => { return 1; };'],
+    ['minify', 'optional chain', 'export function f(a) { return a == null ? void 0 : a.b; }'],
+    ['minify', 'true false', 'export const t = true, f = false;'],
+    ['minify', 'undefined', 'export function f() { return undefined; }'],
+    ['minify', 'known globals', 'export const a = Number.MAX_SAFE_INTEGER, b = Math.PI;'],
+    ['minify', 'string concat', 'export function f(a) { return "a" + "b" + a; }'],
+    ['minify', 'drop debugger', 'export function f() { debugger; return 1; }'],
+    ['minify', 'mangle locals', 'export function run(input) { const total = input.a + input.b; const scaled = total * 2; return [total, scaled]; }'],
+    ['minify', 'mangle top level', 'function helper(x) { return x * 2; }\nexport const value = helper(g());'],
+    ['minify', 'keep class name', 'export class Box { size() { return 1; } }'],
+    ['minify', 'private members', 'export class C { #a = 1; #b() { return this.#a; } get() { return this.#b(); } }'],
+    ['minify', 'switch', 'export function f(a) { switch (a) { case 1: return g(); case 2: return h(); default: return k(); } }'],
+    ['minify', 'for statement', 'export function f(a) { for (;;) { if (a()) break; g(); } }'],
 ];
 
 const normalize = (code: string): string =>
@@ -96,14 +129,16 @@ const normalize = (code: string): string =>
 const filesOf = (files: string | Record<string, string>): Record<string, string> =>
     typeof files === 'string' ? { '/main.js': files } : files;
 
-async function ours(files: Record<string, string>, minify: false | undefined): Promise<string> {
+type Minify = false | undefined | true;
+
+async function ours(files: Record<string, string>, minify: Minify): Promise<string> {
     const r = await bundle({ entry: '/main.js', fs: createMemoryFs(files), external: [], output: { minify } } as never);
     const result = r as { errors: string[]; chunks: { code: string }[] };
     if (result.errors.length > 0) return `ERROR ${result.errors.join('; ')}`;
     return normalize(result.chunks.map((c) => c.code).join('\n'));
 }
 
-async function theirs(files: Record<string, string>, minify: false | undefined): Promise<string> {
+async function theirs(files: Record<string, string>, minify: Minify): Promise<string> {
     const build = await rolldown({
         input: '/main.js',
         logLevel: 'silent',
@@ -119,21 +154,27 @@ async function theirs(files: Record<string, string>, minify: false | undefined):
     return normalize(output.map((o) => ('code' in o ? o.code : '')).join('\n'));
 }
 
-const filter = process.argv[2];
+const minifyMode = process.argv.includes('--min');
+const filter = process.argv.slice(2).find((argument) => argument !== '--min');
+const modes: (readonly [string, Minify])[] = minifyMode
+    ? [['min', true]]
+    : [
+          ['raw', false],
+          ['dce', undefined],
+      ];
 let group = '';
 let diverged = 0;
 let total = 0;
 for (const [g, label, spec] of CASES) {
     if (filter !== undefined && !label.includes(filter) && !g.includes(filter)) continue;
+    // The full-minify cases say nothing new about the tree-shake tier.
+    if (!minifyMode && g === 'minify') continue;
     if (g !== group) {
         group = g;
         console.log(`\n-- ${g} --`);
     }
     const files = filesOf(spec);
-    for (const [mode, minify] of [
-        ['raw', false],
-        ['dce', undefined],
-    ] as const) {
+    for (const [mode, minify] of modes) {
         total++;
         const a = await ours(files, minify);
         const b = await theirs(files, minify);

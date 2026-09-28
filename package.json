@@ -18,6 +18,7 @@
         "regress": "tsx scripts/regress.ts",
         "oxcdiff": "tsx scripts/oxc-diff.ts",
         "dcediff": "tsx scripts/dce-diff.ts",
+        "mindiff": "tsx scripts/dce-diff.ts --min",
         "cjsdiff": "tsx scripts/cjs-diff.ts",
         "parserdiff": "tsx scripts/parser-diff.ts",
         "parsercorpus": "tsx scripts/parser-corpus.ts",

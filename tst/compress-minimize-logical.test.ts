@@ -172,15 +172,14 @@ describe('minimize-logical (compress)', () => {
         expect(compressed).not.toMatch(/[^=!]=\s*null/); // no loose `== null` was introduced
     });
 
-    it('does NOT fold a MEMBER-target compound assignment (`o.x = o.x + c`)', async () => {
-        // A member target evaluated twice in `o.x = o.x + c` vs once in `o.x += c` differs under a
-        // getter/proxy; we bail for v1. Parity still holds (no rewrite), and the source shape survives.
+    it('folds a MEMBER-target compound assignment on a local object (`o.x = o.x + c`)', async () => {
+        // oxc folds a member target whose object is a plain identifier; rolldown 1.2.4 gives the same output.
         const src = ['export function f(c) { const o = { x: 10 }; o.x = o.x + c; return o.x; }', 'export const out = f(5);'].join(
             '\n',
         );
         const { compressed } = await parity(src);
         expect((await run(compressed)).out).toBe(15);
-        expect(compressed).not.toMatch(/\.x\s*\+=/); // member compound NOT formed
+        expect(compressed).toMatch(/o\.x \+= c/);
     });
 
     it('does NOT fold `a = b + c` when the RHS left operand is a DIFFERENT variable', async () => {

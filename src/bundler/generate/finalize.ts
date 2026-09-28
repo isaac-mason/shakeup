@@ -28,6 +28,8 @@ export type FinalizeRules = {
     defaultName: () => string;
     /** Keep a renamed class's `.name` (`output.keepNames`). */
     keepNames: boolean;
+    /** Whether a symbol is declared in the module's own top-level scope. */
+    isTopLevelSymbol: (symbol: number) => boolean;
     /** Added to every source position, placing the module in a combined source. */
     offset: number;
 };
@@ -202,8 +204,9 @@ function finalizeProperty(finalizer: Finalizer, property: Node): Node | null {
     } as never);
 }
 
-/** A class as an expression named `name`, its body read under the original name when `ownSym` is set. */
-function classExpression(finalizer: Finalizer, source: Node, name: string, ownSym: number): Node {
+/** A class as an expression named `name` (anonymous when null), its body read under the original name
+ *  when `ownSym` is set. */
+function classExpression(finalizer: Finalizer, source: Node, name: string | null, ownSym: number): Node {
     const data = source.data as {
         decorators: Node[];
         typeParameters: Node | null;
@@ -218,7 +221,7 @@ function classExpression(finalizer: Finalizer, source: Node, name: string, ownSy
     finalizer.originalNameSym = previous;
     return node(N.ClassExpression, UNSPANNED, UNSPANNED, '', {
         decorators: data.decorators.map((decorator) => copy(finalizer, decorator)),
-        id: node(N.BindingIdentifier, UNSPANNED, UNSPANNED, name, null),
+        id: name === null ? null : node(N.BindingIdentifier, UNSPANNED, UNSPANNED, name, null),
         typeParameters: copyOrNull(finalizer, data.typeParameters),
         superClass: copyOrNull(finalizer, data.superClass),
         superTypeArguments: copyOrNull(finalizer, data.superTypeArguments),
@@ -226,6 +229,49 @@ function classExpression(finalizer: Finalizer, source: Node, name: string, ownSy
         body,
         scopeId: 0,
     });
+}
+
+/** Whether a class refers to itself anywhere inside, as rolldown's scanner records it: a nested class
+ *  declaration's own references are its own. */
+function classRefersToItself(declaration: Node, symbol: number): boolean {
+    let found = false;
+    walk(declaration, (inner) => {
+        if (found) return false;
+        if (inner !== declaration && inner.type === N.ClassDeclaration) return false;
+        if (inner.type === N.IdentifierReference && inner.sym === symbol) found = true;
+        return !found;
+    });
+    return found;
+}
+
+/** `var <name> = class <expressionName> {}` standing where `declaration` stood. */
+function classAsVar(finalizer: Finalizer, declaration: Node, name: string, expressionName: string | null, ownSym: number): Node {
+    const offset = finalizer.rules.offset;
+    const declarator = node(N.VariableDeclarator, UNSPANNED, UNSPANNED, '', {
+        id: node(N.BindingIdentifier, UNSPANNED, UNSPANNED, name, null),
+        typeAnnotation: null,
+        init: classExpression(finalizer, declaration, expressionName, ownSym),
+        definite: false,
+    });
+    return node(N.VariableDeclaration, declaration.start + offset, declaration.end + offset, '', {
+        declarations: [declarator],
+        kind: 'var',
+        declare: false,
+    });
+}
+
+/**
+ * rolldown `get_transformed_class_decl`: a class declared at the module's top level becomes
+ * `var X = class {}`, keeping its own name only when its body refers to it (`var T = class T { static
+ * a = new T() }`). With `keepNames`, a renamed class keeps its original name instead, as below.
+ */
+function topLevelClassDeclaration(finalizer: Finalizer, declaration: Node): Node | null {
+    const id = (declaration.data as { id: Node | null }).id;
+    if (id === null || id.sym === 0 || !finalizer.rules.isTopLevelSymbol(id.sym)) return null;
+    const name = finalizer.rules.nameOf(id);
+    const original = preservedClassName(finalizer.rules.keepNames, finalizer.rules.nameOf, id, declaration);
+    if (original !== null) return classAsVar(finalizer, declaration, name, original, id.sym);
+    return classAsVar(finalizer, declaration, name, classRefersToItself(declaration, id.sym) ? name : null, 0);
 }
 
 /** A renamed class declaration as `let <new> = class <original> {}`, which keeps `.name` (Rollup's
@@ -291,7 +337,7 @@ function substituteFor(finalizer: Finalizer): (source: Node) => Node | null {
             case N.ObjectProperty:
                 return finalizeProperty(finalizer, source);
             case N.ClassDeclaration:
-                return finalizeClassDeclaration(finalizer, source);
+                return topLevelClassDeclaration(finalizer, source) ?? finalizeClassDeclaration(finalizer, source);
             case N.VariableDeclarator:
                 return finalizeDeclarator(finalizer, source);
             case N.BlockStatement:
@@ -323,27 +369,30 @@ function liveDeclarators(finalizer: Finalizer, declaration: Node): Node {
     } as never);
 }
 
-/** `export default <anonymous>` as `const <defaultName> = <value>`. */
+/**
+ * rolldown's finalizer for an anonymous `export default`: `function <defaultName>() {}` for a function,
+ * `var <defaultName> = class {}` for a class, `var <defaultName> = <value>` for anything else.
+ */
 function defaultExportDeclaration(finalizer: Finalizer, statement: Node, declaration: Node): Node {
     const offset = finalizer.rules.offset;
-    let value: Node;
-    if (declaration.type === N.FunctionDeclaration || declaration.type === N.ClassDeclaration) {
-        const { declare: _declare, abstract: _abstract, ...rest } = declaration.data as Record<string, unknown>;
-        const expressionType = declaration.type === N.FunctionDeclaration ? N.FunctionExpression : N.ClassExpression;
-        const expression = node(expressionType, declaration.start, declaration.end, declaration.name, rest as never);
-        value = copy(finalizer, expression);
-        (value as { start: number; end: number }).start = UNSPANNED;
-        (value as { start: number; end: number }).end = UNSPANNED;
-    } else value = copy(finalizer, declaration);
+    const defaultName = finalizer.rules.defaultName();
+    if (declaration.type === N.FunctionDeclaration) {
+        const named = node(N.FunctionDeclaration, declaration.start, declaration.end, declaration.name, {
+            ...(declaration.data as object),
+            id: node(N.BindingIdentifier, UNSPANNED, UNSPANNED, defaultName, null),
+        } as never);
+        return standingAt(copy(finalizer, named), statement, offset);
+    }
+    if (declaration.type === N.ClassDeclaration) return standingAt(classAsVar(finalizer, declaration, defaultName, null, 0), statement, offset);
     const declarator = node(N.VariableDeclarator, UNSPANNED, UNSPANNED, '', {
-        id: node(N.BindingIdentifier, UNSPANNED, UNSPANNED, finalizer.rules.defaultName(), null),
+        id: node(N.BindingIdentifier, UNSPANNED, UNSPANNED, defaultName, null),
         typeAnnotation: null,
-        init: value,
+        init: copy(finalizer, declaration),
         definite: false,
     });
     return node(N.VariableDeclaration, statement.start + offset, statement.end + offset, '', {
         declarations: [declarator],
-        kind: 'const',
+        kind: 'var',
         declare: false,
     });
 }

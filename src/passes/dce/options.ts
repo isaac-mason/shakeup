@@ -1,4 +1,4 @@
-// Port of oxc_minifier/src/options.rs, reduced to what `CompressOptions::dce()` and rolldown pass.
+// Port of oxc_minifier/src/options.rs, and the options rolldown builds from it.
 
 import type { EngineTargets, EsFeature, PropertyReadSideEffects } from '../../analysis/side-effects.ts';
 
@@ -6,6 +6,13 @@ import type { EngineTargets, EsFeature, PropertyReadSideEffects } from '../../an
 export type CompressTargets = EngineTargets & {
     /** oxc `EngineTargets::has_feature`: true when some target engine lacks `feature` and needs it transformed. */
     hasFeature: (feature: string) => boolean;
+};
+
+/** oxc `EngineTargets::default()`, rolldown's target when none is set: nothing needs transforming, and
+ *  nothing is known to be supported (`supports_es_feature` is a strict capability query). */
+export const ANY_TARGETS: CompressTargets = {
+    hasFeature: () => false,
+    supportsEsFeature: (_feature: EsFeature) => false,
 };
 
 /** `esnext`: every engine feature is available. */
@@ -61,10 +68,31 @@ export function defaultTreeShakeOptions(): TreeShakeOptions {
     };
 }
 
+/** oxc `CompressOptions::smallest()`. */
+export function smallestOptions(): CompressOptions {
+    return {
+        target: ANY_TARGETS,
+        keepNames: { function: false, class: false },
+        dropDebugger: true,
+        dropConsole: false,
+        joinVars: true,
+        sequences: true,
+        unused: 'remove',
+        treeshake: defaultTreeShakeOptions(),
+        dropLabels: new Set(),
+        maxIterations: null,
+    };
+}
+
+/** oxc `CompressOptions::safest()`. */
+export function safestOptions(): CompressOptions {
+    return { ...smallestOptions(), keepNames: { function: true, class: true }, dropDebugger: false, unused: 'keep' };
+}
+
 /** oxc `CompressOptions::dce()`. */
 export function dceOptions(): CompressOptions {
     return {
-        target: ESNEXT_TARGETS,
+        target: ANY_TARGETS,
         keepNames: { function: true, class: true },
         dropDebugger: false,
         dropConsole: false,
@@ -86,12 +114,28 @@ export function rolldownChunkDceOptions(treeshake: Partial<TreeShakeOptions> = {
 /** What rolldown's `pre_process_ecma_ast` step 5 passes: `CompressOptions::dce()` with the bundle's
  *  target and `TreeShakeOptions::from(&bundle_options.treeshake)`, forcing `invalid_import_side_effects`. */
 export function rolldownDceOptions(
-    target: CompressTargets = ESNEXT_TARGETS,
+    target: CompressTargets = ANY_TARGETS,
     treeshake: Partial<TreeShakeOptions> = {},
 ): CompressOptions {
     return {
         ...dceOptions(),
         target,
         treeshake: { ...defaultTreeShakeOptions(), ...treeshake, invalidImportSideEffects: true },
+    };
+}
+
+/** What rolldown's `minify: true` passes (`minify_options.rs`, `RawCompressOptions::into_compress_options`):
+ *  `CompressOptions::smallest()` with the bundle's target, keep-names from `output.keepNames`, and the
+ *  bundle's treeshake options. */
+export function rolldownMinifyOptions(
+    target: CompressTargets = ANY_TARGETS,
+    keepNames = false,
+    treeshake: Partial<TreeShakeOptions> = {},
+): CompressOptions {
+    return {
+        ...smallestOptions(),
+        target,
+        keepNames: { function: keepNames, class: keepNames },
+        treeshake: { ...defaultTreeShakeOptions(), ...treeshake },
     };
 }

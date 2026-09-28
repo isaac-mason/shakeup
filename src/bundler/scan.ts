@@ -3,7 +3,6 @@ import { semanticVerifyOn, verifySemantic } from '../analysis/ref-facts.ts';
 import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '../analysis/semantic.ts';
 import { isJSXNode, N, type Node, type Program, walk } from '../ast/index.ts';
 import { parse } from '../parser/index.ts';
-import { runCompress } from '../passes/compress/index.ts';
 import { eliminateDeadCode } from '../passes/dce/compressor.ts';
 import { rolldownDceOptions } from '../passes/dce/options.ts';
 import type { SourceType } from '../passes/dce/state.ts';
@@ -1050,7 +1049,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
     // Modules whose export surface changed vs the prior build — the affected-set frontier.
     const changedExports = new Set<string>();
     const jsxOptions = resolveJSXOptions(options.jsx);
-    const compress = options.compress ?? false; // minify P4 — a MODE ('full'|'dce'|false); part of the parse-cache key below
+    const deadCodeElimination = options.deadCodeElimination ?? false; // part of the parse-cache key below
     const optimizeTier = options.optimize ?? true; // directive-gated hot-path opts; `false` ignores all directives
     // Default ON, matching rolldown, which runs oxc's checker on every module and fails the build on
     // it. `false` is the escape hatch for input you know is invalid and want bundled anyway.
@@ -1551,7 +1550,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             reuse =
                 hit !== undefined &&
                 hit.srcHash === srcHash &&
-                hit.compress === compress &&
+                hit.deadCodeElimination === deadCodeElimination &&
                 hit.optimize === optimizeTier &&
                 hit.defFormat === defFormat;
             if (reuse && hit !== undefined) {
@@ -1784,13 +1783,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // NO REBUILD after the optimize tier either — same reason. This and the one above
                 // were the last two per-module rebuilds outside the initial `analyze`.
                 void expanded;
-                if (compress === 'dce') {
-                    // rolldown's per-module dead-code pass (`pre_process_ecma_ast.rs` step 5)
+                // rolldown's per-module dead-code pass (`pre_process_ecma_ast.rs` step 5)
+                if (deadCodeElimination)
                     eliminateDeadCode(program, semantic, rolldownDceOptions(), dceSourceType(defFormat), noSideEffects);
-                } else if (compress !== false) {
-                    const refreshed = runCompress(program, semantic, compress);
-                    if (refreshed !== null) semantic = refreshed;
-                }
                 graph.parseStats.parsed++;
                 graph.changed.add(id);
             }
@@ -1865,7 +1860,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             if (hit !== undefined && hit.exportSig !== exportSig) changedExports.add(id);
             cache?.set(id, {
                 srcHash,
-                compress,
+                deadCodeElimination,
                 optimize: optimizeTier,
                 program,
                 nodeCount,

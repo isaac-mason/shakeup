@@ -15,9 +15,7 @@ import { attachScopeNode } from '../../../analysis/semantic.ts';
 import { isTypedArrayConstructor, isValidRegExp } from '../../../analysis/side-effects.ts';
 import { type DataOf, N, type Node, node } from '../../../ast/index.ts';
 import { boundNames } from '../bound-names.ts';
-import { shouldTrackMemberWriteEffects } from '../state.ts';
-import { MemberWriteEffect } from '../symbol-metadata.ts';
-import { recordMemberWriteEffect } from '../symbol-state.ts';
+import { isTreeShakeOnly, shouldTrackMemberWriteEffects } from '../state.ts';
 import {
     registerDefaultExport,
     registerExportDeclaration,
@@ -25,7 +23,10 @@ import {
     registerNamedExport,
     registerUsingDeclaration,
 } from '../symbol-liveness.ts';
+import { MemberWriteEffect } from '../symbol-metadata.ts';
+import { recordMemberWriteEffect } from '../symbol-state.ts';
 import { referenceIsReadOnly, scopeContainsDirectEval, scopeIsStrictMode } from '../syntax.ts';
+import { compileWalker, type HookName, hookNamesOf, type Traverser } from '../traverse.ts';
 import {
     createChildScopeOfCurrent,
     createVoidZero,
@@ -41,7 +42,6 @@ import {
     scopeParentId,
     valueToExpr,
 } from '../traverse-context.ts';
-import { compileWalker, type HookName, hookNamesOf, type Traverser } from '../traverse.ts';
 import { memberKeyIsSafe } from './remove-unused-expression.ts';
 
 export type NormalizeOptions = {
@@ -424,7 +424,7 @@ function recordSimpleTargetMemberWriteHazard(ctx: DceCtx, target: Node, isReadMo
 /** Record the base symbol of a hazardous member write: one that reads the property, is chained, or
  *  may write `__proto__`. Tree-shake mode only reads the possible-prototype-mutation state. */
 function recordMemberWriteHazard(ctx: DceCtx, object: Node, keyIsUnsafe: boolean, isReadModify: boolean): void {
-    if (!keyIsUnsafe) return;
+    if (isTreeShakeOnly(ctx.state) && !keyIsUnsafe) return;
     let depth = 1;
     let current = object;
     let base: Node;

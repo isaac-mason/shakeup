@@ -395,8 +395,8 @@ export function stampPureCalls(program: Node, asserted: ReadonlySet<number> = EM
  *
  * Runs between link and treeshake, which is the point where it pays: `treeshake` roots any top-level
  * statement `isPureStatement` rejects, and that in turn consults `CallExpression.pure`. So proving an
- * IMPORTED helper pure lets treeshake drop a discarded call to it — something the per-module pass in
- * `runCompress` cannot see, because scan analyses each module before any of them are bound together.
+ * IMPORTED helper pure lets treeshake drop a discarded call to it — something the per-module dead-code
+ * pass cannot see, because scan analyses each module before any of them are bound together.
  *
  * A callee that leaves the analysed set (an external package, a namespace import, an unresolved bind)
  * is treated as unknown code and poisons its caller, exactly like an unresolved local callee.

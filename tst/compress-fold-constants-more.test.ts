@@ -41,9 +41,9 @@ describe('fold-constants — typeof over literals / literal-constructors', () =>
         expect(b.compressed).not.toMatch(/typeof/);
     });
 
-    it('folds typeof /re/ to "object"', async () => {
+    it('leaves typeof /re/ alone, as oxc does', async () => {
         const { compressed } = await parity('export const out = typeof /re/;', 'object');
-        expect(compressed).not.toMatch(/typeof/);
+        expect(compressed).toMatch(/typeof/);
     });
 
     it('folds typeof over a pure array/object literal with literal contents', async () => {
@@ -65,11 +65,12 @@ describe('fold-constants — typeof over literals / literal-constructors', () =>
         expect(compressed).toMatch(/typeof/); // survives
     });
 
-    it('does NOT fold typeof over a member / call (not statically known)', async () => {
+    it('does NOT fold typeof over a member; a call folds only once it is inlined', async () => {
         const a = await parity('const o = { p: 1 }; export const out = typeof o.p;', 'number');
         expect(a.compressed).toMatch(/typeof/);
+        // the single-use arrow is inlined and its call folded first, as rolldown 1.2.4 does
         const b = await parity('const f = () => 1; export const out = typeof f();', 'number');
-        expect(b.compressed).toMatch(/typeof/);
+        expect(b.compressed).toContain('const out = "number";');
     });
 
     it('does NOT drop side effects: typeof {a: sideEffect} keeps the call', async () => {
@@ -123,9 +124,10 @@ describe('fold-constants — .length on string / array literals', () => {
     });
 
     // ---- ADVERSARIAL --------------------------------------------------------------------------
-    it('does NOT fold [...a].length (spread makes length unknown)', async () => {
+    it('folds [...a].length once the spread array is inlined', async () => {
         const { compressed } = await parity('const a = [1, 2]; export const out = [...a, 9].length;', 3);
-        expect(compressed).toMatch(/\.length/); // survives — length is not static
+        // rolldown 1.2.4's output for the same input
+        expect(compressed).toContain('const out = 3;');
     });
 
     it('does NOT fold a length access on an impure array (would drop the call)', async () => {

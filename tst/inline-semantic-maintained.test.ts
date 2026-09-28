@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { setVerifyExtras, verifySemantic } from '../src/analysis/ref-facts.ts';
 import { parseProgram } from '../src/parser/index.ts';
-import { runCompress } from '../src/passes/compress/index.ts';
+import { eliminateDeadCode } from '../src/passes/dce/compressor.ts';
+import { rolldownDceOptions } from '../src/passes/dce/options.ts';
 import { inlineFunctions } from '../src/passes/optimize/inline-functions.ts';
 
 // `inlineFunctions` MAINTAINS the semantic rather than rebuilding it, so every splice has to leave
@@ -20,16 +21,15 @@ function problemsAfterInlining(src: string): string[] {
     return verifySemantic(semantic, program);
 }
 
-/** The real per-module order: the optimize tier, then the compress fixed point. A splice can leave
- *  the semantic self-consistent yet carry state compress then resolves differently, which only
- *  shows up once both have run. */
-function problemsAfterInliningAndCompress(src: string): string[] {
+/** The real per-module order: the optimize tier, then the dead-code pass. A splice can leave the semantic
+ *  self-consistent yet carry state the dead-code pass then resolves differently, which only shows up once
+ *  both have run. */
+function problemsAfterInliningAndDeadCode(src: string): string[] {
     const program = parseProgram(src, { ts: false, jsx: false }) as never;
-    let semantic = createSemantic();
+    const semantic = createSemantic();
     analyze(semantic, program);
     inlineFunctions(program, semantic, src);
-    const refreshed = runCompress(program, semantic, 'full');
-    if (refreshed !== null) semantic = refreshed;
+    eliminateDeadCode(program, semantic, rolldownDceOptions(), 'module');
     return verifySemantic(semantic, program);
 }
 
@@ -110,10 +110,10 @@ describe('inlineFunctions maintains the semantic', () => {
     }
 });
 
-describe('the semantic survives inlining followed by compress', () => {
+describe('the semantic survives inlining followed by the dead-code pass', () => {
     for (const [name, src] of Object.entries(cases)) {
         it(name, () => {
-            expect(problemsAfterInliningAndCompress(src)).toEqual([]);
+            expect(problemsAfterInliningAndDeadCode(src)).toEqual([]);
         });
     }
 });

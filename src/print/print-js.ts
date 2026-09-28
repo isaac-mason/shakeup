@@ -22,12 +22,23 @@ import {
 type D = Record<string, Node | (Node | null)[] | string | number | boolean | null>;
 const data = (n: Node): D => n.data as unknown as D;
 
-/** A `PrivateIdentifier`'s text is stored without the leading `#`; restore it. */
-const privName = (n: Node): string => (n.name[0] === '#' ? n.name : `#${n.name}`);
+/** A `PrivateIdentifier`'s text is stored without the leading `#`; restore it, under the mangler's name when the
+ *  innermost class that maps it has one (oxc's `Gen for PrivateIdentifier`). */
+function privName(p: Printer, n: Node): string {
+    const name = n.name[0] === '#' ? n.name.slice(1) : n.name;
+    const mappings = p.privateMemberMappings;
+    if (mappings !== null) {
+        for (let i = p.classStack.length - 1; i >= 0; i--) {
+            const mangled = mappings[p.classStack[i]]?.get(name);
+            if (mangled !== undefined) return `#${mangled}`;
+        }
+    }
+    return `#${name}`;
+}
 
 /** Precedence of an expression node — what a parent must require to avoid wrapping it. */
 /**
- * Precedence by NODE TYPE. `-1` marks the four types whose precedence depends on their DATA.
+ * Precedence by NODE TYPE. `-1` marks the three types whose precedence depends on their DATA.
  *
  * This replaced a ~20-case `switch` over 151 possible types, evaluated once per EXPRESSION from
  * `printExpr` (1.40% of a crashcat bundling profile). The common path is the `default` arm —
@@ -54,11 +65,11 @@ const PREC_BY_TYPE = (() => {
     t[N.PrivateFieldExpression] = Prec.Call;
     t[N.TaggedTemplateExpression] = Prec.Call;
     t[N.ChainExpression] = Prec.Call;
+    t[N.NewExpression] = Prec.Call;
     // Data-dependent — resolved by the switch in `precOf`.
     t[N.LogicalExpression] = -1;
     t[N.BinaryExpression] = -1;
     t[N.UpdateExpression] = -1;
-    t[N.NewExpression] = -1;
     return t;
 })();
 
@@ -72,10 +83,8 @@ function precOf(n: Node): Prec {
             return LOGICAL_PREC[data(n).operator as string];
         case N.BinaryExpression:
             return BINARY_PREC[data(n).operator as string];
-        case N.UpdateExpression:
-            return (data(n).prefix as boolean) ? Prec.Unary : Prec.Postfix;
         default:
-            return (data(n).arguments as Node[]).length > 0 ? Prec.Call : Prec.New;
+            return (data(n).prefix as boolean) ? Prec.Unary : Prec.Postfix;
     }
 }
 
@@ -245,7 +254,10 @@ function emitLogical(p: Printer, n: Node): void {
     softSpace(p);
     write(p, op);
     softSpace(p);
-    operand(d.right as Node, (prec + 1) as Prec);
+    // oxc: a logical right operand wraps only below this precedence, so `a && (b && c)` prints flat;
+    // anything else on the right wraps at equal precedence too.
+    const right = d.right as Node;
+    operand(right, right.type === N.LogicalExpression ? prec : ((prec + 1) as Prec));
 }
 
 function emitArgs(p: Printer, args: Node[], plainStringIndex = -1): void {
@@ -333,6 +345,33 @@ function emitArrow(p: Printer, n: Node): void {
     } else {
         printExpr(p, body, Prec.Assign);
     }
+}
+
+/** A destructuring pattern's member. As oxc's codegen, `{ y: y }` prints as `{ y }` whenever the key is a
+ *  plain name the binding (or its default's binding) prints as, whatever the source wrote. */
+function emitBindingMember(p: Printer, n: Node): void {
+    if (n.type === N.ObjectProperty && !(data(n).computed as boolean)) {
+        const key = data(n).key as Node;
+        const value = data(n).value as Node;
+        if (key.type === N.IdentifierName) {
+            if (value.type === N.BindingIdentifier && p.nameOf(value) === key.name) {
+                emitExpr(p, value);
+                return;
+            }
+            if (value.type === N.AssignmentPattern) {
+                const left = data(value).left as Node;
+                if (left.type === N.BindingIdentifier && p.nameOf(left) === key.name) {
+                    emitExpr(p, left);
+                    softSpace(p);
+                    write(p, '=');
+                    softSpace(p);
+                    printExpr(p, data(value).right as Node, Prec.Assign);
+                    return;
+                }
+            }
+        }
+    }
+    emitObjectMember(p, n);
 }
 
 function emitObjectMember(p: Printer, n: Node): void {
@@ -510,7 +549,7 @@ function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
             write(p, quoteString(stringLiteralText(n), p.opts.minify, true));
             return;
         case N.PrivateIdentifier:
-            write(p, privName(n));
+            write(p, privName(p, n));
             return;
         case N.NullLiteral:
             write(p, 'null');
@@ -552,7 +591,7 @@ function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
                     write(p, ',');
                     softSpace(p);
                 }
-                emitObjectMember(p, props[i]);
+                emitBindingMember(p, props[i]);
             }
             softSpace(p);
             write(p, '}');
@@ -672,12 +711,10 @@ function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
             } else {
                 printExpr(p, callee, Prec.New);
             }
-            // `new X()` → `new X` under minify: an empty argument list is redundant. Safe in every
-            // context because `getPrec` already reports a 0-argument `new` as `Prec.New` (below
-            // `Prec.Call`), so the precedence machinery parenthesises it wherever the bare form would
-            // re-associate — `(new X).y` for a member access, `(new X)()` as a callee.
+            // oxc drops an empty argument list under minify only below `Postfix`, where the bare form cannot
+            // re-associate: `new X().y` and `new X()()` keep theirs.
             const args = d.arguments as Node[];
-            if (p.opts.minify && args.length === 0) return;
+            if (p.opts.minify && args.length === 0 && minPrec < Prec.Postfix) return;
             emitArgs(p, args);
             return;
         }
@@ -711,7 +748,7 @@ function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
         case N.PrivateFieldExpression:
             emitMemberObject(p, d.object as Node);
             write(p, (d.optional as boolean) ? '?.' : '.');
-            write(p, privName(d.field as Node));
+            write(p, privName(p, d.field as Node));
             return;
         case N.ChainExpression:
             emitExpr(p, d.expression as Node);
@@ -723,7 +760,8 @@ function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
                     write(p, ',');
                     softSpace(p);
                 }
-                printExpr(p, exprs[i], Prec.Assign);
+                // oxc prints each element at the lowest precedence: a nested sequence stays flat.
+                printExpr(p, exprs[i], Prec.Lowest);
             }
             return;
         }
@@ -848,6 +886,14 @@ export function preservedClassName(keepNames: boolean, nameOf: NameResolver, id:
 }
 
 function emitClass(p: Printer, n: Node, preserveName: string | null = null): void {
+    // oxc codegen's `enter_class`/`exit_class`: every class printed takes the next id, whether or not it has
+    // private members, so the ids line up with the mangler's class table.
+    p.classStack.push(p.nextClassId++);
+    emitClassInner(p, n, preserveName);
+    p.classStack.pop();
+}
+
+function emitClassInner(p: Printer, n: Node, preserveName: string | null): void {
     const d = data(n);
     write(p, 'class');
     const id = d.id as Node | null;
@@ -1224,7 +1270,6 @@ export function printStmt(p: Printer, n: Node): void {
                 if (!isDirective) printedNonDirective = true;
                 emitted = true;
             }
-            dropTrailingSemi(p); // module ends — trailing `;` is redundant
             printTrailingComments(p, n.end);
             return;
         }

@@ -399,7 +399,8 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
     // `exports: 'none'` suppresses the entry export line entirely (validation-only shaping for
     // pure ESM — cross-chunk producer exports still emit so shared chunks keep working). For a
     // shared/producer chunk it is `chunk.exports`.
-    const exportSpecs: string[] = [];
+    /** `[exported name, specifier text]`, sorted by name before printing, as rolldown's `get_export_items`. */
+    const exportSpecs: [string, string][] = [];
     /** `var <alias> = <memberExpr>;` lines that must precede the export clause — see below. */
     const exportAliasLines: string[] = [];
     const exportedNames: string[] = [];
@@ -482,7 +483,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
                     local = alias;
                 }
                 const exported = isIdentName(name) ? name : JSON.stringify(name);
-                exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
+                exportSpecs.push([name, local === name ? exported : `${local} as ${exported}`]);
                 exportedNames.push(name);
             }
         }
@@ -498,7 +499,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
             if (local === null) continue;
             seenExport.add(name);
             const exported = isIdentName(name) ? name : JSON.stringify(name);
-            exportSpecs.push(local === name ? exported : `${local} as ${exported}`);
+            exportSpecs.push([name, local === name ? exported : `${local} as ${exported}`]);
             exportedNames.push(name);
         }
     }
@@ -508,7 +509,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         const local = e.local;
         seenExport.add(exportedName);
         const exported = isIdentName(exportedName) ? exportedName : JSON.stringify(exportedName);
-        exportSpecs.push(local === exportedName ? exported : `${local} as ${exported}`);
+        exportSpecs.push([exportedName, local === exportedName ? exported : `${local} as ${exported}`]);
         exportedNames.push(exportedName);
     }
     // The shared runtime chunk exports the helpers it defines, under their own names. Not routed
@@ -517,11 +518,14 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         for (const name of chunk.runtimeHelpers) {
             if (seenExport.has(name)) continue;
             seenExport.add(name);
-            exportSpecs.push(name);
+            exportSpecs.push([name, name]);
             exportedNames.push(name);
         }
     }
-    const exportInner = exportSpecs.join(clauseSep(tight));
+    const byName = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+    exportSpecs.sort((a, b) => byName(a[0], b[0]));
+    exportedNames.sort(byName);
+    const exportInner = exportSpecs.map(([, text]) => text).join(clauseSep(tight));
     const exportLine = exportSpecs.length > 0 ? (tight ? `export{${exportInner}};` : `export { ${exportInner} };`) : null;
     const starLines = suppressEntryExports
         ? []

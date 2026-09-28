@@ -118,7 +118,7 @@ describe('convert-to-dotted-properties (compress)', () => {
         expect((await run(code)).out).toBe(11);
     });
 
-    it('a["0"] (numeric-string / array-index key) is NOT converted', async () => {
+    it('a["0"] (numeric-string / array-index key) becomes a[0], never a dotted access', async () => {
         const src = [
             'const arr = [10, 20, 30];',
             'const o = { "0": 99 };',
@@ -126,7 +126,8 @@ describe('convert-to-dotted-properties (compress)', () => {
             'export const zero = o["0"];',
         ].join('\n');
         const code = await assertParity(src);
-        expect(code).toContain('["0"]');
+        // rolldown 1.2.4's output for the same input
+        expect(code).toContain('o = { 0: 99 }, first = arr[0], zero = o[0];');
         expect(code).not.toContain('.0');
         const m = await run(code);
         expect(m.first).toBe(10);
@@ -163,10 +164,11 @@ describe('convert-to-dotted-properties (compress)', () => {
         expect((await run(code)).out).toBe(4);
     });
 
-    it('a[0] (numeric-literal computed key) is NOT converted', async () => {
+    it('a[1] (numeric-literal computed key) is never a dotted access', async () => {
         const src = ['const arr = [5, 6, 7];', 'export const out = arr[1];'].join('\n');
         const code = await assertParity(src);
-        expect(code).toContain('[1]');
+        // the index into a literal array folds outright, as rolldown 1.2.4 does
+        expect(code).toContain('const out = 6;');
         expect((await run(code)).out).toBe(6);
     });
 

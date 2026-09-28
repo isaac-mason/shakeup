@@ -29,7 +29,7 @@ import {
 import { isPureFunction, mayHaveSideEffects, type SideEffectsContext } from '../../analysis/side-effects.ts';
 import { type DataOf, N, type Node, node, set, walk } from '../../ast/index.ts';
 import type { CompressOptions } from './options.ts';
-import { createMinifierState, type MinifierState, recordAstChange, type SourceType } from './state.ts';
+import { type CompressionMode, createMinifierState, type MinifierState, recordAstChange, type SourceType } from './state.ts';
 import { storeSymbolValue, symbolValueOf } from './symbol-state.ts';
 import {
     countsHaveWrites,
@@ -747,6 +747,31 @@ export function exprEq(ctx: DceCtx, left: Node, right: Node): boolean {
     return contentEq(left, right) || (isExpressionUndefined(ctx, left) && isExpressionUndefined(ctx, right));
 }
 
+const INT32_MIN = -2147483648;
+const INT32_MAX = 2147483647;
+
+/** oxc `string_to_equivalent_number_value` (esbuild): the number whose `ToString` is exactly `text`,
+ *  for canonical 32-bit integers only. */
+export function stringToEquivalentNumberValue(text: string): number | null {
+    if (text.length === 0) return null;
+    let isNegative = false;
+    let intValue = 0;
+    let start = 0;
+    if (text[0] === '-' && text.length > 1) {
+        isNegative = true;
+        start = 1;
+    }
+    if (text[start] === '0' && text.length > 1) return null;
+    for (let index = start; index < text.length; index++) {
+        const code = text.charCodeAt(index);
+        if (code < 48 || code > 57) return null;
+        const digit = code & 15;
+        intValue = isNegative ? intValue * 10 - digit : intValue * 10 + digit;
+        if (intValue < INT32_MIN || intValue > INT32_MAX) return null;
+    }
+    return intValue;
+}
+
 /** oxc `init_value`: record what `symbolId` was initialized with for this pass. */
 export function initValue(
     ctx: DceCtx,
@@ -1114,12 +1139,13 @@ export function createDceCtx(
     program: Node,
     semantic: Semantic,
     compressOptions: CompressOptions,
+    mode: CompressionMode,
     moduleSourceType: SourceType,
     noSideEffectSymbols: ReadonlySet<number>,
     verify: boolean,
 ): DceCtx {
     const { scoping, directives } = buildScoping(program, semantic, noSideEffectSymbols);
-    const state = createMinifierState(moduleSourceType, compressOptions, scoping);
+    const state = createMinifierState(moduleSourceType, compressOptions, mode, scoping);
     const treeshake = compressOptions.treeshake;
     const ctx: DceCtx = {
         ...createWalkState(scoping.rootScopeId),

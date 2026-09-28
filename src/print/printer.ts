@@ -31,6 +31,9 @@ export type SourceRegion = {
  *  building (segments emitted during the walk, oxc's `SourcemapBuilder` model). */
 export type PrinterConfig = {
     nameOf?: NameResolver;
+    /** The mangler's private member names, one map per class in the order the mangler met the classes: oxc
+     *  codegen's `with_private_member_mappings`. */
+    privateMemberMappings?: readonly ReadonlyMap<string, string>[];
     /** The regions node positions fall in, in position order. Enables the map. */
     sources?: SourceRegion[];
     /** Retained comment spans for THIS module, plus the source they index into. Both or neither:
@@ -78,6 +81,12 @@ export type Printer = {
      *  BEFORE the outer `let` is assigned. Only the class's own binding is in scope there. Verified
      *  against node; a method body would have been fine either way. 0 ⇒ no override. */
     originalNameSym: number;
+    /** See {@link PrinterConfig.privateMemberMappings}; null when private names print as written. */
+    privateMemberMappings: readonly ReadonlyMap<string, string>[] | null;
+    /** Ids of the classes being printed, innermost last. oxc's `class_stack`. */
+    classStack: number[];
+    /** The id the next printed class takes. oxc's `next_class_id`. */
+    nextClassId: number;
     /** Buffer length right after a printed number literal that a following `.` would extend (`0 .x`).
      *  oxc's `need_space_before_dot`. */
     needSpaceBeforeDot: number;
@@ -161,6 +170,9 @@ export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Prin
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
         originalNameSym: 0,
+        privateMemberMappings: cfg.privateMemberMappings ?? null,
+        classStack: [],
+        nextClassId: 0,
         needSpaceBeforeDot: -1,
         map: wantMap ? newMappings() : null,
         line: 0,

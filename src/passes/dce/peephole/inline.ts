@@ -1,14 +1,21 @@
-// Port of oxc_minifier/src/peephole/inline.rs, the parts tree-shake mode reaches: recording each
-// declarator's value. `inline_identifier_reference` and the declaration-value initializers are full
-// minify only.
+// Port of oxc_minifier/src/peephole/inline.rs.
 
 import { evaluateValueInContext, numericLiteralValue, stringLiteralValue } from '../../../analysis/const-eval.ts';
 import type { ConstantValue } from '../../../analysis/constant-value.ts';
 import { type DataOf, N, type Node } from '../../../ast/index.ts';
 import { lastBodyFrame } from '../state.ts';
-import type { FreshValueKind } from '../symbol-value.ts';
+import { symbolValueOf } from '../symbol-state.ts';
+import { canInlineInitializedConstant, type FreshValueKind } from '../symbol-value.ts';
 import { referenceIsRead } from '../syntax.ts';
-import { type DceCtx, getResolvedReferences, initValue, parent } from '../traverse-context.ts';
+import {
+    type DceCtx,
+    getReference,
+    getResolvedReferences,
+    initValue,
+    parent,
+    replaceExpression,
+    valueToExpr,
+} from '../traverse-context.ts';
 import { readCrossesFunctionBoundary } from './index.ts';
 import { isScriptRootScope } from './remove-unused-declaration.ts';
 
@@ -163,6 +170,8 @@ export function classMayHavePropertySideEffects(classNode: Node): boolean {
                     (element.data.static && (element.data.kind === 'set' || element.data.kind === 'get'))
                 );
             case N.PropertyDefinition:
+                // `static accessor foo` auto-generates a getter and setter pair.
+                if (element.data.accessor) return element.data.static || (element.data.decorators as Node[]).length > 0;
                 return (element.data.decorators as Node[]).length > 0 || (element.data.static && element.data.value !== null);
             case N.StaticBlock:
                 return true;
@@ -189,10 +198,39 @@ function expressionHasSetterOrGetter(expr: Node): boolean {
     }
 }
 
+/** Function declarations always create fresh values. */
+export function initFunctionDeclarationSymbolValue(ctx: DceCtx, id: Node | null): void {
+    if (id === null) return;
+    const symbolId = id.sym;
+    if (symbolId === 0) return;
+    initValue(ctx, symbolId, null, 'function', false, false);
+}
+
+/** Class declarations create fresh values, unless a property write could trigger a static setter. */
+export function initClassDeclarationSymbolValue(ctx: DceCtx, classNode: Node): void {
+    const id = (classNode.data as DataOf<'ClassDeclaration'>).id;
+    if (id === null) return;
+    const symbolId = id.sym;
+    if (symbolId === 0) return;
+    const kind: FreshValueKind = classMayHavePropertySideEffects(classNode) ? 'none' : 'class';
+    initValue(ctx, symbolId, null, kind, false, false);
+}
+
 /** The declaration is a for-in/of head. */
 function isForStatementInit(ctx: DceCtx): boolean {
     const at = ctx.ancestorDepth - 2;
     if (at < 0) return false;
     const kind = ctx.ancestorKinds[at];
     return kind === 'ForInStatementLeft' || kind === 'ForOfStatementLeft';
+}
+
+export function inlineIdentifierReference(ctx: DceCtx, expr: Node): void {
+    if (expr.type !== N.IdentifierReference) return;
+    const symbolId = getReference(ctx, expr).symbolId;
+    if (symbolId === 0) return;
+    const symbolValue = symbolValueOf(ctx.state.symbols, symbolId);
+    if (symbolValue === null) return;
+    if (!canInlineInitializedConstant(symbolValue)) return;
+    const constant = symbolValue.initializedConstant as ConstantValue;
+    replaceExpression(ctx, expr, valueToExpr(ctx, expr, constant));
 }

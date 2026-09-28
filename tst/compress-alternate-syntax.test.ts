@@ -13,8 +13,8 @@ const build = async (src: string, minify: boolean | { compress?: boolean; mangle
 /** Build twice — compress-on and compress-off — and assert the two bundles produce identical runtime
  *  values for every exported key. Every substitution case funnels through here so we never assert a
  *  syntactic swap without proving it preserved behavior. */
-const assertParity = async (src: string) => {
-    const on = await build(src, { compress: true });
+const assertParity = async (src: string, minify: boolean | { compress: boolean } = { compress: true }) => {
+    const on = await build(src, minify);
     const off = await build(src, false);
     expect(await run(on)).toEqual(await run(off));
     return on;
@@ -110,11 +110,11 @@ describe('substitute-alternate-syntax (compress)', () => {
 
     // ---- `Infinity` -> `1/0`, and the two guards that make identifier substitution safe ----
 
-    it('global Infinity → 1/0, behavior preserved', async () => {
+    it('global Infinity prints as 1/0 when minified, behavior preserved', async () => {
         const src = 'export const a = Infinity;\nexport const b = -Infinity;\nexport const c = 1 / Infinity;';
-        const code = await assertParity(src);
-        expect(tight(code)).toContain('1/0');
-        expect(code).not.toMatch(/\bInfinity\b/);
+        const code = await assertParity(src, true);
+        // rolldown 1.2.4's output for the same input
+        expect(code).toBe('const e=1/0,t=-1/0,n=0;export{e as a,t as b,n as c};');
         const m = await run(code);
         expect(m.a).toBe(Infinity);
         expect(m.b).toBe(-Infinity);
@@ -129,10 +129,10 @@ describe('substitute-alternate-syntax (compress)', () => {
         // an unknown operand, so the per-module dead-code pass has nothing to fold first
         const code = await assertParity(
             'export const a = (globalThis.k ?? 2) * Infinity;\nexport const b = (globalThis.k ?? 1) / Infinity;\nexport const c = -Infinity;',
+            true,
         );
-        expect(tight(code)).toContain('*(1/0)');
-        expect(tight(code)).toContain('/(1/0)');
-        expect(tight(code)).toContain('-(1/0)');
+        // rolldown 1.2.4's output for the same input: a leading `-` needs no parens, `-1/0` is `(-1)/0`
+        expect(code).toBe('const e=(globalThis.k??2)*(1/0),t=(globalThis.k??1)/(1/0),n=-1/0;export{e as a,t as b,n as c};');
     });
 
     it('a locally-shadowed `Infinity` is NOT substituted', async () => {

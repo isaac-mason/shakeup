@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { existsSync, readFileSync } from 'node:fs';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { computePrelude } from '../src/passes/compress/prelude.ts';
+import { computePrelude } from './compute-prelude.ts';
 import { parse } from '../src/ast.ts';
 
 // Phase A gate. `analyze` now maintains the reference facts (`refs`/`uses`/`shorthand`/`exported`)
@@ -9,7 +9,7 @@ import { parse } from '../src/ast.ts';
 // EXACTLY — a disagreement in the safe direction (analyze over-counting) only costs an optimization,
 // but under-counting drops a binding that is still read, so this asserts equality, not a bound.
 //
-// `computePrelude` is kept solely as this differential's reference implementation.
+// `computePrelude` is this differential's reference implementation.
 
 function diff(src: string, ts: boolean): string[] {
     const { program } = parse(src, { ts, jsx: false });

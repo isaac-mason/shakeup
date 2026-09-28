@@ -1,6 +1,6 @@
-// Port of oxc_minifier/src/peephole/remove_unused_expression.rs, tree-shake-only paths.
+// Port of oxc_minifier/src/peephole/remove_unused_expression.rs.
 
-import { getInnerExpression, stringLiteralValue, toPrimitive, type ToPrimitiveResult } from '../../../analysis/const-eval.ts';
+import { getInnerExpression, stringLiteralValue, type ToPrimitiveResult, toPrimitive } from '../../../analysis/const-eval.ts';
 import {
     arrayExpressionElementMayHaveSideEffects,
     mayHaveSideEffects,
@@ -8,9 +8,14 @@ import {
     type SideEffectsContext,
 } from '../../../analysis/side-effects.ts';
 import { type DataOf, N, type Node, node } from '../../../ast/index.ts';
-import { functionSummaryIsSideEffectFree, memberWriteEffectMayMutatePrototype } from '../symbol-metadata.ts';
+import { isTreeShakeOnly } from '../state.ts';
+import {
+    functionSummaryIsSideEffectFree,
+    memberWriteEffectIsHazardous,
+    memberWriteEffectMayMutatePrototype,
+} from '../symbol-metadata.ts';
 import { functionSummary, isImplicitlyObservable, memberWriteEffect, symbolValueOf } from '../symbol-state.ts';
-import { countsHaveOnlyMemberWriteTargetReads, countsHaveReads } from '../symbol-value.ts';
+import { countsHaveOnlyMemberWriteTargetReads, countsHaveReads, type FreshValueKind } from '../symbol-value.ts';
 import { scopeContainsDirectEval, scopeIsArrow, scopeIsBlock, scopeIsConstructor, symbolIsConstVariable } from '../syntax.ts';
 import {
     ancestorScopes,
@@ -29,9 +34,9 @@ import {
     takeNode,
 } from '../traverse-context.ts';
 import { isCjsModuleExportsHint } from './fold-constants.ts';
-import { minimizeExpressionInBooleanContext } from './minimize-expression-in-boolean-context.ts';
-import { joinWithLeftAssociativeOp } from './minimize-conditions.ts';
 import { injectOptionalChainingIfMatched } from './minimize-conditional-expression.ts';
+import { joinWithLeftAssociativeOp } from './minimize-conditions.ts';
+import { minimizeExpressionInBooleanContext } from './minimize-expression-in-boolean-context.ts';
 import { canCompressToLogicalAssignment, markAssignmentTargetAsRead } from './minimize-logical-expression.ts';
 import { isScriptRootScope } from './remove-unused-declaration.ts';
 
@@ -502,10 +507,11 @@ function removeUnusedCallExpr(ctx: DceCtx, e: Node): boolean {
     return !hasSideEffectsOrPreservedIife(ctx, e);
 }
 
-/** `mayHaveSideEffects`, except that an IIFE call is reported as effectful so tree-shake mode keeps
- *  its structure, as Rollup and esbuild do. */
+/** `mayHaveSideEffects`, except that in tree-shake mode an IIFE call is reported as effectful so its
+ *  structure survives, as Rollup and esbuild do. */
 export function hasSideEffectsOrPreservedIife(ctx: DceCtx, e: Node): boolean {
     if (
+        isTreeShakeOnly(ctx.state) &&
         e.type === N.CallExpression &&
         (e.data.callee.type === N.FunctionExpression || e.data.callee.type === N.ArrowFunctionExpression)
     )
@@ -552,16 +558,81 @@ export function removeUnusedAssignmentExpr(ctx: DceCtx, e: Node): boolean {
     return false;
 }
 
-/** A member assignment (`A.from = () => {}`) whose root object is an unused local binding. In
- *  tree-shake mode only the `propertyWriteSideEffects: false` opt-in drops it; oxc's default path for
- *  plain writes to fresh locals is full-minify only. */
+/** A member assignment (`A.from = () => {}`) whose root object is an unused local binding. With
+ *  `propertyWriteSideEffects: false` the binding check alone decides. Otherwise (full minify only) a
+ *  plain `=` write to a safe single-level member of an unused fresh local is unobservable, unless the
+ *  symbol carries a member-write hazard. */
 function removeUnusedMemberAssignment(ctx: DceCtx, e: Node): boolean {
     if (isScriptRootScope(ctx)) return false;
     const symbolId = resolveMemberAssignObjectSymbol(ctx, e);
     if (symbolId === 0) return false;
     // With a pure right-hand side the whole assignment is free; only the binding check remains.
     if (!mayHaveSideEffects(e, ctx)) return isMemberAssignToUnusedBinding(ctx, symbolId);
+
+    // In tree-shake mode rolldown owns `propertyWriteSideEffects` as its opt-in knob.
+    if (isTreeShakeOnly(ctx.state)) return false;
+    if (scopeContainsDirectEval(currentScopeFlags(ctx))) return false;
+    const assignData = e.data as DataOf<'AssignmentExpression'>;
+    // Compound and logical assignments read the property (getters, coercion).
+    if (assignData.operator !== '=') return false;
+    if (!memberWriteShapeIsSafe(assignData.left)) return false;
+    if (!isMemberAssignToUnusedBinding(ctx, symbolId)) return false;
+    // Writing some keys on a fresh function, class or array throws or is observable.
+    const kind = symbolValueOf(ctx.state.symbols, symbolId)?.kind ?? 'none';
+    if (memberWriteKeyDenied(assignData.left, kind)) return false;
+    // Another member operation on this symbol reads the property or may install setters.
+    if (memberWriteEffectIsHazardous(memberWriteEffect(ctx.state.symbols, symbolId))) return false;
+    // Pure right-hand side: the statement-position caller drops the whole thing.
+    if (!mayHaveSideEffects(assignData.right, ctx)) return true;
+    // Impure right-hand side: keep it in place. A plain `=` assignment's value is its right-hand side.
+    replaceExpression(ctx, e, takeNode(ctx, assignData.right));
     return false;
+}
+
+/** A single-level member write (`o.x`, `o["x"]`, `o[0]`, object an identifier) whose key is provably
+ *  not `__proto__`. A private-field write is a brand check that always throws on a fresh literal. */
+function memberWriteShapeIsSafe(target: Node): boolean {
+    switch (target.type) {
+        case N.StaticMemberExpression:
+            return target.data.object.type === N.IdentifierReference && target.data.property.name !== '__proto__';
+        case N.ComputedMemberExpression:
+            return target.data.object.type === N.IdentifierReference && memberKeyIsSafe(target.data.expression);
+        default:
+            return false;
+    }
+}
+
+/** The key of a safe-shaped member write when it is a static name or a computed string literal. A
+ *  numeric key can never equal a denied name. */
+function memberWriteKeyName(target: Node): string | null {
+    switch (target.type) {
+        case N.StaticMemberExpression:
+            return target.data.property.name;
+        case N.ComputedMemberExpression: {
+            const key = target.data.expression as Node;
+            return key.type === N.StringLiteral ? stringLiteralValue(key).value : null;
+        }
+        default:
+            return null;
+    }
+}
+
+/** Whether writing the key on a fresh value of `kind` throws a strict-mode `TypeError` or has an
+ *  observable effect: `caller`/`arguments`/`name`/`length` on a function or class, `prototype` on a
+ *  class, `length` on an array. */
+function memberWriteKeyDenied(target: Node, kind: FreshValueKind): boolean {
+    const key = memberWriteKeyName(target);
+    if (key === null) return false;
+    switch (kind) {
+        case 'function':
+            return key === 'caller' || key === 'arguments' || key === 'name' || key === 'length';
+        case 'class':
+            return key === 'caller' || key === 'arguments' || key === 'name' || key === 'length' || key === 'prototype';
+        case 'array':
+            return key === 'length';
+        default:
+            return false;
+    }
 }
 
 /** A computed member key that can never be `__proto__`. */

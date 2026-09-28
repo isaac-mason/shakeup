@@ -67,10 +67,8 @@ describe('join-vars + sequences (compress)', () => {
             export const out = f(10);`;
         const { code, min } = await both(src);
         expect(min.out).toBe(50);
-        // `substituteAlternateSyntax` rewrites `const` → `let` in the final pass, so the two runs
-        // become one mergeable run and the POST-final `joinVars` fuses all four declarators.
+        // Normalize's `convert_const_to_let` turns the nested `const`s into `let`s, so the two runs become one.
         expect(code).toMatch(/let a = x \+ 1, b = x \+ 2, c = x \+ 3, d = x \+ 4/);
-        expect(code).not.toMatch(/\bconst\b/);
     });
 
     it('folds consecutive expression statements into one comma sequence', async () => {

@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
 import { setVerifyExtras, verifySemantic } from '../src/analysis/ref-facts.ts';
 import { parseProgram } from '../src/parser/index.ts';
-import { runCompress } from '../src/passes/compress/index.ts';
+import { eliminateDeadCode } from '../src/passes/dce/compressor.ts';
+import { rolldownDceOptions } from '../src/passes/dce/options.ts';
 import { scalarReplaceAggregates } from '../src/passes/optimize/sroa.ts';
 
 // SROA MAINTAINS the semantic rather than rebuilding it, so every scalar it mints has to be a real
@@ -18,13 +19,12 @@ setVerifyExtras(true);
 
 function problems(src: string): string[] {
     const program = parseProgram(src, { ts: false, jsx: false }) as never;
-    let semantic = createSemantic();
+    const semantic = createSemantic();
     analyze(semantic, program);
     scalarReplaceAggregates(program, semantic, src);
     const first = verifySemantic(semantic, program);
     if (first.length > 0) return first;
-    const refreshed = runCompress(program, semantic, 'dce');
-    if (refreshed !== null) semantic = refreshed;
+    eliminateDeadCode(program, semantic, rolldownDceOptions(), 'module');
     return verifySemantic(semantic, program);
 }
 

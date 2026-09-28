@@ -1,4 +1,3 @@
-import type { CompressMode } from '../passes/compress/index.ts';
 import { dirnameOf, type Fs, fileExists, joinPath, type MaybePromise } from './fs.ts';
 import type { ParseCache } from './graph-types.ts';
 import { createNodeResolver, packageSideEffectsFor } from './node-resolve.ts';
@@ -211,10 +210,9 @@ export type GraphOptions = CommonOptions & {
     incremental?: { changed: Set<string> };
     /** Accepted and IGNORED. Present so callers can pass it today. */
     preserveEntrySignatures?: false | 'strict' | 'allow-extension' | 'exports-only';
-    /** Run the AST compress passes (minify P4) during scan. A transform concern (syntactic
-     *  lowering), so it lives in scan and the parse-cache key includes it. Set by `bundle()` from
-     *  `output.minify`; default false. */
-    compress?: CompressMode | false;
+    /** Run oxc's dead-code pass over each module during scan, rolldown's `pre_process_ecma_ast` step 5. It
+     *  changes the AST, so the parse-cache key includes it. Set by `bundle()` from `treeshake`; default false. */
+    deadCodeElimination?: boolean;
     /** Extension → {@link ModuleType}, overriding the built-in map. The leading dot is optional:
      *  `{ '.png': 'dataurl', wgsl: 'text' }`. rolldown's option of the same name, and the only way
      *  to reach `base64`/`dataurl`/`binary` by extension — neither oracle maps any extension to

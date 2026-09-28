@@ -75,8 +75,8 @@ describe('substitute-alternate-syntax extras (compress)', () => {
         expect(m.out).toBe('OA');
     });
 
-    // ── Boolean(x) → !!x (global, one arg) ────────────────────────────────────────────────────────
-    it('Boolean(x) → !!x, behavior preserved', async () => {
+    // ── Boolean(x) on a literal folds to the boolean (global, one arg) ─────────────────────────────
+    it('Boolean(literal) folds to a boolean, behavior preserved', async () => {
         const src = [
             'export const a = Boolean(1);',
             'export const b = Boolean(0);',
@@ -85,9 +85,8 @@ describe('substitute-alternate-syntax extras (compress)', () => {
             'export const e = Boolean(null);',
         ].join('\n');
         const code = await assertParity(src);
-        // Double-negation — the printer may space the operators (`! !x`); match either.
-        expect(code).toMatch(/!\s*!/);
-        expect(code).not.toMatch(/\bBoolean\s*\(/);
+        // rolldown 1.2.4's output for the same input
+        expect(code).toContain('const a = !0, b = !1, c = !1, d = !0, e = !1;');
         const m = await run(code);
         expect(m.a).toBe(true);
         expect(m.b).toBe(false);

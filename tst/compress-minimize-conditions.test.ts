@@ -98,7 +98,7 @@ describe('minimize-conditions (compress)', () => {
     });
 
     // ---- precedence: real nodes get parenthesized correctly by the printer --------------------
-    it('parenthesizes a sequence test in `(a, b) && c()`', async () => {
+    it('splits the sequence off the test: `if ((a, b)) c()` becomes `a, b && c()`', async () => {
         const src = [
             'const order = [];',
             'function go(x) { if ((order.push("a"), x)) order.push("b"); }',
@@ -108,7 +108,7 @@ describe('minimize-conditions (compress)', () => {
         const { compressed, q } = await parity(src, ['order2']);
         // go(1): pushes "a" (from the sequence test) then "b"; go(0): pushes only "a".
         expect(q.order2).toStrictEqual(['a', 'b', 'a']);
-        expect(compressed).toMatch(/\(.*,.*\)\s*&&/); // the sequence test kept its parens
+        expect(compressed).toContain('order.push("a"), x && order.push("b");'); // rolldown 1.2.4's output
     });
 
     // ---- ADVERSARIAL: multi-statement / declaration branches are NOT collapsed ----------------

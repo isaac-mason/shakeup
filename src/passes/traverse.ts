@@ -134,11 +134,8 @@ class Ctx {
     /**
      * Names already taken, for {@link generateUid}. Built LAZILY.
      *
-     * This used to be `new Set(semantic.names.keys())` in the constructor — a copy of every name in the
-     * program, allocated on EVERY `traverse` call, so once per compress round. It exists only for
-     * `generateUid`, and no compress-loop pass mints a binding at all (`generateUid`, `createScope` and
-     * `declareSymbol` have zero uses under `src/passes/compress/`), so the whole set was allocated and
-     * thrown away every round. Allocation profiling put `Set`/`set` construction among the top sites.
+     * It is a copy of every name in the program and exists only for `generateUid`, which most traversals
+     * never call, so building it up front allocated it on every `traverse` call for nothing.
      */
     private used: Set<string> | null = null;
     op = OP_NONE;

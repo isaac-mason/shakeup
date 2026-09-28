@@ -176,8 +176,7 @@ function lowerEnum(enumNode: Node, ctx: TransformCtx, enclosing: number): Node {
             // the semantic still describes, so mutating first makes it decrement the NEW `_E`
             // references (which were never counted) and re-add them — netting zero where the truth
             // is +1 each, i.e. an UNDER-count, which is the unsafe direction. Bracketing the
-            // rewrite settles the initializer's own accounting before/after, exactly as
-            // `compress/inline.ts` brackets a moved body.
+            // rewrite settles the initializer's own accounting before and after.
             ctx.dropRefs(init);
             qualifyMemberRefs(init, prior, param);
             ctx.addRefs(init);

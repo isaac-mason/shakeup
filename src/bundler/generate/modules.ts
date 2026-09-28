@@ -6,7 +6,7 @@
 // builds `Map<Node, string>` overrides that `printModule` consumes and discards, so collection and
 // printing are one unit. That is deliberate: the module AST is reused across builds through
 // `options.cache`, and mutating it during render would poison the next build.
-import { SYM, symbolOf } from '../../analysis/semantic.ts';
+import { SYM, scopeOf, symbolOf } from '../../analysis/semantic.ts';
 import { N, type Node, node, walk, walkChildren } from '../../ast/index.ts';
 import { CommentKind, classifyComment, commentAttachedTo, commentCount } from '../../parser/comments.ts';
 import { lazySplit } from '../../passes/lazy-split.ts';
@@ -696,6 +696,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         const initCalls = collectInitCalls(emit);
         collectRequireOverrides(emit, overrides);
         const renameCache: (string | null | undefined)[] = [];
+        const moduleScope = scopeOf(mod.semantic, mod.program);
         const rules: FinalizeRules = {
             // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
             // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
@@ -721,6 +722,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
             },
             keepNames: naming.keepNames === true,
+            isTopLevelSymbol: (symbol) => mod.semantic.symbols[symbol]?.scope === moduleScope,
             offset: 0,
         };
         const commentOptions = effectiveComments(naming.comments, deferMinify ? false : naming.minify);

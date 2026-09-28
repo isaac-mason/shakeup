@@ -33,6 +33,7 @@ import {
     referenceOf,
     replaceExpression,
     type Span,
+    takeNode,
     valueToExpr,
 } from '../traverse-context.ts';
 import { shouldKeepIndirectAccess } from './remove-dead-code.ts';
@@ -913,6 +914,47 @@ export function isCjsModuleExportsHint(expr: Node): boolean {
     if (!isMemberExpression(target)) return false;
     const object = getInnerExpression((target.data as { object: Node }).object);
     return object.type === N.IdentifierReference && object.name === 'module' && staticPropertyName(target) === 'exports';
+}
+
+/** Move a sequence out of an operand so its last expression can fold into the operator. oxc defines
+ *  this in substitute_alternate_syntax.rs.
+ *
+ *  - `(a, b) + c` -> `a, b + c`
+ *  - `(a, b) || c` -> `a, b || c`
+ *  - `-(a, b)` -> `a, -b`
+ *  - `await (a, b)` -> `a, await b`
+ *  - `yield (a, b)` -> `a, yield b` */
+export function foldSequenceExpression(ctx: DceCtx, expr: Node): void {
+    let field: 'left' | 'argument';
+    switch (expr.type) {
+        case N.BinaryExpression:
+        case N.LogicalExpression:
+            field = 'left';
+            break;
+        case N.UnaryExpression: {
+            const operator = expr.data.operator as string;
+            if (operator === 'typeof' || operator === 'void' || operator === 'delete' || operator === '!') return;
+            field = 'argument';
+            break;
+        }
+        case N.AwaitExpression:
+            field = 'argument';
+            break;
+        case N.YieldExpression:
+            if (expr.data.argument === null) return;
+            field = 'argument';
+            break;
+        default:
+            return;
+    }
+    const operands = expr.data as Record<'left' | 'argument', Node>;
+    const sequence = operands[field];
+    if (sequence.type !== N.SequenceExpression) return;
+    const expressions = sequence.data.expressions as Node[];
+    if (expressions.length <= 1) return;
+    operands[field] = expressions.pop() as Node;
+    expressions.push(takeNode(ctx, expr));
+    replaceExpression(ctx, expr, sequence);
 }
 
 // --- optional chains -----------------------------------------------------------------------------

@@ -39,10 +39,9 @@ describe('compress modes (dev/bundle parity)', () => {
         const src = 'export const log = [];\nexport function f(a) { const x = a ? true : false; log.push(a); return x; }';
         const dce = await build(src, 'dce');
         const full = await build(src, true);
-        // full: ternary → `!!a`, `const` → `let`. dce leaves both alone.
-        expect(full).toMatch(/!\s*!/); // `!!a` (readable mode spaces the nested unaries)
-        expect(full).not.toContain('const ');
-        expect(dce).toContain('const ');
+        // full: ternary to `!!a`, the nested `const` to `let`. dce leaves both alone.
+        expect(full).toContain('let x = !!a;');
+        expect(dce).toContain('const x');
         expect(dce).toContain('? true : false');
         // ...but they still compute the same thing.
         const fd = (await run(dce)).f as (a: unknown) => boolean;

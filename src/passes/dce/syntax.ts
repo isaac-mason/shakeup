@@ -90,3 +90,30 @@ export const symbolIsCatchVariable = (flags: number): boolean => (flags & Symbol
 export const symbolIsFunctionScopedDeclaration = (flags: number): boolean => (flags & SymbolFlags.FunctionScopedVariable) !== 0;
 export const symbolIsImport = (flags: number): boolean => (flags & (SymbolFlags.Import | SymbolFlags.TypeImport)) !== 0;
 export const symbolIsTypeImport = (flags: number): boolean => (flags & SymbolFlags.TypeImport) !== 0;
+
+const ID_START_UNICODE = /^\p{ID_Start}$/u;
+const ID_CONTINUE_UNICODE = /^\p{ID_Continue}$/u;
+const KATAKANA_MIDDLE_DOT = 0x30fb;
+const HALFWIDTH_KATAKANA_MIDDLE_DOT = 0xff65;
+
+const isIdentifierStartChar = (char: string): boolean => char === '$' || char === '_' || ID_START_UNICODE.test(char);
+
+const isIdentifierPartChar = (char: string): boolean =>
+    char === '$' || char === '‌' || char === '‍' || ID_CONTINUE_UNICODE.test(char);
+
+/** oxc_syntax `is_identifier_name_patched`: `is_identifier_name` rejecting the two katakana middle
+ *  dots, which older Unicode versions do not treat as identifier parts. */
+export function isIdentifierNamePatched(name: string): boolean {
+    let first = true;
+    for (const char of name) {
+        if (first) {
+            if (!isIdentifierStartChar(char)) return false;
+            first = false;
+            continue;
+        }
+        const codePoint = char.codePointAt(0) as number;
+        if (codePoint === KATAKANA_MIDDLE_DOT || codePoint === HALFWIDTH_KATAKANA_MIDDLE_DOT) return false;
+        if (!isIdentifierPartChar(char)) return false;
+    }
+    return !first;
+}

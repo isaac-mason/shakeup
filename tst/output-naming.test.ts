@@ -313,9 +313,8 @@ describe('output — exports mode & stubs', () => {
         });
         expect(r.errors).toEqual([]);
         const code = r.chunks[0].code;
-        expect(code).not.toContain('\n    '); // no indentation
-        expect(code).toMatch(/let \w+=1/); // whitespace stripped; local mangled; const→let
-        expect(code).toContain(' as x'); // public export name preserved via alias
+        // rolldown 1.2.4's output, byte for byte: whitespace stripped, locals mangled, public names kept by alias
+        expect(code).toBe('const e=1;function t(e){return e+1}export{t as f,e as x};');
     });
 
     it('topLevelVar is accepted with a not-implemented warning; keepNames no longer warns', async () => {

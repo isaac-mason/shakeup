@@ -4,7 +4,15 @@
 
 import { isLiteralValue } from '../../../analysis/const-eval.ts';
 import { type DataOf, N, type Node } from '../../../ast/index.ts';
-import { type BodyFrame, lastBodyFrame } from '../state.ts';
+import {
+    type BodyFrame,
+    enterClassPrivateMembers,
+    exitClassPrivateMembers,
+    isTreeShakeOnly,
+    lastBodyFrame,
+    privateMembersAtRoot,
+    recordPrivateMemberUse,
+} from '../state.ts';
 import { symbolValueOf } from '../symbol-state.ts';
 import { countsHaveWrites } from '../symbol-value.ts';
 import { scopeIsFunction, symbolIsBlockScoped, symbolIsImport } from '../syntax.ts';
@@ -12,6 +20,8 @@ import {
     type DceCtx,
     getReference,
     parentKind,
+    replaceExpression,
+    replaceStatement,
     scopeAncestors,
     scopeFlags,
     symbolFlags,
@@ -27,17 +37,73 @@ import {
     foldComputedMemberExpr,
     foldLogicalExpr,
     foldObjectExp,
+    foldSequenceExpression,
     foldStaticMemberExpr,
     foldUnaryExpr,
     inlineTemplateLiteral,
 } from './fold-constants.ts';
-import { initSymbolValue } from './inline.ts';
+import {
+    initClassDeclarationSymbolValue,
+    initFunctionDeclarationSymbolValue,
+    initSymbolValue,
+    inlineIdentifierReference,
+} from './inline.ts';
+import { convertToDottedProperties } from './convert-to-dotted-properties.ts';
+import { minimizeConditionalExpression } from './minimize-conditional-expression.ts';
+import {
+    minimizeAssignmentToUpdateExpression,
+    minimizeBinary,
+    minimizeLooseBoolean,
+    minimizeNormalAssignmentToCombinedAssignment,
+    minimizeNormalAssignmentToCombinedLogicalAssignment,
+} from './minimize-conditions.ts';
+import { minimizeExpressionInBooleanContext } from './minimize-expression-in-boolean-context.ts';
+import { minimizeForStatement } from './minimize-for-statement.ts';
+import { tryMinimizeIf } from './minimize-if-statement.ts';
+import { minimizeLogicalExpression } from './minimize-logical-expression.ts';
+import { minimizeUnary } from './minimize-not-expression.ts';
 import { minimizeStatements } from './minimize-statements.ts';
 import { setNoSideEffectsToCallExpr, setPureOrNoSideEffectsToNewExpr } from './normalize.ts';
-import { substituteIifeCall } from './substitute-alternate-syntax.ts';
+import {
+    substituteAccessorProperty,
+    substituteArrayExpression,
+    substituteArrowExpression,
+    substituteAssignmentTargetProperty,
+    substituteAssignmentTargetPropertyProperty,
+    substituteBindingProperty,
+    substituteBoolean,
+    substituteCallExpression,
+    substituteCatchClause,
+    substituteChainExpression,
+    substituteForStatement,
+    substituteGlobalNewExpression,
+    substituteIifeCall,
+    substituteIsObjectAndNotNull,
+    substituteLooseEqualsUndefined,
+    substituteMethodDefinition,
+    substituteNewExpression,
+    substituteObjectOrArrayConstructor,
+    substituteObjectProperty,
+    substitutePropertyDefinition,
+    substituteReturnStatement,
+    substituteRotateBinaryExpression,
+    substituteRotateLogicalExpression,
+    substituteSimpleFunctionCall,
+    substituteSwapBinaryExpressions,
+    substituteTemplateLiteral,
+    substituteTypedArrayConstructor,
+    substituteTypeofUndefined,
+    substituteUnaryPlus,
+    substituteVariableDeclaration,
+    tryFlattenArrayExpressionElements,
+    tryRemoveNameFromClasses,
+    tryRemoveNameFromFunctions,
+} from './substitute-alternate-syntax.ts';
 import {
     keepTrackOfPureFunctions,
     removeDeadCodeCallExpression,
+    removeDeadCodeExitClassBody,
+    removeEmptySpreadArguments,
     removeSequenceExpression,
     tryFoldConditionalExpression,
     tryFoldExpressionStmt,
@@ -53,6 +119,8 @@ import {
     removeUnusedImportSpecifiers,
 } from './remove-unused-declaration.ts';
 import { derivedConstructorThisScope, removeUnusedAssignmentExpr } from './remove-unused-expression.ts';
+import { replaceConcatChain, replaceKnownGlobalMethods, replaceKnownPropertyAccess } from './replace-known-methods.ts';
+import { declaredPrivateMemberNames, removeUnusedPrivateMembers } from './remove-unused-private-members.ts';
 
 // --- helper predicates ---------------------------------------------------------------------------
 
@@ -327,41 +395,107 @@ export const peepholeOptimizations: Traverser<DceCtx> = {
         keepTrackOfPureFunctions(ctx, statement);
     },
 
+    exitProgram(ctx) {
+        // Private member usage is collected only in full minify.
+        if (ctx.verify && !isTreeShakeOnly(ctx.state) && !privateMembersAtRoot(ctx.state.privateMemberUsage))
+            throw new Error('dce: a class body was entered and not exited');
+    },
+
     exitStatement(ctx, statement) {
-        // oxc dispatches BlockStatement, IfStatement, ForStatement, TryStatement, LabeledStatement,
-        // FunctionDeclaration, ClassDeclaration, ExpressionStatement and ImportDeclaration to the
-        // peephole files here, by statement type.
-        switch (statement.type) {
-            case N.BlockStatement:
-                tryOptimizeBlock(ctx, statement);
-                break;
-            case N.IfStatement:
-                tryFoldIf(ctx, statement);
-                break;
-            case N.ForStatement:
-                tryFoldFor(ctx, statement);
-                break;
-            case N.TryStatement:
-                tryFoldTry(ctx, statement);
-                break;
-            case N.LabeledStatement:
-                tryFoldLabeled(ctx, statement);
-                break;
-            case N.FunctionDeclaration:
-                removeUnusedFunctionDeclaration(ctx, statement);
-                break;
-            case N.ClassDeclaration:
-                removeUnusedClassDeclaration(ctx, statement);
-                break;
-            case N.ExpressionStatement:
-                tryFoldExpressionStmt(ctx, statement);
-                break;
-            case N.ImportDeclaration:
-                removeUnusedImportSpecifiers(ctx, statement);
-                break;
+        if (isTreeShakeOnly(ctx.state)) {
+            // oxc dispatches BlockStatement, IfStatement, ForStatement, TryStatement, LabeledStatement,
+            // FunctionDeclaration, ClassDeclaration, ExpressionStatement and ImportDeclaration to the
+            // peephole files here, by statement type.
+            switch (statement.type) {
+                case N.BlockStatement:
+                    tryOptimizeBlock(ctx, statement);
+                    break;
+                case N.IfStatement:
+                    tryFoldIf(ctx, statement);
+                    break;
+                case N.ForStatement:
+                    tryFoldFor(ctx, statement);
+                    break;
+                case N.TryStatement:
+                    tryFoldTry(ctx, statement);
+                    break;
+                case N.LabeledStatement:
+                    tryFoldLabeled(ctx, statement);
+                    break;
+                case N.FunctionDeclaration:
+                    removeUnusedFunctionDeclaration(ctx, statement);
+                    break;
+                case N.ClassDeclaration:
+                    removeUnusedClassDeclaration(ctx, statement);
+                    break;
+                case N.ExpressionStatement:
+                    tryFoldExpressionStmt(ctx, statement);
+                    break;
+                case N.ImportDeclaration:
+                    removeUnusedImportSpecifiers(ctx, statement);
+                    break;
+            }
+        } else {
+            switch (statement.type) {
+                case N.BlockStatement:
+                    tryOptimizeBlock(ctx, statement);
+                    break;
+                case N.IfStatement:
+                    minimizeExpressionInBooleanContext(ctx, statement.data.test);
+                    tryFoldIf(ctx, statement);
+                    if (statement.type === N.IfStatement) {
+                        const foldedStatement = tryMinimizeIf(ctx, statement);
+                        if (foldedStatement !== null) replaceStatement(ctx, statement, foldedStatement);
+                    }
+                    break;
+                case N.WhileStatement:
+                    minimizeExpressionInBooleanContext(ctx, statement.data.test);
+                    break;
+                case N.ForStatement:
+                    if (statement.data.test !== null) minimizeExpressionInBooleanContext(ctx, statement.data.test);
+                    tryFoldFor(ctx, statement);
+                    break;
+                case N.DoWhileStatement:
+                    minimizeExpressionInBooleanContext(ctx, statement.data.test);
+                    break;
+                case N.TryStatement:
+                    tryFoldTry(ctx, statement);
+                    break;
+                case N.LabeledStatement:
+                    tryFoldLabeled(ctx, statement);
+                    break;
+                case N.FunctionDeclaration:
+                    initFunctionDeclarationSymbolValue(ctx, statement.data.id);
+                    removeUnusedFunctionDeclaration(ctx, statement);
+                    break;
+                case N.ClassDeclaration:
+                    initClassDeclarationSymbolValue(ctx, statement);
+                    removeUnusedClassDeclaration(ctx, statement);
+                    break;
+                case N.ImportDeclaration:
+                    removeUnusedImportSpecifiers(ctx, statement);
+                    break;
+            }
+            tryFoldExpressionStmt(ctx, statement);
         }
         // Maintain the per-body declarative-prelude flag read by `isHoistedVarInlineable`.
         if (!isDeclarativeBodyStatement(statement)) markCurrentBodyUnsafe(ctx);
+    },
+
+    exitForStatement(ctx, statement) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteForStatement(ctx, statement);
+        minimizeForStatement(ctx, statement);
+    },
+
+    exitReturnStatement(ctx, statement) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteReturnStatement(ctx, statement);
+    },
+
+    exitVariableDeclaration(ctx, declaration) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteVariableDeclaration(ctx, declaration);
     },
 
     exitVariableDeclarator(ctx, declarator) {
@@ -373,58 +507,241 @@ export const peepholeOptimizations: Traverser<DceCtx> = {
 
     exitExpression(ctx, expr) {
         // Tree-shake mode runs only the transforms that remove code, plus the constant folds those
-        // removals need, dispatched by expression type to the peephole files.
+        // removals need. Transforms that only shrink code are left out.
+        if (isTreeShakeOnly(ctx.state)) {
+            switch (expr.type) {
+                case N.TemplateLiteral:
+                    inlineTemplateLiteral(ctx, expr);
+                    break;
+                case N.ObjectExpression:
+                    foldObjectExp(ctx, expr);
+                    break;
+                case N.UnaryExpression:
+                    foldUnaryExpr(ctx, expr);
+                    break;
+                case N.StaticMemberExpression:
+                    foldStaticMemberExpr(ctx, expr);
+                    break;
+                case N.ComputedMemberExpression:
+                    foldComputedMemberExpr(ctx, expr);
+                    break;
+                case N.LogicalExpression:
+                    foldLogicalExpr(ctx, expr);
+                    break;
+                case N.ChainExpression:
+                    foldChainExpr(ctx, expr);
+                    break;
+                case N.CallExpression:
+                    foldCallExpression(ctx, expr);
+                    substituteIifeCall(ctx, expr);
+                    removeDeadCodeCallExpression(ctx, expr);
+                    break;
+                case N.ConditionalExpression:
+                    tryFoldConditionalExpression(ctx, expr);
+                    break;
+                case N.SequenceExpression:
+                    removeSequenceExpression(ctx, expr);
+                    break;
+                case N.AssignmentExpression:
+                    removeUnusedAssignmentExpr(ctx, expr);
+                    break;
+                case N.BinaryExpression:
+                    // `#x in y` is oxc's `PrivateInExpression`, not a binary expression.
+                    if (expr.data.left.type === N.PrivateIdentifier) break;
+                    foldBinaryExpr(ctx, expr);
+                    foldBinaryTypeofComparison(ctx, expr);
+                    break;
+            }
+            return;
+        }
         switch (expr.type) {
             case N.TemplateLiteral:
                 inlineTemplateLiteral(ctx, expr);
+                substituteTemplateLiteral(ctx, expr);
                 break;
             case N.ObjectExpression:
                 foldObjectExp(ctx, expr);
                 break;
+            case N.BinaryExpression:
+                if (expr.data.left.type === N.PrivateIdentifier) break;
+                substituteSwapBinaryExpressions(expr);
+                foldBinaryExpr(ctx, expr);
+                foldBinaryTypeofComparison(ctx, expr);
+                foldSequenceExpression(ctx, expr);
+                minimizeLooseBoolean(ctx, expr);
+                minimizeBinary(ctx, expr);
+                substituteLooseEqualsUndefined(ctx, expr);
+                substituteTypeofUndefined(ctx, expr);
+                substituteRotateBinaryExpression(ctx, expr);
+                break;
             case N.UnaryExpression:
                 foldUnaryExpr(ctx, expr);
+                minimizeUnary(ctx, expr);
+                substituteUnaryPlus(ctx, expr);
+                foldSequenceExpression(ctx, expr);
+                break;
+            case N.YieldExpression:
+            case N.AwaitExpression:
+                foldSequenceExpression(ctx, expr);
                 break;
             case N.StaticMemberExpression:
                 foldStaticMemberExpr(ctx, expr);
+                replaceKnownPropertyAccess(ctx, expr);
                 break;
             case N.ComputedMemberExpression:
                 foldComputedMemberExpr(ctx, expr);
+                replaceKnownPropertyAccess(ctx, expr);
                 break;
             case N.LogicalExpression:
                 foldLogicalExpr(ctx, expr);
+                foldSequenceExpression(ctx, expr);
+                minimizeLogicalExpression(ctx, expr);
+                substituteIsObjectAndNotNull(ctx, expr);
+                substituteRotateLogicalExpression(ctx, expr);
                 break;
             case N.ChainExpression:
                 foldChainExpr(ctx, expr);
+                substituteChainExpression(ctx, expr);
                 break;
             case N.CallExpression:
                 foldCallExpression(ctx, expr);
                 substituteIifeCall(ctx, expr);
                 removeDeadCodeCallExpression(ctx, expr);
+                replaceConcatChain(ctx, expr);
+                replaceKnownGlobalMethods(ctx, expr);
+                substituteSimpleFunctionCall(ctx, expr);
+                substituteObjectOrArrayConstructor(ctx, expr);
                 break;
-            case N.ConditionalExpression:
+            case N.ConditionalExpression: {
+                minimizeExpressionInBooleanContext(ctx, expr.data.test);
+                const changed = minimizeConditionalExpression(ctx, expr);
+                if (changed !== null) replaceExpression(ctx, expr, changed);
                 tryFoldConditionalExpression(ctx, expr);
+                break;
+            }
+            case N.AssignmentExpression:
+                minimizeNormalAssignmentToCombinedLogicalAssignment(ctx, expr);
+                minimizeNormalAssignmentToCombinedAssignment(ctx, expr);
+                minimizeAssignmentToUpdateExpression(ctx, expr);
+                removeUnusedAssignmentExpr(ctx, expr);
                 break;
             case N.SequenceExpression:
                 removeSequenceExpression(ctx, expr);
                 break;
-            case N.AssignmentExpression:
-                removeUnusedAssignmentExpr(ctx, expr);
+            case N.ArrowFunctionExpression:
+                substituteArrowExpression(ctx, expr);
                 break;
-            case N.BinaryExpression:
-                // `#x in y` is oxc's `PrivateInExpression`, not a binary expression.
-                if (expr.data.left.type === N.PrivateIdentifier) break;
-                foldBinaryExpr(ctx, expr);
-                foldBinaryTypeofComparison(ctx, expr);
+            case N.FunctionExpression:
+                tryRemoveNameFromFunctions(ctx, expr);
+                break;
+            case N.ClassExpression:
+                tryRemoveNameFromClasses(ctx, expr);
+                break;
+            case N.NewExpression:
+                substituteTypedArrayConstructor(ctx, expr);
+                substituteGlobalNewExpression(ctx, expr);
+                substituteObjectOrArrayConstructor(ctx, expr);
+                break;
+            case N.BooleanLiteral:
+                substituteBoolean(ctx, expr);
+                break;
+            case N.ArrayExpression:
+                tryFlattenArrayExpressionElements(ctx, expr);
+                substituteArrayExpression(ctx, expr);
+                break;
+            case N.IdentifierReference:
+                inlineIdentifierReference(ctx, expr);
                 break;
         }
     },
 
+    exitUnaryExpression(ctx, expr) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        const unary = expr.data as DataOf<'UnaryExpression'>;
+        if (unary.operator === '!') minimizeExpressionInBooleanContext(ctx, unary.argument);
+    },
+
     exitCallExpression(ctx, call) {
+        if (!isTreeShakeOnly(ctx.state)) {
+            substituteCallExpression(ctx, call);
+            removeEmptySpreadArguments((call.data as DataOf<'CallExpression'>).arguments);
+        }
         // Re-evaluated each pass: folding may expose a pure-eligible shape Normalize missed.
         setNoSideEffectsToCallExpr(ctx, call);
     },
 
     exitNewExpression(ctx, newExpr) {
+        if (!isTreeShakeOnly(ctx.state)) {
+            substituteNewExpression(ctx, newExpr);
+            removeEmptySpreadArguments((newExpr.data as DataOf<'NewExpression'>).arguments);
+        }
         setPureOrNoSideEffectsToNewExpr(ctx, newExpr);
+    },
+
+    exitObjectProperty(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteObjectProperty(ctx, property);
+    },
+
+    exitAssignmentTargetProperty(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteAssignmentTargetProperty(ctx, property);
+    },
+
+    exitAssignmentTargetPropertyProperty(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteAssignmentTargetPropertyProperty(ctx, property);
+    },
+
+    exitBindingProperty(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteBindingProperty(ctx, property);
+    },
+
+    exitMethodDefinition(ctx, method) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteMethodDefinition(ctx, method);
+    },
+
+    exitPropertyDefinition(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substitutePropertyDefinition(ctx, property);
+    },
+
+    exitAccessorProperty(ctx, property) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteAccessorProperty(ctx, property);
+    },
+
+    exitMemberExpression(ctx, member) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        convertToDottedProperties(ctx, member);
+    },
+
+    enterClassBody(ctx) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        enterClassPrivateMembers(ctx.state.privateMemberUsage);
+    },
+
+    exitClassBody(ctx, classNode) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        removeDeadCodeExitClassBody(ctx, classNode);
+        removeUnusedPrivateMembers(ctx, classNode);
+        exitClassPrivateMembers(ctx.state.privateMemberUsage, declaredPrivateMemberNames(classNode));
+    },
+
+    exitCatchClause(ctx, catchClause) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        substituteCatchClause(ctx, catchClause);
+    },
+
+    exitPrivateFieldExpression(ctx, field) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        recordPrivateMemberUse(ctx.state.privateMemberUsage, (field.data as DataOf<'PrivateFieldExpression'>).field.name);
+    },
+
+    exitPrivateInExpression(ctx, binary) {
+        if (isTreeShakeOnly(ctx.state)) return;
+        recordPrivateMemberUse(ctx.state.privateMemberUsage, (binary.data as DataOf<'BinaryExpression'>).left.name);
     },
 };

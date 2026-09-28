@@ -1,8 +1,12 @@
-// Port of oxc_minifier/src/state.rs for `CompressionMode::TreeShakeOnly`.
+// Port of oxc_minifier/src/state.rs.
 
 import type { CompressOptions } from './options.ts';
 import { createSymbolState, type SymbolState } from './symbol-state.ts';
 import type { Reference, Scoping } from './traverse-context.ts';
+
+/** oxc `CompressionMode`: the full minifier, or the tree-shake-only pipeline rolldown runs per module
+ *  and for `minify: 'dce-only'`, which removes dead code without otherwise shrinking the output. */
+export type CompressionMode = 'full' | 'tree-shake-only';
 
 /** oxc `SourceType`'s module kind: an ES module, a Script, or a CommonJS module. */
 export type SourceType = 'module' | 'script' | 'commonjs';
@@ -33,20 +37,32 @@ export type BodyFrame = {
     thisInitializedAt: number | null;
 };
 
+/** oxc `PrivateMemberUsageStack`: the `#name`s used in each enclosing class, the root at the bottom. */
+export type PrivateMemberUsage = Set<string>[];
+
 export type MinifierState = {
     sourceType: SourceType;
     options: CompressOptions;
+    mode: CompressionMode;
     symbols: SymbolState;
+    privateMemberUsage: PrivateMemberUsage;
     /** One frame per enclosing function body, the program root at the bottom. Never empty. */
     bodyFrames: BodyFrame[];
     passChanges: PassChanges;
 };
 
-export function createMinifierState(sourceType: SourceType, options: CompressOptions, scoping: Scoping): MinifierState {
+export function createMinifierState(
+    sourceType: SourceType,
+    options: CompressOptions,
+    mode: CompressionMode,
+    scoping: Scoping,
+): MinifierState {
     return {
         sourceType,
         options,
+        mode,
         symbols: createSymbolState(sourceType, options, scoping),
+        privateMemberUsage: [new Set()],
         bodyFrames: [{ scopeId: scoping.rootScopeId, hoistedVarInliningUnsafe: false, thisInitializedAt: null }],
         passChanges: {
             revisitRequested: false,
@@ -59,9 +75,34 @@ export function createMinifierState(sourceType: SourceType, options: CompressOpt
 
 export const lastBodyFrame = (state: MinifierState): BodyFrame => state.bodyFrames[state.bodyFrames.length - 1];
 
-/** Whether Normalize's member-write scan should seed persistent metadata. In tree-shake-only mode only
- *  the `property_write_side_effects: false` opt-in drop reads it. */
-export const shouldTrackMemberWriteEffects = (state: MinifierState): boolean => !state.options.treeshake.propertyWriteSideEffects;
+export const isTreeShakeOnly = (state: MinifierState): boolean => state.mode === 'tree-shake-only';
+
+/** Whether Normalize's member-write scan should seed persistent metadata: always in full minify, where the
+ *  write-only property drop reads it; in tree-shake-only mode only for the `property_write_side_effects:
+ *  false` opt-in drop. */
+export const shouldTrackMemberWriteEffects = (state: MinifierState): boolean =>
+    !isTreeShakeOnly(state) || !state.options.treeshake.propertyWriteSideEffects;
+
+/** Whether every class scope has been exited. */
+export const privateMembersAtRoot = (usage: PrivateMemberUsage): boolean => usage.length === 1;
+
+export function enterClassPrivateMembers(usage: PrivateMemberUsage): void {
+    usage.push(new Set());
+}
+
+/** Exit a class and carry uses of names an outer class declares out to it. */
+export function exitClassPrivateMembers(usage: PrivateMemberUsage, declared: Iterable<string>): void {
+    const used = usage.pop() as Set<string>;
+    for (const name of declared) used.delete(name);
+    const outer = usage[usage.length - 1];
+    for (const name of used) outer.add(name);
+}
+
+export const recordPrivateMemberUse = (usage: PrivateMemberUsage, name: string): void => {
+    usage[usage.length - 1].add(name);
+};
+
+export const privateMemberIsUsed = (usage: PrivateMemberUsage, name: string): boolean => usage[usage.length - 1].has(name);
 
 export function requestRevisit(state: MinifierState): void {
     state.passChanges.revisitRequested = true;

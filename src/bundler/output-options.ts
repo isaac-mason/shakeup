@@ -1,4 +1,3 @@
-import type { CompressMode } from '../passes/compress/index.ts';
 import { type GetHash, type HashCharacters, hasherByType } from '../util/hash.ts';
 
 /**
@@ -102,18 +101,16 @@ export type MinifyOptions = {
     compress?: boolean | 'dce';
 };
 
+/** The compressor over each finished chunk, rolldown's `minify_chunks`: `'full'` is oxc's `Minifier::minify`,
+ *  `'dce'` its tree-shake-only compressor (`DeadCodeEliminationOnly`). */
+export type ChunkCompress = 'full' | 'dce';
+
 /** Fully-resolved minify sub-stage flags. */
-/** `compress` is a MODE, not a flag: `'full'` runs every pass, `'dce'` runs only the passes that
- *  change which code EXISTS (removals + the folds they need), and `false` runs none. See
- *  `CompressMode` in `passes/compress` — the split is oxc's `CompressionMode`, and it is what allows
- *  optimisation to behave identically in dev and in a bundle while only the cosmetic tier differs. */
 export type ResolvedMinify = {
     whitespace: boolean;
     mangle: boolean;
-    compress: CompressMode | false;
-    /** What runs over each finished chunk, rolldown's `minify_chunks`: `'dce'` for its `DeadCodeEliminationOnly`,
-     *  `'full'` for a full minify, `false` for `Disabled` (or an object form with no compressor). */
-    chunk: CompressMode | false;
+    /** `false` for rolldown's `Disabled`, or an object form with no compressor. */
+    chunk: ChunkCompress | false;
 };
 
 /** Resolve the `minify` option: `true` = all stages on; an object opts into each stage (default
@@ -141,21 +138,17 @@ export function effectiveComments(c: { legal: boolean; jsdoc: boolean }, minify:
 }
 
 export function resolveMinify(minify: boolean | 'dce-only' | MinifyOptions | undefined): ResolvedMinify {
-    if (minify === true) return { whitespace: true, mangle: true, compress: 'full', chunk: 'full' };
+    if (minify === true) return { whitespace: true, mangle: true, chunk: 'full' };
     if (minify !== null && typeof minify === 'object') {
         return {
             whitespace: minify.whitespace === true,
             mangle: minify.mangle === true,
-            // Omitted → `'dce'`: the semantic tier is ALWAYS on. Only an explicit `false` opts out.
-            compress: minify.compress === true ? 'full' : minify.compress === false ? false : 'dce',
             // rolldown's object form compresses the chunk only when it names a compressor
             chunk: minify.compress === true ? 'full' : minify.compress === 'dce' ? 'dce' : false,
         };
     }
-    // No `minify` at all still runs the SEMANTIC tier. Optimisation (what code exists, which branch
-    // is taken) is then identical in dev and in a bundle; only the cosmetic tier is gated on `minify`.
-    // Over each chunk it is rolldown's default, `'dce-only'`; an explicit `false` is its `Disabled`.
-    return { whitespace: false, mangle: false, compress: 'dce', chunk: minify === false ? false : 'dce' };
+    // rolldown's default, `'dce-only'`; an explicit `false` is its `Disabled`
+    return { whitespace: false, mangle: false, chunk: minify === false ? false : 'dce' };
 }
 
 /** Fully-resolved output naming config with defaults applied. */

@@ -131,10 +131,8 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         // 'pre' effect runs before the test on BOTH invocations, in order.
         expect(min.order).toEqual(['pre', 'then', 'pre', 'else']);
         expect(min.order).toEqual(plain.order);
-        // The `tag('pre')` expr folds into the if-test as `(tag('pre'), cond)`. (minimize-conditions
-        // may then rewrite the whole `if` into a ternary, but the fused test survives as the ternary's
-        // condition — either way the fused comma sequence `(tag('pre'), cond)` appears verbatim.)
-        expect(code).toMatch(/\(tag\("pre"\), cond\)/);
+        // The `tag('pre')` expr folds in ahead of the test, and the `if` becomes a ternary: rolldown 1.2.4's output.
+        expect(code).toMatch(/return tag\("pre"\), cond \? /);
     });
 
     // COMPOSITION — several expr statements before an if fold as one flat comma sequence into the test

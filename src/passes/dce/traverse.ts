@@ -53,6 +53,27 @@ export type Traverser<C> = {
     exitUpdateExpression?: Hook<C>;
     exitUnaryExpression?: Hook<C>;
     exitAssignmentTarget?: Hook<C>;
+    exitForStatement?: Hook<C>;
+    exitReturnStatement?: Hook<C>;
+    exitCatchClause?: Hook<C>;
+    /** An object literal's property, method or spread-free entry. */
+    exitObjectProperty?: Hook<C>;
+    /** oxc `AssignmentTargetProperty`, either variant: `({ a } = o)` and `({ k: a } = o)`. */
+    exitAssignmentTargetProperty?: Hook<C>;
+    /** oxc `AssignmentTargetPropertyProperty`: `({ k: a } = o)`, before `exitAssignmentTargetProperty`. */
+    exitAssignmentTargetPropertyProperty?: Hook<C>;
+    exitBindingProperty?: Hook<C>;
+    exitMethodDefinition?: Hook<C>;
+    exitPropertyDefinition?: Hook<C>;
+    /** oxc `AccessorProperty`: a class field declared `accessor`. */
+    exitAccessorProperty?: Hook<C>;
+    /** Any member expression, static, computed or private, in whatever slot it sits. */
+    exitMemberExpression?: Hook<C>;
+    exitPrivateFieldExpression?: Hook<C>;
+    exitPrivateInExpression?: Hook<C>;
+    /** oxc `ClassBody`, which shakeup does not have: fired with the class, around its members. */
+    enterClassBody?: Hook<C>;
+    exitClassBody?: Hook<C>;
     enterNode?: (ctx: C, node: Node, position: WalkPosition) => void;
     exitNode?: (ctx: C, node: Node, position: WalkPosition) => void;
 };
@@ -61,6 +82,8 @@ const OP_CHILD = 0;
 const OP_LIST = 1;
 const OP_STATEMENTS = 2;
 const OP_SCOPE = 3;
+/** Fire a hook with the node being walked, between two of its children. */
+const OP_HOOK = 4;
 
 // Slots: where a child sits, before its type resolves the hooks it gets and how it is walked.
 const SLOT_NONE = 0;
@@ -103,6 +126,7 @@ const child = (field: string, slot: number, kind: AncestorKind): Instruction => 
 const list = (field: string, slot: number, kind: AncestorKind): Instruction => ({ op: OP_LIST, field, slot, kind });
 const statements = (field: string, kind: AncestorKind): Instruction => ({ op: OP_STATEMENTS, field, slot: SLOT_STATEMENT, kind });
 const SCOPE: Instruction = { op: OP_SCOPE, field: '', slot: SLOT_NONE, kind: 'None' };
+const hookAt = (name: 'enterClassBody' | 'exitClassBody'): Instruction => ({ op: OP_HOOK, field: name, slot: SLOT_NONE, kind: 'None' });
 
 /** Every plan, by id: the generated walker has one straight-line case per plan. */
 const PLAN_BY_ID: Instruction[][] = [];
@@ -198,7 +222,9 @@ const CLASS_PLAN = [
     child('id', SLOT_NONE, 'ClassId'),
     SCOPE,
     child('superClass', SLOT_EXPRESSION, 'ClassHeritageExpression'),
+    hookAt('enterClassBody'),
     list('body', SLOT_NONE, 'ClassBodyBody'),
+    hookAt('exitClassBody'),
 ];
 plan(N.ClassExpression, CLASS_PLAN);
 plan(N.ClassDeclaration, CLASS_PLAN);
@@ -518,6 +544,21 @@ const HOOK_NAMES = [
     'exitUpdateExpression',
     'exitUnaryExpression',
     'exitAssignmentTarget',
+    'exitForStatement',
+    'exitReturnStatement',
+    'exitCatchClause',
+    'exitObjectProperty',
+    'exitAssignmentTargetProperty',
+    'exitAssignmentTargetPropertyProperty',
+    'exitBindingProperty',
+    'exitMethodDefinition',
+    'exitPropertyDefinition',
+    'exitAccessorProperty',
+    'exitMemberExpression',
+    'exitPrivateFieldExpression',
+    'exitPrivateInExpression',
+    'enterClassBody',
+    'exitClassBody',
     'enterNode',
     'exitNode',
 ] as const;
@@ -563,6 +604,9 @@ function planSource(instructions: Instruction[], hooks: ReadonlySet<HookName>): 
         const kindText = JSON.stringify(kind);
         source += `if (step === ${step}) {\n`;
         switch (op) {
+            case OP_HOOK:
+                source += `${hooks.has(field as HookName) ? `traverser.${field}(ctx, node);` : ''}\nstep = ${step + 1};\n`;
+                break;
             case OP_SCOPE:
                 source += `const scopeId = data.scopeId;
 if (scopeId > 0 && savedScopes[top] < 0) { savedScopes[top] = ctx.currentScopeId; ctx.currentScopeId = scopeId; }
@@ -636,18 +680,50 @@ ${call(hooks, 'enterNode', target, ', position')}`;
 }
 
 /** oxc's exit hooks for `target`, which had `position` and, when walked in the default role, `type`. */
-function exitSource(hooks: ReadonlySet<HookName>, target: string, position: string, type: string): string {
+function exitSource(hooks: ReadonlySet<HookName>, target: string, position: string, type: string, plan: string): string {
     const P = WalkPosition;
+    const byType: [number, string][] = [
+        [N.Program, call(hooks, 'exitProgram', target)],
+        [N.VariableDeclarator, call(hooks, 'exitVariableDeclarator', target)],
+        [N.VariableDeclaration, call(hooks, 'exitVariableDeclaration', target)],
+        [N.CallExpression, call(hooks, 'exitCallExpression', target)],
+        [N.NewExpression, call(hooks, 'exitNewExpression', target)],
+        [N.UpdateExpression, call(hooks, 'exitUpdateExpression', target)],
+        [N.UnaryExpression, call(hooks, 'exitUnaryExpression', target)],
+        [N.ForStatement, call(hooks, 'exitForStatement', target)],
+        [N.ReturnStatement, call(hooks, 'exitReturnStatement', target)],
+        [N.CatchClause, call(hooks, 'exitCatchClause', target)],
+        [N.ObjectProperty, call(hooks, 'exitObjectProperty', target)],
+        [N.MethodDefinition, call(hooks, 'exitMethodDefinition', target)],
+        [
+            N.PropertyDefinition,
+            hooks.has('exitAccessorProperty') || hooks.has('exitPropertyDefinition')
+                ? `if (${target}.data.accessor) { ${call(hooks, 'exitAccessorProperty', target)} } else { ${call(hooks, 'exitPropertyDefinition', target)} }`
+                : '',
+        ],
+        [N.StaticMemberExpression, call(hooks, 'exitMemberExpression', target)],
+        [N.ComputedMemberExpression, call(hooks, 'exitMemberExpression', target)],
+        [N.PrivateFieldExpression, call(hooks, 'exitPrivateFieldExpression', target) + call(hooks, 'exitMemberExpression', target)],
+    ];
+    const byPlan: [number, string][] = [
+        [
+            TARGET_PROPERTY_PROPERTY_PLAN,
+            call(hooks, 'exitAssignmentTargetPropertyProperty', target) + call(hooks, 'exitAssignmentTargetProperty', target),
+        ],
+        [TARGET_PROPERTY_IDENTIFIER_PLAN, call(hooks, 'exitAssignmentTargetProperty', target)],
+        [BINDING_PROPERTY_PLAN, call(hooks, 'exitBindingProperty', target)],
+        [PRIVATE_IN_PLAN, call(hooks, 'exitPrivateInExpression', target)],
+    ];
+    const cases = (entries: [number, string][]): string =>
+        entries
+            .filter(([, code]) => code !== '')
+            .map(([value, code]) => `case ${value}: ${code} break;`)
+            .join('\n');
+    const typeCases = cases(byType);
+    const planCases = cases(byPlan);
     return `${hooks.has('exitNode') ? `traverser.exitNode(ctx, ${target}, ${position});` : ''}
-switch (${type}) {
-    case ${N.Program}: ${call(hooks, 'exitProgram', target)} break;
-    case ${N.VariableDeclarator}: ${call(hooks, 'exitVariableDeclarator', target)} break;
-    case ${N.VariableDeclaration}: ${call(hooks, 'exitVariableDeclaration', target)} break;
-    case ${N.CallExpression}: ${call(hooks, 'exitCallExpression', target)} break;
-    case ${N.NewExpression}: ${call(hooks, 'exitNewExpression', target)} break;
-    case ${N.UpdateExpression}: ${call(hooks, 'exitUpdateExpression', target)} break;
-    case ${N.UnaryExpression}: ${call(hooks, 'exitUnaryExpression', target)} break;
-}
+${typeCases === '' ? '' : `switch (${type}) {\n${typeCases}\n}`}
+${planCases === '' ? '' : `switch (${plan}) {\n${planCases}\n}`}
 switch (${position}) {
     case ${P.Statement}: ${call(hooks, 'exitStatement', target)} break;
     case ${P.Expression}: ${call(hooks, 'exitExpression', target)} break;
@@ -703,7 +779,7 @@ walk: {
         const next = program, position = ${WalkPosition.None}, role = ${ROLE_DEFAULT};
         ${enterSource(present, 'next')}
         ${planSelectSource}
-        if (planId === ${NO_CHILDREN}) { const nextType = role === ${ROLE_DEFAULT} ? next.type : 0; ${exitSource(present, 'next', 'position', 'nextType')} break walk; }
+        if (planId === ${NO_CHILDREN}) { const nextType = role === ${ROLE_DEFAULT} ? next.type : 0; ${exitSource(present, 'next', 'position', 'nextType', 'planId')} break walk; }
         ${pushSource}
     }
     while (top >= 0) {
@@ -723,7 +799,7 @@ ${cases}
             ${planSelectSource}
             if (planId === ${NO_CHILDREN}) {
                 const nextType = role === ${ROLE_DEFAULT} ? next.type : 0;
-                ${exitSource(present, 'next', 'position', 'nextType')}
+                ${exitSource(present, 'next', 'position', 'nextType', 'planId')}
                 continue;
             }
             ${pushSource}
@@ -733,9 +809,10 @@ ${cases}
         if (savedScopes[top] >= 0) ctx.currentScopeId = savedScopes[top];
         const leftPosition = positions[top];
         const leftType = types[top];
+        const leftPlan = planIds[top];
         nodes[top] = null;
         top--;
-        ${exitSource(present, 'node', 'leftPosition', 'leftType')}
+        ${exitSource(present, 'node', 'leftPosition', 'leftType', 'leftPlan')}
     }
 }
 spare = frames;`

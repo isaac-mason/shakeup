@@ -199,9 +199,9 @@ describe('printer — Phase 2 syntactic minification', () => {
         expect(minified('class C { "m"() {} }')).toContain('m(){}');
     });
 
-    it('drops the redundant trailing semicolon before } and EOF', () => {
+    it('drops the redundant semicolon before } but keeps the final one, as oxc codegen does', () => {
         expect(minified('function f() { a(); b(); }')).toContain('{a();b()}');
-        expect(minified('a(); b();')).toBe('a();b()');
+        expect(minified('a(); b();')).toBe('a();b();');
         expect(minified('switch (x) { case 1: a(); }')).toContain('case 1:a()}');
     });
 
@@ -225,11 +225,11 @@ describe('dangling else', () => {
 
     it('braces a consequent ending in an if without else, as oxc codegen does', () => {
         expect(printUnwrapped('if (a) { if (b) c(); } else e();', false)).toBe('if (a) {\n    if (b) c();\n}\nelse e();');
-        expect(printUnwrapped('if (a) { if (b) c(); } else e();', true)).toBe('if(a){if(b)c()}else e()');
+        expect(printUnwrapped('if (a) { if (b) c(); } else e();', true)).toBe('if(a){if(b)c()}else e();');
         expect(printUnwrapped('if (a) { for (;;) while (x) if (b) c(); } else e();', true)).toBe(
-            'if(a){for(;;)while(x)if(b)c()}else e()',
+            'if(a){for(;;)while(x)if(b)c()}else e();',
         );
-        expect(printUnwrapped('if (a) { if (b) c(); else d(); } else e();', true)).toBe('if(a)if(b)c();else d();else e()');
+        expect(printUnwrapped('if (a) { if (b) c(); else d(); } else e();', true)).toBe('if(a)if(b)c();else d();else e();');
         expect(printUnwrapped('if (a) { if (b) c(); }', true)).toBe('if(a){if(b)c()}');
     });
 });

@@ -5,7 +5,6 @@
 import type { ConstantValue } from '../analysis/constant-value.ts';
 import type { Semantic } from '../analysis/semantic.ts';
 import type { Node, Program } from '../ast/index.ts';
-import type { CompressMode } from '../passes/compress/index.ts';
 import type { AssetFileNamesFn } from './output-options.ts';
 import type { CustomPluginOptions, ModuleSideEffects, ModuleType } from './plugin.ts';
 import type { Platform } from './resolve.ts';
@@ -303,9 +302,9 @@ export type ExternalRec = {
  *  Per-build state (indices, resolved deps, importers, exec order) is NOT cached. */
 export type CachedParse = {
     srcHash: number;
-    /** Whether compress passes were applied when this AST was produced — part of the cache key, so
-     *  a `minify` toggle across builds re-parses instead of reusing a wrongly-(un)compressed AST. */
-    compress: CompressMode | false;
+    /** Whether the dead-code pass ran when this AST was produced: part of the cache key, so a
+     *  `treeshake` toggle across builds re-parses instead of reusing a wrongly-(un)eliminated AST. */
+    deadCodeElimination: boolean;
     /** Declared module format at the time this AST was produced. A KEY component, not just a
      *  record: the parse goal gates top-level `return`/`new.target`, so the AST depends on it — and
      *  a `package.json#type` edit changes it with no change to the module's own id or source. */

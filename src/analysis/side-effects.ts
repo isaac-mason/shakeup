@@ -429,13 +429,13 @@ function classMayHaveSideEffects(klass: Node, ctx: SideEffectsContext): boolean 
 }
 
 /** oxc `ToIntegerIndex` for `f64`. */
-function numberToIntegerIndex(value: number): number | null {
+export function numberToIntegerIndex(value: number): number | null {
     if (value - Math.trunc(value) !== 0 || value < 0) return null;
     return value <= 0xffffffff ? value : null;
 }
 
 /** oxc `ToIntegerIndex` for `BigInt`. */
-function bigIntToIntegerIndex(value: bigint): number | null {
+export function bigIntToIntegerIndex(value: bigint): number | null {
     if (value < 0n || value > 0xffffffffn) return null;
     return Number(value);
 }
@@ -1066,7 +1066,7 @@ const REGEXP_FLAG_CHARS = 'dgimsuvy';
  * the host engine's parser implements the same grammar, so it stands in for it here. The flags are
  * checked first, the way oxc's `FlagsParser` does, so the verdict never depends on host flag support.
  */
-function isRegExpPatternValid(pattern: string, flags: string | null): boolean {
+export function isRegExpPatternValid(pattern: string, flags: string | null): boolean {
     if (flags !== null) {
         let seen = '';
         for (const flag of flags) {
