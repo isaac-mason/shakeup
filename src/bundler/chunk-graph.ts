@@ -3,6 +3,7 @@ import { helpersNeededBy } from './generate/esm.ts';
 import { type Graph, type ImportBind, type Linked, NAME_NAMESPACE, packRef, refMod, refSym } from './graph-types.ts';
 import { initRefForRecord } from './init-obligations.ts';
 import { finalNameOf, reprName } from './link.ts';
+import type { TreeshakeResult } from './treeshake.ts';
 
 /** A cross-chunk import specifier: the producer chunk's exported name → this chunk's local. */
 export type CrossImport = { imported: string; local: string };
@@ -444,6 +445,10 @@ export type NsElision = {
     nsMemberBinds: Map<number, ImportBind[]>;
 };
 
+/** What tree-shaking decided that wiring needs: which imports surviving code reads, and which
+ *  modules have side effects. */
+export type ShakenReads = Pick<TreeshakeResult, 'readImports' | 'hasSideEffects'>;
+
 const NO_NS_ELISION: NsElision = { elidedNs: new Set(), nsMemberBinds: new Map() };
 
 export function buildChunkGraph(
@@ -452,6 +457,7 @@ export function buildChunkGraph(
     options: ChunkOptions,
     deadDynamic: Set<number> = new Set(),
     nsElision: NsElision = NO_NS_ELISION,
+    shaken: ShakenReads | null = null,
 ): ChunkGraph {
     const N = graph.modules.length;
 
@@ -466,6 +472,7 @@ export function buildChunkGraph(
             formed.entryChunkOf,
             options.keepNames === true,
             nsElision,
+            shaken,
         );
         addRuntimeChunk(graph, linked, formed.chunks, options.symbols !== false, nsElision.elidedNs);
         return { chunks: formed.chunks, chunkByModule: formed.chunkByModule, color, entryChunkOf: formed.entryChunkOf };
@@ -548,7 +555,7 @@ export function buildChunkGraph(
         groupNames,
     );
 
-    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true, nsElision);
+    wireAndDeconflict(graph, linked, chunks, chunkByModule, entryChunkOf, options.keepNames === true, nsElision, shaken);
     addRuntimeChunk(graph, linked, chunks, options.symbols !== false, nsElision.elidedNs);
     return { chunks, chunkByModule, color: preColor, entryChunkOf };
 }
@@ -563,6 +570,7 @@ function wireAndDeconflict(
     entryChunkOf: Map<number, number>,
     keepNames = false,
     nsElision: NsElision = NO_NS_ELISION,
+    shaken: ShakenReads | null = null,
 ): void {
     const memberSets = chunks.map((c) => new Set(c.modules));
 
@@ -625,8 +633,13 @@ function wireAndDeconflict(
         const chunk = chunks[c];
         for (const idx of chunk.modules) {
             const mod = graph.modules[idx];
-            for (const [localSym, imp] of mod.namedImports) {
-                void imp;
+            const read = shaken === null ? null : shaken.readImports[idx];
+            for (const localSym of mod.namedImports.keys()) {
+                // Only what the module's surviving code still reads, as rolldown wires from the
+                // included statements. An import whose every read was inlined (`Kind.B` -> `1`) named
+                // a declaration the producer then dropped, and wiring it exported a name nothing
+                // declared.
+                if (read !== null && !read.has(localSym)) continue;
                 const bind = linked.binds.get(packRef(idx, localSym));
                 if (bind === undefined) continue;
                 // `import * as ns` whose reads are RESOLVED to the members: this chunk needs the
@@ -784,9 +797,10 @@ function wireAndDeconflict(
                             module: rec.resolved,
                         });
                     }
-                } else {
+                } else if (rec.kind === 'static' && (shaken === null || shaken.hasSideEffects[rec.resolved])) {
                     // Bare side-effect import: a static import with no named bindings whose
-                    // target is a different chunk must still be kept as `import './x';`.
+                    // target is a different chunk must still be kept as `import './x';`, when the
+                    // target has anything to run.
                     const producer = chunkByModule[rec.resolved];
                     if (producer >= 0 && producer !== c && !chunk.imports.has(producer)) {
                         // Only add if this record binds no names into this chunk (checked by

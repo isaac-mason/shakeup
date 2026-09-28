@@ -29,7 +29,27 @@ describe('incremental: createBuildContext', () => {
         expect(third.parseStats).toEqual({ parsed: 1, reused: 1 });
         const fresh = await bundle({ entry: '/entry.ts', fs: mutableFs(files) });
         expect(third.chunks[0].code).toBe(fresh.chunks[0].code);
-        expect(third.chunks[0].code).toContain('50');
+        // the new `v`, folded into `v * 2` by the chunk's dead-code pass, as rolldown does
+        expect(third.chunks[0].code).toContain('const r = 100;');
+    });
+
+    it('a chunk printing a constant from a module outside it re-renders when that constant changes', async () => {
+        // `s` is inlined into both entries, so `/shared.ts` lands in no chunk and neither entry's own
+        // source changes: only the value they print does.
+        const files: Record<string, string> = {
+            '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
+            '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
+            '/shared.ts': 'export const s = 40;',
+        };
+        const options = () => ({ input: { a: '/a.ts', b: '/b.ts' }, fs: mutableFs(files) });
+        const ctx = createBuildContext(options());
+        await ctx.rebuild();
+        files['/shared.ts'] = 'export const s = 50;';
+        const rebuilt = await ctx.rebuild();
+        const fresh = await bundle(options());
+        const codeOf = (chunks: { name: string; code: string }[]) => Object.fromEntries(chunks.map((c) => [c.name, c.code]));
+        expect(codeOf(rebuilt.chunks)).toEqual(codeOf(fresh.chunks));
+        expect(codeOf(rebuilt.chunks).a).toContain('const av = 51;');
     });
 
     it('an export-surface change re-links importers correctly', async () => {
@@ -83,9 +103,9 @@ describe('incremental: createBuildContext', () => {
 
     it('render cache: a body change re-renders only its chunk; others reuse (byte-identical)', async () => {
         const files: Record<string, string> = {
-            '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
-            '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
-            '/shared.ts': 'export const s = 40;',
+            '/a.ts': "import { s } from './shared';\nexport const av = s[0] + 1;",
+            '/b.ts': "import { s } from './shared';\nexport const bv = s[0] + 2;",
+            '/shared.ts': 'export const s = [40];',
         };
         const opts = () => ({ input: { a: '/a.ts', b: '/b.ts' }, fs: mutableFs(files), external: [] as string[] });
         const ctx = createBuildContext(opts());
@@ -93,7 +113,7 @@ describe('incremental: createBuildContext', () => {
         expect(first.renderStats).toEqual({ rendered: 3, reused: 0, moduleRendered: 3, moduleReused: 0 });
 
         // Change a's body only (export name av unchanged) — only a's chunk is dirty.
-        files['/a.ts'] = "import { s } from './shared';\nexport const av = s + 100;";
+        files['/a.ts'] = "import { s } from './shared';\nexport const av = s[0] + 100;";
         const r = await ctx.rebuild();
         expect(r.renderStats).toEqual({ rendered: 1, reused: 2, moduleRendered: 1, moduleReused: 0 }); // shared + b reused
 
@@ -104,27 +124,38 @@ describe('incremental: createBuildContext', () => {
 
     it('module render cache: a body change in a single chunk re-renders only that module (byte-identical)', async () => {
         // One entry pulling four modules → a single chunk. A body-only edit to one module must
-        // re-render just that module; the other three reuse their cached text.
+        // re-render just that module; the other three reuse their cached text. Module text is only
+        // printed where no chunk pass runs, so this builds with `minify: false`.
         const files: Record<string, string> = {
             '/entry.ts':
-                "import { a } from './a';\nimport { b } from './b';\nimport { c } from './c';\nexport const t = a + b + c;",
-            '/a.ts': 'export const a = 1;',
-            '/b.ts': 'export const b = 2;',
-            '/c.ts': 'export const c = 3;',
+                "import { a } from './a';\nimport { b } from './b';\nimport { c } from './c';\nexport const t = a[0] + b[0] + c[0];",
+            '/a.ts': 'export const a = [1];',
+            '/b.ts': 'export const b = [2];',
+            '/c.ts': 'export const c = [3];',
         };
-        const ctx = createBuildContext({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const ctx = createBuildContext({
+            entry: '/entry.ts',
+            fs: mutableFs(files),
+            external: [] as string[],
+            output: { minify: false },
+        });
         const first = await ctx.rebuild();
         expect(first.chunks.length).toBe(1);
         expect(first.renderStats).toEqual({ rendered: 1, reused: 0, moduleRendered: 4, moduleReused: 0 });
 
         // Edit b's body only. The chunk is dirty (a member changed), so it re-renders — but only
         // module b re-renders; entry, a, c reuse their cached module text.
-        files['/b.ts'] = 'export const b = 20;';
+        files['/b.ts'] = 'export const b = [20];';
         const r = await ctx.rebuild();
         expect(r.renderStats).toEqual({ rendered: 1, reused: 0, moduleRendered: 1, moduleReused: 3 });
 
         // Byte-identical to a cold build.
-        const fresh = await bundle({ entry: '/entry.ts', fs: mutableFs(files), external: [] as string[] });
+        const fresh = await bundle({
+            entry: '/entry.ts',
+            fs: mutableFs(files),
+            external: [] as string[],
+            output: { minify: false },
+        });
         expect(r.chunks[0].code).toBe(fresh.chunks[0].code);
     });
 

@@ -1,13 +1,23 @@
+import { bigIntLiteralValue, numericLiteralValue, stringLiteralText, templateElementCooked } from '../src/analysis/const-eval.ts';
 import { N, type Node } from '../src/ast.ts';
 
 export const isNode = (x: unknown): x is Node =>
     typeof x === 'object' && x !== null && typeof (x as Node).type === 'number' && 'data' in (x as Node);
 
-/** Strict structural equality over our AST, ignoring node identity (`id`/`start`/`end`).
- *  The gate for whitespace-faithful (non-minify) round-trips. */
+/** What a node's `name` compares as. The printer prints number, bigint and string literals from their
+ *  value, as oxc does, so `0xff` and `'a'` come back as `255` and `"a"`: their values are compared. */
+function nameValue(n: Node): string {
+    if (n.type === N.StringLiteral) return stringLiteralText(n);
+    if (n.type === N.NumericLiteral) return String(numericLiteralValue(n));
+    if (n.type === N.BigIntLiteral) return String(bigIntLiteralValue(n));
+    return n.name;
+}
+
+/** Strict structural equality over our AST, ignoring node identity (`id`/`start`/`end`) and the
+ *  spelling of a literal's value. The gate for whitespace-faithful (non-minify) round-trips. */
 export function astEqual(a: unknown, b: unknown): boolean {
     if (isNode(a) && isNode(b)) {
-        if (a.type !== b.type || a.name !== b.name) return false;
+        if (a.type !== b.type || nameValue(a) !== nameValue(b)) return false;
         return astEqual(a.data, b.data);
     }
     if (Array.isArray(a) && Array.isArray(b)) {
@@ -25,8 +35,8 @@ type Rec = Record<string, unknown>;
 /** Canonical token of a non-computed property key, so `"foo"` (StringLiteral) and `foo`
  *  (IdentifierName) compare equal after minify unquotes them. */
 function keyToken(key: Node): string {
-    if (key.type === N.StringLiteral) return `k:${key.name.slice(1, -1)}`;
-    if (key.type === N.NumericLiteral) return `k:${Number(key.name)}`;
+    if (key.type === N.StringLiteral) return `k:${stringLiteralText(key)}`;
+    if (key.type === N.NumericLiteral) return `k:${numericLiteralValue(key)}`;
     return `k:${key.name}`;
 }
 
@@ -40,6 +50,9 @@ const KEYED = new Set<number>([N.ObjectProperty, N.MethodDefinition, N.PropertyD
 export function canon(x: unknown): unknown {
     if (isNode(x)) {
         if (x.type === N.EmptyStatement) return EMPTY;
+        // Minify prints a string as a template literal wherever that is cheapest, as oxc does.
+        const asString = templateAsString(x);
+        if (asString !== null) return { type: N.StringLiteral, name: JSON.stringify(asString), data: null };
         const out: Rec = { type: x.type, name: x.name, data: canon(x.data) };
         // `/*@__PURE__*​/` is intentionally NOT re-emitted under minify (oxc drops all 214 of
         // three.core.js's annotations too), so the flag legitimately differs after a minified
@@ -61,6 +74,14 @@ export function canon(x: unknown): unknown {
     return x;
 }
 const EMPTY = Symbol('empty-statement');
+
+/** The cooked value of a template literal without substitutions, else null. */
+function templateAsString(n: Node): string | null {
+    if (n.type !== N.TemplateLiteral) return null;
+    const d = n.data as { quasis: Node[]; expressions: Node[] };
+    if (d.expressions.length > 0) return null;
+    return templateElementCooked(d.quasis[0])?.value ?? null;
+}
 
 /** Semantic equality — strict structural equality over the canonicalized trees. */
 export const semanticEqual = (a: unknown, b: unknown): boolean => astEqual(canon(a), canon(b));

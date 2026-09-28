@@ -126,9 +126,12 @@ describe('substitute-alternate-syntax (compress)', () => {
         // (`codegen/gen.rs`). Unparenthesised, `2*1/0` is `(2*1)/0` — still Infinity by luck — but
         // `1/1/0` is `(1/1)/0`, which is Infinity where `1/(1/0)` is 0. The parity check is what
         // actually decides this; the text assertions only say where the parens landed.
-        const code = await assertParity('export const a = 2 * Infinity;\nexport const b = 1 / Infinity;\nexport const c = -Infinity;');
-        expect(tight(code)).toContain('2*(1/0)');
-        expect(tight(code)).toContain('1/(1/0)');
+        // an unknown operand, so the per-module dead-code pass has nothing to fold first
+        const code = await assertParity(
+            'export const a = (globalThis.k ?? 2) * Infinity;\nexport const b = (globalThis.k ?? 1) / Infinity;\nexport const c = -Infinity;',
+        );
+        expect(tight(code)).toContain('*(1/0)');
+        expect(tight(code)).toContain('/(1/0)');
         expect(tight(code)).toContain('-(1/0)');
     });
 
@@ -200,8 +203,9 @@ describe('substitute-alternate-syntax (compress)', () => {
     it('does NOT fire without compress (plain build keeps literals)', async () => {
         const code = await build('export const a = true;\nexport const b = undefined;', false);
         expect(code).toMatch(/\btrue\b/);
-        expect(code).toMatch(/\bundefined\b/);
         expect(code).not.toContain('!0');
-        expect(code).not.toContain('void 0');
+        // `undefined` -> `void 0` is the per-module dead-code pass's normalize, not this substitution;
+        // rolldown prints the same with minification off
+        expect(code).toContain('void 0');
     });
 });

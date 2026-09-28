@@ -1,7 +1,7 @@
 import esbuild from 'esbuild';
 import { describe, expect, it } from 'vitest';
 import { analyze, createSemantic } from '../src/analysis/semantic.ts';
-import { parse } from '../src/ast.ts';
+import { type Node, parse } from '../src/ast.ts';
 import { tsLower } from '../src/passes/lower-ts.ts';
 import { tsStrip } from '../src/passes/strip-ts.ts';
 import { traverse } from '../src/passes/traverse.ts';
@@ -210,5 +210,26 @@ describe('printer — Phase 2 syntactic minification', () => {
         const plain = createPrinter({ minify: false });
         printModule(plain, parse(src, { ts: false, jsx: false }).program);
         expect(minified(src).length).toBeLessThan(finishPrinter(plain).length);
+    });
+});
+
+describe('dangling else', () => {
+    const printUnwrapped = (source: string, minify: boolean): string => {
+        const { program } = parse(source, { ts: false, jsx: false });
+        const outer = program.data.body[0].data as { consequent: Node };
+        outer.consequent = (outer.consequent.data as { body: Node[] }).body[0];
+        const p = createPrinter({ minify });
+        printModule(p, program);
+        return finishPrinter(p).trim();
+    };
+
+    it('braces a consequent ending in an if without else, as oxc codegen does', () => {
+        expect(printUnwrapped('if (a) { if (b) c(); } else e();', false)).toBe('if (a) {\n    if (b) c();\n}\nelse e();');
+        expect(printUnwrapped('if (a) { if (b) c(); } else e();', true)).toBe('if(a){if(b)c()}else e()');
+        expect(printUnwrapped('if (a) { for (;;) while (x) if (b) c(); } else e();', true)).toBe(
+            'if(a){for(;;)while(x)if(b)c()}else e()',
+        );
+        expect(printUnwrapped('if (a) { if (b) c(); else d(); } else e();', true)).toBe('if(a)if(b)c();else d();else e()');
+        expect(printUnwrapped('if (a) { if (b) c(); }', true)).toBe('if(a){if(b)c()}');
     });
 });

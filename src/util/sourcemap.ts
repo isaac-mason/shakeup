@@ -237,19 +237,25 @@ export function joinParts(parts: Part[]): { code: string; map: Mappings } {
     return { code: `${codes.join('\n')}\n`, map: { lines } };
 }
 
-/** Nearest-preceding mapped segment on `line` at/-before `col`. */
+/**
+ * oxc_sourcemap's `lookup_token_approx`: the segment on `line` at or before `col` (the first of several at
+ * the same column), else the line's first segment. Null only when the line has no segments at all.
+ */
 function traceSegment(m: Mappings, line: number, col: number): Segment | null {
     const segs = m.lines[line];
-    if (!segs) return null;
+    if (segs === undefined || segs.length === 0) return null;
     let best: Segment | null = null;
-    for (const seg of segs) if (seg.length >= 4 && seg[0] <= col) best = seg;
-    return best;
+    for (const seg of segs) {
+        if (seg[0] > col) break;
+        if (best === null || best[0] !== seg[0]) best = seg;
+    }
+    return best ?? segs[0];
 }
 
 /**
- * Compose two single-source maps into one: `outer` maps final output → an intermediate whose own
- * origin is described by `inner`; the result maps final output → `inner`'s sources. Each `outer`
- * segment is retraced through `inner`. Assumes a single inner source (index 0).
+ * Compose two maps into one: `outer` maps final output → an intermediate whose own origin is described
+ * by `inner`; the result maps final output → `inner`'s sources, each segment keeping the source its
+ * `inner` segment names. Each `outer` segment is retraced through `inner`.
  */
 export function composeSourceMaps(outer: SourceMap, inner: SourceMap): SourceMap {
     const result = composeMappings(decodeMappings(inner.mappings), decodeMappings(outer.mappings));
@@ -276,8 +282,12 @@ export function composeMappings(inner: Mappings, outer: Mappings): Mappings {
                 addUnmapped(result, seg[0]);
                 continue;
             }
+            // rolldown's `collapse_sourcemaps`: a position with nothing to trace to is dropped, one that
+            // traces to an unmapped segment stays unmapped
             const t = traceSegment(im, seg[2], seg[3]);
-            if (t) addSegment(result, seg[0], 0, t[2], t[3], t.length === 5 ? t[4] : -1);
+            if (t === null) continue;
+            // the inner segment's own source: a chunk's inner map spans every module in it
+            if (t.length >= 4) addSegment(result, seg[0], t[1], t[2], t[3], t.length === 5 ? t[4] : -1);
             else addUnmapped(result, seg[0]);
         }
     }

@@ -215,6 +215,7 @@ export const DEFS = [
         definite: boolean,
         declare: boolean,
         abstract: boolean,
+        accessor: boolean,
         accessibility: scalar<Accessibility>(),
     }),
     def('StaticBlock', { body: list(child), scopeId: scalar<number>() }),
@@ -441,6 +442,9 @@ export type NodeOf<T extends TypeName> = {
     /** resolved symbol id for a reference/binding ident (0 = unresolved/global). The node→symbol
      *  link lives on the node (oxc model) so it survives movement/cloning; `set` clears it. */
     sym: number;
+    /** oxc `reference_id`: this identifier's index in the running dead-code pass's reference table,
+     *  -1 for none. Clones and `set` clear it. */
+    ref: number;
     data: DataOf<T>;
 };
 
@@ -498,8 +502,6 @@ export function lineColOf(lines: Uint32Array, offset: number): { line: number; c
     return { line: lo + 1, column: offset - lines[lo] };
 }
 
-const payload = (n: Node): Record<string, unknown> | null => n.data as Record<string, unknown> | null;
-
 type DataForId<Id extends NodeType> = { [T in TypeName]: IdOf<T> extends Id ? DataOf<T> : never }[TypeName];
 
 let idCounter = 0;
@@ -516,7 +518,7 @@ export const allocId = (): number => ++idCounter;
 export const peekNextId = (): number => idCounter + 1;
 
 export function node<Id extends NodeType>(type: Id, start: number, end: number, name: string, data: DataForId<Id>): Node {
-    return { id: allocId(), type, start, end, name, sym: 0, data } as Node;
+    return { id: allocId(), type, start, end, name, sym: 0, ref: -1, data } as Node;
 }
 
 /**
@@ -527,10 +529,11 @@ export function node<Id extends NodeType>(type: Id, start: number, end: number, 
  * (`start`/`end`) is kept; `name` is left as-is (unused by most node types).
  */
 export function set<Id extends NodeType>(n: Node, type: Id, data: DataForId<Id>): void {
-    const w = n as { type: number; data: unknown; sym: number };
+    const w = n as { type: number; data: unknown; sym: number; ref: number };
     w.type = type;
     w.data = data;
     w.sym = 0; // a retyped node is a fresh node — it carries no prior symbol association
+    w.ref = -1;
 }
 
 /**
@@ -639,39 +642,64 @@ export function walk(n: Node, enter: (n: Node) => boolean | void): void {
     walkImpl(n, enter);
 }
 
-export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null): Node | null {
+/** The start of a node made by the bundler with no source position; the printer maps nothing for it. */
+export const UNSPANNED = -1;
+
+type CloneData = (n: Node, substitute: ((n: Node) => Node | null) | undefined, offset: number) => unknown;
+
+/** The data copy for every node type as straight-line code: each field in schema order, children
+ *  copied through `cloneNode`. Schema order is the parser's order, so a copy has the original's shape. */
+function buildCloneDataBody(): string {
+    let body = 'switch (n.type) {';
+    for (const definition of DEFS) {
+        if (definition.fields === null) continue;
+        body += `case ${N[definition.name as TypeName]}: return {`;
+        for (const [name, schema] of Object.entries(definition.fields)) {
+            const key = JSON.stringify(name);
+            const read = `d[${key}]`;
+            // A copy is a fresh node: it owns no scope, the same rule `set()` applies to `sym`.
+            if (name === 'scopeId') body += `${key}: 0,`;
+            else if (!holdsChild(schema as Schema)) body += `${key}: ${read},`;
+            else if (isList(schema as Schema)) body += `${key}: cloneList(${read}, substitute, offset),`;
+            else body += `${key}: ${read} == null ? null : cloneNode(${read}, substitute, offset),`;
+        }
+        body += '};';
+    }
+    return `const d = n.data; ${body} } return null;`;
+}
+
+const cloneList = (
+    list: (Node | null)[],
+    substitute: ((n: Node) => Node | null) | undefined,
+    offset: number,
+): (Node | null)[] => {
+    const copy: (Node | null)[] = new Array(list.length);
+    for (let index = 0; index < list.length; index++) {
+        const element = list[index];
+        copy[index] = element == null ? null : cloneNode(element, substitute, offset);
+    }
+    return copy;
+};
+
+const cloneData = new Function(
+    'cloneNode',
+    'cloneList',
+    `return function cloneData(n, substitute, offset) { ${buildCloneDataBody()} };`,
+)(cloneNode, cloneList) as CloneData;
+
+/** A deep copy of `n`. `substitute` may supply the copy of any node itself, and `offset` moves every
+ *  source position, as when modules are placed in one combined source. */
+export function cloneNode(n: Node | null, substitute?: (n: Node) => Node | null, offset = 0): Node | null {
     if (n === null) return null;
     if (substitute) {
         const sub = substitute(n);
         if (sub !== null) return sub;
     }
-    const id = n.type;
-    const srcData = payload(n);
-    if (srcData === null) return rebuild(id, n.start, n.end, n.name, n.sym, null);
-    const fields = FIELDS[id];
-    const outData: Record<string, unknown> = { ...srcData };
-    // A CLONE IS A FRESH NODE — it carries no scope association, the same rule `set()` applies to
-    // `sym`. Without this the spread would copy `scopeId` and the clone would claim the ORIGINAL's
-    // scope, which belongs to a different lexical region. It matters: `optimize/unroll.ts` clones a
-    // loop body (a scope-owning `BlockStatement`), and `inline-functions`/`flow-inline` clone bodies
-    // and initialisers. Under the old `Map<Node, number>` a clone simply had no entry, and every
-    // reader fell back to the enclosing scope; resetting to 0 reproduces that exactly.
-    if ('scopeId' in outData) outData.scopeId = 0;
-    for (let i = 0; i < fields.length; i++) {
-        const spec = fields[i];
-        const v = srcData[spec.name];
-        if (spec.list) {
-            const list = v as (Node | null)[];
-            const nl: (Node | null)[] = new Array(list.length);
-            for (let j = 0; j < list.length; j++) nl[j] = cloneNode(list[j] as Node | null, substitute);
-            outData[spec.name] = nl;
-        } else {
-            outData[spec.name] = v == null ? null : cloneNode(v as Node, substitute);
-        }
-    }
-    return rebuild(id, n.start, n.end, n.name, n.sym, outData);
+    const start = n.start < 0 ? n.start : n.start + offset;
+    const end = n.start < 0 ? n.end : n.end + offset;
+    return rebuild(n.type, start, end, n.name, n.sym, n.data === null ? null : cloneData(n, substitute, offset));
 }
 
 function rebuild(type: number, start: number, end: number, name: string, sym: number, data: unknown): Node {
-    return { id: allocId(), type, start, end, name, sym, data } as Node;
+    return { id: allocId(), type, start, end, name, sym, ref: -1, data } as Node;
 }

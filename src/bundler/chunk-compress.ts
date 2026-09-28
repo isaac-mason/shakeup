@@ -22,73 +22,76 @@
 // SO: `dce` stays per module and cached (it feeds the purity analysis tree-shaking depends on); the
 // cosmetic tier runs here instead, once, over the assembled chunk.
 //
-// RE-PARSING, AND WHY — this REVERSES an earlier recorded decision, so it needs its reasons stated.
-//
-// Architecturally it decouples: by the time a chunk is assembled every per-module concern — renames,
-// dropped imports, unwrapped exports, `linked` maps keyed by `(mod, sym)` — is already baked into the
-// text, so the compressor needs none of it. rolldown does the same, and composes the two maps the
-// same way (`minify_chunks.rs` -> `dce_or_minify(source_text)` -> `collapse_sourcemaps`).
-//
-// But "rolldown does it" is NOT sufficient here, and `llm/notes/chunk-level-compress-plan.md` was
-// right to say so: peers decide ORDERING, JavaScript's cost model decides IMPLEMENTATION. That plan
-// chose to concatenate module ASTs instead, on a measured spike where re-parse + re-analyse was 60%
-// of the pass (parse 199ms, analyze 139ms, of 563ms).
-//
-// That premise expired. The parser perf work moved those numbers; measured in situ on the real input
-// (crashcat, 1,176,861b of dce-only chunk text -> 445,872b out, 469.4ms total):
-//
-//     parse 46.9ms (10%)   analyze 33.0ms (7%)   compress 334.7ms (71%)   mangle 24.5ms   print 30.3ms
-//
-// Re-parse + re-analyse is 17%, not 60%, and COMPRESS is now the cost. Concatenating module ASTs
-// would buy back ~80ms of a ~240ms regression and would entangle the compressor with per-module link
-// state to do it. If this is revisited, the target is the 335ms compressor, not the 47ms parse.
+// THE CHUNK AS ONE PROGRAM. Every per-module concern (renames, dropped imports, unwrapped exports, the
+// linker's rewrites) is settled by the module finalizer, and the chunk arrives as one program assembled
+// from the finalized trees (`generate/chunk-program.ts`), so the compressor sees none of the link state.
+// rolldown prints its modules and parses the chunk again to get the same program; building it directly
+// skips that print and parse, and the map points straight at the module sources instead of being composed
+// through the chunk text. Measured on crashcat, the re-parse and module printing were ~60ms of a ~290ms
+// chunk pass.
+import { resolveNoSideEffects } from '../analysis/purity.ts';
 import { analyze, createSemantic } from '../analysis/semantic.ts';
 import type { Node } from '../ast/index.ts';
 import { mangleProgram } from '../mangle/program.ts';
-import { parse } from '../parser/index.ts';
 import { setDropUnusedTopLevel } from '../passes/compress/drop-unused.ts';
-import { runCompress } from '../passes/compress/index.ts';
+import { type CompressMode, runCompress } from '../passes/compress/index.ts';
+import { eliminateDeadCode } from '../passes/dce/compressor.ts';
+import { rolldownChunkDceOptions } from '../passes/dce/options.ts';
 import { printModule } from '../print/print-js.ts';
-import type { PrinterConfig, PrintOptions } from '../print/printer.ts';
+import type { PrinterConfig, PrintOptions, SourceRegion } from '../print/printer.ts';
 import { createPrinter, finishPrinter } from '../print/printer.ts';
 import type { Mappings } from '../util/sourcemap.ts';
-import { buildLineTable, trimMappings } from '../util/sourcemap.ts';
+import { trimMappings } from '../util/sourcemap.ts';
 import { RESERVED } from './deconflict.ts';
 
 export type ChunkCompressResult = { code: string; map: Mappings | null };
 
-/** Compress `code` as one program. `wantMap` produces chunk→compressed mappings for the caller to
- *  compose with the module→chunk mappings it already holds. */
+/** A chunk as one program: the tree, the text its positions and comments index, and the original source each
+ *  position maps to. */
+export type ChunkProgram = {
+    program: Node;
+    src: string;
+    comments: Int32Array;
+    /** Positions of `@__NO_SIDE_EFFECTS__` annotations. */
+    noSideEffectsAt: readonly number[];
+    /** Null when no map is wanted. */
+    sources: SourceRegion[] | null;
+};
+
+/** Compress `chunk` and print it. Its map points wherever `chunk.sources` does. */
 export function compressChunk(
-    code: string,
+    chunk: ChunkProgram,
     opts: PrintOptions,
-    wantMap: boolean,
     mangle: boolean,
-    /** Run the cosmetic compress tier. False for `{ mangle: true, compress: false }`, which still
-     *  needs this pass — mangling has nowhere else to run now that link-time mangling is gone. */
-    compress: boolean,
-    /** Which comment classes to keep. The chunk arriving here ALREADY carries the comments the
-     *  module printer emitted, so re-printing must be told to keep them or minification silently
-     *  strips the licences it exists to preserve. */
+    /** The compress tier to run: `'full'`, or `'dce'` for dead code only (rolldown's `dce-only` chunk pass). False for
+     *  `{ mangle: true, compress: false }`, which still needs this pass — mangling has nowhere else to run now that
+     *  link-time mangling is gone. */
+    compress: CompressMode | false,
+    /** Which comment classes to keep; minification must not strip the licences this exists to preserve. */
     comments: { legal: boolean; jsdoc: boolean },
 ): ChunkCompressResult {
-    // The chunk is emitted JavaScript in module goal — never TS, never JSX by this stage.
-    const parsed = parse(code, { ts: false, jsx: false, kind: 'module' });
-    // A chunk we just emitted must parse; if it does not, that is a printer bug and the right move is
-    // to surface the original rather than silently ship a half-compressed chunk.
-    if (parsed.errors !== undefined && parsed.errors.length > 0) return { code, map: null };
+    const program = chunk.program;
     const semantic = createSemantic();
-    analyze(semantic, parsed.program);
+    analyze(semantic, program);
     // TOP-LEVEL drop-unused, enabled HERE and nowhere else. Per-module, `drop-unused` must not touch
     // module-scope bindings because treeshake has not run yet and another module may still reach
     // them. In this chunk it HAS run, the chunk is one closed program, and nothing downstream will
     // remove a top-level binding again — so the declarations that cross-module constant folding
     // strands (`let t=20,n="x",e=()=>21`, where rolldown emits just `const out=()=>21`) would
     // otherwise ship. Worth 243 raw / 146 brotli on crashcat, all of it provably dead.
-    if (compress) {
+    if (compress === 'dce') {
+        // rolldown's `dce-only` chunk pass: oxc's tree-shake-only compressor over the chunk as one program
+        eliminateDeadCode(
+            program,
+            semantic,
+            rolldownChunkDceOptions(),
+            'module',
+            resolveNoSideEffects(program, chunk.noSideEffectsAt),
+        );
+    } else if (compress !== false) {
         setDropUnusedTopLevel(true);
         try {
-            runCompress(parsed.program, semantic, 'full');
+            runCompress(program, semantic, compress);
         } finally {
             // Restored even if compress throws: the flag is module state shared with the per-module
             // pass, and leaking it there would let a top-level binding be dropped before treeshake
@@ -105,20 +108,23 @@ export function compressChunk(
     // `true` opts into the per-symbol scope pairs, the way oxc's mangler build opts into
     // `with_build_nodes`/`with_class_table` that the compressor's build omits. The ~97 per-module
     // analyses stay on the cheap path.
-    const mangleSemantic = createSemantic(true);
-    analyze(mangleSemantic, parsed.program);
     // MANGLE LAST, after the compressor has finished deleting things — otherwise short names are
-    // spent on bindings that do not survive. See `mangle/program.ts`.
-    const names = mangle ? mangleProgram(parsed.program, mangleSemantic, new Set(RESERVED)) : null;
-    const cfg: PrinterConfig = wantMap ? { srcLines: Uint32Array.from(buildLineTable(code)), sourceIdx: 0 } : {};
-    // One coordinate space here, unlike the per-module printer: the chunk is a single text, and
-    // `parsed.comments` indexes exactly it.
-    cfg.comments = parsed.comments;
-    cfg.src = code;
-    cfg.commentOpts = comments;
+    // spent on bindings that do not survive. See `mangle/program.ts`. No mangler, no second build: oxc's
+    // `dce` has `mangle: None` and never builds one.
+    let names: Map<number, string> | null = null;
+    if (mangle) {
+        const mangleSemantic = createSemantic(true);
+        analyze(mangleSemantic, program);
+        names = mangleProgram(program, mangleSemantic, new Set(RESERVED));
+    }
+    const cfg: PrinterConfig = chunk.sources === null ? {} : { sources: chunk.sources };
+    cfg.comments = chunk.comments;
+    cfg.src = chunk.src;
+    // ordinary comments too, unless minifying: rolldown's `minify_chunks` codegen, `normal: !remove_whitespace`
+    cfg.commentOpts = { ...comments, normal: !opts.minify };
     if (names !== null) cfg.nameOf = (idNode: Node) => (idNode.sym === 0 ? idNode.name : (names.get(idNode.sym) ?? idNode.name));
     const printer = createPrinter(opts, cfg);
-    printModule(printer, parsed.program);
+    printModule(printer, program);
     const raw = finishPrinter(printer);
     // `trimMappings` drops the printer's trailing newline AND the mapping line that goes with it —
     // without it the composed map claims one more generated line than the chunk has, which shifts

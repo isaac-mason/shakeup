@@ -5,20 +5,12 @@
 // than beside either, because this is the only caller and the pipeline reads top-down from it.
 
 import type { CompressMode } from '../../passes/compress/index.ts';
-import {
-    composeMappings,
-    encodeMappings,
-    inlineSourceMapComment,
-    joinParts,
-    type Part,
-    type SourceMap,
-} from '../../util/sourcemap.ts';
+import { encodeMappings, inlineSourceMapComment, joinParts, type Part, type SourceMap } from '../../util/sourcemap.ts';
 import type { OutputAsset, OutputChunk } from '../bundle.ts';
 import { compressChunk } from '../chunk-compress.ts';
 import type { Chunk, ChunkGraph } from '../chunk-graph.ts';
 import { basenameOf, dirnameOf, relativePath } from '../fs.ts';
 import type { Linked } from '../graph-types.ts';
-import type { RenderedChunkInfo } from '../plugin.ts';
 import {
     DEFAULT_HASH_SIZE,
     effectiveComments,
@@ -33,6 +25,8 @@ import {
     replacePlaceholdersWithDefaultAndGetContainedPlaceholders,
     replaceSinglePlaceholder,
 } from '../output-options.ts';
+import type { RenderedChunkInfo } from '../plugin.ts';
+import { assembleChunkProgram } from './chunk-program.ts';
 import type { ModuleReuse, PreliminaryFileName, RenderCtx, RenderedChunk, RenderStats } from './context.ts';
 import { renderEsm } from './esm.ts';
 import { renderModules } from './modules.ts';
@@ -162,6 +156,20 @@ export function hashLiveSet(set: Set<number>): number {
     return (Math.imul(h, 31) + set.size) | 0;
 }
 
+/** Signature of the values another module's source decided for this one: the enum members and
+ *  constants its reads print as. A clean module whose producer changed one of them must re-render,
+ *  and nothing else about it changed. */
+export function hashInlinedValues(linked: Linked, idx: number): number {
+    let h = 5381;
+    const fold = (text: string): void => {
+        for (let i = 0; i < text.length; i++) h = (Math.imul(h, 33) ^ text.charCodeAt(i)) | 0;
+    };
+    for (const text of linked.enumInlines.get(idx)?.values() ?? []) fold(text);
+    for (const value of linked.constInlines.get(idx)?.values() ?? [])
+        fold(value.kind === 'undefined' || value.kind === 'null' ? value.kind : `${value.kind}:${String(value.value)}`);
+    return h;
+}
+
 /** Order-independent signature of every final name rendered this build (module locals, namespace
  *  objects, external import locals). Equal signatures ⇒ no name shifted, so any clean module's
  *  referenced names are stable and its cached text is reusable. */
@@ -254,8 +262,8 @@ export async function renderChunks(
     render: ChunkRenderer,
     moduleIdOf: (i: number) => string,
     moduleIdsOf: (c: Chunk) => string[],
-    /** Resolved compress mode. `'full'` runs the cosmetic tier over each assembled chunk. */
-    compressMode: CompressMode | false,
+    /** What compresses each assembled chunk: `'full'`, `'dce'` (dead code only), or nothing. */
+    chunkCompress: CompressMode | false,
     /** Mangle inside the chunk pass — set when link-time mangling was skipped so this can run last. */
     chunkMangle: boolean,
     inc?: RenderIncremental,
@@ -307,7 +315,12 @@ export async function renderChunks(
     const rendered: RenderedChunk[] = [];
     for (let i = 0; i < chunks.length; i++) {
         const chunk = chunks[i];
-        const sig = inc !== undefined ? chunkSignature(chunk, keyOf) : '';
+        // Each member's render key too: a member prints values decided in modules outside the chunk
+        // (inlined constants and enum members), and its own source changing is not the only way they move.
+        const sig =
+            inc !== undefined
+                ? `${chunkSignature(chunk, keyOf)}|${chunk.modules.map((idx) => inc.mod.liveHash[idx]).join(',')}`
+                : '';
         const cached = inc !== undefined && dirtyChunk !== null && !dirtyChunk[i] ? inc.cache.get(keyOf[i]) : undefined;
         if (inc !== undefined && cached !== undefined && cached.signature === sig) {
             rendered.push({
@@ -316,6 +329,7 @@ export async function renderChunks(
                 prelim: prelim[i],
                 code: fromMarkers(cached.code, placeholderByKey),
                 parts: cached.parts,
+                pieces: null,
                 mapSources: cached.mapSources,
                 mapSourcesContent: cached.mapSourcesContent,
                 name: cached.name,
@@ -338,22 +352,20 @@ export async function renderChunks(
         // from content, so compressing after would invalidate every hash).
         // Also runs for `{ mangle: true, compress: false }`: link-time mangling is gone, so this pass
         // is the only place a mangler runs at all.
-        if (compressMode === 'full' || chunkMangle) {
-            const joined = wantMap ? joinParts(rc.parts) : null;
+        if (rc.pieces !== null) {
+            // The chunk as one program, built from the modules' finalized trees: no print and parse in
+            // between, and a map that points straight at the module sources.
             const done = compressChunk(
-                rc.code,
+                assembleChunkProgram(rc.pieces, wantMap),
                 { minify: naming.minify },
-                wantMap,
                 chunkMangle,
-                compressMode === 'full',
+                chunkCompress,
                 effectiveComments(naming.comments, naming.minify),
             );
-            rc.code = done.code;
-            // One part carrying the composed mapping: module→chunk (`joined`) then chunk→compressed
-            // (`done.map`). `rc.parts` described the pre-compress text and is now meaningless.
-            if (wantMap && joined !== null && done.map !== null) {
-                rc.parts = [{ code: done.code, map: composeMappings(joined.map, done.map) }];
-            }
+            // Unminified, the chunk ends on a newline, as rolldown's `dce-only` reprint does.
+            rc.code = naming.minify ? done.code : `${done.code}\n`;
+            rc.parts = done.map === null ? [{ code: done.code }] : [{ code: done.code, map: done.map }];
+            rc.pieces = null;
         }
         if (inc !== undefined) {
             inc.cache.set(keyOf[i], {

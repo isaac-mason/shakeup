@@ -128,7 +128,7 @@ describe('G-JSX-5: shake interplay', () => {
             }),
             external: ['react/jsx-runtime', 'react'],
         });
-        expect(r.chunks[0].code).toMatch(/import \{ useState \} from 'react'/);
+        expect(r.chunks[0].code).toMatch(/import \{ useState \} from "react"/);
         expect(r.chunks[0].code).not.toMatch(/from ['"]react\/jsx-runtime['"]/);
     });
 

@@ -2,8 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { bundle, createMemoryFs } from '../src/index.ts';
 import { exportShape, runModule } from './exec-helpers.ts';
 
+// `treeshake: false` as well, so no dead-code pass runs and what is left is exactly what SROA did
 const build = async (src: string) =>
-    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), output: { minify: { compress: false } } })).chunks[0].code;
+    (await bundle({ input: '/m.js', fs: createMemoryFs({ '/m.js': src }), treeshake: false, output: { minify: { compress: false } } })).chunks[0].code;
 
 /** The SROA'd build must compute exactly what the un-annotated build computes. */
 const parity = async (src: string) => {
@@ -117,7 +118,7 @@ describe('sroa (@sroa)', () => {
 
 describe('sroa — typed shapes (in-file)', () => {
     const buildTs = async (src: string) =>
-        (await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), output: { minify: { compress: false } } })).chunks[0].code;
+        (await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), treeshake: false, output: { minify: { compress: false } } })).chunks[0].code;
 
     const parityTs = async (src: string) => {
         const on = await buildTs(src);

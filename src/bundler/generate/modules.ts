@@ -7,14 +7,17 @@
 // printing are one unit. That is deliberate: the module AST is reused across builds through
 // `options.cache`, and mutating it during render would poison the next build.
 import { SYM, symbolOf } from '../../analysis/semantic.ts';
-import { N, type Node, walk, walkChildren } from '../../ast/index.ts';
+import { N, type Node, node, walk, walkChildren } from '../../ast/index.ts';
+import { CommentKind, classifyComment, commentAttachedTo, commentCount } from '../../parser/comments.ts';
 import { lazySplit } from '../../passes/lazy-split.ts';
 import { interopNamespace, materialiseLiveBody, wrapModuleBody } from '../../passes/wrap-module.ts';
+import { constantText } from '../../print/print-constant.ts';
 import { printModule } from '../../print/print-js.ts';
-import { createPrinter, finishPrinter } from '../../print/printer.ts';
+import { type CommentPrintOptions, createPrinter, finishPrinter, keepsComment } from '../../print/printer.ts';
 import type { Mappings } from '../../util/sourcemap.ts';
 import { buildLineTable, type Part, trimMappings } from '../../util/sourcemap.ts';
 import type { Chunk } from '../chunk-graph.ts';
+import { safeConstantOf } from '../const-inlines.ts';
 import {
     emittedSpecifier,
     type Graph,
@@ -22,6 +25,7 @@ import {
     type ImportRecord,
     isEsmFormat,
     type Linked,
+    type Module,
     packRef,
     refMod,
     refSym,
@@ -30,10 +34,11 @@ import { initRefForRecord, recordIsInitObligation } from '../init-obligations.ts
 import { finalNameOf, namespaceLocals } from '../link.ts';
 import { effectiveComments, type RenderedModule } from '../output-options.ts';
 import { isRequireCall } from '../scan.ts';
+import type { ChunkPiece } from './chunk-program.ts';
 import {
     clauseSep,
-    emitsNamespaceObject,
     type EmitCtx,
+    emitsNamespaceObject,
     isIdentName,
     type ModuleReuse,
     nameOfBind,
@@ -41,6 +46,7 @@ import {
     type RenderedModules,
 } from './context.ts';
 import { freeRequireRefs } from './esm.ts';
+import { type FinalizeRules, finalizeStatements } from './finalize.ts';
 
 /** Final output name for an Ident node's symbol, or null if unchanged. */
 function renameOf(ctx: EmitCtx, identNode: Node): string | null {
@@ -214,7 +220,15 @@ function collectInitCalls(ctx: EmitCtx): Map<Node, string> {
  *  string otherwise). */
 function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     const { mod, chunkGraph } = ctx;
-    const map = new Map<Node, string>();
+    /** {@link Linked.enumInlines} for this module — the enum reads decided at LINK. `Kind.DYNAMIC` ->
+     *  `2`: TypeScript treats an enum member access as a constant and the other bundlers inline it —
+     *  rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not only a `const enum`, keeping the object
+     *  for whatever else still reads it. Every one is an override, and takes precedence over the rules
+     *  below. Looked up, not recomputed: it is the SAME map treeshake consulted to decide these reads
+     *  are not references to the enum; deciding it twice is how the object ends up dropped while a read
+     *  of it survives. */
+    const enumInlined = ctx.linked.enumInlines.get(mod.idx);
+    const map = new Map<Node, string>(enumInlined ?? []);
     // `import * as ns` bindings in THIS module whose `ns.foo` reads name the member's own binding
     // instead of going through the object. Built first because it has its own reason to walk — a
     // module can have namespace imports and no `import()` at all.
@@ -227,21 +241,12 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
     if (ctx.rewrittenNs.size > 0)
         for (const [localSym, target] of namespaceLocals(mod, ctx.linked))
             if (ctx.rewrittenNs.has(target)) elidedNs.set(localSym, target);
-    // Only `import()` and `new URL(...)` produce the OTHER overrides, and the scan already recorded
+    // Only `import()` and `new URL(...)` produce the other overrides, and the scan already recorded
     // both as import records — so a module with neither, and no elided namespace, cannot contribute
     // one and the whole-program walk is skipped. Checking is O(records).
-    // The walk also has to run for a module that merely READS an enum member, which no import record
-    // announces — so `hasEnumReads` is the module's own table plus "imports anything at all", the
-    // cheap over-approximation. A JS module with no imports still skips it.
-    const hasEnumReads = mod.enumConsts.size > 0 || mod.namedImports.size > 0;
-    if (
-        elidedNs.size === 0 &&
-        !hasEnumReads &&
-        !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral)
-    )
+    if (elidedNs.size === 0 && !mod.importRecords.some((r) => r.kind === 'dynamic' || r.kind === 'new-url' || r.hasDynamicLiteral))
         return map;
-    /** {@link Linked.enumInlines} for this module — the enum reads decided at LINK. */
-    const enumInlined = ctx.linked.enumInlines.get(mod.idx);
+    const constants = ctx.linked.constInlines.get(mod.idx);
     /** Member expressions standing in an assignment TARGET. `ns.foo = 1` is not a read: ESM renders
      *  a live member as a getter with no setter, so it must stay an assignment TO THE OBJECT and
      *  throw. Rewriting it to `foo = 1` would silently assign the producer's binding instead.
@@ -265,18 +270,11 @@ function collectLinkOverrides(ctx: EmitCtx): Map<Node, string> {
         if (n.type === N.AssignmentExpression) markTarget(n.data.left);
         else if (n.type === N.UpdateExpression) markTarget(n.data.argument);
         else if (n.type === N.ForInStatement || n.type === N.ForOfStatement) markTarget(n.data.left);
-        // `Kind.DYNAMIC` -> `2`. TypeScript treats an enum member access as a constant and the other
-        // bundlers inline it — rolldown emits `0` for `Kind.STATIC` on a PLAIN enum, not only a
-        // `const enum`, keeping the object for whatever else still reads it.
-        //
-        // Looked up, not recomputed. `linked.enumInlines` is the SAME map treeshake consulted to
-        // decide these reads are not references to the enum; deciding it twice is how the object
-        // ends up dropped while a read of it survives.
-        const lit = enumInlined?.get(n);
-        if (lit !== undefined) {
-            map.set(n, lit);
-            return;
-        }
+        // An enum read, already in the map.
+        if (enumInlined?.has(n) === true) return;
+        // Printed as its constant value by the printer (`Linked.constInlines`), which nothing here may
+        // pre-empt with a name.
+        if (constants?.has(n) === true) return;
         if (
             elidedNs.size > 0 &&
             n.type === N.StaticMemberExpression &&
@@ -452,9 +450,11 @@ function renderNamespaceObject(
             // Narrowed target: emit only the members its consumers read (tree-shake seeded exactly
             // these live). Absent set → whole surface (target escaped / entry / dynamic).
             if (nsMembers !== undefined && !nsMembers.has(name)) continue;
-            const value = nameOfBind(linked, bind, chunk);
-            if (value === null) continue;
             const key = isIdentName(name) ? name : JSON.stringify(name);
+            // A small constant's member reads its value, as rolldown's finalizer prints the getter.
+            const constant = bind.kind === 'found' ? safeConstantOf(linked, bind.ref) : undefined;
+            const value = constant !== undefined ? constantText(constant, tight) : nameOfBind(linked, bind, chunk);
+            if (value === null) continue;
             // An ESM namespace exposes LIVE bindings: `ns.v` must re-read the local, so an
             // `export let v` reassigned after the namespace is built is visible through it. A flat
             // `v: v` snapshots the initial value and silently miscompiles (`ns.bump(); ns.v` read 1
@@ -555,6 +555,35 @@ function renderNamespaceObject(
     return tight ? `${decl}${nsName}=${value};` : `${decl}${nsName} = ${value};`;
 }
 
+/** Whether `statements` print as nothing at all: none, and no comment of `mod`'s that would print
+ *  without an anchor (a licence, or one at the end of the module). */
+function rendersNothing(mod: Module, statements: Node[], options: CommentPrintOptions): boolean {
+    if (statements.length > 0) return false;
+    const comments = mod.comments;
+    for (let index = 0; index < commentCount(comments); index++) {
+        const kind = classifyComment(mod.source, comments, index);
+        if (!keepsComment(options, kind)) continue;
+        if (kind === CommentKind.Legal || commentAttachedTo(comments, index) === mod.program.end) return false;
+    }
+    return true;
+}
+
+/** `OutputChunk.modules[id]` whose code is printed on first read, as rolldown's is. */
+function lazyRenderedModule(printCode: () => string, renderedExports: string[]): RenderedModule {
+    let code: string | null = null;
+    return {
+        get code() {
+            code ??= printCode();
+            return code;
+        },
+        get renderedLength() {
+            code ??= printCode();
+            return code.length;
+        },
+        renderedExports,
+    };
+}
+
 /** Render every module of one chunk to text, in that chunk's perspective.
  *
  *  This is where the collect-then-print pairing lives, and it CANNOT be lifted out the way rolldown
@@ -570,6 +599,8 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
     /** The chunk's module region, as parts. ONE list, not a `string[]` beside a `Part[]` — see the
      *  assembly at the end of this function for why that pairing is a defect generator. */
     const moduleParts: Part[] = [];
+    /** The modules as trees, when the chunk pass assembles the chunk as one program. */
+    const pieces: ChunkPiece[] | null = ctx.chunkProgram ? [] : null;
     const mapSources: string[] = [];
     const mapSourcesContent: string[] = [];
     /** `OutputChunk.modules`. Insertion order is `chunk.modules` order, which is emit order, which is
@@ -645,168 +676,150 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         const live = shaken === null ? null : shaken.live[idx];
         // Index this module will occupy in `mapSources` if it emits anything.
         const srcIdx = mapSources.length;
-        let out: string;
-        let mapPart: Part | null = null;
+        // Named `emit`, not `ctx`: the enclosing function's parameter is the per-CHUNK
+        // `RenderCtx`, and the two share six field names. A shadow here would resolve silently.
+        const emit: EmitCtx = {
+            linked,
+            mod,
+            warnings,
+            live,
+            chunk,
+            chunkGraph,
+            pathToChunk,
+            interopOwners,
+            elidableNs: ctx.elidedNs,
+            context: ctx.context,
+            rewrittenNs: ctx.rewrittenNs,
+        };
+        trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);
+        const overrides = collectLinkOverrides(emit);
+        const initCalls = collectInitCalls(emit);
+        collectRequireOverrides(emit, overrides);
+        const renameCache: (string | null | undefined)[] = [];
+        const rules: FinalizeRules = {
+            // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
+            // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
+            // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
+            // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
+            // collapses that to one. Correct per module render because the answer depends on
+            // `emit.chunk`.
+            nameOf: (idNode: Node) => {
+                const sym = idNode.sym;
+                if (sym === 0) return idNode.name; // unresolved: the name varies per node
+                const hit = renameCache[sym];
+                if (hit !== undefined) return hit ?? idNode.name;
+                const v = renameOf(emit, idNode) ?? null;
+                renameCache[sym] = v;
+                return v ?? idNode.name;
+            },
+            live,
+            initCalls,
+            overrides,
+            constants: linked.constInlines.get(idx) ?? null,
+            defaultName: () => {
+                const ref = linked.defaultRefs.get(mod.idx);
+                return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
+            },
+            keepNames: naming.keepNames === true,
+            offset: 0,
+        };
+        const commentOptions = effectiveComments(naming.comments, deferMinify ? false : naming.minify);
+        const finalize = (body: Node[], bodyLive: typeof live): Node[] => finalizeStatements(body, { ...rules, live: bodyLive });
+        const print = (statements: Node[]): { code: string; map: Mappings | null } => {
+            const pr = createPrinter(
+                { minify: deferMinify ? false : naming.minify, keepNames: naming.keepNames },
+                {
+                    sources: wantMap
+                        ? [{ start: 0, lines: Uint32Array.from(buildLineTable(mod.source)), sourceIdx: srcIdx }]
+                        : undefined,
+                    // Per MODULE: a comment's offsets index this module's own source.
+                    comments: mod.comments,
+                    src: mod.source,
+                    commentOpts: commentOptions,
+                },
+            );
+            printModule(pr, node(N.Program, mod.program.start, mod.program.end, '', { body: statements, scopeId: 0 }));
+            if (!wantMap) return { code: finishPrinter(pr).trim(), map: null };
+            const code = trimMappings(finishPrinter(pr), pr.map!);
+            return { code, map: pr.map! };
+        };
+        const moduleBody = (mod.program.data as { body: Node[] }).body;
+        // What the module renders as: `primaryBody` finalized under `primaryLive`, then its namespace object.
+        let primaryBody = moduleBody;
+        let primaryLive: typeof live = live;
         // Set only for a module needing the declaration/initializer split — see §7.25.
         let splitRender: ReturnType<typeof lazySplit> | null = null;
-        let splitMapParts: Part[] | null = null;
-        // Hoisted out of the printer block below so the `__esm` wrappers further down can render AST
-        // rather than splice text. Assigned exactly once, immediately.
-        let renderStmts: ((body: Node[], liveOverride?: Set<number> | null) => { code: string; map: Mappings | null }) | null =
-            null;
-        // Printer backend (minify and non-minify): generate every token from the AST, in link mode
-        // (drop imports, unwrap exports, shake dead statements, apply renames + node rewrites).
-        // `minify` only toggles whitespace/syntactic form — the link-mode rewrites are identical.
-        {
-            // Named `emit`, not `ctx`: the enclosing function's parameter is the per-CHUNK
-            // `RenderCtx`, and the two share six field names. A shadow here would resolve silently.
-            const emit: EmitCtx = {
-                linked,
-                mod,
-                warnings,
-                live,
-                chunk,
-                chunkGraph,
-                pathToChunk,
-                interopOwners,
-                elidableNs: ctx.elidedNs,
-                context: ctx.context,
-                rewrittenNs: ctx.rewrittenNs,
-            };
-            trackChunkSpecs(emit, mod.isEntry, entryStarSpecs, sideEffectSpecs);
-            const overrides = collectLinkOverrides(emit);
-            const initCalls = collectInitCalls(emit);
-            collectRequireOverrides(emit, overrides);
-            const renameCache: (string | null | undefined)[] = [];
-            // A FACTORY, not a single printer: a module that needs the declaration/initializer split
-            // (cjs.md §7.25) is printed as two regions — hoisted bindings and function declarations
-            // at top level, then the initializers inside the `__esm` closure — and each region needs
-            // its own printer. Everything else makes exactly one.
-            const makePrinter = (liveOverride: typeof live = live) =>
-                createPrinter(
-                    { minify: deferMinify ? false : naming.minify, keepNames: naming.keepNames },
-                    {
-                        // Memoised per SYMBOL, not per occurrence. `renameOf` does two Map lookups
-                        // (`namedImports`, then `finalNames` under a packed key), and a symbol is emitted
-                        // many times — ~94k references over ~7.3k symbols on crashcat, so roughly 13
-                        // identical lookups per symbol. Symbol ids are dense, so an array indexed by id
-                        // collapses that to one. Correct per printer because the answer depends on
-                        // `emit.chunk`, and a printer is created per module PER CHUNK render.
-                        nameOf: (idNode: Node) => {
-                            const sym = idNode.sym;
-                            if (sym === 0) return idNode.name; // unresolved: the name varies per node
-                            const hit = renameCache[sym];
-                            if (hit !== undefined) return hit ?? idNode.name;
-                            const v = renameOf(emit, idNode) ?? null;
-                            renameCache[sym] = v;
-                            return v ?? idNode.name;
-                        },
-                        linkModule: true,
-                        defaultName: () => {
-                            const ref = linked.defaultRefs.get(mod.idx);
-                            return ref !== undefined ? (finalNameOf(linked, ref) ?? `${mod.idx}_default`) : `${mod.idx}_default`;
-                        },
-                        live: liveOverride,
-                        overrides,
-                        initCalls,
-                        srcLines: wantMap ? Uint32Array.from(buildLineTable(mod.source)) : undefined,
-                        // Per MODULE: a comment's offsets index this module's own source, and a chunk
-                        // concatenates many, so the join cannot be hoisted to the chunk.
-                        comments: mod.comments,
-                        src: mod.source,
-                        commentOpts: effectiveComments(naming.comments, deferMinify ? false : naming.minify),
-                        sourceIdx: srcIdx,
-                    },
-                );
-            const renderBody = (body: Node[], liveOverride: typeof live = live): { code: string; map: Mappings | null } => {
-                const pr = makePrinter(liveOverride);
-                const prog =
-                    body === (mod.program.data as { body: Node[] }).body
-                        ? mod.program
-                        : ({ ...mod.program, data: { ...(mod.program.data as object), body } } as Node);
-                printModule(pr, prog);
-                if (!wantMap) return { code: finishPrinter(pr).trim(), map: null };
-                const code = trimMappings(finishPrinter(pr), pr.map!);
-                return { code, map: pr.map! };
-            };
-            renderStmts = renderBody;
-            const whole = renderBody((mod.program.data as { body: Node[] }).body);
-            out = whole.code;
-            if (wantMap) mapPart = { code: out, map: whole.map! };
-            if (linked.esmInitSplit.has(idx)) {
-                const dref = linked.defaultRefs.get(idx);
-                // Split the LIVE statements only, then render with shaking OFF. The statements the
-                // split synthesizes (`var a, b;`, `a = 1`) are new nodes with fresh ids, so a `live`
-                // set built from the original program would drop every one of them — which is
-                // exactly what happened: the hoisted bindings and all the initializers vanished.
-                const all = (mod.program.data as { body: Node[] }).body;
-                const liveBody = live === null ? all : all.filter((st) => live.has(st.id));
-                splitRender = lazySplit(liveBody, dref === undefined ? undefined : (finalNameOf(linked, dref) ?? undefined));
+        if (linked.esmInitSplit.has(idx)) {
+            const dref = linked.defaultRefs.get(idx);
+            // Split the LIVE statements only, then render with shaking OFF. The statements the
+            // split synthesizes (`var a, b;`, `a = 1`) are new nodes with fresh ids, so a `live`
+            // set built from the original program would drop every one of them — which is
+            // exactly what happened: the hoisted bindings and all the initializers vanished.
+            const liveBody = live === null ? moduleBody : moduleBody.filter((st) => live.has(st.id));
+            splitRender = lazySplit(liveBody, dref === undefined ? undefined : (finalNameOf(linked, dref) ?? undefined));
+        }
+        // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
+        // MINIMAL — bound only when the body references them. `/* @__PURE__ */` lets an unused
+        // wrapper be dropped entirely.
+        const wrapRef = linked.cjsWrap.get(idx);
+        if (wrapRef !== undefined) {
+            const wrapName = finalNameOf(linked, wrapRef);
+            // rolldown's rule exactly (`ast_factory.rs:759-786`): push `exports` when the module
+            // references EITHER binding (`ModuleOrExports`), push `module` only when it references
+            // `module` (`ModuleRef`). A module touching neither gets NO parameter list. We used to
+            // emit `exports` unconditionally — the comment above claimed to be following rolldown and
+            // described behaviour it does not have.
+            const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
+            // Top-level `this` counts as referencing `exports`: in CommonJS `this === module.exports`,
+            // and `bundle.ts:323` rewrites every top-level `this` to `exports` — so a module that only
+            // ever says `this` still needs the parameter bound. rolldown folds the same case into
+            // `ModuleOrExports`. Missing it emitted a closure with no `exports` param whose body
+            // referenced `exports`, which the CJS `this` tests caught immediately.
+            const usesModule = uses.has('module');
+            const usesExports = uses.has('exports') || mod.topLevelThis.length > 0;
+            const params = usesModule ? ['exports', 'module'] : usesExports ? ['exports'] : [];
+            // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
+            // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
+            // in its pipeline. Building it here means the mappings fall out of printing instead of
+            // being patched up afterwards to account for the added header line and indent, which
+            // is what used to desynchronize the whole chunk's map when it was missed.
+            //
+            // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
+            // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
+            // body is not top level.
+            const wrapped: Node[] = [
+                wrapModuleBody({
+                    name: wrapName,
+                    helper: '__commonJS',
+                    params,
+                    body: materialiseLiveBody((mod.program.data as { body: Node[] }).body, live),
+                    pure: true,
+                }),
+            ];
+            for (const [map, nodeMode] of [
+                [linked.cjsNamespace, false],
+                [linked.cjsNamespaceNode, true],
+            ] as const) {
+                const nsRef = map.get(idx);
+                if (nsRef === undefined) continue;
+                // UNLESS AN IMPORT STATEMENT OWNS IT. `import b from './b.cjs'` evaluates the
+                // module at that statement, so when one exists the decl is emitted there instead
+                // (`collectInitCalls`) and putting a second one here would both redeclare the
+                // binding and run the wrapper early. Only a module reached solely through
+                // `require()` — which sequences its own init — still declares it beside the
+                // wrapper, which is where it has always been.
+                if (interopOwners.has(nsRef)) continue;
+                wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
             }
-            // A wrapped CommonJS module becomes a closure instead of top-level statements. Params are
-            // MINIMAL — bound only when the body references them. `/* @__PURE__ */` lets an unused
-            // wrapper be dropped entirely.
-            const wrapRef = linked.cjsWrap.get(idx);
-            if (wrapRef !== undefined) {
-                const wrapName = finalNameOf(linked, wrapRef);
-                // rolldown's rule exactly (`ast_factory.rs:759-786`): push `exports` when the module
-                // references EITHER binding (`ModuleOrExports`), push `module` only when it references
-                // `module` (`ModuleRef`). A module touching neither gets NO parameter list. We used to
-                // emit `exports` unconditionally — the comment above claimed to be following rolldown and
-                // described behaviour it does not have.
-                const uses = new Set(mod.semantic.unresolved.map((n) => n.name));
-                // Top-level `this` counts as referencing `exports`: in CommonJS `this === module.exports`,
-                // and `bundle.ts:323` rewrites every top-level `this` to `exports` — so a module that only
-                // ever says `this` still needs the parameter bound. rolldown folds the same case into
-                // `ModuleOrExports`. Missing it emitted a closure with no `exports` param whose body
-                // referenced `exports`, which the CJS `this` tests caught immediately.
-                const usesModule = uses.has('module');
-                const usesExports = uses.has('exports') || mod.topLevelThis.length > 0;
-                const params = usesModule ? ['exports', 'module'] : usesExports ? ['exports'] : [];
-                // AST, NOT a text splice. rolldown builds this with `new_commonjs_wrapper_stmt`
-                // (`ast_factory.rs:741`), moving `program.body` into the closure — there is no text stage
-                // in its pipeline. Building it here means the mappings fall out of printing instead of
-                // being patched up afterwards to account for the added header line and indent, which
-                // is what used to desynchronize the whole chunk's map when it was missed.
-                //
-                // The body is materialised (statements + declarators filtered by `live`) BEFORE wrapping
-                // and then rendered with shaking off: `live` is keyed by TOP-LEVEL node id, and a closure
-                // body is not top level.
-                const wrapped: Node[] = [
-                    wrapModuleBody({
-                        name: wrapName,
-                        helper: '__commonJS',
-                        params,
-                        body: materialiseLiveBody((mod.program.data as { body: Node[] }).body, live),
-                        pure: true,
-                    }),
-                ];
-                for (const [map, nodeMode] of [
-                    [linked.cjsNamespace, false],
-                    [linked.cjsNamespaceNode, true],
-                ] as const) {
-                    const nsRef = map.get(idx);
-                    if (nsRef === undefined) continue;
-                    // UNLESS AN IMPORT STATEMENT OWNS IT. `import b from './b.cjs'` evaluates the
-                    // module at that statement, so when one exists the decl is emitted there instead
-                    // (`collectInitCalls`) and putting a second one here would both redeclare the
-                    // binding and run the wrapper early. Only a module reached solely through
-                    // `require()` — which sequences its own init — still declares it beside the
-                    // wrapper, which is where it has always been.
-                    if (interopOwners.has(nsRef)) continue;
-                    wrapped.push(interopNamespace(finalNameOf(linked, nsRef), wrapName, nodeMode));
-                }
-                const rendered = renderBody(wrapped, null);
-                out = rendered.code;
-                if (wantMap) mapPart = { code: out, map: rendered.map! };
-                // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
-                // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
-                //
-                // The second argument is rolldown's `isNodeMode` (D4): an importer that is ESM BY FILE
-                // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
-                // hands back the whole `module.exports` as `default` — what Node actually does. A module
-                // imported both ways gets both objects; they are genuinely different values.
-            }
+            primaryBody = wrapped;
+            primaryLive = null;
+            // The interop namespace is materialized ONCE per (module, isNodeMode), right after its
+            // wrapper, and every consumer reads members off it (`nameOfBind`'s `cjs-member`).
+            //
+            // The second argument is rolldown's `isNodeMode` (D4): an importer that is ESM BY FILE
+            // FORMAT gets `__toESM(require_d(), 1)`, which skips the `__esModule` check entirely and
+            // hands back the whole `module.exports` as `default` — what Node actually does. A module
+            // imported both ways gets both objects; they are genuinely different values.
         }
         const lazyRef = linked.esmInit.get(idx);
         let nsCode: string | null = null;
@@ -824,7 +837,6 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                 lazyRef !== undefined && !linked.esmInitSplit.has(idx),
                 linked.esmInitSplit.has(idx),
             );
-            out += `\n${nsCode}`;
         }
         // LAZY INIT — an ESM module reached only through `require()` (§7.20/D1). Its whole body,
         // initializers move inside an `__esm` closure so they evaluate at the require CALL, while the
@@ -834,46 +846,62 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         // The namespace object stays OUTSIDE and is built from those hoisted bindings, so it must
         // use accessors — a value snapshot taken here would capture `undefined`, since nothing has
         // been assigned until `init` runs.
-        if (lazyRef !== undefined && out !== '') {
+        let primary = finalize(primaryBody, primaryLive);
+        if (lazyRef !== undefined && splitRender !== null && (!rendersNothing(mod, primary, commentOptions) || nsCode !== null)) {
+            // AST, not a text splice — same reason as the CommonJS wrapper above. `lazySplit`
+            // already hands back STATEMENT ARRAYS, so the hoisted bindings, the kept function
+            // declarations and the closure render as one body.
+            //
+            // NO eager `init()` call at the module's own slot. `link.ts` sets `esmInitSplit`
+            // only for require-ONLY targets, and the whole point of the lazy form is that such
+            // a module runs at the require CALL and not before — an eager call here re-broke
+            // all six laziness tests (never-reached require, ordering, sticky throw). The
+            // mixed case, which DOES need a call because a static importer reads the bindings,
+            // still takes the eager path in `link.ts` and never reaches here.
             const initName = finalNameOf(linked, lazyRef);
-            if (splitRender !== null) {
-                //
-                // AST, not a text splice — same reason as the CommonJS wrapper above. `lazySplit`
-                // already hands back STATEMENT ARRAYS, so the hoisted bindings, the kept function
-                // declarations and the closure render as one body and the mappings fall out of
-                // printing instead of needing the mappings shoved down and right afterwards.
-                const headAndClosure = renderStmts!(
-                    [
-                        ...splitRender.hoisted,
-                        ...splitRender.functions,
-                        wrapModuleBody({ name: initName, helper: '__esm', params: [], body: splitRender.body, pure: true }),
-                    ],
-                    null,
-                );
-                // `nsCode` was appended to `out` before this block; replacing `out` wholesale dropped
-                // it and left `e_ns is not defined`. Re-append it AFTER the closure — the namespace
-                // reads hoisted bindings, so it may be built at top level, and it must be, because a
-                // consumer names it outside.
-                // NO eager `init()` call at the module's own slot. `link.ts` sets `esmInitSplit`
-                // only for require-ONLY targets, and the whole point of the lazy form is that such
-                // a module runs at the require CALL and not before — an eager call here re-broke
-                // all six laziness tests (never-reached require, ordering, sticky throw). The
-                // mixed case, which DOES need a call because a static importer reads the bindings,
-                // still takes the eager path in `link.ts` and never reaches here.
-                out = `${headAndClosure.code}${nsCode === null ? '' : `\n${nsCode}`}`;
-                if (mapPart !== null) {
-                    // One part per emitted region: `joinParts` derives each span from its own `code`,
-                    // so they stay aligned. The namespace object is still emitter TEXT and keeps its
-                    // own (unmapped) part, as it always did.
-                    splitMapParts = [
-                        { code: headAndClosure.code, map: headAndClosure.map ?? undefined },
-                        ...(nsCode === null ? [] : [{ code: nsCode }]),
-                    ];
-                    mapPart = null;
-                    nsCode = null; // already inside `out`, and covered by the parts above
-                }
-            }
+            primaryBody = [
+                ...splitRender.hoisted,
+                ...splitRender.functions,
+                wrapModuleBody({ name: initName, helper: '__esm', params: [], body: splitRender.body, pure: true }),
+            ];
+            primaryLive = null;
+            primary = finalize(primaryBody, primaryLive);
         }
+        // The namespace object is built from the module's top-level bindings, so it follows the module's
+        // statements; it is emitter TEXT and maps to nothing.
+        if (pieces !== null) {
+            // The chunk pass takes the module as its finalized tree. The module's text is printed only if
+            // someone reads it.
+            const finalBody = primaryBody;
+            const finalLive = primaryLive;
+            if (!rendersNothing(mod, primary, commentOptions) || nsCode !== null) {
+                const namespaceCode = nsCode;
+                modules[mod.id] = lazyRenderedModule(() => {
+                    const printed = print(finalize(finalBody, finalLive)).code;
+                    return namespaceCode === null ? printed : `${printed}\n${namespaceCode}`;
+                }, renderedExportsOf(idx));
+                if (wantMap) {
+                    mapSources.push(mod.id);
+                    mapSourcesContent.push(mod.source);
+                }
+                pieces.push({
+                    kind: 'module',
+                    statements: primary,
+                    source: mod.source,
+                    comments: mod.comments,
+                    commentOptions,
+                    minified: deferMinify ? false : naming.minify,
+                    sourceIdx: srcIdx,
+                });
+                if (nsCode !== null) pieces.push({ kind: 'text', code: nsCode });
+            } else if (idx === chunk.entryModule) {
+                modules[mod.id] = { code: null, renderedLength: 0, renderedExports: renderedExportsOf(idx) };
+            }
+            if (reuse !== null) reuse.stats.moduleRendered++;
+            continue;
+        }
+        const rendered = print(primary);
+        const out = nsCode === null ? rendered.code : `${rendered.code}\n${nsCode}`;
         // A module that rendered nothing is ABSENT — that is how a pure re-exporter stays out of
         // `modules`, which both oracles agree on (`reexporter.js` appears in neither). The chunk's
         // own entry module is the exception: it is listed with `code: null, renderedLength: 0` even
@@ -891,11 +919,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
             if (wantMap) {
                 mapSources.push(mod.id);
                 mapSourcesContent.push(mod.source);
-                // Finer-grained than `out` on purpose: the namespace object and the split module's
-                // two regions are separate parts so `joinParts` can give each its own line span.
-                // Their codes still concatenate back to exactly `out`.
-                if (splitMapParts !== null) moduleParts.push(...splitMapParts);
-                else moduleParts.push(mapPart!);
+                moduleParts.push({ code: rendered.code, map: rendered.map! });
                 if (nsCode !== null) moduleParts.push({ code: nsCode });
             } else moduleParts.push({ code: out });
         }
@@ -908,7 +932,7 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
                     liveHash: reuse.liveHash[idx],
                     chunkKey,
                     text: out,
-                    mapPart,
+                    mapPart: wantMap ? { code: rendered.code, map: rendered.map! } : null,
                     srcIdx,
                     nsCode,
                 });
@@ -916,5 +940,5 @@ export function renderModules(ctx: RenderCtx, reuse: ModuleReuse | null): Render
         }
     }
 
-    return { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs, modules };
+    return { parts: moduleParts, pieces, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs, modules };
 }

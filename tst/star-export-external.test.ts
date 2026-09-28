@@ -27,7 +27,7 @@ describe('a name imported through `export * from <external>`', () => {
         const r = await build({ ...barrel, '/main.js': "import { far } from './mid.js';\nexport const v = far;\n" }, ['ext']);
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code).toMatch(/import\s*\{[^}]*far[^}]*\}\s*from\s*'ext'/);
+        expect(code).toMatch(/import\s*\{[^}]*far[^}]*\}\s*from\s*"ext"/);
     });
 
     it('still prefers a LOCAL export of the same name over the star', async () => {
@@ -40,8 +40,8 @@ describe('a name imported through `export * from <external>`', () => {
         );
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code).toContain("'local'");
-        expect(code).not.toMatch(/import\s*\{[^}]*own[^}]*\}\s*from\s*'ext'/);
+        expect(code).toContain('"local"');
+        expect(code).not.toMatch(/import\s*\{[^}]*own[^}]*\}\s*from\s*"ext"/);
     });
 
     it('an ESM star source still wins over the external one', async () => {
@@ -55,7 +55,8 @@ describe('a name imported through `export * from <external>`', () => {
         );
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code).toContain("'esm'");
+        // `far` is an exported constant, so the read prints its value, in oxc's double quotes
+        expect(code).toContain('"esm"');
     });
 
     it('a genuinely missing name is still reported when there is no external star', async () => {

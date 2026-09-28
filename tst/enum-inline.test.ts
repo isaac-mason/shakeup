@@ -37,15 +37,16 @@ describe('constant enum members are inlined at the read', () => {
             '/k.ts': 'export const enum C { A = 10, B = 20 }\n',
             '/main.ts': "import { C } from './k.ts';\nexport const c = C.A + C.B;\n",
         });
-        expect(code).toMatch(/const c = 10 \+ 20;/);
+        // and the chunk's dead-code pass folds the sum, as rolldown's default `dce-only` does
+        expect(code).toMatch(/const c = 30;/);
     });
 
-    it('inlines a STRING member, keeping the literal exactly as written', async () => {
+    it('inlines a STRING member, printed from its value as oxc prints it', async () => {
         const code = await build({
             '/k.ts': "export enum S { A = 'left', B = 'right' }\n",
             '/main.ts': "import { S } from './k.ts';\nexport const s = S.B;\n",
         });
-        expect(code).toMatch(/const s = 'right';/);
+        expect(code).toMatch(/const s = "right";/);
     });
 
     it('auto-increment continues from an explicit value, and stops when it cannot', async () => {
@@ -53,8 +54,7 @@ describe('constant enum members are inlined at the read', () => {
             '/k.ts': 'export enum E { A, B = 7, C, D = "x", E }\n',
             '/main.ts': "import { E } from './k.ts';\nexport const v = [E.A, E.B, E.C, E.D];\n",
         });
-        // The literal is substituted VERBATIM, double quotes and all — the source wrote `D = "x"`.
-        expect(code).toContain('[0,7,8,"x"]');
+        expect(code).toContain('[0, 7, 8, "x"]');
         // `E` follows a string member, so the sequence is no longer known — left as a read.
         expect(
             await build({
@@ -72,9 +72,9 @@ describe('constant enum members are inlined at the read', () => {
         expect(code, 'a call is not a constant enum expression').toContain('E.A');
         // `-1` is a unary expression rather than a literal, which used to be enough to refuse it.
         // oxc evaluates unary `-`/`+`/`~` (`ts_enum/eval.rs`), so it is a constant like any other.
-        // PARENTHESISED: the substitution replaces a member expression, which binds tighter than
-        // unary minus, so a bare `-1` would depend on the printer to space `E.A + -1` correctly.
-        expect(code).toContain('(-1)');
+        // The substitution is parenthesised, since it replaces a member expression that binds tighter than unary
+        // minus; the chunk's reprint then spaces `+ -1` itself, as rolldown's output has it.
+        expect(code).toContain('E.A + -1');
         expect(code).not.toContain('E.B');
     });
 
@@ -89,7 +89,7 @@ describe('constant enum members are inlined at the read', () => {
         });
         // Not a bare `F.` search: `qualifyMemberRefs` leaves `_F.A | _F.B` INSIDE the enum body,
         // which contains `F.A` as a substring. The consumer's own line is what this is about.
-        expect(code, 'no member read survives at the use site').toContain('const got = [1,2,3,(-1),12,13]');
+        expect(code, 'no member read survives at the use site').toContain('const got = [1, 2, 3, -1, 12, 13]');
         // Executed, because the POINT is the arithmetic: `C` reads two earlier members of its own
         // enum, `D` is `~0`, and `G` resumes auto-increment from `E`'s computed 12.
         expect(new Function(`${code.replace(/export .*$/gm, '')}\nreturn got;`)()).toEqual([1, 2, 3, -1, 12, 13]);
@@ -129,5 +129,21 @@ describe('constant enum members are inlined at the read', () => {
         });
         expect(code, 'the parameter read is untouched').toContain('return Kind.DYNAMIC');
         expect(code).toMatch(/const real = 0;/);
+    });
+
+    it('does not import an inlined enum across a chunk boundary', async () => {
+        const files: Record<string, string> = {
+            '/kind.ts': 'export enum Kind { A = 0, B = 1 }\nexport const other = [5];\n',
+            '/a.ts': "import { Kind } from './kind.ts';\nconsole.log(Kind.B);\n",
+            '/b.ts': "import { Kind, other } from './kind.ts';\nconsole.log(Kind.A, other);\n",
+        };
+        const fs = { read: (id: string) => files[id] ?? null, exists: (id: string) => id in files };
+        const r = await bundle({ input: ['/a.ts', '/b.ts'], fs, external: [], output: {} });
+        expect(r.errors).toEqual([]);
+        const byName = Object.fromEntries(r.chunks.map((c) => [c.fileName, c.code]));
+        expect(byName['a.js']).toBe('console.log(1);\n');
+        expect(byName['b.js']).toMatch(/^import \{ other \} from ['"]\.\/kind-[\w-]+\.js['"];\nconsole\.log\(0, other\);\n$/);
+        const shared = r.chunks.find((c) => c.fileName.startsWith('kind-'));
+        expect(shared?.code).not.toContain('Kind');
     });
 });

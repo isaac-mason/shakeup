@@ -56,7 +56,7 @@ describe('preserveModules: namespaces are native', () => {
     it('emits a native star import and no synthesized namespace object', async () => {
         const { chunks } = await build(LIB);
         const main = chunkFor(chunks, 'main');
-        expect(main.code).toMatch(/import \* as \w+ from '\.\/a-[^']+\.js';/);
+        expect(main.code).toMatch(/import \* as \w+ from "\.\/a-[^"]+\.js";/);
         for (const c of chunks) {
             expect(c.code).not.toContain('Object.freeze');
             expect(c.code).not.toContain('Symbol.toStringTag');

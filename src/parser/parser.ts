@@ -92,26 +92,49 @@ type Ref = Node | null;
 
 /** Fresh parser state for one `parse` call. Every field is initialized here so
  * `state` keeps a single stable hidden class for the whole parse. */
-/** `FL.PURE` when a `/*@__PURE__*​/` annotation immediately precedes the expression starting at
- *  `start` (the whitespace skipper records that position in `state.pureAt`), else 0.
- *
- *  The annotation is CONSUMED on the first match. In `/*@__PURE__*​/ new Matrix3().set(…)` both the
- *  inner `new` and the outer `.set()` call begin at the same offset, so without consuming it the one
- *  annotation would mark two nodes — printing two markers and failing to round-trip. Nodes are built
- *  innermost-first, so the `new` claims it: that matches the convention (esbuild/rollup) that the
- *  marker applies to the call it immediately precedes.
- *
- *  CALL THIS BEFORE PARSING ARGUMENTS. `pureAt` is a single slot, so an annotation inside the
- *  arguments overwrites it and then consumes it, and the OUTER call silently loses its flag:
- *
- *      /*@__PURE__*​/ f('a', /*@__PURE__*​/ asset('y'))   ->   f=no, asset=PURE
- *
- *  Both oracles drop that whole expression when unused; we kept it, because only `asset` carried the
- *  flag. Capturing at the `(` — before `parseArgs` — gives each call its own annotation. */
-function pureFlag(state: ParserState, start: number): number {
-    if (state.pureAt !== start) return 0;
-    state.pureAt = -1;
-    return FL.PURE;
+/** A `@__PURE__` annotation applies to the expression it precedes: to that expression's call or `new`, reached through
+ *  TS wrappers, the left side of a binary or logical expression, a conditional's test, and a member or optional chain's
+ *  object. oxc's `set_pure_on_call_or_new_expr` (`js/expression.rs`), which its parser runs at the start of a unary
+ *  operand, of a binary expression's left side, and of an assignment expression (see {@link pureAnnotated}). */
+function setPureOnCallOrNew(expr: Node): boolean {
+    switch (expr.type) {
+        case N.CallExpression:
+        case N.NewExpression:
+            (expr.data as { pure: boolean }).pure = true;
+            return true;
+        case N.TSAsExpression:
+        case N.TSSatisfiesExpression:
+        case N.TSInstantiationExpression:
+        case N.TSNonNullExpression:
+        case N.ChainExpression:
+            return setPureOnCallOrNew((expr.data as { expression: Node }).expression);
+        case N.BinaryExpression:
+        case N.LogicalExpression:
+            return setPureOnCallOrNew((expr.data as { left: Node }).left);
+        case N.ConditionalExpression:
+            return setPureOnCallOrNew((expr.data as { test: Node }).test);
+        case N.StaticMemberExpression:
+        case N.ComputedMemberExpression:
+        case N.PrivateFieldExpression:
+            return setPureOnCallOrNew((expr.data as { object: Node }).object);
+        default:
+            return false;
+    }
+}
+
+/** Does a `@__PURE__` annotation sit right before the current token? The lexer records the position of the token an
+ *  annotation precedes; oxc's `previous_token_has_pure_comment`. Read BEFORE parsing, since a nested annotation
+ *  moves it. */
+function pureAnnotated(state: ParserState): boolean {
+    return state.pureAt === state.tokStart;
+}
+
+/** A unary operator's operand, with a `@__PURE__` before it applied (oxc `parse_unary_expression`). */
+function parseUnaryOperand(state: ParserState): Node {
+    const annotated = pureAnnotated(state);
+    const arg = parseUnary(state);
+    if (annotated) setPureOnCallOrNew(arg);
+    return arg;
 }
 
 function createParserState(source: string, options: ParseOptions): ParserState {
@@ -634,6 +657,7 @@ function checkRestTarget(state: ParserState, arg: Node): void {
 }
 
 function parseAssign(state: ParserState, noIn = false, allowReturnType = true): Node {
+    const annotated = pureAnnotated(state);
     if (isP(state, P.LPAREN)) {
         const tri = classifyArrowHead(state);
         if (tri === TRI_TRUE) return parseArrow(state, state.tokStart, 0, null, allowReturnType);
@@ -754,6 +778,8 @@ function parseAssign(state: ParserState, noIn = false, allowReturnType = true): 
         const right = parseAssign(state, noIn);
         return create.AssignmentExpression(left.start, right.end, op, left, right);
     }
+    // oxc `parse_assignment_expression_or_higher_impl`: after the conditional, never an assignment or an arrow
+    if (annotated) setPureOnCallOrNew(left);
     return left;
 }
 
@@ -788,7 +814,9 @@ const LOGICAL_QQ = 2;
  * unparenthesised-`?.` tracking at `state.ts:199`.
  */
 function parseBinary(state: ParserState, minPrec: number, noIn: boolean): Node {
+    const annotated = pureAnnotated(state);
     let left = parseUnary(state);
+    if (annotated) setPureOnCallOrNew(left); // oxc `parse_binary_expression_or_higher`
     // Whatever a parenthesised operand left behind is not OUR top level.
     let leftKind = LOGICAL_NONE;
     let leftUnary = state.unaryTop;
@@ -885,7 +913,7 @@ function parseUnary(state: ParserState): Node {
                 const op =
                     state.tok === P.PLUS ? OP.POS : state.tok === P.MINUS ? OP.NEG : state.tok === P.BANG ? OP.NOT : OP.BIT_NOT;
                 nextToken(state);
-                const arg = parseUnary(state);
+                const arg = parseUnaryOperand(state);
                 const n = create.UnaryExpression(start, arg.end, op, arg);
                 state.unaryTop = state.src[start];
                 return n;
@@ -907,7 +935,7 @@ function parseUnary(state: ParserState): Node {
             case K.DELETE: {
                 const op = state.tok === K.TYPEOF ? OP.TYPEOF : state.tok === K.VOID ? OP.VOID : OP.DELETE;
                 nextToken(state);
-                const arg = parseUnary(state);
+                const arg = parseUnaryOperand(state);
                 const n = create.UnaryExpression(start, arg.end, op, arg);
                 state.unaryTop = op === OP.TYPEOF ? 'typeof' : op === OP.VOID ? 'void' : 'delete';
                 return n;
@@ -1059,15 +1087,12 @@ function parseNew(state: ParserState): Node {
     }
     let args: Node[] | null = null;
     let end = callee.end;
-    // CLAIM THE ANNOTATION BEFORE PARSING ARGUMENTS — see `pureFlag`. `state.pureAt` is one slot, so
-    // an annotation inside the arguments overwrites (and then consumes) the outer one.
-    const pure = pureFlag(state, start);
     if (isP(state, P.LPAREN)) {
         args = parseArgs(state);
         end = state.tokStart;
     }
     if (calleeIsBareImport && reachesImportExpression(callee)) raise(state, ParseErrorCode.NewDynamicImport);
-    const nw = create.NewExpression(start, end, pure, callee, args, typeArgs);
+    const nw = create.NewExpression(start, end, 0, callee, args, typeArgs);
     return parseMemberChain(state, nw, true);
 }
 
@@ -1124,9 +1149,8 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             nextToken(state);
             if (isP(state, P.LPAREN)) {
                 if (!allowCall) return finish(expr);
-                const pure = pureFlag(state, expr.start);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL | pure, expr, args, null);
+                expr = create.CallExpression(expr.start, state.tokStart, FL.OPTIONAL, expr, args, null);
             } else if (isP(state, P.LBRACKET)) {
                 nextToken(state);
                 const prop = parseExpression(state);
@@ -1145,9 +1169,8 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             expectP(state, P.RBRACKET, "']'");
             expr = create.ComputedMemberExpression(expr.start, state.tokStart, 0, expr, prop);
         } else if (allowCall && isP(state, P.LPAREN)) {
-            const pure = pureFlag(state, expr.start);
             const args = parseArgs(state);
-            expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, null);
+            expr = create.CallExpression(expr.start, state.tokStart, 0, expr, args, null);
         } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
             if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
             const quasi = parseTemplate(state, true);
@@ -1159,9 +1182,8 @@ function parseMemberChain(state: ParserState, expr: Node, allowCall: boolean): N
             const t = tryParseTypeArgsForCall(state);
             if (t === null) return finish(expr);
             if (isP(state, P.LPAREN)) {
-                const pure = pureFlag(state, expr.start);
                 const args = parseArgs(state);
-                expr = create.CallExpression(expr.start, state.tokStart, pure, expr, args, t);
+                expr = create.CallExpression(expr.start, state.tokStart, 0, expr, args, t);
             } else if (state.tok === T_TEMPLATE_FULL || state.tok === T_TEMPLATE_HEAD) {
                 if (sawOptional) raise(state, ParseErrorCode.TaggedOptionalChain);
                 const quasi = parseTemplate(state, true);
@@ -2514,7 +2536,10 @@ function parseClassMember(state: ParserState): Node {
             flags |= FL.DECLARE;
             nextToken(state);
         } else if (isK(state, K.OVERRIDE) && !nextIsPropertyEnd(state)) nextToken(state);
-        else if (isK(state, K.ACCESSOR) && !nextIsPropertyEnd(state)) nextToken(state);
+        else if (isK(state, K.ACCESSOR) && !nextIsPropertyEnd(state)) {
+            flags |= FL.ACCESSOR;
+            nextToken(state);
+        }
         else break;
     }
     if (isK(state, K.ASYNC) && !nextIsPropertyEnd(state) && !newlineAfterAsync(state)) {

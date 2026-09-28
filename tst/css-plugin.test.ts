@@ -33,7 +33,7 @@ describe('css plugin — .css imports', () => {
             plugins: [css({ mode: 'inject' })],
         });
         expect(r.errors).toEqual([]);
-        expect(r.chunks[0].code).toContain("typeof document !== 'undefined'");
+        expect(r.chunks[0].code).toContain('typeof document !== "undefined"');
         expect(r.chunks[0].code).toContain('.a { color: red; }');
         expect(r.chunks[0].code).toContain('document.head.appendChild');
     });

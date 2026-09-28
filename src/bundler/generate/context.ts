@@ -12,6 +12,7 @@ import type { InteropOwner } from '../init-obligations.ts';
 import { finalNameOf } from '../link.ts';
 import type { NormalizedOutputNaming, RenderedModule } from '../output-options.ts';
 import type { TreeshakeResult } from '../treeshake.ts';
+import type { ChunkPiece } from './chunk-program.ts';
 
 /** Per-module render context. Built once per module inside `renderChunk`'s loop, and by nothing
  *  else — there is no chunk-less caller, which is why every field below is non-null.
@@ -135,12 +136,12 @@ export type RenderCtx = {
     context: string | null;
     wantMap: boolean;
     tight: boolean;
-    /** The cosmetic tier runs later over the assembled chunk, so this render must stay READABLE.
-     *  Minified printing drops `/*@__PURE__*​/` annotations (1146 → 0 on crashcat), and the chunk
-     *  compress re-parses this text — so minifying here would destroy the purity information it
-     *  needs and it would keep calls it could otherwise drop. rolldown renders the chunk un-minified
-     *  for the same reason and lets `dce_or_minify` do the minifying once, at the end. */
+    /** The chunk pass minifies, so modules render READABLE, as rolldown renders them un-minified and lets
+     *  `dce_or_minify` do the minifying once, at the end. */
     deferMinify: boolean;
+    /** The chunk pass runs over this chunk, so the chunk is assembled as one program from the modules'
+     *  finalized trees rather than printed and parsed again. */
+    chunkProgram: boolean;
     /** Resolve a target chunk idx to the import specifier this chunk uses for it. */
     pathToChunk: (targetChunkIdx: number) => string;
 };
@@ -152,6 +153,9 @@ export type RenderCtx = {
 export type RenderedModules = {
     /** The module region, as sourcemap parts. Their `code` concatenates to the region's text. */
     parts: Part[];
+    /** The module region as pieces of one program, when {@link RenderCtx.chunkProgram} is set; `parts`
+     *  is then empty. */
+    pieces: ChunkPiece[] | null;
     mapSources: string[];
     mapSourcesContent: string[];
     /** `export * from '<external>'` specifiers hoisted out of an entry module. */
@@ -208,6 +212,9 @@ export type RenderedChunk = {
     code: string;
     /** Assembled parts (banner/intro leading synthetics included) for the per-chunk map. */
     parts: Part[];
+    /** The chunk as pieces of one program, when {@link RenderCtx.chunkProgram} is set. `code` and `parts`
+     *  stay empty until the chunk pass prints it. */
+    pieces: ChunkPiece[] | null;
     mapSources: string[];
     mapSourcesContent: string[];
     // metadata for OutputChunk

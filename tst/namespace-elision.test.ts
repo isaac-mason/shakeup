@@ -31,7 +31,8 @@ describe('a namespace object nothing can observe is not built', () => {
         expect(code, 'no namespace object').not.toContain('__proto__: null');
         expect(code, 'no toStringTag stamp').not.toContain('Symbol.toStringTag');
         // The reads became direct references to the members' own bindings.
-        expect(code).toMatch(/got = a \+ b\(\)/);
+        // `a` is a constant, so its value goes in its place: rolldown's `const got = 1 + b();`
+        expect(code).toMatch(/got = 1 \+ b\(\)/);
     });
 
     it.each([

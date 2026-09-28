@@ -75,9 +75,9 @@ describe('renderChunk', () => {
 // passes `(code, chunk, outputOptions, meta)`.
 describe('renderChunk — the chunk it hands over', () => {
     const SPLIT: Record<string, string> = {
-        '/a.js': "import { s } from './shared.js';\nexport const A = `${s}a`;\n",
-        '/b.js': "import { s } from './shared.js';\nexport const B = `${s}b`;\n",
-        '/shared.js': "export const s = 'S';\n",
+        '/a.js': "import { s } from './shared.js';\nexport const A = `${s[0]}a`;\n",
+        '/b.js': "import { s } from './shared.js';\nexport const B = `${s[0]}b`;\n",
+        '/shared.js': "export const s = ['S'];\n",
     };
     const split = async (plugin: unknown) => {
         const fs = { read: (id: string) => SPLIT[id] ?? null, exists: (id: string) => id in SPLIT };

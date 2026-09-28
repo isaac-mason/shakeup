@@ -30,9 +30,9 @@ describe('bundle: base automatic chunking', () => {
         const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
-                '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
-                '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
-                '/shared.ts': 'export const s = 40;',
+                '/a.ts': "import { s } from './shared';\nexport const av = s[0] + 1;",
+                '/b.ts': "import { s } from './shared';\nexport const bv = s[0] + 2;",
+                '/shared.ts': 'export const s = [40];',
             }),
             external: [],
         });
@@ -55,9 +55,9 @@ describe('bundle: base automatic chunking', () => {
         const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
-                '/a.ts': "import * as m from './shared';\nexport const av = m.s + m.t;",
-                '/b.ts': "import * as m from './shared';\nexport const bv = m.s * m.t;",
-                '/shared.ts': 'export const s = 3;\nexport const t = 4;',
+                '/a.ts': "import * as m from './shared';\nexport const av = m.s[0] + m.t[0];",
+                '/b.ts': "import * as m from './shared';\nexport const bv = m.s[0] * m.t[0];",
+                '/shared.ts': 'export const s = [3];\nexport const t = [4];',
             }),
             external: [],
         });
@@ -77,7 +77,7 @@ describe('bundle: base automatic chunking', () => {
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './dep';\nexport const v = x;",
-                '/dep.ts': 'export const x = 1;',
+                '/dep.ts': 'export const x = [1];',
             }),
             external: [],
             output: {
@@ -116,10 +116,10 @@ describe('bundle: base automatic chunking', () => {
         const r = await bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs({
-                '/a.ts': "import { x } from '/lib/shared';\nimport { y } from '/lib/onlyA';\nexport const av = x + y;",
-                '/b.ts': "import { x } from '/lib/shared';\nexport const bv = x;",
-                '/lib/shared.ts': 'export const x = 1;', // reached by a + b
-                '/lib/onlyA.ts': 'export const y = 2;', // reached by a only
+                '/a.ts': "import { x } from '/lib/shared';\nimport { y } from '/lib/onlyA';\nexport const av = x[0] + y[0];",
+                '/b.ts': "import { x } from '/lib/shared';\nexport const bv = x[0];",
+                '/lib/shared.ts': 'export const x = [1];', // reached by a + b
+                '/lib/onlyA.ts': 'export const y = [2];', // reached by a only
             }),
             external: [],
             output: { codeSplitting: { groups: [{ name: 'lib', test: '/lib/', entriesAware: true }] } },
@@ -149,7 +149,7 @@ describe('bundle: base automatic chunking', () => {
         expect(r.errors).toEqual([]);
         const a = r.chunks.find((c) => c.name === 'a')!;
         const shared = r.chunks.find((c) => c.moduleIds.includes('/shared.ts'))!;
-        expect(a.code).toContain(`from './${shared.fileName}'`);
+        expect(a.code).toContain(`from "./${shared.fileName}"`);
         const ns = await execEntries(r.chunks, ['a', 'b']);
         // a set the shared value to 123 before reading; b reads the same live binding.
         expect(ns.a.got).toBe(123);
@@ -182,7 +182,7 @@ describe('bundle: dynamic import splitting', () => {
         const lazy = r.chunks.find((c) => c.isDynamicEntry)!;
         expect(lazy.moduleIds).toEqual(['/lazy.ts']);
         expect(lazy.exports).toContain('secret');
-        expect(entry.code).toContain(`import('./${lazy.fileName}')`);
+        expect(entry.code).toContain(`import("./${lazy.fileName}")`);
         expect(entry.dynamicImports).toContain(lazy.name);
         expect(entry.imports).toEqual([]);
     });
@@ -231,7 +231,7 @@ describe('bundle: config layer', () => {
             input: { app: '/app.ts' },
             fs: createMemoryFs({
                 '/app.ts': "import { v } from './vendor';\nexport const y = v;",
-                '/vendor.ts': 'export const v = 1;',
+                '/vendor.ts': 'export const v = [1];',
             }),
             external: [],
             output: { manualChunks: (id) => (id.includes('vendor') ? 'vendor' : null) },
@@ -250,7 +250,7 @@ describe('bundle: config layer', () => {
             fs: createMemoryFs({
                 '/a.ts': "import { v } from './node_modules/lib';\nexport const av = v;",
                 '/b.ts': "import { v } from './node_modules/lib';\nexport const bv = v;",
-                '/node_modules/lib.ts': 'export const v = 9;',
+                '/node_modules/lib.ts': 'export const v = [9];',
             }),
             external: [],
             output: { codeSplitting: { groups: [{ name: 'vendor', test: /node_modules/ }] } },
@@ -264,8 +264,8 @@ describe('bundle: config layer', () => {
         const r = await bundle({
             input: '/a.ts',
             fs: createMemoryFs({
-                '/a.ts': "import { x } from './b';\nexport const y = x + 1;",
-                '/b.ts': 'export const x = 41;',
+                '/a.ts': "import { x } from './b';\nexport const y = x[0] + 1;",
+                '/b.ts': 'export const x = [41];',
             }),
             external: [],
             output: { preserveModules: true },

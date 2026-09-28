@@ -118,7 +118,7 @@ describe('bundle — minify', () => {
         expect(r.chunks.length).toBe(2);
         const entry = r.chunks.find((c) => c.isEntry)!;
         const lazyChunk = r.chunks.find((c) => !c.isEntry)!;
-        expect(entry.code).toContain(`import('./${lazyChunk.fileName}')`);
+        expect(entry.code).toContain(`import(\`./${lazyChunk.fileName}\`)`);
         expect(entry.code).toMatch(/async function \w+\(\)\{/); // local mangled
         expect(entry.code).toContain(' as lazy'); // public export name preserved
     });
@@ -150,16 +150,16 @@ describe('emit-layer glue respects minify.whitespace', () => {
 
     it('emits import and export clauses with no readability padding', async () => {
         const code = await build(true);
-        expect(code).toMatch(/import\{one as \w+,two as \w+\}from'ext';/);
+        expect(code).toMatch(/import\{one as \w+,two as \w+\}from"ext";/);
         expect(code).not.toMatch(/import \{ /);
         expect(code).not.toMatch(/, \w+ as /);
     });
 
     it('keeps the space a DEFAULT import actually needs', async () => {
-        // `import{a}from'x'` is fine, but a bare default local cannot be glued to the keyword —
-        // `importd from'x'` is a different token stream.
+        // `import{a}from"x"` is fine, but a bare default local cannot be glued to the keyword —
+        // `importd from"x"` is a different token stream.
         const code = await build(true);
-        expect(code).toMatch(/import \w+ from'ext2';/);
+        expect(code).toMatch(/import \w+ from"ext2";/);
         expect(code).not.toMatch(/import\w+ from/);
     });
 
@@ -172,7 +172,7 @@ describe('emit-layer glue respects minify.whitespace', () => {
         expect(code).not.toMatch(/\w+ = \{ /);
         // The tag goes on through the `__tag` helper — mangled here, like every other declaration in
         // the chunk — so the property names appear ONCE, in its body, not at this namespace.
-        expect(code).toMatch(/=\w+=>\w+\(\w+,Symbol\.toStringTag,\{value:'Module'\}\)/);
+        expect(code).toMatch(/=\w+=>\w+\(\w+,Symbol\.toStringTag,\{value:`Module`\}\)/);
         expect(code).not.toMatch(/Object\.defineProperty\(\w+,Symbol\.toStringTag/);
     });
 

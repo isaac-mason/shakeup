@@ -58,7 +58,12 @@ describe('sourcemaps survive CommonJS wrapping', () => {
         // so `const x` was the first generated line of main's region and took the region's opening
         // segment. Now the statement emits `var import_d = …` and carries line 1 itself, and the line
         // after it maps to the line after it. Both are asserted, since the pair is the real claim.
-        const { code, map } = await build({ '/d.cjs': D_CJS, '/main.js': "import d from './d.cjs';\nexport const x = d;" });
+        // `d` is read twice so the interop declaration stays its own statement: with a single read the
+        // dead-code pass substitutes it into that read, as rolldown's does.
+        const { code, map } = await build({
+            '/d.cjs': D_CJS,
+            '/main.js': "import d from './d.cjs';\nexport const x = d;\nexport const y = d;",
+        });
         expect(resolve(code, map, 'var import_d')).toEqual({ source: '/main.js', line: 1, column: 0 });
         expect(resolve(code, map, 'const x =')).toEqual({ source: '/main.js', line: 2, column: 0 });
     });
@@ -73,7 +78,8 @@ describe('sourcemaps survive CommonJS wrapping', () => {
         });
         expect(resolve(code, map, 'function helper()')).toEqual({ source: '/d.js', line: 1, column: 0 });
         expect(resolve(code, map, 'globalThis.z')).toEqual({ source: '/d.js', line: 2, column: 4 });
-        expect(resolve(code, map, 'const x =')).toEqual({ source: '/main.js', line: 1, column: 0 });
+        // rolldown 1.2.4 maps it to its own line, not to the start of main's region.
+        expect(resolve(code, map, 'const x =')).toEqual({ source: '/main.js', line: 2, column: 0 });
     });
 
     it('a lazily-initialised ES module maps through its __esm closure', async () => {

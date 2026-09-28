@@ -37,6 +37,15 @@ describe('a namespace member CALL keeps the whole surface', () => {
         expect(code, 'the whole surface is kept, not just the called member').toContain('7');
     });
 
+    it('keeps the whole surface when the awaited import is called on directly', async () => {
+        const code = await build({
+            '/dep.js': dep,
+            '/main.js': "export const run = async () => (await import('./dep.js')).test();\n",
+        });
+        expect(code, 'value is reachable as this.value').toContain('42');
+        expect(code).toContain('7');
+    });
+
     it('narrows anyway when the callee cannot mention `this`', async () => {
         // The whole-surface widening is gated on the DEFINING module containing a `this` at all.
         // Without that gate this costs 1,704 minified bytes on crashcat for nothing.

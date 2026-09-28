@@ -10,6 +10,14 @@ const build = async (src: string, minify: boolean | { compress?: boolean; mangle
     return result.chunks[0].code;
 };
 
+/** No compress at all: `minify: false` still runs the per-module dead-code pass whenever tree-shaking is
+ *  on, as rolldown's does, so this turns tree-shaking off too. */
+const buildUntouched = async (src: string) => {
+    const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), treeshake: false, output: { minify: false } });
+    expect(result.errors).toEqual([]);
+    return result.chunks[0].code;
+};
+
 /** Build the same source both un-minified and compress-only, execute both bundles, and assert the
  *  exported `out` is identical (and, when given, equals `expected`). This is the load-bearing check:
  *  a fold is only allowed if it preserves the runtime value bit-for-bit. */
@@ -143,8 +151,8 @@ describe('fold-constants (compress)', () => {
         expect(q.out).toStrictEqual([14, 'xyz', true, 15, 0.30000000000000004]);
     });
 
-    it('does not fire when compress is explicitly disabled (plain build keeps the un-folded expression)', async () => {
-        const code = await build('export const out = 2 + 3;', { compress: false });
+    it('does not fire when compress and tree-shaking are off (plain build keeps the un-folded expression)', async () => {
+        const code = await buildUntouched('export const out = 2 + 3;');
         expect(code).toMatch(/2\s*\+\s*3/);
         expect((await run(code)).out).toBe(5);
     });

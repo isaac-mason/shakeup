@@ -95,7 +95,7 @@ describe('plugin pipeline', () => {
         } = await build({ '/main.ts': "import { chunk } from 'lodash-esque';\nexport const c = () => chunk([1], 1);" }, [
             externalize,
         ]);
-        expect(code).toContain("from 'lodash-esque'");
+        expect(code).toContain('from "lodash-esque"');
     });
 
     it('renderChunk sees the final chunk; buildStart/buildEnd bracket the build', async () => {

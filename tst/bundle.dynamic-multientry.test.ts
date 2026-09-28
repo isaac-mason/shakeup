@@ -30,8 +30,8 @@ describe('bundle: dynamic import() edges', () => {
         expect(entryChunk.moduleIds).toContain('/main.ts');
         expect(lazyChunk.moduleIds).toContain('/lazy.ts');
         expect(lazyChunk.code).toContain('lazy-payload');
-        expect(entryChunk.code).toContain(`import('./${lazyChunk.fileName}')`);
-        expect(entryChunk.code).not.toContain("import('./lazy')");
+        expect(entryChunk.code).toContain(`import("./${lazyChunk.fileName}")`);
+        expect(entryChunk.code).not.toContain('import("./lazy")');
         expect(lazyChunk.exports).toContain('secret');
     });
 
@@ -66,7 +66,7 @@ describe('bundle: dynamic import() edges', () => {
         const mod = result.graph!.modules[result.graph!.byId.get('/main.ts')!];
         expect(mod.importRecords).toHaveLength(0);
         expect(result.chunks[0].code).toContain('import(p)');
-        expect(result.chunks[0].code).toContain("import('./x' + y)");
+        expect(result.chunks[0].code).toContain('import("./x" + y)');
     });
 
     it('static + dynamic same specifier ⇒ one record, static dominates', async () => {
@@ -137,7 +137,7 @@ describe('bundle: multi-entry input', () => {
         expect(main.imports).toContain(shared.name);
         expect(admin.imports).toContain(shared.name);
         expect(shared.exports).toContain('util');
-        expect(main.code).toContain(`from './${shared.fileName}'`);
+        expect(main.code).toContain(`from "./${shared.fileName}"`);
     });
 
     it('input: string[] derives distinct names and dedups repeats', async () => {

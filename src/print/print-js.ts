@@ -1,11 +1,16 @@
+import { bigIntLiteralValue, numericLiteralValue, stringLiteralText } from '../analysis/const-eval.ts';
 import { N, type Node, TYPE_COUNT, TYPE_NAME, walk } from '../ast/index.ts';
 import { BINARY_PREC, LOGICAL_PREC, Prec } from './precedence.ts';
+import { directiveText, printBigInt, printNumber, quoteString, templateString } from './print-constant.ts';
 import {
     dropTrailingSemi,
+    keywordSpace,
     mark,
+    type NameResolver,
     type Printer,
     parens,
     printLeadingComments,
+    printTrailingComments,
     semi,
     softNewline,
     softSpace,
@@ -83,8 +88,53 @@ export function printExpr(p: Printer, n: Node, minPrec: Prec): void {
     // frequency. The remaining `parens` call sites are cold and keep the helper.
     const wrap = precOf(n) < minPrec;
     if (wrap) write(p, '(');
-    emitExpr(p, n);
+    emitExprNode(p, n, minPrec);
     if (wrap) write(p, ')');
+}
+
+/** A string literal where oxc passes `allow_backtick: false` (property keys, module specifiers and sources,
+ *  import attributes): under minify the quote is `"` or `'`, never a backtick. */
+const plainString = (p: Printer, literal: Node): string => quoteString(stringLiteralText(literal), p.opts.minify, false);
+
+/** The string value of `n` when it is a string literal, else null. */
+const stringValueOf = (n: Node): string | null => (n.type === N.StringLiteral ? stringLiteralText(n) : null);
+
+/** A string printed without the backtick option, else `printExpr`. oxc keeps a plain string where
+ *  cjs-module-lexer pattern-matches one (`oxc_codegen/src/cjs_module_lexer.rs`), which only differs
+ *  under minify. */
+function printExprPlainString(p: Printer, n: Node, minPrec: Prec): void {
+    const value = stringValueOf(n);
+    if (value === null) {
+        printExpr(p, n, minPrec);
+        return;
+    }
+    mark(p, n);
+    write(p, quoteString(value, p.opts.minify, false));
+}
+
+/** Is `n` the identifier `name` as written in source? oxc's `is_specific_id`. */
+const isSpecificId = (n: Node, name: string): boolean => n.type === N.IdentifierReference && n.name === name;
+
+/** oxc's `is_specific_member_access` for the static form: `object.property`. */
+function isSpecificMemberAccess(n: Node, object: string, property: string): boolean {
+    if (n.type !== N.StaticMemberExpression) return false;
+    const d = data(n);
+    return isSpecificId(d.object as Node, object) && (d.property as Node).name === property;
+}
+
+/** The argument index of a `require("...")` or `Object.defineProperty(_, "name", ...)` call that oxc
+ *  prints as a plain string (`try_print_require_call`, `try_print_define_property_call`), or -1. */
+function plainStringArgumentIndex(p: Printer, callee: Node, args: Node[]): number {
+    if (!p.opts.minify) return -1;
+    if (isSpecificId(callee, 'require') && args.length === 1) return 0;
+    if (
+        args.length > 1 &&
+        (isSpecificMemberAccess(callee, 'Object', 'defineProperty') ||
+            isSpecificMemberAccess(callee, 'Reflect', 'defineProperty'))
+    ) {
+        return 1;
+    }
+    return -1;
 }
 
 /** `??` cannot be mixed with `||`/`&&` without parentheses (a syntax error otherwise). */
@@ -94,6 +144,18 @@ const isNullishMix = (a: string, b: string): boolean =>
 function printBinaryOperand(p: Printer, child: Node, minPrec: Prec): void {
     printExpr(p, child, minPrec);
 }
+
+/** oxc's `try_print_equality_string`: `key === "default"` keeps its plain quotes under minify. */
+function printEqualityOperand(p: Printer, child: Node, minPrec: Prec): void {
+    const value = stringValueOf(child);
+    if (value === 'default' || value === '__esModule') {
+        printExprPlainString(p, child, minPrec);
+        return;
+    }
+    printExpr(p, child, minPrec);
+}
+
+const isEqualityOperator = (op: string): boolean => op === '==' || op === '!=' || op === '===' || op === '!==';
 
 /** The leading '+'/'-' char the printed form of `n` starts with (via its left spine), or ''.
  *  Used to force a mandatory space so `a - -b` / `a + ++b` can't merge into `a--b` / `a+++b`
@@ -150,21 +212,22 @@ function emitBinary(p: Printer, n: Node): void {
     const op = d.operator as string;
     const prec = BINARY_PREC[op];
     const wordOp = op === 'in' || op === 'instanceof';
+    const printOperand = p.opts.minify && isEqualityOperator(op) ? printEqualityOperand : printBinaryOperand;
     if (op === '**') {
         // right-assoc; a unary/lower left operand must be parenthesised (`(-2)**2`).
-        printBinaryOperand(p, d.left as Node, (Prec.Unary + 1) as Prec);
+        printOperand(p, d.left as Node, (Prec.Unary + 1) as Prec);
     } else {
-        printBinaryOperand(p, d.left as Node, prec);
+        printOperand(p, d.left as Node, prec);
     }
+    softSpace(p);
     if (wordOp) space(p);
-    else softSpace(p);
     write(p, op);
     // `+`/`-` before a right operand that also leads with that sign needs a real space,
     // else `-` `-b` collapses to the `--` token (`a--b`) — a different program.
     const mergeRisk = (op === '+' || op === '-') && leadingSign(d.right as Node) === op;
+    softSpace(p);
     if (wordOp || mergeRisk) space(p);
-    else softSpace(p);
-    printBinaryOperand(p, d.right as Node, op === '**' ? prec : ((prec + 1) as Prec));
+    printOperand(p, d.right as Node, op === '**' ? prec : ((prec + 1) as Prec));
 }
 
 function emitLogical(p: Printer, n: Node): void {
@@ -185,14 +248,15 @@ function emitLogical(p: Printer, n: Node): void {
     operand(d.right as Node, (prec + 1) as Prec);
 }
 
-function emitArgs(p: Printer, args: Node[]): void {
+function emitArgs(p: Printer, args: Node[], plainStringIndex = -1): void {
     write(p, '(');
     for (let i = 0; i < args.length; i++) {
         if (i > 0) {
             write(p, ',');
             softSpace(p);
         }
-        printExpr(p, args[i], Prec.Assign);
+        if (i === plainStringIndex) printExprPlainString(p, args[i], Prec.Assign);
+        else printExpr(p, args[i], Prec.Assign);
     }
     write(p, ')');
 }
@@ -213,7 +277,12 @@ function emitParams(p: Printer, params: Node[]): void {
 function emitFunctionTail(p: Printer, d: D): void {
     emitParams(p, d.params as Node[]);
     softSpace(p);
-    printStmt(p, d.body as Node);
+    printFunctionBody(p, d.body as Node);
+}
+
+function printFunctionBody(p: Printer, body: Node): void {
+    mark(p, body);
+    printBlock(p, body, true);
 }
 
 function emitFunction(p: Printer, n: Node): void {
@@ -258,7 +327,7 @@ function emitArrow(p: Printer, n: Node): void {
     softSpace(p);
     const body = d.body as Node;
     if (!(d.expression as boolean)) {
-        printStmt(p, body);
+        printFunctionBody(p, body);
     } else if (body.type === N.ObjectExpression) {
         parens(p, true, () => emitExpr(p, body));
     } else {
@@ -333,32 +402,56 @@ function emitObjectMember(p: Printer, n: Node): void {
 const IDENT_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 function emitPropertyKey(p: Printer, key: Node, computed: boolean): void {
-    if (computed) {
+    if (key.type === N.StringLiteral) {
+        // `{ "foo": 1 }` → `{ foo: 1 }` when the string key is a plain identifier (minify).
+        if (p.opts.minify && !computed) {
+            const value = stringLiteralText(key);
+            if (IDENT_KEY.test(value)) {
+                mark(p, key);
+                write(p, value);
+                return;
+            }
+        }
+        if (computed) write(p, '[');
+        mark(p, key);
+        write(p, plainString(p, key));
+        if (computed) write(p, ']');
+        return;
+    }
+    // oxc brackets a negative or infinite number key, which has no literal form: `{ [-1]: 0 }`.
+    const bracket = computed || (key.type === N.NumericLiteral && isNegativeOrInfinite(numericLiteralValue(key)));
+    if (bracket) {
         write(p, '[');
         printExpr(p, key, Prec.Assign);
         write(p, ']');
         return;
     }
-    // `{ "foo": 1 }` → `{ foo: 1 }` when the string key is a plain identifier (minify).
-    if (p.opts.minify && key.type === N.StringLiteral) {
-        const inner = key.name.slice(1, -1);
-        if (IDENT_KEY.test(inner)) {
-            write(p, inner);
-            return;
-        }
-    }
     emitExpr(p, key);
 }
 
-function emitMemberObject(p: Printer, object: Node): void {
-    // `1 .toString()` — a numeric-literal object needs disambiguation; parenthesise it.
-    parens(p, object.type === N.NumericLiteral, () => printExpr(p, object, Prec.Call));
+const isNegativeOrInfinite = (value: number): boolean => value < 0 || Object.is(value, -0) || !Number.isFinite(value);
+
+/** `exports[KEY]` or `module.exports[KEY]` as an assignment target. */
+function isExportsComputedTarget(left: Node): boolean {
+    if (left.type !== N.ComputedMemberExpression) return false;
+    const object = data(left).object as Node;
+    return isSpecificId(object, 'exports') || isSpecificMemberAccess(object, 'module', 'exports');
 }
 
+/** A member object. A number literal needs no parentheses: its printer records when a following `.` would
+ *  extend it, and the `.` is then preceded by a space (`1 .x`), as oxc's `need_space_before_dot`. */
+function emitMemberObject(p: Printer, object: Node): void {
+    printExpr(p, object, Prec.Call);
+}
+
+const SCRIPT_CLOSE_TAG = /<\/script/gi;
+
+/** oxc prints template chunks raw, apart from `print_str_escaping_script_close_tag`: `</script` becomes `<\/script`. */
 function emitTemplate(p: Printer, quasis: Node[], expressions: Node[]): void {
     write(p, '`');
     for (let i = 0; i < quasis.length; i++) {
-        write(p, quasis[i].name);
+        const raw = quasis[i].name;
+        write(p, raw.includes('</') ? raw.replace(SCRIPT_CLOSE_TAG, (tag) => `<\\${tag.slice(1)}`) : raw);
         if (i < expressions.length) {
             write(p, '${');
             printExpr(p, expressions[i], Prec.Lowest);
@@ -368,10 +461,14 @@ function emitTemplate(p: Printer, quasis: Node[], expressions: Node[]): void {
     write(p, '`');
 }
 
+/** oxc's `Gen for ArrayExpression`, minus its multi-line layout past two elements. */
 function emitArray(p: Printer, elements: (Node | null)[]): void {
     write(p, '[');
     for (let i = 0; i < elements.length; i++) {
-        if (i > 0) write(p, ',');
+        if (i > 0) {
+            write(p, ',');
+            softSpace(p);
+        }
         const el = elements[i];
         if (el !== null) printExpr(p, el, Prec.Assign);
     }
@@ -382,15 +479,12 @@ function emitArray(p: Printer, elements: (Node | null)[]): void {
 
 /** Emit an expression node's own text (no outer precedence wrapping — see `printExpr`). */
 function emitExpr(p: Printer, n: Node): void {
+    emitExprNode(p, n);
+}
+
+/** `minPrec` matters only to a number or bigint literal, whose negative value prints as a unary minus. */
+function emitExprNode(p: Printer, n: Node, minPrec: Prec = Prec.Lowest): void {
     mark(p, n);
-    // Bundle rewrites (dynamic import() retarget, asset URLs) are pre-resolved to text.
-    if (p.overrides !== null) {
-        const r = p.overrides.get(n);
-        if (r !== undefined) {
-            write(p, r);
-            return;
-        }
-    }
     const d = data(n);
     switch (n.type) {
         case N.IdentifierReference:
@@ -402,12 +496,18 @@ function emitExpr(p: Printer, n: Node): void {
         case N.IdentifierName:
         case N.LabelIdentifier:
         case N.JSXIdentifier:
-        case N.NumericLiteral:
-        case N.StringLiteral:
         case N.BooleanLiteral:
         case N.RegExpLiteral:
-        case N.BigIntLiteral:
             write(p, n.name);
+            return;
+        case N.NumericLiteral:
+            printNumber(p, numericLiteralValue(n), minPrec);
+            return;
+        case N.BigIntLiteral:
+            printBigInt(p, bigIntLiteralValue(n), minPrec);
+            return;
+        case N.StringLiteral:
+            write(p, quoteString(stringLiteralText(n), p.opts.minify, true));
             return;
         case N.PrivateIdentifier:
             write(p, privName(n));
@@ -470,7 +570,19 @@ function emitExpr(p: Printer, n: Node): void {
             emitLogical(p, n);
             return;
         case N.AssignmentExpression: {
-            printExpr(p, d.left as Node, Prec.Assign);
+            const left = d.left as Node;
+            if (p.opts.minify && isExportsComputedTarget(left)) {
+                // oxc's `try_print_exports_computed_target`: `exports["x"] = ...` keeps a plain string key.
+                const ld = data(left);
+                mark(p, left);
+                emitMemberObject(p, ld.object as Node);
+                if (ld.optional as boolean) write(p, '?.');
+                write(p, '[');
+                printExprPlainString(p, ld.expression as Node, Prec.Lowest);
+                write(p, ']');
+            } else {
+                printExpr(p, left, Prec.Assign);
+            }
             softSpace(p);
             write(p, d.operator as string);
             softSpace(p);
@@ -489,7 +601,22 @@ function emitExpr(p: Printer, n: Node): void {
             const wordOp = op === 'typeof' || op === 'void' || op === 'delete';
             write(p, op);
             const arg = d.argument as Node;
+            // oxc follows a keyword operator with a soft space: `typeof -x` readable, `typeof-x` minified.
+            if (wordOp) softSpace(p);
             if (wordOp || arg.type === N.UnaryExpression || arg.type === N.UpdateExpression) space(p);
+            // `delete Infinity` is a strict-mode error; oxc prints `delete (0, Infinity)` outside minify.
+            if (
+                op === 'delete' &&
+                !p.opts.minify &&
+                arg.type === N.NumericLiteral &&
+                numericLiteralValue(arg) === Number.POSITIVE_INFINITY
+            ) {
+                write(p, '(0,');
+                softSpace(p);
+                printExpr(p, arg, Prec.Unary);
+                write(p, ')');
+                return;
+            }
             printExpr(p, arg, Prec.Unary);
             return;
         }
@@ -528,11 +655,12 @@ function emitExpr(p: Printer, n: Node): void {
             if (!p.opts.minify && (d.pure as boolean)) write(p, '/* @__PURE__ */ ');
             printExpr(p, d.callee as Node, Prec.Call);
             if (d.optional as boolean) write(p, '?.');
-            emitArgs(p, d.arguments as Node[]);
+            emitArgs(p, d.arguments as Node[], plainStringArgumentIndex(p, d.callee as Node, d.arguments as Node[]));
             return;
         case N.NewExpression: {
             if (!p.opts.minify && (d.pure as boolean)) write(p, '/* @__PURE__ */ ');
             write(p, 'new');
+            softSpace(p);
             space(p);
             // A call on the callee's member spine must be parenthesised, else `new (foo())()`
             // degrades to `new foo()()` = `(new foo())()` — the `()` binds as the new's args.
@@ -568,6 +696,8 @@ function emitExpr(p: Printer, n: Node): void {
         }
         case N.StaticMemberExpression:
             emitMemberObject(p, d.object as Node);
+            // `0.toString()` would lex `0.` as the number.
+            if (!(d.optional as boolean) && p.needSpaceBeforeDot === p.len) write(p, ' ');
             write(p, (d.optional as boolean) ? '?.' : '.');
             write(p, (d.property as Node).name);
             return;
@@ -608,14 +738,14 @@ function emitExpr(p: Printer, n: Node): void {
             if (d.delegate as boolean) write(p, '*');
             const arg = d.argument as Node | null;
             if (arg) {
-                space(p);
+                keywordSpace(p);
                 printExpr(p, arg, Prec.Assign);
             }
             return;
         }
         case N.AwaitExpression:
             write(p, 'await');
-            space(p);
+            keywordSpace(p);
             printExpr(p, d.argument as Node, Prec.Unary);
             return;
         case N.FormalParameter: {
@@ -654,6 +784,10 @@ function emitClassMember(p: Printer, n: Node): void {
         space(p);
     }
     if (n.type === N.PropertyDefinition) {
+        if (d.accessor as boolean) {
+            write(p, 'accessor');
+            space(p);
+        }
         emitPropertyKey(p, d.key as Node, d.computed as boolean);
         const value = d.value as Node | null;
         if (value) {
@@ -688,10 +822,10 @@ function emitClassMember(p: Printer, n: Node): void {
  *  the class itself (`let foo$1 = class foo {}`, verified on rollup 4.63); rolldown makes it opt-in
  *  as `keepNames` and injects a `__name` helper instead. shakeup takes rolldown's option and default
  *  with Rollup's zero-runtime mechanism. */
-function preservedClassName(p: Printer, id: Node | null, classNode: Node): string | null {
-    if (p.opts.keepNames !== true || id === null) return null;
+export function preservedClassName(keepNames: boolean, nameOf: NameResolver, id: Node | null, classNode: Node): string | null {
+    if (!keepNames || id === null) return null;
     const original = id.name as string;
-    if (p.nameOf(id) === original) return null; // not renamed: `.name` is already right
+    if (nameOf(id) === original) return null; // not renamed: `.name` is already right
     // THE CAPTURE GUARD. Naming the class introduces a binding INSIDE its scope, and anything in the
     // heritage clause or body that was printing that same name now resolves to the class instead.
     // rollupsuite's `class-name-conflict-2` is titled "does not shadow variables when preserving
@@ -707,7 +841,7 @@ function preservedClassName(p: Printer, id: Node | null, classNode: Node): strin
     let captured = false;
     walk(classNode, (m) => {
         if (captured) return false;
-        if (m.type === N.IdentifierReference && m.sym !== 0 && m.sym !== classSym && p.nameOf(m) === original) captured = true;
+        if (m.type === N.IdentifierReference && m.sym !== 0 && m.sym !== classSym && nameOf(m) === original) captured = true;
         return captured ? false : undefined;
     });
     return captured ? null : original;
@@ -787,11 +921,8 @@ function exprStmtNeedsParens(n: Node): boolean {
 function printVarDecl(p: Printer, n: Node, withSemi: boolean): void {
     const d = data(n);
     write(p, d.kind as string);
-    space(p);
-    const all = d.declarations as Node[];
-    // Identity-checked: the filter is live for the whole subtree, so only the declaration it names
-    // is filtered — a nested `for` init or function-body declaration prints in full.
-    const decls = p.declFilter === null || p.declFilter.decl !== n ? all : all.filter((x) => p.declFilter!.live.has(x.id));
+    keywordSpace(p);
+    const decls = d.declarations as Node[];
     for (let i = 0; i < decls.length; i++) {
         if (i > 0) {
             write(p, ',');
@@ -811,7 +942,7 @@ function printVarDecl(p: Printer, n: Node, withSemi: boolean): void {
             const idNode = dd.id as Node;
             const anonClass =
                 init.type === N.ClassExpression && (data(init).id as Node | null) === null && idNode.type === N.BindingIdentifier;
-            const original = anonClass ? preservedClassName(p, idNode, init) : null;
+            const original = anonClass ? preservedClassName(p.opts.keepNames === true, p.nameOf, idNode, init) : null;
             if (original !== null) emitClass(p, init, original);
             else printExpr(p, init, Prec.Assign);
         }
@@ -819,17 +950,54 @@ function printVarDecl(p: Printer, n: Node, withSemi: boolean): void {
     if (withSemi) semi(p);
 }
 
-function printBlock(p: Printer, n: Node): void {
+/** A statement in directive position: an unparenthesised string literal statement. Only the leading run of
+ *  them in a Program or function body is a directive prologue. */
+function isDirectiveShaped(s: Node): boolean {
+    if (s.type !== N.ExpressionStatement) return false;
+    const expression = data(s).expression as Node;
+    return expression.type === N.StringLiteral && expression.start === s.start;
+}
+
+function directivePrologueLength(body: Node[]): number {
+    let length = 0;
+    while (length < body.length && isDirectiveShaped(body[length])) length++;
+    return length;
+}
+
+/** A statement of a Program or function body, as oxc's `print_directives_and_statements`. A directive
+ *  keeps its raw text. The first statement after the directives, when it is a string literal statement,
+ *  must not print as one: `("x");` readable, `` `x`; `` minified. */
+function printBodyStatement(p: Printer, s: Node, isDirective: boolean, firstAfterDirectives: boolean): void {
+    if (isDirective) {
+        mark(p, s);
+        write(p, directiveText((data(s).expression as Node).name.slice(1, -1)));
+        semi(p);
+        return;
+    }
+    const expression = s.type === N.ExpressionStatement ? (data(s).expression as Node) : null;
+    if (firstAfterDirectives && expression !== null && expression.type === N.StringLiteral) {
+        mark(p, s);
+        const value = stringLiteralText(expression);
+        write(p, p.opts.minify ? templateString(value) : `(${quoteString(value, false, true)})`);
+        semi(p);
+        return;
+    }
+    printStmt(p, s);
+}
+
+function printBlock(p: Printer, n: Node, isFunctionBody = false): void {
     write(p, '{');
     const body = data(n).body as Node[];
     if (body.length === 0) {
         write(p, '}');
         return;
     }
+    const prologueLength = isFunctionBody ? directivePrologueLength(body) : 0;
     p.indent++;
-    for (const s of body) {
+    for (let index = 0; index < body.length; index++) {
         softNewline(p);
-        printStmt(p, s);
+        if (isFunctionBody) printBodyStatement(p, body[index], index < prologueLength, index === prologueLength);
+        else printStmt(p, body[index]);
     }
     dropTrailingSemi(p); // last statement's `;` is redundant before `}`
     p.indent--;
@@ -837,24 +1005,58 @@ function printBlock(p: Printer, n: Node): void {
     write(p, '}');
 }
 
+/** oxc codegen's `wrap_to_avoid_ambiguous_else`: a consequent ending in an `if` without `else` gets
+ *  braces, so an outer `else` cannot bind to the inner `if`. */
+function wrapToAvoidAmbiguousElse(statement: Node): boolean {
+    let current = statement;
+    for (;;) {
+        switch (current.type) {
+            case N.IfStatement: {
+                const alternate = data(current).alternate as Node | null;
+                if (alternate === null) return true;
+                current = alternate;
+                break;
+            }
+            case N.ForStatement:
+            case N.ForOfStatement:
+            case N.ForInStatement:
+            case N.WhileStatement:
+            case N.WithStatement:
+            case N.LabeledStatement:
+                current = data(current).body as Node;
+                break;
+            default:
+                return false;
+        }
+    }
+}
+
 /** Print a statement in body position. A block only needs a soft separator (`)`/keyword
  *  then `{`); a non-block clause following a bare keyword (`else`/`do`/`try`/`finally`)
  *  needs a mandatory space so `else c()` doesn't collapse to `elsec()`. */
 function printClause(p: Printer, n: Node, afterKeyword = false): void {
     if (n.type === N.BlockStatement || !afterKeyword) softSpace(p);
-    else space(p);
+    else keywordSpace(p);
     printStmt(p, n);
 }
 
-/** `left` or `left as right`, dropping the `as` when the names coincide. The rename-aware
- *  side is the LOCAL binding; the external name (source export / export alias) is verbatim. */
-function emitAsClause(p: Printer, leftName: string, rightName: string): void {
-    write(p, leftName);
-    if (leftName !== rightName) {
-        space(p);
+/** A module export name as oxc's `Gen for ModuleExportName`: an identifier as named, a string literal
+ *  from its value without the backtick option. */
+const moduleExportNameText = (p: Printer, name: Node, identifierText: string): string =>
+    name.type === N.StringLiteral ? plainString(p, name) : identifierText;
+
+/** oxc's `get_module_export_name`: what a specifier's name compares as. */
+const moduleExportNameValue = (name: Node, identifierText: string): string =>
+    name.type === N.StringLiteral ? stringLiteralText(name) : identifierText;
+
+/** `left` or `left as right`, dropping the `as` when `same`. */
+function emitAsClause(p: Printer, leftText: string, rightText: string, same: boolean): void {
+    write(p, leftText);
+    if (!same) {
+        keywordSpace(p);
         write(p, 'as');
-        space(p);
-        write(p, rightName);
+        keywordSpace(p);
+        write(p, rightText);
     }
 }
 
@@ -868,11 +1070,20 @@ function emitNamedGroup(p: Printer, specs: Node[], bindingKind: 'import' | 'expo
         }
         const sd = data(specs[i]);
         if (bindingKind === 'import') {
-            // `import { imported as local }` — external `imported` verbatim, local renamed.
-            emitAsClause(p, (sd.imported as Node).name, p.nameOf(sd.local as Node));
+            // `import { imported as local }`: external `imported` as written, local renamed. A string
+            // `imported` always keeps its `as`, which oxc would drop when the names coincide, leaving
+            // `import { "a" }`, which does not parse.
+            const imported = sd.imported as Node;
+            const local = p.nameOf(sd.local as Node);
+            const same = imported.type !== N.StringLiteral && imported.name === local;
+            emitAsClause(p, moduleExportNameText(p, imported, imported.name), local, same);
         } else {
-            // `export { local as exported }` — local renamed, external `exported` verbatim.
-            emitAsClause(p, p.nameOf(sd.local as Node), (sd.exported as Node).name);
+            // `export { local as exported }`: local renamed, external `exported` as written.
+            const local = sd.local as Node;
+            const exported = sd.exported as Node;
+            const localName = local.type === N.StringLiteral ? '' : p.nameOf(local);
+            const same = moduleExportNameValue(local, localName) === moduleExportNameValue(exported, exported.name);
+            emitAsClause(p, moduleExportNameText(p, local, localName), moduleExportNameText(p, exported, exported.name), same);
         }
     }
     softSpace(p);
@@ -887,9 +1098,11 @@ function emitNamedGroup(p: Printer, specs: Node[], bindingKind: 'import' | 'expo
  *  unreachable the moment anything prints a module-faithful import — e.g. the chunk-level compress
  *  pass, which round-trips an assembled chunk through parse and print. Dropping the clause there
  *  silently changes what the runtime fetches. */
-function emitImportAttributes(p: Printer, attributes: Node[] | undefined): void {
+function emitImportAttributes(p: Printer, attributes: Node[] | undefined, hardSpace: boolean): void {
     if (attributes === undefined || attributes.length === 0) return;
-    space(p);
+    // oxc's `ExportAllDeclaration` prints a hard space before `with`, the other declarations a soft one.
+    if (hardSpace) write(p, ' ');
+    else keywordSpace(p);
     write(p, 'with');
     softSpace(p);
     write(p, '{');
@@ -901,11 +1114,10 @@ function emitImportAttributes(p: Printer, attributes: Node[] | undefined): void 
         }
         const ad = data(attributes[i]);
         const key = ad.key as Node;
-        // The key is an identifier or a string literal; `name` carries the raw text for both.
-        write(p, key.name);
+        write(p, key.type === N.StringLiteral ? plainString(p, key) : key.name);
         write(p, ':');
         softSpace(p);
-        write(p, (ad.value as Node).name);
+        write(p, plainString(p, ad.value as Node));
     }
     softSpace(p);
     write(p, '}');
@@ -913,20 +1125,6 @@ function emitImportAttributes(p: Printer, attributes: Node[] | undefined): void 
 
 function emitImportDeclaration(p: Printer, n: Node): void {
     const d = data(n);
-    // In a bundle, every import is hoisted to chunk-level wiring — drop the statement.
-    //
-    // UNLESS it carries an init obligation. A statically imported module that is ALSO `require`d is
-    // lazy, and the language says it must have been evaluated by the time this import statement is
-    // reached — so the statement is REPLACED IN PLACE by `init_X();`. Because the statement already
-    // sits in source order inside the importer's body, correct evaluation order is inherited rather
-    // than reconstructed. rolldown's mechanism verbatim (`esm_init_obligations.rs`: "the finalizer
-    // replaces each included static-import statement with the `init_*()` calls of the targets that
-    // record must initialize"); see `cjs.md` §7.25d.
-    if (p.linkModule) {
-        const init = p.initCalls?.get(n);
-        if (init !== undefined) write(p, init);
-        return;
-    }
     const specs = d.specifiers as Node[]; // tsStrip already removed type-only imports + specifiers
     // The import PHASE was parsed and stored but never printed, so `import source w from 'm'` came
     // out as `import w from 'm'` — a silent semantic change. A side-effect import cannot carry one.
@@ -935,20 +1133,22 @@ function emitImportDeclaration(p: Printer, n: Node): void {
         // Side-effect import: `import 'x';`
         write(p, 'import');
         softSpace(p);
-        write(p, (d.source as Node).name);
-        emitImportAttributes(p, d.attributes as Node[] | undefined);
+        write(p, plainString(p, d.source as Node));
+        emitImportAttributes(p, d.attributes as Node[] | undefined, false);
         semi(p);
         return;
     }
     const def = specs.find((s) => s.type === N.ImportDefaultSpecifier);
     const ns = specs.find((s) => s.type === N.ImportNamespaceSpecifier);
     const named = specs.filter((s) => s.type === N.ImportSpecifier);
+    // oxc's codegen: a hard space before a default binding, a soft one before `*` or `{`
+    const beforeFirst = (): void => (def ? space(p) : softSpace(p));
     write(p, 'import');
-    space(p);
     if (phase !== null) {
-        write(p, phase);
         space(p);
+        write(p, phase);
     }
+    beforeFirst();
     let wrote = false;
     if (def) {
         write(p, p.nameOf(data(def).local as Node));
@@ -960,7 +1160,7 @@ function emitImportDeclaration(p: Printer, n: Node): void {
             softSpace(p);
         }
         write(p, '*');
-        space(p);
+        softSpace(p);
         write(p, 'as');
         space(p);
         write(p, p.nameOf(data(ns).local as Node));
@@ -972,39 +1172,24 @@ function emitImportDeclaration(p: Printer, n: Node): void {
             softSpace(p);
         }
         emitNamedGroup(p, named, 'import');
-    }
-    space(p);
+        softSpace(p);
+    } else space(p);
     write(p, 'from');
     softSpace(p);
-    write(p, (d.source as Node).name);
-    emitImportAttributes(p, d.attributes as Node[] | undefined);
+    write(p, plainString(p, d.source as Node));
+    emitImportAttributes(p, d.attributes as Node[] | undefined, false);
     semi(p);
 }
 
 function emitExportNamed(p: Printer, n: Node): void {
     const d = data(n);
-    // `export { v } from './e.js'` where `e` is wrapped: this statement is the dependency edge, so
-    // it is what runs the module — same obligation an `import` carries, same treatment.
-    if (p.linkModule) {
-        const init = p.initCalls?.get(n);
-        if (init !== undefined) {
-            write(p, init);
-            return;
-        }
-    }
     const decl = d.declaration as Node | null; // tsStrip already erased type-only exports + specifiers
     if (decl) {
-        // Link mode: keep the declaration, drop the `export` keyword (the binding is
-        // re-exported by the chunk's own export line).
-        if (!p.linkModule) {
-            write(p, 'export');
-            space(p);
-        }
+        write(p, 'export');
+        space(p);
         printStmt(p, decl);
         return;
     }
-    // Bare re-export (`export { a, b }`) — resolved at chunk level in link mode.
-    if (p.linkModule) return;
     const specs = d.specifiers as Node[];
     const source = d.source as Node | null;
     if (specs.length === 0 && !source) return;
@@ -1012,40 +1197,13 @@ function emitExportNamed(p: Printer, n: Node): void {
     softSpace(p);
     emitNamedGroup(p, specs, 'export');
     if (source) {
-        space(p);
+        softSpace(p);
         write(p, 'from');
         softSpace(p);
-        write(p, source.name);
-        emitImportAttributes(p, d.attributes as Node[] | undefined);
+        write(p, plainString(p, source));
+        emitImportAttributes(p, d.attributes as Node[] | undefined, false);
     }
     semi(p);
-}
-
-/** In link mode a statement can vanish entirely (dropped import, bare re-export) — detecting
- *  that up front lets the top-level loop skip its separator so no blank line is left behind. */
-function emitsNothing(p: Printer, n: Node): boolean {
-    if (!p.linkModule) return false;
-    // A module declaration that was replaced by what evaluates its target emits something after all.
-    // `export { v } from './e.js'` is as much a dependency edge as `import './e.js'` is, and when the
-    // target is wrapped the re-export is the statement that has to run it.
-    if (p.initCalls?.get(n) !== undefined) return false;
-    if (n.type === N.ImportDeclaration) return true;
-    if (n.type === N.ExportAllDeclaration) return true;
-    if (n.type === N.ExportNamedDeclaration) return (data(n).declaration as Node | null) === null;
-    return false;
-}
-
-/** The `VariableDeclaration` a top-level statement declares through, bare or `export`-wrapped.
- *
- *  Pure structure — deliberately NOT a judgement about whether it was shaken per declarator. That
- *  decision belongs to `treeshake`, which records every id an emitter must test: the statement's own,
- *  and one per surviving declarator. Asking the same question here in a second place would be two
- *  sources of truth that must agree, and they would eventually not. */
-function varDeclOf(stmt: Node): Node | null {
-    if (stmt.type === N.VariableDeclaration) return stmt;
-    if (stmt.type !== N.ExportNamedDeclaration) return null;
-    const inner = data(stmt).declaration as Node | null;
-    return inner !== null && inner.type === N.VariableDeclaration ? inner : null;
 }
 
 export function printStmt(p: Printer, n: Node): void {
@@ -1055,43 +1213,19 @@ export function printStmt(p: Printer, n: Node): void {
         case N.Program: {
             const body = d.body as Node[];
             let emitted = false;
-            // IMPORTS ARE HOISTED, so what they emit is hoisted too. A static import evaluates its
-            // target before ANY of the importer's body runs, whatever line the statement sits on:
-            //
-            //     globalThis.o = [];          // main.js line 1 — runs SECOND
-            //     import a from './a.cjs';    // line 2 — a.cjs runs FIRST, and pushes to `o`
-            //
-            // Node throws there (`o` is undefined when a.cjs pushes) and so does rolldown; emitting
-            // `var import_a = __toESM(require_a())` down at line 2 does not, which is the
-            // `CommonJS evaluates in dependency order` case in `pnpm cjsdiff`. Textual position is
-            // right relative to the OTHER imports and wrong relative to everything else, so the
-            // imports emit as a block, in their own order, ahead of the body.
-            const hoisted = (s: Node): boolean => p.linkModule && p.initCalls?.get(s) !== undefined;
-            if (p.linkModule) {
-                for (const s of body) {
-                    if (!hoisted(s)) continue;
-                    if (p.live !== null && !p.live.has(s.id)) continue;
-                    if (emitted) softNewline(p);
-                    printStmt(p, s);
-                    emitted = true;
-                }
-            }
-            for (const s of body) {
-                if (hoisted(s)) continue; // emitted as a block above
-                if (p.live !== null && !p.live.has(s.id)) continue; // tree-shaken (top-level only)
-                // Declarator granularity falls out of the same set: `treeshake` put an id in `live`
-                // for each declarator it kept, so this is membership, not policy.
-                const decl = p.live === null ? null : varDeclOf(s);
-                const filter = decl === null ? null : { decl, live: p.live! };
-                if (emitsNothing(p, s)) continue;
+            const prologueLength = directivePrologueLength(body);
+            let printedNonDirective = false;
+            for (let index = 0; index < body.length; index++) {
+                const s = body[index];
                 if (emitted) softNewline(p);
                 printLeadingComments(p, s.start);
-                p.declFilter = filter;
-                printStmt(p, s);
-                p.declFilter = null;
+                const isDirective = index < prologueLength;
+                printBodyStatement(p, s, isDirective, !isDirective && !printedNonDirective);
+                if (!isDirective) printedNonDirective = true;
                 emitted = true;
             }
             dropTrailingSemi(p); // module ends — trailing `;` is redundant
+            printTrailingComments(p, n.end);
             return;
         }
         case N.ExpressionStatement: {
@@ -1117,7 +1251,7 @@ export function printStmt(p: Printer, n: Node): void {
             write(p, 'return');
             const arg = d.argument as Node | null;
             if (arg) {
-                space(p);
+                keywordSpace(p);
                 printExpr(p, arg, Prec.Lowest);
             }
             semi(p);
@@ -1125,7 +1259,7 @@ export function printStmt(p: Printer, n: Node): void {
         }
         case N.ThrowStatement:
             write(p, 'throw');
-            space(p);
+            keywordSpace(p);
             printExpr(p, d.argument as Node, Prec.Lowest);
             semi(p);
             return;
@@ -1152,7 +1286,18 @@ export function printStmt(p: Printer, n: Node): void {
             write(p, '(');
             printExpr(p, d.test as Node, Prec.Lowest);
             write(p, ')');
-            printClause(p, d.consequent as Node);
+            const consequent = d.consequent as Node;
+            if (wrapToAvoidAmbiguousElse(consequent)) {
+                softSpace(p);
+                write(p, '{');
+                p.indent++;
+                softNewline(p);
+                printStmt(p, consequent);
+                dropTrailingSemi(p);
+                p.indent--;
+                softNewline(p);
+                write(p, '}');
+            } else printClause(p, consequent);
             const alt = d.alternate as Node | null;
             if (alt) {
                 softNewline(p);
@@ -1217,9 +1362,9 @@ export function printStmt(p: Printer, n: Node): void {
             const left = d.left as Node;
             if (left.type === N.VariableDeclaration) printVarDecl(p, left, false);
             else printExpr(p, left, Prec.Lowest);
-            space(p);
+            keywordSpace(p);
             write(p, n.type === N.ForInStatement ? 'in' : 'of');
-            space(p);
+            keywordSpace(p);
             printExpr(p, d.right as Node, Prec.Assign);
             write(p, ')');
             printClause(p, d.body as Node);
@@ -1232,7 +1377,7 @@ export function printStmt(p: Printer, n: Node): void {
             // A RENAMED class declaration becomes `let <new> = class <original> { … }`, which keeps
             // `.name`. Rollup's `ClassDeclaration.render` does exactly this. The `let` is safe: a
             // class declaration is TDZ-bound like `let`, not hoisted-initialised like a function.
-            const original = preservedClassName(p, (data(n).id as Node | null) ?? null, n);
+            const original = preservedClassName(p.opts.keepNames === true, p.nameOf, (data(n).id as Node | null) ?? null, n);
             if (original !== null) {
                 write(p, 'let');
                 space(p);
@@ -1256,60 +1401,36 @@ export function printStmt(p: Printer, n: Node): void {
         case N.ExportDefaultDeclaration: {
             const decl = d.declaration as Node;
             const isDeclKind = decl.type === N.FunctionDeclaration || decl.type === N.ClassDeclaration;
-            if (p.linkModule) {
-                // Named `export default function f(){}` keeps its binding; anonymous forms
-                // become `const <defaultName> = <value>;` (mirrors moduleEdits, bundle.ts:334).
-                if (isDeclKind && (data(decl).id as Node | null) !== null) {
-                    printStmt(p, decl);
-                } else {
-                    write(p, 'const');
-                    space(p);
-                    write(p, p.defaultName ? p.defaultName() : '_default');
-                    softSpace(p);
-                    write(p, '=');
-                    softSpace(p);
-                    if (decl.type === N.FunctionDeclaration) emitFunction(p, decl);
-                    else if (decl.type === N.ClassDeclaration) emitClass(p, decl);
-                    else printExpr(p, decl, Prec.Assign);
-                    semi(p);
-                }
-                return;
-            }
             write(p, 'export');
             space(p);
             write(p, 'default');
+            keywordSpace(p);
             if (isDeclKind) {
-                space(p);
                 printStmt(p, decl);
             } else {
-                space(p);
                 printExpr(p, decl, Prec.Assign);
                 semi(p);
             }
             return;
         }
         case N.ExportAllDeclaration: {
-            // Bundled star re-exports are resolved at chunk level — but the edge still evaluates the
-            // target, so a wrapped one is initialized here (see `emitExportNamed`).
-            if (p.linkModule) {
-                const init = p.initCalls?.get(n);
-                if (init !== undefined) write(p, init);
-                return;
-            }
+            // oxc's codegen spacing: soft around `*` and `as`, hard after an exported name (it may be a string)
             write(p, 'export');
             softSpace(p);
             write(p, '*');
+            softSpace(p);
             const exported = d.exported as Node | null;
             if (exported) {
-                space(p);
                 write(p, 'as');
-                space(p);
-                write(p, exported.name);
+                softSpace(p);
+                space(p); // oxc prints the name with `print_space_before_identifier`
+                write(p, moduleExportNameText(p, exported, exported.name));
+                write(p, ' ');
             }
-            space(p);
             write(p, 'from');
             softSpace(p);
-            write(p, (d.source as Node).name);
+            write(p, plainString(p, d.source as Node));
+            emitImportAttributes(p, d.attributes as Node[] | undefined, true);
             semi(p);
             return;
         }
@@ -1353,7 +1474,7 @@ export function printStmt(p: Printer, n: Node): void {
                 const test = cd.test as Node | null;
                 if (test) {
                     write(p, 'case');
-                    space(p);
+                    keywordSpace(p);
                     printExpr(p, test, Prec.Lowest);
                 } else {
                     write(p, 'default');

@@ -182,6 +182,6 @@ describe('a `var` that shadows a catch parameter shares its symbol', () => {
         // resolve to the OUTER catch parameter here.
         const body = `try { throw 1 } catch (e) { try { throw 2 } catch (e) { var e = 'i'; sink = e; } sink = e; }\n`;
         const code = await bundleTwo(body, body);
-        expect(code).toMatch(/catch \(e\$1\) \{\s*var e\$1 = 'i';\s*sink = e\$1;/);
+        expect(code).toMatch(/catch \(e\$1\) \{\s*var e\$1 = "i";\s*sink = e\$1;/);
     });
 });

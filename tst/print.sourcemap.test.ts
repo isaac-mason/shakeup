@@ -7,7 +7,7 @@ import { buildLineTable, decodeMappings, encodeMappings } from '../src/util/sour
 /** Print `src` with sourcemap building on; return generated code + decoded segments. */
 function printWithMap(src: string, minify: boolean) {
     const { program } = parse(src, { ts: false, jsx: false });
-    const p = createPrinter({ minify }, { srcLines: Uint32Array.from(buildLineTable(src)), sourceIdx: 0 });
+    const p = createPrinter({ minify }, { sources: [{ start: 0, lines: Uint32Array.from(buildLineTable(src)), sourceIdx: 0 }] });
     printModule(p, program);
     const part = printerPart(p);
     // round-trip through encode/decode to prove the segments serialize cleanly

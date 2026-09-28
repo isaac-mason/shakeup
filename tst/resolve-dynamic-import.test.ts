@@ -26,7 +26,7 @@ describe('resolveDynamicImport', () => {
             external: ['asdf'],
             plugins: [{ name: 'p', resolveDynamicImport: () => 'asdf' }],
         });
-        expect(code).toContain("import('asdf')");
+        expect(code).toContain('import("asdf")');
         expect(code, 'not the specifier as written').not.toContain('./asdf');
     });
 
@@ -70,7 +70,7 @@ describe('resolveDynamicImport', () => {
                 { name: 'static', resolveId: (id: string) => (id === './asdf' ? '/real.js' : null) },
             ],
         });
-        expect(code).toContain("import('asdf')");
+        expect(code).toContain('import("asdf")');
         expect(code, 'resolveId did not get to answer').not.toContain('const v = 1');
     });
 });

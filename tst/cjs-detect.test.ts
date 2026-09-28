@@ -820,8 +820,9 @@ describe('require() of an ES module that is also statically imported', () => {
     it('is lazy — and so silent — when the target has a side-effectful statement', async () => {
         const r = await mixed('console.log("hi");\nexport const a = 1;');
         expect(r.warnings).toEqual([]);
-        // The split: binding hoisted out so `main` can name it, body inside the closure.
-        expect(r.chunks[0].code).toMatch(/var a;\nvar init_esm = \/\* @__PURE__ \*\/ __esm\(\(\) => \{/);
+        // The body goes inside the closure. `a` is an exported constant, so its reads print `1` and no
+        // binding is left to hoist, as in rolldown's output for the same files.
+        expect(r.chunks[0].code).toMatch(/var init_esm = \/\* @__PURE__ \*\/ __esm\(\(\) => \{\n\s*console\.log\("hi"\);\n\}\);/);
         expect(r.chunks[0].code).toMatch(/console\.log\("hi"\);/);
         // ...and it runs at the require, not at the producer's slot.
         expect(r.chunks[0].code).toMatch(/module\.exports = \(init_esm\(\), __toCommonJS\(esm_ns\)\)\.a;/);

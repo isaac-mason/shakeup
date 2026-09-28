@@ -98,11 +98,11 @@ describe('constant folding of single-quoted strings', () => {
         expect((await folds(`'\\n' === "\\n"`)).value).toBe(true);
     });
 
-    it('BAILS rather than mis-folding a JS-only escape', async () => {
-        // `\x41` is not valid JSON, so `JSON.parse` rejects it and no fold happens. The cost is a
-        // missed optimization; the alternative — guessing — would be a wrong answer.
+    it('folds a JS-only escape by its decoded value', async () => {
+        // `\x41` is not valid JSON, but it is JavaScript for `A`: strings are compared by value, as
+        // rolldown folds this same comparison to `!0`
         const { code, value } = await folds(`'\\x41' === 'A'`);
-        expect(value).toBe(true); // still correct at runtime
-        expect(code).toContain('==='); // …but deliberately not folded
+        expect(value).toBe(true);
+        expect(code).not.toContain('===');
     });
 });

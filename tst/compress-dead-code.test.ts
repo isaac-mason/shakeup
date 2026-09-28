@@ -138,7 +138,7 @@ describe('dead-code elimination (compress)', () => {
     // A block-nested `function` declaration is a hoisting hazard we bail on (conservatively safe in
     // both strict and sloppy mode). We assert the branch is left intact in the output rather than a
     // runtime `typeof`, since in a module (strict mode) a block-scoped function does not leak anyway.
-    it('does NOT eliminate a dead branch that contains a `function` declaration', async () => {
+    it('eliminates a dead branch holding a `function` declaration, which is block-scoped in a module', async () => {
         const src = `
             export function f() {
                 if (false) { function g() { return 42; } }
@@ -146,7 +146,8 @@ describe('dead-code elimination (compress)', () => {
             }
             export const out = f();`;
         const code = await build(src);
-        expect(code).toMatch(/function g\b/); // the branch (and its function decl) survives the bail
+        // module code is strict, so `g` never escapes the block: oxc drops it with the branch, as rolldown does
+        expect(code).not.toMatch(/function g\b/);
         expect((await run(code)).out).toBe('kept');
     });
 

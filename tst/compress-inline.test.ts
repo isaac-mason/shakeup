@@ -93,17 +93,18 @@ describe('single-use inline (movement kernel)', () => {
     });
 
     // ---- hard bails ------------------------------------------------------------------------------
-    it('does NOT inline anywhere when the module uses eval (module-wide bail)', async () => {
-        // `x` is single-use adjacent (normally inlined), but eval ANYWHERE in the module could resolve
-        // a name dynamically, so inline bails module-wide — `x` keeps its declaration.
+    it('does NOT inline in a function that uses eval', async () => {
+        // A direct eval can resolve `x` by name, so its function keeps the binding. oxc's gate is the
+        // scope's own direct-eval flag, so a function without eval still inlines, as rolldown does.
         const src = [
-            'export function f(o) { const x = o.a; return x; }',
-            'export function danger() { return eval("1 + 1"); }',
-            'export const out = f({ a: 5 });',
+            'export function f(o) { const x = o.a; eval("1 + 1"); return x; }',
+            'export function g(o) { const y = o.b; return y; }',
+            'export const out = [f({ a: 5 }), g({ b: 6 })];',
         ].join('\n');
         const code = await parity(src);
-        expect((await run(code)).out).toBe(5);
-        expect(code).toMatch(/\blet x\b/); // NOT inlined (module has eval)
+        expect((await run(code)).out).toEqual([5, 6]);
+        expect(code).toMatch(/\b(?:const|let) x\b/);
+        expect(code).not.toMatch(/\b(?:const|let) y\b/);
     });
 
     it('does NOT inline a multi-read binding', async () => {
@@ -111,9 +112,9 @@ describe('single-use inline (movement kernel)', () => {
         expect(code).toMatch(/\bx\b/); // two reads → kept
     });
 
-    it('does NOT inline a `var`', async () => {
+    it('inlines a `var` too, as oxc does for an adjacent single use', async () => {
         const code = await parity('export function f(o) { var x = o.a; return x; }\nexport const out = f({ a: 5 });');
-        expect(code).toMatch(/\bvar\b/);
+        expect(code).not.toMatch(/\bvar\b/);
     });
 
     it('does NOT inline across a non-adjacent statement', async () => {
@@ -128,9 +129,9 @@ describe('single-use inline (movement kernel)', () => {
         expect((await run(code)).out).toBe(5);
     });
 
-    it('does not fire without compress', async () => {
+    it('still inlines without compress: the per-module dead-code pass runs whenever tree-shaking does', async () => {
         const code = await build('export function f(o) { const x = o.a; return x; }\nexport const out = f({ a: 5 });', false);
-        // No compress → no inlining AND no `const` → `let` substitution; the source form survives.
-        expect(code).toMatch(/\bconst x\b/);
+        // rolldown's `minify: false` output is the same `return o.a`
+        expect(code).toContain('return o.a;');
     });
 });

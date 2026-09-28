@@ -3,6 +3,7 @@ import { analyzeDynamicUsage, analyzeNsUsage, type NsUsage } from '../analysis/n
 import { walkRefIdents } from '../analysis/refs.ts';
 import { scopeOf, symbolOf } from '../analysis/semantic.ts';
 import { N, type Node, walk } from '../ast/index.ts';
+import { isSafeToInline, safeConstantOf } from './const-inlines.ts';
 import { type Graph, type ImportBind, type Linked, type Module, packRef, refMod, refSym } from './graph-types.ts';
 import { staticImportRunsTarget } from './init-obligations.ts';
 import { namespaceLocals } from './link.ts';
@@ -38,6 +39,13 @@ export type TreeshakeResult = {
      *  rolldown decides the same thing with `ModuleNamespaceIncludedReason`, materialising only a
      *  namespace that is "semantically observed". Measured on crashcat: 63 objects to rolldown's 0. */
     elidableNs: Set<number>;
+    /** Per module, the local import bindings some LIVE unit reads. An import nothing live reads needs
+     *  no cross-chunk wiring: its producer may have dropped the declaration, as it does for an enum
+     *  whose every read was inlined. */
+    readImports: Set<number>[];
+    /** Per module, whether importing it has an effect, which is what keeps a bare `import './x'` of
+     *  another chunk. {@link determineSideEffects}. */
+    hasSideEffects: boolean[];
 };
 
 export type StatementInfo = {
@@ -48,6 +56,9 @@ export type StatementInfo = {
      *  knowing whether it was split. */
     owner: Node;
     refs: number[];
+    /** The local import bindings the unit reads, which is what a chunk has to import across a
+     *  boundary (rolldown's `referenced_symbols` on the included `StmtInfo`s). */
+    importSyms: number[];
     pure: boolean;
 };
 
@@ -63,11 +74,13 @@ function collectRefs(
     statement: Node,
     out: number[],
     declared: number[],
+    importSyms: number[],
     /** Identifier nodes that are the OBJECT of a read the emitter replaces with an enum constant.
      *  They are not references: `Kind.DYNAMIC` becomes `2` and names nothing. Counting them is what
      *  kept every lowered enum object alive — 231 string literals on crashcat, where rolldown emits
      *  2. Built from `linked.enumInlines`, the SAME map the emitter substitutes from, so the two
-     *  cannot disagree. */
+     *  cannot disagree. Also holds every imported read of a small constant (`linked.constInlines`),
+     *  for the same reason. */
     inlinedObjects: Set<Node> | null,
 ): void {
     const moduleScope = scopeOf(mod.semantic, mod.program);
@@ -75,6 +88,7 @@ function collectRefs(
     const pushSym = (sym: number): void => {
         if (sym === 0) return;
         if (mod.namedImports.has(sym)) {
+            importSyms.push(sym);
             const bind = linked.binds.get(packRef(mod.idx, sym));
             if (bind === undefined) return;
             if (bind.kind === 'found') out.push(bind.ref);
@@ -107,6 +121,43 @@ function collectRefs(
     });
     // (JSX runtime refs are collected normally now — jsxLower lowers JSX to `jsx(...)` calls before
     // treeshake, so their callee IdentifierReferences are ordinary refs. No JSX-specific walk.)
+}
+
+/**
+ * Whether each module has side effects, rolldown's `determine_side_effects`. A declared flag stands
+ * as declared. Otherwise a module has them when one of its own statements does, or when anything it
+ * imports does, or when it re-exports `*` from a module that has to run to build its exports.
+ */
+function determineSideEffects(graph: Graph, linked: Linked, infos: StatementInfo[][]): boolean[] {
+    const UNVISITED = 0;
+    const VISITING = 1;
+    const DONE = 2;
+    const state = new Uint8Array(graph.modules.length);
+    const result: boolean[] = graph.modules.map((mod) => {
+        if (mod.sideEffects === 'no-treeshake') return true;
+        if (mod.sideEffectsDeclared) return mod.sideEffects === true;
+        return infos[mod.idx].some((info) => !info.pure);
+    });
+    const visit = (idx: number): boolean => {
+        // A cycle answers with what is known so far, as rolldown's `Visited` does.
+        if (state[idx] !== UNVISITED) return result[idx];
+        state[idx] = VISITING;
+        const mod = graph.modules[idx];
+        if (!result[idx] && !mod.sideEffectsDeclared && mod.sideEffects !== 'no-treeshake') {
+            result[idx] = mod.importRecords.some((rec, recIdx) => {
+                if (rec.external) return graph.externalSideEffects.get(rec.specifier) !== false;
+                if (rec.resolved < 0) return false;
+                if (visit(rec.resolved)) return true;
+                if (rec.kind !== 'static' || !mod.starExports.includes(recIdx)) return false;
+                if (linked.cjsWrap.has(rec.resolved) || linked.esmInit.has(rec.resolved)) return true;
+                return linked.dynamicExports.has(rec.resolved);
+            });
+        }
+        state[idx] = DONE;
+        return result[idx];
+    };
+    for (let idx = 0; idx < graph.modules.length; idx++) visit(idx);
+    return result;
 }
 
 /** The bindings a statement AUGMENTS — every `X.a = …` whose target chain roots at a module-scope
@@ -621,6 +672,24 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             inlinedObjects = new Set<Node>();
             for (const n of inlines.keys()) inlinedObjects.add((n.data as { object: Node }).object);
         }
+        // An imported small constant is not a reference either: every read of it prints the value
+        // (rolldown's `is_bypassed_inlined_constant`). Only through an import: a read in the declaring
+        // module, a namespace member read and a namespace object all still keep the declaration,
+        // because rolldown enqueues the declaring statement of what they name before that bypass.
+        // A namespace member read (`ns.E`) is not a reference to the namespace either; whether it keeps
+        // the member's declaration is decided after the fixpoint, by `keepNamespaceConstants`.
+        const constants = linked.constInlines.get(mod.idx);
+        if (constants !== undefined) {
+            for (const [n, value] of constants) {
+                if (!isSafeToInline(value)) continue;
+                if (n.type === N.StaticMemberExpression) {
+                    (inlinedObjects ??= new Set<Node>()).add(n.data.object);
+                    continue;
+                }
+                if (n.type !== N.IdentifierReference || !mod.namedImports.has(n.sym)) continue;
+                (inlinedObjects ??= new Set<Node>()).add(n);
+            }
+        }
         const body = mod.program.data.body;
         for (let idx = 0; idx < body.length; idx++) {
             const statement = body[idx];
@@ -632,8 +701,9 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             for (const unit of shakeUnits(statement)) {
                 const refs: number[] = [];
                 const declared: number[] = [];
-                collectRefs(mod, linked, unit, refs, declared, inlinedObjects);
-                list.push({ statement: unit, owner: statement, refs, pure: unitIsPure(mod, linked, unit, statement) });
+                const importSyms: number[] = [];
+                collectRefs(mod, linked, unit, refs, declared, importSyms, inlinedObjects);
+                list.push({ statement: unit, owner: statement, refs, importSyms, pure: unitIsPure(mod, linked, unit, statement) });
                 for (const ref of declared) {
                     noteDecl(ref, [mod.idx, list.length - 1]);
                     localDecls.push([ref, [mod.idx, list.length - 1]]);
@@ -739,7 +809,11 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         for (const name of narrow) {
             if (!nsMemberLive(modIdx, name)) continue;
             const bind = map.get(name);
-            if (bind !== undefined) markBind(bind);
+            if (bind === undefined) continue;
+            // a small constant read statically prints its value: `keepNamespaceConstants` decides it
+            if (bind.kind === 'found' && safeConstantOf(linked, bind.ref) !== undefined && nsSites.get(modIdx)?.has(name) === true)
+                continue;
+            markBind(bind);
         }
     };
     // Root from every entry's export surface (multi-entry).
@@ -779,6 +853,25 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         }
     };
     drain();
+
+    /**
+     * A small constant read through a namespace (`ns.E`) prints its value, so the read alone keeps
+     * nothing. But once something else includes the module, rolldown's namespace statement is included
+     * with it, and that statement names each member it was narrowed to, which keeps their declarations
+     * (the `WorkItem::Module` gate in `include_statements.rs`).
+     */
+    const keepNamespaceConstants = (): void => {
+        for (const [target, byName] of nsSites) {
+            if (!infos[target].some((info) => live[target].has(info.statement.id))) continue;
+            const map = linked.exportMaps.get(target);
+            if (map === undefined) continue;
+            for (const [name, sites] of byName) {
+                const bind = map.get(name);
+                if (bind === undefined || bind.kind !== 'found' || safeConstantOf(linked, bind.ref) === undefined) continue;
+                if (sites.some(([m, i]) => live[m].has(infos[m][i].statement.id))) markRef(bind.ref);
+            }
+        }
+    };
 
     // `sideEffects: false` says the MODULE MAY BE OMITTED when nothing needs it. It does NOT license
     // deleting the effects of a module that IS included — and reading it that way silently deleted
@@ -825,6 +918,7 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
         // Monotone in both directions — liveness only grows, and so does each narrowed surface — so
         // this terminates for the same reason the rooting above does.
         for (const modIdx of nsExpanded) expandNs(modIdx);
+        keepNamespaceConstants();
         if (worklist.length > 0) added = true;
         if (!added) break;
         drain();
@@ -871,10 +965,16 @@ export function treeshake(graph: Graph, linked: Linked, cache?: TreeshakeCache):
             dropped.push([mod.idx, info.statement]);
         }
     }
+    const hasSideEffects = determineSideEffects(graph, linked, infos);
+    const readImports = graph.modules.map((mod) => {
+        const read = new Set<number>();
+        for (const info of infos[mod.idx]) if (live[mod.idx].has(info.statement.id)) for (const sym of info.importSyms) read.add(sym);
+        return read;
+    });
     if (cache !== undefined) {
         cache.moduleIds = moduleIds;
         cache.infos = infos;
         cache.decls = declArrays;
     }
-    return { live, dropped, nsUsage, nsRead, deadDynamic, liveRefs, elidableNs };
+    return { live, dropped, nsUsage, nsRead, deadDynamic, liveRefs, elidableNs, readImports, hasSideEffects };
 }

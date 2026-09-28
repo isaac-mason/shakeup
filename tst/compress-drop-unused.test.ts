@@ -10,6 +10,14 @@ const build = async (src: string, minify: boolean | { compress?: boolean }) => {
     return result.chunks[0].code;
 };
 
+/** No compress at all: `minify: false` still runs the per-module dead-code pass whenever tree-shaking is
+ *  on, as rolldown's does, so this turns tree-shaking off too. */
+const buildUntouched = async (src: string) => {
+    const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), treeshake: false, output: { minify: false } });
+    expect(result.errors).toEqual([]);
+    return result.chunks[0].code;
+};
+
 /** Build the source both un-minified and compress-only, execute both, and assert the exported `out`
  *  is bit-for-bit identical. EXECUTION PARITY is the load-bearing guard: drop-unused is only allowed
  *  if it preserves runtime behavior exactly. Returns both bundles + the shared `out`. */
@@ -242,11 +250,11 @@ describe('drop-unused (compress)', () => {
         expect(q.log).toEqual(['x']); // deadImpure's effect ran; deadPure/deadVar/closed did nothing
     });
 
-    it('does not fire when compress is explicitly disabled (plain build keeps the unused binding)', async () => {
+    it('does not fire when compress and tree-shaking are off (plain build keeps the unused binding)', async () => {
         const src = `
             export function f() { const unusedPure = 1; return 'x'; }
             export const out = f();`;
-        const code = await build(src, { compress: false });
+        const code = await buildUntouched(src);
         expect(code).toMatch(/unusedPure/);
         expect((await run(code)).out).toBe('x');
     });

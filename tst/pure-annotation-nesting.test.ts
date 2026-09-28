@@ -40,13 +40,15 @@ describe('a nested PURE annotation does not steal the outer one', () => {
         expect(pureMarks(src)).toEqual(expected);
     });
 
-    it('one annotation still marks only the innermost node at that offset', () => {
-        // Documented convention: `/*@__PURE__*/ new Matrix3().set(…)` — the `new` and the `.set()`
-        // call start at the same offset, and the `new` claims it. Capturing earlier must not change
-        // that.
+    it('one annotation marks the expression it precedes, which here is the outer call', () => {
+        // oxc's `set_pure_on_call_or_new_expr`: the annotation belongs to the expression after it, and
+        // `new Matrix3().set(1)` IS the `.set(1)` call, so that call carries it. It reaches a `new` or call
+        // further in only through a member access that isn't called (`foo().a.b`).
         // Walk order visits the outer `.set()` call first; its callee is a member expression, so the
         // helper labels it with an empty name. What matters is WHICH node carries the flag.
-        expect(pureMarks('const x = /*@__PURE__*/ new Matrix3().set(1);')).toEqual(['=no', 'Matrix3=PURE']);
+        expect(pureMarks('const x = /*@__PURE__*/ new Matrix3().set(1);')).toEqual(['=PURE', 'Matrix3=no']);
+        expect(pureMarks('const x = /*@__PURE__*/ foo().a.b;')).toEqual(['foo=PURE']);
+        expect(pureMarks('const x = /*@__PURE__*/ ((y) => y)(1);')).toEqual(['=PURE']);
     });
 
     it("shakes kit's shape: an annotated call whose argument holds another annotated call", async () => {

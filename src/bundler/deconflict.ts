@@ -270,6 +270,16 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         if (memberSet !== null && !memberSet.has(mod.idx)) continue;
         if (mod.external) continue;
         const sem = mod.semantic;
+        /** Names bound below the top level: only a read of one of these can be captured, so no other
+         *  name needs marking. None means nothing in this module can be. */
+        const nestedNames = new Set<string>();
+        for (let sym = 1; sym < sem.symbols.length; sym++) {
+            const rec = sem.symbols[sym];
+            if (rec === undefined || rec.decl === null) continue;
+            const flags = sem.scopes[rec.scope]?.flags;
+            if (flags !== undefined && scopeKind(flags) !== SCOPE.MODULE) nestedNames.add(rec.decl.name);
+        }
+        if (nestedNames.size === 0) continue;
         /** This module's NAMESPACE locals whose `ns.foo` reads get rewritten to the producer's
          *  binding, mapped to that target. Each such read is a reference to the producer from
          *  whatever scope it sits in — the reference the renamer would otherwise never see. Same
@@ -302,16 +312,26 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
                     return null;
             }
         };
+        /** Memoised per symbol: a symbol is read many times. */
+        const outerNames: (string | null | undefined)[] = [];
         const outerName = (modIdx: number, sym: number): string | null => {
-            if (mod.namedImports.get(sym) === undefined) return finalNameOf(linked, packRef(modIdx, sym));
-            const bind = linked.binds.get(packRef(modIdx, sym));
-            return bind === undefined ? null : nameOfBind(bind);
+            const known = outerNames[sym];
+            if (known !== undefined) return known;
+            let name: string | null;
+            if (mod.namedImports.get(sym) === undefined) name = finalNameOf(linked, packRef(modIdx, sym));
+            else {
+                const bind = linked.binds.get(packRef(modIdx, sym));
+                name = bind === undefined ? null : nameOfBind(bind);
+            }
+            outerNames[sym] = name;
+            return name;
         };
         /** Per scope: names read inside it that resolve OUTSIDE it, so a local of that name captures. */
         const captured = new Map<number, Set<string>>();
         /** Mark every scope from the READ up to (not including) the one holding the DECLARATION: a
          *  binding anywhere on that chain would capture the reference. */
         const mark = (from: number, stop: number, name: string): void => {
+            if (!nestedNames.has(name)) return;
             for (let s = from; s !== 0 && s !== stop; s = sem.scopes[s].parent) {
                 let set = captured.get(s);
                 if (set === undefined) captured.set(s, (set = new Set()));
@@ -327,6 +347,11 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
         // generated function means a bigger frame — a nesting limit that moves when the AST grows.
         const nodes: Node[] = [mod.program];
         const scopes: number[] = [0];
+        let childScope = 0;
+        const pushChild = (c: Node): void => {
+            nodes.push(c);
+            scopes.push(childScope);
+        };
         while (nodes.length > 0) {
             const n = nodes.pop() as Node;
             const scope = scopes.pop() as number;
@@ -355,10 +380,8 @@ function deshadowLocals(graph: Graph, linked: Linked, memberSet: Set<number> | n
                     continue;
                 }
             }
-            walkChildren(n, (c) => {
-                nodes.push(c);
-                scopes.push(cur);
-            });
+            childScope = cur;
+            walkChildren(n, pushChild);
         }
         if (captured.size === 0) continue;
         for (let sym = 1; sym < sem.symbols.length; sym++) {

@@ -42,10 +42,10 @@ describe('join-vars + sequences (compress)', () => {
     it('merges consecutive same-kind var declarations into one', async () => {
         const src = `
             export function f() {
-                var a = 1;
-                var b = 2;
-                var c = 3;
-                return a + b + c;
+                var a = globalThis.a ?? 1;
+                var b = globalThis.b ?? 2;
+                var c = globalThis.c ?? 3;
+                return a + b + c + (a - a) + (b - b) + (c - c);
             }
             export const out = f();`;
         const { code, min } = await both(src);
@@ -86,7 +86,7 @@ describe('join-vars + sequences (compress)', () => {
         const { code, min } = await both(src);
         expect(min.out).toBe('abc');
         // The three `s+=…` statements fold into one comma sequence: `s += 'a', s += 'b', s += 'c'`.
-        expect(code).toMatch(/s \+= 'a', s \+= 'b', s \+= 'c'/);
+        expect(code).toMatch(/s \+= "a", s \+= "b", s \+= "c"/);
     });
 
     // OBSERVABLE ORDER: record var-init and expr-statement effects into an exported array; the array's
@@ -151,7 +151,7 @@ describe('join-vars + sequences (compress)', () => {
         expect(min.result).toBe('decl');
         // The two tag() expr-statements are separated by the `let`, so they are NOT fused: no comma
         // sequence joining "before" directly to "after".
-        expect(code).not.toMatch(/tag\('before'\), tag\('after'\)/);
+        expect(code).not.toMatch(/tag\("before"\), tag\("after"\)/);
     });
 
     // A "use strict" prologue is a string-literal expression statement; it must not be swallowed into a
@@ -173,8 +173,8 @@ describe('join-vars + sequences (compress)', () => {
         expect(min.order).toEqual(['x', 'y']);
         expect(min.result).toBe('done');
         // The directive is not comma-joined to a following call.
-        expect(code).not.toMatch(/use strict', /);
+        expect(code).not.toMatch(/use strict", /);
         // The two real calls still fold.
-        expect(code).toMatch(/tag\('x'\), tag\('y'\)/);
+        expect(code).toMatch(/tag\("x"\), tag\("y"\)/);
     });
 });

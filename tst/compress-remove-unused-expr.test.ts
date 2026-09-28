@@ -10,6 +10,14 @@ const build = async (src: string, minify: boolean | { compress?: boolean }) => {
     return result.chunks[0].code;
 };
 
+/** No compress at all: `minify: false` still runs the per-module dead-code pass whenever tree-shaking is
+ *  on, as rolldown's does, so this turns tree-shaking off too. */
+const buildUntouched = async (src: string) => {
+    const result = await bundle({ entry: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), treeshake: false, output: { minify: false } });
+    expect(result.errors).toEqual([]);
+    return result.chunks[0].code;
+};
+
 function normalize(v: unknown): unknown {
     if (typeof v === 'function') return '$fn';
     if (Array.isArray(v)) return v.map(normalize);
@@ -157,8 +165,8 @@ describe('remove-unused-expression (compress)', () => {
         expect((await run(code)).out).toBe('true,false,else,true,then,0');
     });
 
-    it('does not fire when compress is explicitly disabled', async () => {
-        const code = await build('export function f() { [1, 2, 3]; return 5; }\nexport const out = f();', { compress: false });
+    it('does not fire when compress and tree-shaking are off', async () => {
+        const code = await buildUntouched('export function f() { [1, 2, 3]; return 5; }\nexport const out = f();');
         expect(code).toMatch(/\[1,\s?2,\s?3\]/); // dead array literal kept without compress
     });
 });

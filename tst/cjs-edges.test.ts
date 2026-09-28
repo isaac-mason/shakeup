@@ -46,7 +46,7 @@ describe('§7.6 — require() of an external', () => {
             { external: ['ext'] },
         );
         expect(r.errors).toEqual([]);
-        expect(r.chunks[0].code).toContain("__require('ext')");
+        expect(r.chunks[0].code).toContain('__require("ext")');
     });
 
     it('a DYNAMIC require is still a build error — it has no specifier to defer', async () => {

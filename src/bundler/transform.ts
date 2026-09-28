@@ -545,7 +545,7 @@ export function devTransform(filename: string, source: string, options: DevTrans
     // JSX is already lowered to calls, so the printer needs no JSX hook.
     const p = createPrinter(
         { minify: false },
-        { srcLines: wantMap ? Uint32Array.from(buildLineTable(source)) : undefined, sourceIdx: 0 },
+        { sources: wantMap ? [{ start: 0, lines: Uint32Array.from(buildLineTable(source)), sourceIdx: 0 }] : undefined },
     );
     printModule(p, program);
 

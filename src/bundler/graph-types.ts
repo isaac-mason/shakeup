@@ -2,6 +2,7 @@
 // depends only on ast/semantic/plugin/fs types, imported by every stage (scan/link/deconflict/
 // treeshake/chunk-graph/bundle). No stage logic here.
 
+import type { ConstantValue } from '../analysis/constant-value.ts';
 import type { Semantic } from '../analysis/semantic.ts';
 import type { Node, Program } from '../ast/index.ts';
 import type { CompressMode } from '../passes/compress/index.ts';
@@ -192,6 +193,8 @@ export type Module = {
     jsxRuntime: JSXRuntime | null;
     /** Resolved module-level side-effect flag (transform>load>resolveId>default true). */
     sideEffects: ModuleSideEffects;
+    /** {@link sideEffects} came from a hook, the option or `package.json`, not the default. */
+    sideEffectsDeclared: boolean;
     /** Merged per-module plugin scratch space (shallow-merged across the chain). */
     meta: CustomPluginOptions;
     /** Declared module type (js/ts/jsx/tsx/json/…); default derived from the id extension. */
@@ -344,6 +347,7 @@ export type CachedParse = {
      *  an unchanged module WITHOUT re-loading, re-transforming, re-hashing or re-parsing it. */
     source: string;
     sideEffects: ModuleSideEffects;
+    sideEffectsDeclared: boolean;
     meta: CustomPluginOptions;
     moduleType: ModuleType;
     /** Files whose content influenced this module's transformed output, as `[moduleId, srcHash]`.
@@ -413,6 +417,11 @@ export type Linked = {
      *  Shared so TREESHAKE can decline to count them as references to the enum (letting the lowered
      *  object drop when nothing else reads it) and EMIT can substitute exactly the same set. */
     enumInlines: Map<number, Map<Node, string>>;
+    /** Exported constants, keyed by `packRef` — rolldown's `global_constant_symbol_map`. */
+    constExports: Map<number, ConstantValue>;
+    /** Per module, the reads printed as their constant value (`const-inlines.ts`). Treeshake and emit
+     *  both read this one decision. */
+    constInlines: Map<number, Map<Node, ConstantValue>>;
     syntheticNames: Map<number, string>;
     /** Modules lowered to a `__commonJS` wrapper, mapped to the name of the wrapper function
      *  (`require_foo`). rolldown's `WrapKind::Cjs`. A wrapped module is NOT concatenated as

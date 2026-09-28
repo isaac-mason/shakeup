@@ -9,8 +9,8 @@ import { treeshake } from '../src/bundler/treeshake.ts';
 const run = async (code: string): Promise<Record<string, unknown>> =>
     (await import(`data:text/javascript,${encodeURIComponent(code)}`)) as Record<string, unknown>;
 
-const build = async (files: Record<string, string>, treeshake = true) => {
-    const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [], treeshake });
+const build = async (files: Record<string, string>, treeshake = true, minify?: false) => {
+    const result = await bundle({ entry: '/main.ts', fs: createMemoryFs(files), external: [], treeshake, output: { minify } });
     expect(result.errors).toEqual([]);
     return result;
 };
@@ -36,17 +36,20 @@ describe('tree shaking', () => {
         expect(code).not.toContain('DEAD_MARKER_LOCAL');
         expect(code).not.toContain('DEAD_MARKER_CONST');
         expect(code).toContain('DEAD_MARKER_KEEP_ALIVE_CHECK');
-        expect(shaken!.dropped.length).toBe(3);
+        // `deadLocal` is gone before tree-shaking runs: the per-module dead-code pass removes it, as rolldown's does
+        expect(shaken!.dropped.length).toBe(2);
         const mod = await run(code);
         expect(mod.out).toBe(42);
     });
 
     it('treeshake: false keeps everything', async () => {
+        // with `minify: false` too: the chunk's `dce-only` pass would still drop the unused export, as rolldown's does
         const {
             chunks: [{ code }],
             shaken,
-        } = await build(files, false);
+        } = await build(files, false, false);
         expect(code).toContain('DEAD_MARKER_EXPORT');
+        expect(code).toContain('DEAD_MARKER_LOCAL');
         expect(shaken).toBeNull();
         const mod = await run(code);
         expect(mod.out).toBe(42);
@@ -103,8 +106,9 @@ describe('tree shaking', () => {
             chunks: [{ code }],
         } = await build({
             '/main.ts': ["import { pure } from './lib';", 'export const out = pure;'].join('\n'),
-            '/lib.ts': ['export const pure = 1;', 'const kept = Math.max(1, 2);'].join('\n'),
+            '/lib.ts': ['export const pure = 1;', 'const kept = Math.max(globalThis.limit ?? 1, 2);'].join('\n'),
         });
+        // `Math.max(1, 2)` would fold to a constant; reading a global property may have an effect, so it stays
         expect(code).toContain('Math.max');
         const mod = await run(code);
         expect(mod.out).toBe(1);
@@ -269,11 +273,10 @@ describe('external import specifiers shake individually', () => {
         expect(code).toMatch(/from\s*['"]ext['"]/);
     });
 
-    it('keeps every specifier when NONE is referenced', async () => {
-        // Nothing live means the statement itself would go, and a side-effectful external then needs
-        // a bare `import "ext";` emitted in the right ORDER — deliberately left on the conservative path.
+    it('keeps the import, bare, when NONE of its specifiers is referenced', async () => {
+        // the chunk's dead-code pass drops the unused specifiers and leaves the side effect, as rolldown does
         const code = await buildExt(['import { a, b } from "ext";', 'export const out = 1;'].join('\n'));
-        expect(code).toMatch(/from\s*['"]ext['"]/);
+        expect(code).toMatch(/^import "ext";$/m);
     });
 
     it('still drops specifiers behind a default import', async () => {

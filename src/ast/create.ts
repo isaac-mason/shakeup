@@ -40,6 +40,8 @@ export const FL = {
     /** `/*@__PURE__*​/`-annotated call/new — the call is side-effect-free if its args are (oxc
      * `CallExpression.pure`). Set by lowering passes so tree-shaking can drop the result if unused. */
     PURE: 1 << 16,
+    /** `accessor x = 1`: an auto-accessor, a getter/setter pair over private storage, not a field. */
+    ACCESSOR: 1 << 17,
 } as const;
 
 /** Declaration kind, packed into the low bits of a node's `flags`.
@@ -318,6 +320,7 @@ export const PropertyDefinition = (
         definite: (flags & FL.DEFINITE) !== 0,
         declare: (flags & FL.DECLARE) !== 0,
         abstract: (flags & FL.ABSTRACT) !== 0,
+        accessor: (flags & FL.ACCESSOR) !== 0,
         accessibility: accessibilityOf(flags),
     });
 export const FormalParameter = (s: number, e: number, flags: number, pat: Node, ta: Node | null, init: Node | null): Node =>

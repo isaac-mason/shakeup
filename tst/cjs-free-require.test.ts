@@ -69,7 +69,7 @@ describe('free `require` references are substituted', () => {
             'node',
         );
         expect(value).toEqual(['function', 'function', 'object']);
-        expect(code).toContain("import { createRequire } from 'node:module';");
+        expect(code).toContain('import { createRequire } from "node:module";');
         expect(code).not.toContain('new Proxy');
     });
 
@@ -83,7 +83,7 @@ describe('free `require` references are substituted', () => {
         // derived from scratch gets both wrong.
         const { code } = await run("module.exports = typeof require === 'function';");
         expect(code).toContain('new Proxy(x, {');
-        expect(code).toContain("get: (a, b) => (typeof require !== 'undefined' ? require : a)[b]");
+        expect(code).toContain('get: (a, b) => (typeof require !== "undefined" ? require : a)[b]');
         expect(code).toMatch(/__require = \/\* @__PURE__ \*\/ \(\(x\) =>/);
         expect(code).toContain(': x)(function (x) {');
     });

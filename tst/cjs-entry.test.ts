@@ -76,7 +76,7 @@ describe('CommonJS entry points', () => {
         const mainChunk = r.chunks.find((c) => c.fileName === 'main.js')!;
         expect(main2Chunk.code).toContain('var require_main2 =');
         expect(mainChunk.code).not.toContain('var require_main2 =');
-        expect(mainChunk.code).toMatch(/import \{[^}]*\} from '\.\/main2\.js';/);
+        expect(mainChunk.code).toMatch(/import \{[^}]*\} from "\.\/main2\.js";/);
         expect(await importChunk(r, 'main.js')).toMatchObject({ same: true });
     });
 });
@@ -95,7 +95,7 @@ describe('two entries in an import cycle each get an output file', () => {
             ['/a.js', '/b.js'],
         );
         expect(r.chunks.map((c) => c.fileName).sort()).toEqual(['a.js', 'b.js']);
-        expect(r.chunks.find((c) => c.fileName === 'b.js')!.code).toMatch(/import \{ require_b \} from '\.\/a\.js';/);
+        expect(r.chunks.find((c) => c.fileName === 'b.js')!.code).toMatch(/import \{ require_b \} from "\.\/a\.js";/);
         expect(await importChunk(r, 'a.js')).toBe('a');
         expect(await importChunk(r, 'b.js')).toBe('b');
     });

@@ -47,7 +47,7 @@ describe('the shared runtime chunk', () => {
         expect(helperCopies(chunks, '__toESM')).toBe(1);
         expect(helperCopies(chunks, '__commonJS')).toBe(1);
         const consumer = chunks.find((c) => c.code.includes('require_a'))!;
-        expect(consumer.code).toMatch(/import \{[^}]*__commonJS[^}]*\} from '\.\/runtime[^']*\.js';/);
+        expect(consumer.code).toMatch(/import \{[^}]*__commonJS[^}]*\} from "\.\/runtime[^"]*\.js";/);
     });
 
     it('is NOT minted for a single consumer', async () => {
@@ -97,7 +97,7 @@ describe('the shared runtime chunk', () => {
         );
         expect(value).toEqual(['function', 'function']);
         const rt = chunks.find((c) => c.fileName.includes('runtime'))!;
-        expect(rt.code).toContain("import { createRequire } from 'node:module';");
+        expect(rt.code).toContain('import { createRequire } from "node:module";');
     });
 
     it('serves mode-2 namespaces across chunks', async () => {

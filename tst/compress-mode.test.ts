@@ -35,7 +35,8 @@ describe('compress modes (dev/bundle parity)', () => {
     it("'dce' skips the COSMETIC tier that 'full' applies", async () => {
         // `f` is exported and never called here, so its body survives both modes and the contrast is
         // purely the cosmetic tier (a constant call site would simply fold away in both).
-        const src = 'export function f(a) { const x = a ? true : false; return x; }';
+        // the `log` push between the two keeps `x` from being substituted into the `return`, which both modes do
+        const src = 'export const log = [];\nexport function f(a) { const x = a ? true : false; log.push(a); return x; }';
         const dce = await build(src, 'dce');
         const full = await build(src, true);
         // full: ternary → `!!a`, `const` → `let`. dce leaves both alone.
@@ -55,8 +56,11 @@ describe('compress modes (dev/bundle parity)', () => {
         expect(await build(src, true)).not.toContain('debugger');
     });
 
-    it('compress: false runs nothing', async () => {
+    it('compress: false still runs the per-module dead-code pass, and treeshake: false stops it', async () => {
+        // rolldown ties that pass to tree-shaking, not to `minify`
         const src = ['const DEBUG = false;', 'export const out = DEBUG ? 1 : 2;'].join('\n');
-        expect(await build(src, false)).toContain('DEBUG');
+        expect(await build(src, false)).not.toContain('DEBUG');
+        const untouched = await bundle({ input: '/m.ts', fs: createMemoryFs({ '/m.ts': src }), treeshake: false, output: { minify: false } });
+        expect(untouched.chunks[0].code).toContain('DEBUG');
     });
 });

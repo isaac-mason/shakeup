@@ -61,7 +61,7 @@ describe('exemplar: the puddle mini-library bundles + executes', () => {
     });
 
     it('emits exactly one deduped external import line for node:path', () => {
-        expect(stripComments(built.chunks[0].code).match(/from 'node:path'/g)?.length).toBe(1);
+        expect(stripComments(built.chunks[0].code).match(/from "node:path"/g)?.length).toBe(1);
     });
 
     it('strips all TS type syntax from the output', () => {

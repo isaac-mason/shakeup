@@ -9,7 +9,7 @@ describe('output.advancedChunks', () => {
             fs: createMemoryFs({
                 '/a.ts': "import { v } from './node_modules/lib';\nexport const av = v;",
                 '/b.ts': "import { v } from './node_modules/lib';\nexport const bv = v;",
-                '/node_modules/lib.ts': 'export const v = 9;',
+                '/node_modules/lib.ts': 'export const v = [9];',
             }),
             external: [],
             output: { advancedChunks: { groups: [{ name: 'vendor', test: /node_modules/ }] } },
@@ -27,7 +27,7 @@ describe('output.advancedChunks', () => {
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { v } from './vendor';\nexport const av = v;",
-                '/vendor.ts': 'export const v = 1;',
+                '/vendor.ts': 'export const v = [1];',
             }),
             external: [],
             output: { advancedChunks: { groups: [{ name: 'libs', test: 'vendor' }] } },
@@ -42,9 +42,9 @@ describe('output.advancedChunks', () => {
         const r = await bundle({
             input: { a: '/a.ts' },
             fs: createMemoryFs({
-                '/a.ts': "import { r } from './node_modules/react';\nimport { l } from './node_modules/lodash';\nexport const v = r + l;",
-                '/node_modules/react.ts': 'export const r = 1;',
-                '/node_modules/lodash.ts': 'export const l = 2;',
+                '/a.ts': "import { r } from './node_modules/react';\nimport { l } from './node_modules/lodash';\nexport const v = r[0] + l[0];",
+                '/node_modules/react.ts': 'export const r = [1];',
+                '/node_modules/lodash.ts': 'export const l = [2];',
             }),
             external: [],
             output: {
@@ -68,7 +68,7 @@ describe('output.advancedChunks', () => {
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './node_modules/dep';\nexport const v = x;",
-                '/node_modules/dep.ts': 'export const x = 1;',
+                '/node_modules/dep.ts': 'export const x = [1];',
             }),
             external: [],
             output: {
@@ -94,7 +94,7 @@ describe('output.advancedChunks', () => {
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './dep';\nexport const v = x;",
-                '/dep.ts': 'export const x = 1;',
+                '/dep.ts': 'export const x = [1];',
             }),
             external: [],
             output: {
@@ -127,7 +127,7 @@ describe('output.advancedChunks', () => {
             fs: createMemoryFs({
                 '/a.ts': "import { x } from './dep';\nexport const av = x;",
                 '/b.ts': "import { x } from './dep';\nexport const bv = x;",
-                '/dep.ts': 'export const x = 1;',
+                '/dep.ts': 'export const x = [1];',
             }),
             external: [],
             output: { advancedChunks: { minShareCount: 2, groups: [{ name: 'shared', test: 'dep' }] } },
@@ -142,7 +142,7 @@ describe('output.advancedChunks', () => {
             input: { a: '/a.ts' },
             fs: createMemoryFs({
                 '/a.ts': "import { v } from './vendor';\nexport const y = v;",
-                '/vendor.ts': 'export const v = 1;',
+                '/vendor.ts': 'export const v = [1];',
             }),
             external: [],
             output: {
@@ -163,8 +163,8 @@ describe('output.manualChunks', () => {
             input: { app: '/app.ts' },
             fs: createMemoryFs({
                 '/app.ts': "import { v } from './vendor';\nexport const y = v;",
-                '/vendor.ts': "import { u } from './util';\nexport const v = u + 1;",
-                '/util.ts': 'export const u = 1;',
+                '/vendor.ts': "import { u } from './util';\nexport const v = u[0] + 1;",
+                '/util.ts': 'export const u = [1];',
             }),
             external: [],
             output: { manualChunks: (id) => (id.includes('vendor') ? 'vendor' : null) },
@@ -180,8 +180,8 @@ describe('output.manualChunks', () => {
             input: { app: '/app.ts' },
             fs: createMemoryFs({
                 '/app.ts': "import { v } from './vendor';\nexport const y = v;",
-                '/vendor.ts': "import { u } from './util';\nexport const v = u + 1;",
-                '/util.ts': 'export const u = 1;',
+                '/vendor.ts': "import { u } from './util';\nexport const v = u[0] + 1;",
+                '/util.ts': 'export const u = [1];',
             }),
             external: [],
             output: { manualChunks: { vendor: ['/vendor.ts'] } },

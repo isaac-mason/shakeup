@@ -33,7 +33,7 @@ describe('this.resolve skipSelf', () => {
             },
             { name: 'second', resolveId: (id: string) => (id === 'x' ? '/a.js' : null) },
         ]);
-        expect(code).toContain("'a'");
+        expect(code).toContain('"a"');
     });
 
     it('skipSelf: false lets the caller see its own hook again', async () => {
@@ -54,7 +54,7 @@ describe('this.resolve skipSelf', () => {
             },
         ]);
         expect(seen, 'the hook ran twice — it was not skipped').toBe(2);
-        expect(code).toContain("'b'");
+        expect(code).toContain('"b"');
     });
 
     it('a plugin skipped for one specifier still resolves ANOTHER', async () => {
@@ -115,6 +115,6 @@ describe('this.resolve skipSelf', () => {
                 },
             },
         ]);
-        expect(code).toContain("'a'");
+        expect(code).toContain('"a"');
     });
 });

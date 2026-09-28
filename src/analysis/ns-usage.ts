@@ -169,9 +169,17 @@ function awaitedUsage(awaitNode: Node, parentOf: Map<Node, Node>, program: Node,
         if (id.type === N.ObjectPattern) return membersFromPattern(id);
         return allUsage();
     }
-    // `(await import(x)).foo`
+    // `(await import(x)).foo`, and `(await import(x)).foo()`, which calls `foo` with the namespace as
+    // `this` exactly as `ns.foo()` does (the shape a single-use `const ns = await import(x)` takes once
+    // the dead-code pass substitutes it)
     if (q.type === N.StaticMemberExpression && q.data.object === awaitNode) {
-        return { escapes: false, called: new Set(), members: new Set([q.data.property.name]) };
+        const name = q.data.property.name;
+        const user = parentOf.get(q);
+        const isCalled =
+            user !== undefined &&
+            ((user.type === N.CallExpression && user.data.callee === q) ||
+                (user.type === N.TaggedTemplateExpression && user.data.tag === q));
+        return { escapes: false, called: isCalled ? new Set([name]) : new Set(), members: new Set([name]) };
     }
     if (q.type === N.ExpressionStatement) return noUsage(); // `await import(x);` — result discarded
     return allUsage();

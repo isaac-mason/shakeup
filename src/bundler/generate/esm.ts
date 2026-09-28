@@ -12,6 +12,7 @@ import { type Graph, type Linked, type Module, NAME_DEFAULT, NAME_NAMESPACE } fr
 import { finalNameOf } from '../link.ts';
 import type { PreRenderedChunk } from '../output-options.ts';
 import { isAnyRequireCall } from '../scan.ts';
+import type { ChunkPiece } from './chunk-program.ts';
 import {
     clauseSep,
     emitsNamespaceObject,
@@ -372,7 +373,7 @@ export function helpersNeededBy(
  *  naming it now means a second format arrives as a sibling rather than as a re-cut. */
 export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: PreliminaryFileName): RenderedChunk | null {
     const { graph, linked, chunkGraph, chunk, chunkIdx, shaken, naming, tight, pathToChunk } = ctx;
-    const { parts: moduleParts, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs } = mods;
+    const { parts: moduleParts, pieces: modulePieces, mapSources, mapSourcesContent, entryStarSpecs, sideEffectSpecs } = mods;
 
     // Cross-chunk static imports: `import { imported as local, … } from '<path>';`
     const crossImportLines: string[] = [];
@@ -546,7 +547,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
 
     // Empty non-entry chunk with nothing to emit: drop it.
     const isEmpty =
-        moduleParts.length === 0 &&
+        (modulePieces ?? moduleParts).length === 0 &&
         exportLine === null &&
         cjsEntryDefault === null &&
         starLines.length === 0 &&
@@ -593,22 +594,33 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
     //
     // Unmapped parts (banner, imports, helper text) carry `code` only; `joinParts` counts their
     // lines and emits empty segments, which is exactly what shifts the mapped parts into place.
-    const parts: Part[] = [];
-    if (banner !== '') parts.push({ code: banner });
-    if (intro !== '') parts.push({ code: intro });
-    for (const s of crossImportLines) parts.push({ code: s });
-    for (const s of extImports) parts.push({ code: s });
-    for (const s of helperLines) parts.push({ code: s });
-    parts.push(...moduleParts);
+    const leading: string[] = [];
+    if (banner !== '') leading.push(banner);
+    if (intro !== '') leading.push(intro);
+    leading.push(...crossImportLines, ...extImports, ...helperLines);
     // AFTER the module bodies: the member expression these read (`import_x.default`) is declared by
     // the CommonJS interop line inside them, so an alias hoisted above would snapshot `undefined`.
-    for (const s of exportAliasLines) parts.push({ code: s });
-    if (exportLine !== null) parts.push({ code: exportLine });
-    if (cjsEntryDefault !== null) parts.push({ code: cjsEntryDefault });
-    for (const s of starLines) parts.push({ code: s });
-    if (outro !== '') parts.push({ code: outro });
-    if (footer !== '') parts.push({ code: footer });
-    const code = `${parts.map((p) => p.code).join('\n')}\n`;
+    const trailing: string[] = [...exportAliasLines];
+    if (exportLine !== null) trailing.push(exportLine);
+    if (cjsEntryDefault !== null) trailing.push(cjsEntryDefault);
+    trailing.push(...starLines);
+    if (outro !== '') trailing.push(outro);
+    if (footer !== '') trailing.push(footer);
+    const parts: Part[] = [];
+    let pieces: ChunkPiece[] | null = null;
+    let code = '';
+    if (modulePieces !== null) {
+        // One text piece per run of emitter text, so each run is parsed once.
+        pieces = [];
+        if (leading.length > 0) pieces.push({ kind: 'text', code: leading.join('\n') });
+        pieces.push(...modulePieces);
+        if (trailing.length > 0) pieces.push({ kind: 'text', code: trailing.join('\n') });
+    } else {
+        for (const s of leading) parts.push({ code: s });
+        parts.push(...moduleParts);
+        for (const s of trailing) parts.push({ code: s });
+        code = `${parts.map((p) => p.code).join('\n')}\n`;
+    }
 
     const importNames: string[] = [];
     for (const p of chunk.imports.keys()) importNames.push(chunkGraph.chunks[p].name);
@@ -622,6 +634,7 @@ export function renderEsm(ctx: RenderCtx, mods: RenderedModules, prelim: Prelimi
         prelim,
         code,
         parts,
+        pieces,
         mapSources,
         mapSourcesContent,
         name: chunk.name,

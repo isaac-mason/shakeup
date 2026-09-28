@@ -71,7 +71,7 @@ describe('the external option', () => {
     it('an ARRAY external is matched verbatim, `\\0` included', async () => {
         const r = await build(['\0kept', 'bare']);
         expect(r.errors).toEqual([]);
-        expect(r.chunks.map((c) => c.code).join('\n')).toContain("'bare'");
+        expect(r.chunks.map((c) => c.code).join('\n')).toContain('"bare"');
     });
 
     it('a TRUTHY return means external; `undefined` means it is not', async () => {
@@ -85,7 +85,7 @@ describe('the external option', () => {
         // against a strict `=== true` too, which is how the first version of this case slipped past
         // its own sabotage.
         expect(truthy.warnings, 'declared external, so nothing failed to resolve').toEqual([]);
-        expect(truthy.chunks.map((c) => c.code).join('\n')).toContain("'bare'");
+        expect(truthy.chunks.map((c) => c.code).join('\n')).toContain('"bare"');
 
         const undef = await build(() => undefined as unknown as boolean);
         // Nothing is declared external, so `bare` goes to resolution. It does not exist, and shakeup's

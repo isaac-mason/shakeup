@@ -341,13 +341,24 @@ function enumConstFor(mod: Module, linked: Linked, objectNode: Node, member: str
     return linked.graph.modules[ownerIdx]?.enumConsts.get(ownerSym)?.get(member) ?? null;
 }
 
+/** Whether `mod` can read an enum member at all: it declares an enum, or imports one. */
+function mayReadEnum(mod: Module, linked: Linked): boolean {
+    if (mod.enumConsts.size > 0) return true;
+    for (const sym of mod.namedImports.keys()) {
+        const bind = linked.binds.get(packRef(mod.idx, sym));
+        if (bind !== undefined && bind.kind === 'found' && linked.graph.modules[refMod(bind.ref)]?.enumConsts.has(refSym(bind.ref)))
+            return true;
+    }
+    return false;
+}
+
 /** {@link enumInlines} for every module, or an empty map when the graph has no value enum at all —
  *  the common case for plain JS, and the walk is not worth paying for to discover it. */
 export function computeEnumInlines(graph: Graph, linked: Linked): Map<number, Map<Node, string>> {
     const out = new Map<number, Map<Node, string>>();
     if (!graph.modules.some((m) => !m.external && m.enumConsts.size > 0)) return out;
     for (const mod of graph.modules) {
-        if (mod.external) continue;
+        if (mod.external || !mayReadEnum(mod, linked)) continue;
         const m = enumInlines(mod, linked);
         if (m.size > 0) out.set(mod.idx, m);
     }
@@ -417,6 +428,8 @@ export function linkGraph(graph: Graph): Linked {
         exportMaps: new Map(),
         rewritableNs: new Set(),
         enumInlines: new Map(),
+        constExports: new Map(),
+        constInlines: new Map(),
         syntheticNames: new Map(),
         cjsWrap: new Map(),
         cjsNamespace: new Map(),

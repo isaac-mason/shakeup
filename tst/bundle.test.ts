@@ -116,7 +116,7 @@ describe('bundle: executable output', () => {
             },
             ['node:process'],
         );
-        expect(code.match(/from 'node:process'/g)?.length).toBe(1);
+        expect(code.match(/from "node:process"/g)?.length).toBe(1);
         const mod = await run(code);
         expect(typeof mod.p).toBe('string');
         expect(typeof mod.arch).toBe('string');
@@ -338,7 +338,8 @@ describe('bundle: namespace objects are live', () => {
             '/main.ts': "import * as ns from './a';\nexport const out = ns;",
             '/a.ts': 'export const c = 1;\nexport function f(){}\nexport let mut = 2;\nexport function bump(){ mut = 3 }',
         });
-        expect(code).toMatch(/\bc: c\b/);
+        // the constant's value in place of its binding, as rolldown inlines it (`c: () => 1`)
+        expect(code).toMatch(/\bc: 1\b/);
         expect(code).toMatch(/\bf: f\b/);
         expect(code).toMatch(/get mut\(\)/);
     });

@@ -53,7 +53,7 @@ describe('a dynamic import yields the MODULE’s namespace, not its chunk’s', 
         );
         // Find the chunk `main` dynamically imports, and read what it exports.
         const main = r.chunks.find((c) => c.isEntry)!;
-        const target = /import\('\.\/([^']+)'\)/.exec(main.code)?.[1];
+        const target = /import\("\.\/([^"]+)"\)/.exec(main.code)?.[1];
         expect(target, 'main should dynamically import a chunk').toBeDefined();
         const dyn1Chunk = r.chunks.find((c) => c.fileName === target)!;
         expect(exportNames(dyn1Chunk.code)).toEqual(['p', 'shared', 'used']);
@@ -72,7 +72,7 @@ describe('a dynamic import yields the MODULE’s namespace, not its chunk’s', 
             '/main.js',
         );
         const main = r.chunks.find((c) => c.isEntry)!;
-        const target = /import\('\.\/([^']+)'\)/.exec(main.code)?.[1];
+        const target = /import\("\.\/([^"]+)"\)/.exec(main.code)?.[1];
         if (target === undefined) return; // inlined into the entry — nothing to leak
         const lazyChunk = r.chunks.find((c) => c.fileName === target)!;
         expect(exportNames(lazyChunk.code)).toEqual(['a']);

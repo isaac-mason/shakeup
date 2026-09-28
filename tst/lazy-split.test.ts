@@ -56,7 +56,7 @@ describe('declaration/initializer split', () => {
     it.each([
         ['object destructuring', 'const { p, q } = o;', 'var p, q;', '({ p, q } = o);'],
         ['nested destructuring', 'const { nest: { deep } } = o;', 'var deep;', '({ nest: { deep } } = o);'],
-        ['array destructuring with rest', 'const [r, s, ...rest] = a;', 'var r, s, rest;', '[r,s,...rest] = a;'],
+        ['array destructuring with rest', 'const [r, s, ...rest] = a;', 'var r, s, rest;', '[r, s, ...rest] = a;'],
         ['a default value', 'const { d = 5 } = o;', 'var d;', '({ d = 5 } = o);'],
     ])('handles %s', (_label, src, hoisted, body) => {
         const r = split(src);
@@ -104,8 +104,8 @@ describe('the split keeps every binding on ONE name', () => {
     // `var e,t; ... {get a(){return a}}`: getters reading variables that do not exist. Only
     // `pnpm cjsdiff` caught it, so it is pinned here too.
     const files = {
-        '/e.js': 'export const a = 1;\nexport let m = 2;',
-        '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a, e.m];",
+        '/e.js': 'export const a = [1];\nexport let m = [2];',
+        '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a[0], e.m[0]];",
         '/main.js': "import d from './d.cjs';\nexport const x = d;",
     };
     const run = async (minify: boolean) => {
@@ -135,9 +135,9 @@ describe('the split keeps every binding on ONE name', () => {
         const r = await bundle({
             entry: '/main.js',
             fs: createMemoryFs({
-                '/e.js': 'export const a = 1;\nexport let m = 2;',
+                '/e.js': 'export const a = [1];\nexport let m = [2];',
                 '/other.js': 'export let a = globalThis.__seed;\nexport function q() { a += 1; return a; }',
-                '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a, e.m];",
+                '/d.cjs': "const e = require('./e.js');\nmodule.exports = [e.a[0], e.m[0]];",
                 '/main.js': "import { q } from './other.js';\nimport d from './d.cjs';\nexport const x = [d, q()];",
             }),
             output: {},
@@ -145,12 +145,12 @@ describe('the split keeps every binding on ONE name', () => {
         expect(r.errors).toEqual([]);
         // Whatever the getter returns is the authority — the hoisted `var` and the assignment must
         // both use that same name, and it must NOT be the un-deconflicted `a`.
-        const getter = /get a\(\) \{ return ([A-Za-z$_][\w$]*); \}/.exec(r.chunks[0].code);
+        const getter = /get a\(\) \{\s*return ([A-Za-z$_][\w$]*);\s*\}/.exec(r.chunks[0].code);
         expect(getter).not.toBeNull();
         const name = getter![1];
         expect(name).not.toBe('a');
         expect(r.chunks[0].code).toMatch(new RegExp(`var ${name.replace('$', '\\$')}, `));
-        expect(r.chunks[0].code).toMatch(new RegExp(`${name.replace('$', '\\$')} = 1;`));
+        expect(r.chunks[0].code).toMatch(new RegExp(`${name.replace('$', '\\$')} = \\[1\\];`));
     });
 
     it('every namespace getter reads a variable the chunk actually assigns', async () => {

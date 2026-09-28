@@ -1,5 +1,7 @@
 import { resetInferredPure } from '../analysis/effects.ts';
 import { runCompress } from '../passes/compress/index.ts';
+import { eliminateDeadCode } from '../passes/dce/compressor.ts';
+import { rolldownDceOptions } from '../passes/dce/options.ts';
 import { eliminateDeadStores } from '../passes/optimize/dead-store.ts';
 import { flowInlineVariables } from '../passes/optimize/flow-inline.ts';
 import { inlineCrossModule } from '../passes/optimize/inline-functions.ts';
@@ -7,9 +9,11 @@ import { scalarReplaceAggregates } from '../passes/optimize/sroa.ts';
 import type { SourceMap } from '../util/sourcemap.ts';
 import * as Timer from '../util/timer.ts';
 import { buildChunkGraph, type ChunkOptions, type ResolvedGroup } from './chunk-graph.ts';
+import { computeConstInlines, safeConstantOf } from './const-inlines.ts';
 import { type Fs, normalizePath, relativePath } from './fs.ts';
 import {
     type ChunkRenderer,
+    hashInlinedValues,
     hashLiveSet,
     nameSignature,
     type RenderCache,
@@ -55,7 +59,7 @@ import {
     pluginParse, pluginMeta,} from './plugin.ts';
 import { stampPureCallsGraph } from './purity-graph.ts';
 import type { GraphOptions } from './resolve.ts';
-import { buildGraph, externalModuleInfo, fileNameOfRef, hashSource, registerEmitted, toModuleInfo } from './scan.ts';
+import { buildGraph, dceSourceType, externalModuleInfo, fileNameOfRef, hashSource, registerEmitted, toModuleInfo } from './scan.ts';
 import { type TreeshakeCache, type TreeshakeResult, treeshake } from './treeshake.ts';
 import type { FileEvent } from './watch.ts';
 
@@ -428,7 +432,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // content-addressed minimize cache, reached through the cache we already keep. Taken
     // deliberately: correct decisions on whole-chunk information beat cached decisions made per
     // module on partial information.
-    const compressForScan = resolveMinify(options.output?.minify).compress === false ? false : ('dce' as const);
+    // rolldown runs its per-module dead-code pass whenever tree-shaking is on, whatever `minify` says
+    // (`pre_process_ecma_ast.rs` step 5 is gated on `treeshake` alone).
+    const compressForScan = options.treeshake === false ? false : ('dce' as const);
     // CROSS-MODULE CACHE INVALIDATION — done BEFORE scan, on purpose.
     //
     // A module that received a cross-module substitution has its producers recorded on its cache entry
@@ -550,7 +556,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // turned off the per-module tier and left the cross-module one running — a build that asked for no
     // optimization still got imported helpers inlined and its buffers scalarized.
     if ((options.output?.optimize ?? true) !== false) {
-        const compressMode = resolveMinify(options.output?.minify).compress === false ? false : ('dce' as const);
+        const compressMode = compressForScan;
         const resolveImport = (idx: number, sym: number): { mod: number; sym: number } | null => {
             const bind = linked.binds.get(packRef(idx, sym));
             if (bind === undefined || bind.kind !== 'found') return null;
@@ -632,7 +638,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 flowInlineVariables(mod.program, mod.semantic, mod.source);
                 eliminateDeadStores(mod.program, mod.semantic, mod.source);
             }
-            if (compressMode !== false) {
+            if (compressMode === 'dce') {
+                eliminateDeadCode(mod.program, mod.semantic, rolldownDceOptions(), dceSourceType(mod.defFormat), mod.noSideEffects);
+            } else if (compressMode !== false) {
                 const refreshed = runCompress(mod.program, mod.semantic, compressMode);
                 if (refreshed !== null) mod.semantic = refreshed;
             }
@@ -649,6 +657,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // dropped. On crashcat that object is 231 string literals (3,903 bytes against rolldown's 2) —
     // the single largest item left in the size gap, and rolldown drops every one of them.
     linked.enumInlines = computeEnumInlines(graph, linked);
+    computeConstInlines(graph, linked);
     Timer.start(timer, 'treeshake');
     const shaken = options.treeshake === false ? null : treeshake(graph, linked, options.treeshakeCache);
     Timer.end(timer, 'treeshake');
@@ -707,7 +716,10 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         const members = shaken === null ? new Set(map.keys()) : (shaken.nsUsage.get(target) ?? shaken.nsRead.get(target));
         if (members === undefined) continue;
         const binds: ImportBind[] = [];
-        for (const [name, bind] of map) if (members.has(name)) binds.push(bind);
+        // A small constant member prints as its value, and rolldown never counts it as a used symbol,
+        // so no chunk imports it.
+        for (const [name, bind] of map)
+            if (members.has(name) && !(bind.kind === 'found' && safeConstantOf(linked, bind.ref) !== undefined)) binds.push(bind);
         nsMemberBinds.set(target, binds);
         rewrittenNs.add(target);
         // Elision needs everything rewriting needs AND proof the object is unobservable, which is
@@ -748,7 +760,14 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
     // Link-time mangling is SKIPPED when the chunk pass will do it, so names stay readable through
     // the chunk compress and the mangler gets to run last (see `mangle/program.ts`). `deconflict`
     // still runs — the chunk must be collision-free before it is one program.
-    const chunkGraph = buildChunkGraph(graph, linked, chunkOptions, shaken?.deadDynamic, { elidedNs, nsMemberBinds });
+    const chunkGraph = buildChunkGraph(
+        graph,
+        linked,
+        chunkOptions,
+        shaken?.deadDynamic,
+        { elidedNs, nsMemberBinds },
+        shaken,
+    );
     // Ownership is decided once for the whole bundle, over the SHAKEN graph and the finished chunk
     // assignment: the owner has to be a statement that survives, "first in evaluation order" is a
     // global question no per-chunk pass can answer, and the owner has to sit in the SAME chunk as the
@@ -826,7 +845,9 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
         // final name shifted this build, any clean module renders identical bytes.
         const mrc = options.moduleRenderCache ?? { modules: new Map(), namesHash: -1 };
         const namesHash = nameSignature(linked);
-        const liveHash = graph.modules.map((_, i) => (shaken === null ? 0 : hashLiveSet(shaken.live[i])));
+        const liveHash = graph.modules.map(
+            (_, i) => ((shaken === null ? 0 : hashLiveSet(shaken.live[i])) ^ Math.imul(hashInlinedValues(linked, i), 0x85ebca6b)) | 0,
+        );
         const mod: ModuleReuse = {
             cache: mrc.modules,
             namesStable: mrc.namesHash === namesHash,
@@ -858,6 +879,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
                 // minify: it re-parses this text, and minified printing loses `@__PURE__`.
                 tight: min.compress === 'full' ? false : min.whitespace,
                 deferMinify: min.compress === 'full',
+                chunkProgram: min.chunk !== false || min.mangle,
                 pathToChunk,
             },
             prelim,
@@ -941,7 +963,7 @@ export async function bundle(options: BundleOptions): Promise<BundleResult> {
             renderer,
             (i) => graph.modules[i].id,
             (c) => includedModuleIds(graph, shaken, c),
-            min.compress,
+            min.chunk,
             min.mangle,
             inc,
             renderHooks,

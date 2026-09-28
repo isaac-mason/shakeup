@@ -17,7 +17,7 @@ describe("an entry's external export-star survives tree-shaking", () => {
 
     it('emits the star for an entry', async () => {
         const code = await build({ '/main.js': "export * from 'ext';\nexport const local = 1;" }, ['ext']);
-        expect(code).toContain("export * from 'ext'");
+        expect(code).toContain('export * from "ext"');
     });
 
     it('survives alongside local exports that override it', async () => {
@@ -26,13 +26,13 @@ describe("an entry's external export-star survives tree-shaking", () => {
         const code = await build({ '/main.js': "export * from 'ext';\nexport const dirname = 'defined';\nexport let resolve;" }, [
             'ext',
         ]);
-        expect(code).toContain("export * from 'ext'");
+        expect(code).toContain('export * from "ext"');
         expect(code).toMatch(/export\s*\{[^}]*dirname/);
     });
 
     it('is emitted with tree-shaking off too — the fix did not just disable shaking', async () => {
         const code = await build({ '/main.js': "export * from 'ext';\nexport const local = 1;" }, ['ext'], false);
-        expect(code).toContain("export * from 'ext'");
+        expect(code).toContain('export * from "ext"');
     });
 
     it('a star from a BUNDLED module is still resolved, not passed through', async () => {

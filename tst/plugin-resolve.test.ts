@@ -36,7 +36,7 @@ describe('plugin resolve/load contract (R1)', () => {
         } = await build({ '/main.ts': "import { chunk } from 'lib-esque';\nexport const c = () => chunk([1], 1);" }, [
             externalize,
         ]);
-        expect(code).toContain("from 'lib-esque'");
+        expect(code).toContain('from "lib-esque"');
     });
 
     it("resolveId { external: 'absolute' } is also treated external", async () => {
@@ -52,7 +52,7 @@ describe('plugin resolve/load contract (R1)', () => {
         // as well, since `makeAbsoluteExternalsRelative`'s default only renormalizes an absolute id
         // when the SOURCE specifier was relative. This assertion used to read `from 'abs-lib'`, which
         // pinned shakeup's own behaviour rather than Rollup's.
-        expect(code).toContain("from '/abs/abs-lib'");
+        expect(code).toContain('from "/abs/abs-lib"');
     });
 
     it('moduleSideEffects: false drops an unused side-effect module', async () => {
@@ -117,8 +117,9 @@ describe('plugin resolve/load contract (R1)', () => {
         const {
             chunks: [{ code }],
         } = await build(files, [noShake]);
-        expect(code).toContain('DEAD_BUT_KEPT');
-        expect(code).toContain('__NT__');
+        // the statement stays; the constant it reads is folded into it, which is rolldown's output too
+        // (`globalThis.__NT__ = 99;`, with or without its `dce-only` chunk pass)
+        expect(code).toContain('globalThis.__NT__ = 99;');
     });
 
     it('side-effect precedence: transform wins over load over resolveId', async () => {
@@ -212,17 +213,28 @@ describe('plugin resolve/load contract (R1)', () => {
         } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d;" }, [desc]);
         const mod = await run(code);
         expect(mod.v).toBe(7);
-        // The assignment is KEPT, and this assertion was inverted on 2026-09-06. `moduleSideEffects:
-        // false` says the module may be OMITTED when nothing needs it — not that the effects of a
-        // module that IS emitted may be deleted. This chunk still contains `const d = 7`, so dropping
-        // `globalThis.__D__ = 1` from it was a silent behaviour change, the same bug that deleted
-        // `registry.set(…)` and `console.log(…)` elsewhere (ROADMAP §2z47).
-        //
-        // rolldown emits neither: it constant-folds `d` into the consumer and then drops the module
-        // WHOLE, which is a stronger result reached by cross-module inlining rather than by a
-        // different side-effect rule. Give it a non-inlinable export and it keeps the effect exactly
-        // as this now does (measured). Closing that gap is an inlining change, not this one.
-        expect(code).toContain('__D__');
+        // `d` is an exported constant, so the read prints `7` and nothing needs the module: with
+        // `moduleSideEffects: false` it is dropped WHOLE, effect and all, as rolldown drops it. A module
+        // that IS emitted keeps its effects (ROADMAP §2z47); that case needs a non-inlinable export.
+        expect(code).not.toContain('__D__');
         expect(sideEffects).toBe(false);
+    });
+
+    it('a moduleSideEffects:false module that IS emitted keeps its effects', async () => {
+        // `moduleSideEffects: false` lets an unneeded module be omitted; it does not license deleting
+        // the effects of one that is emitted (ROADMAP §2z47). The array export cannot be inlined, so
+        // the read keeps the module, and rolldown keeps `globalThis.__D__ = 1;` with it.
+        const desc: Plugin = {
+            name: 'desc',
+            resolveId: (spec) => (spec === 'virtual:d' ? '\0d' : null),
+            load: (id) =>
+                id === '\0d' ? { code: 'globalThis.__D__ = 1;\nexport const d = [7];', moduleSideEffects: false } : null,
+        };
+        const {
+            chunks: [{ code }],
+        } = await build({ '/main.ts': "import { d } from 'virtual:d';\nexport const v = d[0];" }, [desc]);
+        const mod = await run(code);
+        expect(mod.v).toBe(7);
+        expect(code).toContain('globalThis.__D__ = 1;');
     });
 });

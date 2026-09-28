@@ -127,7 +127,7 @@ describe('a plugin resolving into the `external` option', () => {
         );
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code, "the emitted import names the RESOLVED id, not './dep.js'").toContain("'path'");
+        expect(code, "the emitted import names the RESOLVED id, not './dep.js'").toContain('"path"');
         expect(code).not.toContain('./dep.js');
     });
 
@@ -143,7 +143,7 @@ describe('a plugin resolving into the `external` option', () => {
         );
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code).toContain("'path'");
+        expect(code).toContain('"path"');
         expect(code).not.toContain('./dep.js');
     });
 
@@ -166,7 +166,7 @@ describe('a plugin resolving into the `external` option', () => {
         );
         expect(r.errors).toEqual([]);
         const code = r.chunks.map((c) => c.code).join('\n');
-        expect(code).toContain("'./rel-lib.js'");
+        expect(code).toContain('"./rel-lib.js"');
         expect(code).not.toContain('/deep/rel-lib.js');
     });
 

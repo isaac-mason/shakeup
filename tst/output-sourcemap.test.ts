@@ -55,8 +55,8 @@ describe('output sourcemap — sourcesContent & ignoreList', () => {
         const r = await bundle({
             input: '/main2.ts',
             fs: createMemoryFs({
-                '/main2.ts': "import { libv } from './node_modules/lib';\nexport const v = libv;",
-                '/node_modules/lib.ts': 'export const libv = 7;',
+                '/main2.ts': "import { libv } from './node_modules/lib';\nexport const v = libv[0];",
+                '/node_modules/lib.ts': 'export const libv = [7];',
             }),
             external: [],
             output: { sourcemap: true, sourcemapIgnoreList: /node_modules/ },

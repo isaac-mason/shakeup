@@ -37,9 +37,9 @@ describe('output naming — [name] and patterns', () => {
 
 describe('output naming — [hash] stability & size', () => {
     const files = {
-        '/a.ts': "import { s } from './shared';\nexport const av = s + 1;",
-        '/b.ts': "import { s } from './shared';\nexport const bv = s + 2;",
-        '/shared.ts': 'export const s = 40;',
+        '/a.ts': "import { s } from './shared';\nexport const av = s[0] + 1;",
+        '/b.ts': "import { s } from './shared';\nexport const bv = s[0] + 2;",
+        '/shared.ts': 'export const s = [40];',
     };
     const build = async (extra: Record<string, unknown> = {}) =>
         bundle({ input: { a: '/a.ts', b: '/b.ts' }, fs: createMemoryFs(files), external: [], output: extra });
@@ -78,7 +78,7 @@ describe('output naming — [hash] change-propagation across chunks (THE test)',
         '/b.ts': "import { s } from './shared';\nexport const bv = s;",
         '/shared.ts': bBody,
     });
-    const build = async (bBody: string, aBody = 'export const av = s + 1;') =>
+    const build = async (bBody: string, aBody = 'export const av = s[0] + 1;') =>
         bundle({
             input: { a: '/a.ts', b: '/b.ts' },
             fs: createMemoryFs(filesWith(bBody, aBody)),
@@ -90,29 +90,29 @@ describe('output naming — [hash] change-propagation across chunks (THE test)',
     const entryA = (r: Awaited<ReturnType<typeof build>>) => r.chunks.find((c) => c.name === 'a')!;
 
     it('changing the shared chunk source changes its hash AND updates importers', async () => {
-        const base = await build('export const s = 40;');
-        const changed = await build('export const s = 999;');
+        const base = await build('export const s = [40];');
+        const changed = await build('export const s = [999];');
 
         const sharedBase = sharedName(base);
         const sharedChanged = sharedName(changed);
         // The shared chunk's hash changed.
         expect(sharedChanged).not.toBe(sharedBase);
         // Chunk A embeds the shared chunk's path — its import specifier tracks the new name.
-        expect(entryA(base).code).toContain(`from './${sharedBase}'`);
-        expect(entryA(changed).code).toContain(`from './${sharedChanged}'`);
+        expect(entryA(base).code).toContain(`from "./${sharedBase}"`);
+        expect(entryA(changed).code).toContain(`from "./${sharedChanged}"`);
     });
 
     it('changing ONLY entry A does not change the shared chunk hash', async () => {
-        const base = await build('export const s = 40;', 'export const av = s + 1;');
-        const changedA = await build('export const s = 40;', 'export const av = s + 12345;');
+        const base = await build('export const s = [40];', 'export const av = s[0] + 1;');
+        const changedA = await build('export const s = [40];', 'export const av = s[0] + 12345;');
         // Shared chunk source is untouched → its hash is stable (entries are not hashed).
         expect(sharedName(changedA)).toBe(sharedName(base));
     });
 
     it("A's import path string equals B's final filename", async () => {
-        const r = await build('export const s = 40;');
+        const r = await build('export const s = [40];');
         const shared = sharedName(r);
-        expect(entryA(r).code).toContain(`from './${shared}'`);
+        expect(entryA(r).code).toContain(`from "./${shared}"`);
     });
 });
 
@@ -123,7 +123,7 @@ describe('output naming — hashCharacters', () => {
             fs: createMemoryFs({
                 '/a.ts': "import { s } from './shared';\nexport const av = s;",
                 '/b.ts': "import { s } from './shared';\nexport const bv = s;",
-                '/shared.ts': 'export const s = 1;',
+                '/shared.ts': 'export const s = [1];',
             }),
             external: [],
             output: { hashCharacters, chunkFileNames: '[name]-[hash].js' },
@@ -146,7 +146,7 @@ describe('output naming — sanitizeFileName', () => {
             input: { app: '/app.ts' },
             fs: createMemoryFs({
                 '/app.ts': "import { v } from './vendor';\nexport const y = v;",
-                '/vendor.ts': 'export const v = 1;',
+                '/vendor.ts': 'export const v = [1];',
             }),
             external: [],
             output: {
@@ -196,8 +196,8 @@ describe('output naming — makeUnique collision', () => {
                 '/b.ts': "import { x } from './x1';\nexport const bv = x;",
                 '/c.ts': "import { y } from './x2';\nexport const cv = y;",
                 '/d.ts': "import { y } from './x2';\nexport const dv = y;",
-                '/x1.ts': 'export const x = 1;',
-                '/x2.ts': 'export const y = 2;',
+                '/x1.ts': 'export const x = [1];',
+                '/x2.ts': 'export const y = [2];',
             }),
             external: [],
             output: { chunkFileNames: 'shared.js' }, // constant name, no [name]/[hash] → collision
@@ -246,7 +246,9 @@ describe('output naming — banner/footer/intro/outro', () => {
             input: '/main.ts',
             fs: createMemoryFs(files),
             external: [],
-            output: { banner: '/* B */', footer: '/* F */', intro: 'const I = 0;', outro: 'const O = 0;' },
+            // no chunk pass: the default one removes the unused intro and outro with the banner attached to them, as
+            // rolldown's `dce-only` does
+            output: { banner: '/* B */', footer: '/* F */', intro: 'const I = 0;', outro: 'const O = 0;', minify: false },
         });
         const lines = r.chunks[0].code.split('\n');
         expect(lines[0]).toBe('/* B */');

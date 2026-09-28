@@ -92,7 +92,16 @@ describe('import elision leaves externals and JavaScript alone', () => {
         // unreferenced one survives is decided later by `pruneUnusedExternals` via symbol liveness —
         // which needs the binding to still exist. Eliding collapsed `import { a } from 'ext'` to a
         // bare `import 'ext'`, which reads as side-effectful and could then never be pruned.
-        const { chunks: [{ code }] } = await buildWith({ '/main.ts': "import { a, b } from 'ext';\nexport const out = 1;" }, ['ext']);
+        // `minify: false`, because the chunk's own dead-code pass does drop the unused specifiers
+        // (to `import "ext"`, as rolldown's does); what is under test is that scan never does
+        const {
+            chunks: [{ code }],
+        } = await bundle({
+            entry: '/main.ts',
+            fs: createMemoryFs({ '/main.ts': "import { a, b } from 'ext';\nexport const out = 1;" }),
+            external: ['ext'],
+            output: { minify: false },
+        });
         expect(code).toMatch(/from\s*['"]ext['"]/);
     });
 

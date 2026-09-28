@@ -1,12 +1,5 @@
 import { lineColOf, type Node } from '../ast/index.ts';
-import {
-    classifyComment,
-    CommentKind,
-    commentAttachedTo,
-    commentCount,
-    commentEnd,
-    commentStart,
-} from '../parser/comments.ts';
+import { CommentKind, classifyComment, commentAttachedTo, commentCount, commentEnd, commentStart } from '../parser/comments.ts';
 import { addLine, addSegment, type Mappings, newMappings } from '../util/sourcemap.ts';
 
 /** Options controlling how the printer renders. Whitespace and syntactic-form
@@ -24,28 +17,22 @@ export type PrintOptions = {
  *  falls back to the node's own text. Never returns null — the caller defaults. */
 export type NameResolver = (identNode: Node) => string;
 
-/** Extra config for {@link createPrinter}. Providing `srcLines` turns on sourcemap
+/** A stretch of the positions a printed program uses, from `start` up to the next region's start,
+ *  belonging to one original source. */
+export type SourceRegion = {
+    start: number;
+    /** Line-start offsets of that source, relative to `start`. */
+    lines: Uint32Array;
+    /** Index of the source in the map's `sources`, -1 for text with no source to map to. */
+    sourceIdx: number;
+};
+
+/** Extra config for {@link createPrinter}. Providing `sources` turns on sourcemap
  *  building (segments emitted during the walk, oxc's `SourcemapBuilder` model). */
 export type PrinterConfig = {
     nameOf?: NameResolver;
-    /** Source line-start offsets (the `lines` table from `parse`). Enables the map. */
-    srcLines?: Uint32Array;
-    /** Index of this module's source in the chunk's `sources` array. */
-    sourceIdx?: number;
-    /** Bundle "link mode": drop import statements, unwrap `export <decl>` to `<decl>`, and
-     *  rewrite anonymous `export default` to `const <defaultName()> =`. Off ⇒ module-faithful. */
-    linkModule?: boolean;
-    /** Text to emit AT an included static import statement's position, keyed by that statement.
-     *  Used for `init_X();` — see `init-obligations.ts` and `cjs.md` §7.25d. */
-    initCalls?: Map<Node, string>;
-    /** Name for an anonymous `export default` in link mode. */
-    defaultName?: () => string;
-    /** Top-level statement liveness (tree-shaking). A statement whose id is absent is dropped.
-     *  null/absent ⇒ keep everything. */
-    live?: Set<number> | null;
-    /** Per-node text overrides (dynamic `import()` retargeting, asset URL rewrites). A node
-     *  present here is emitted as its mapped text verbatim, skipping normal emission. */
-    overrides?: Map<Node, string> | null;
+    /** The regions node positions fall in, in position order. Enables the map. */
+    sources?: SourceRegion[];
     /** Retained comment spans for THIS module, plus the source they index into. Both or neither:
      *  the spans are meaningless without the text. Absent ⇒ no comments are printed. */
     comments?: Int32Array;
@@ -56,7 +43,10 @@ export type PrinterConfig = {
 };
 
 /** Mirrors rolldown's `PrintCommentsOptions` (`rolldown_ecmascript/src/ecma_compiler.rs:159`). */
-export type CommentPrintOptions = { legal: boolean; jsdoc: boolean };
+/** `normal` is for a chunk's reprint only: oxc's codegen keeps ordinary comments unless it is removing whitespace
+ *  (`CommentOptions.normal`, which rolldown's `minify_chunks` sets to `!remove_whitespace`), and that is how a banner
+ *  written as a comment survives it. */
+export type CommentPrintOptions = { legal: boolean; jsdoc: boolean; normal?: boolean };
 
 /** Printer state. Mirrors the load-bearing fields of oxc's `Codegen`
  *  (`llm/libs/oxc/crates/oxc_codegen/src/lib.rs:87-148`), trimmed to what we emit. */
@@ -88,31 +78,20 @@ export type Printer = {
      *  BEFORE the outer `let` is assigned. Only the class's own binding is in scope there. Verified
      *  against node; a method body would have been fine either way. 0 ⇒ no override. */
     originalNameSym: number;
-    /** Bundle link mode (see {@link PrinterConfig.linkModule}). */
-    linkModule: boolean;
-    /** See {@link PrinterConfig.initCalls}. */
-    initCalls: Map<Node, string> | null;
-    defaultName: (() => string) | null;
-    live: Set<number> | null;
-    /** Which declarators to emit for ONE specific declaration node. Set by the `Program` loop and
-     *  consumed by `printVarDecl`, which must check `decl` identity: the filter is live for the whole
-     *  subtree being printed, so a NESTED declaration (a `for` init, a declaration inside a function
-     *  body) would otherwise be filtered against a set holding none of its declarators and emit a
-     *  bare `let;`. */
-    declFilter: { decl: Node; live: Set<number> } | null;
-    overrides: Map<Node, string> | null;
+    /** Buffer length right after a printed number literal that a following `.` would extend (`0 .x`).
+     *  oxc's `need_space_before_dot`. */
+    needSpaceBeforeDot: number;
     // Generated position + sourcemap (all null/0 when the map is off).
     map: Mappings | null;
     line: number; // 0-based generated line
     col: number; // 0-based generated column (UTF-16 units)
-    srcLines: Uint32Array | null;
+    sources: SourceRegion[] | null;
     /** Printable comments, keyed by the offset of the node they precede. Null ⇒ none to print. */
     comments: Map<number, string[]> | null;
     /** Sorted anchors of LEGAL comments, so one whose anchor was dropped can still be flushed. */
     legalKeys: number[];
     /** How far through {@link legalKeys} the orphan flush has got. */
     legalAt: number;
-    sourceIdx: number;
     /** A mandatory separator that has been requested but not yet committed — see {@link space}. */
     pendingSpace: boolean;
     /** Last character actually emitted, for deciding whether `pendingSpace` is really needed. */
@@ -130,6 +109,14 @@ function wouldMerge(a: string, b: string): boolean {
     if (a === '<' && b === '!') return true; // `<!--` is a line comment in scripts
     return false;
 }
+
+/** Whether comments of `kind` print under `options`. A source-mapping comment never does: the bundler
+ *  appends its own, and two would collide. Normal comments are dropped where rolldown drops them, which is
+ *  everywhere but a chunk reprint. */
+export const keepsComment = (options: CommentPrintOptions, kind: CommentKind): boolean =>
+    (kind === CommentKind.Legal && options.legal) ||
+    (kind === CommentKind.Jsdoc && options.jsdoc) ||
+    (kind === CommentKind.Normal && options.normal === true);
 
 /** Group the comments this printer may emit by the offset of the node they precede — oxc's
  *  `build_comments` (`codegen/src/comment.rs:71`), which keys a map by `attached_to` and looks it up
@@ -156,10 +143,7 @@ function buildCommentIndex(cfg: PrinterConfig): {
     const legalKeys: number[] = [];
     for (let i = 0; i < commentCount(c); i++) {
         const kind = classifyComment(src, c, i);
-        // A source-mapping comment is DROPPED, never re-emitted: the bundler appends its own, and two
-        // would collide. Normal comments are dropped because rolldown drops them.
-        const keep = (kind === CommentKind.Legal && want.legal) || (kind === CommentKind.Jsdoc && want.jsdoc);
-        if (!keep) continue;
+        if (!keepsComment(want, kind)) continue;
         const at = commentAttachedTo(c, i);
         const text = src.slice(commentStart(c, i), commentEnd(c, i));
         const bucket = map.get(at);
@@ -171,26 +155,17 @@ function buildCommentIndex(cfg: PrinterConfig): {
 }
 
 export function createPrinter(opts: PrintOptions, cfg: PrinterConfig = {}): Printer {
-    const wantMap = cfg.srcLines !== undefined;
+    const wantMap = cfg.sources !== undefined;
     return {
         opts,
         indent: 0,
         nameOf: cfg.nameOf ?? ((n) => n.name),
         originalNameSym: 0,
-        linkModule: cfg.linkModule ?? false,
-        initCalls: cfg.initCalls ?? null,
-        defaultName: cfg.defaultName ?? null,
-        live: cfg.live ?? null,
-        declFilter: null,
-        // An EMPTY map is normalised to null. `emitExpr` guards on `overrides !== null` and then does
-        // a `Map.get` PER EXPRESSION NODE; a module with no dynamic imports and no asset URLs supplies
-        // an empty map, which is not null, so every node paid a lookup that could never hit.
-        overrides: cfg.overrides !== undefined && cfg.overrides !== null && cfg.overrides.size > 0 ? cfg.overrides : null,
+        needSpaceBeforeDot: -1,
         map: wantMap ? newMappings() : null,
         line: 0,
         col: 0,
-        srcLines: cfg.srcLines ?? null,
-        sourceIdx: cfg.sourceIdx ?? 0,
+        sources: cfg.sources ?? null,
         ...buildCommentIndex(cfg),
         // Grown by doubling. A printer is created PER MODULE, so a large up-front reservation would be
         // wasted on the many small ones; a 380KB chunk costs ~7 doublings and ~760KB copied in total.
@@ -222,6 +197,22 @@ export function printLeadingComments(p: Printer, start: number): void {
     for (const text of here) writeComment(p, text);
 }
 
+/** Comments after the last statement, anchored to the end of input, and any legal comment still waiting: oxc's
+ *  `Program` codegen ends with `print_comments_at(self.span.end)` ("trailing statement comments"). */
+export function printTrailingComments(p: Printer, end: number): void {
+    if (p.comments === null) return;
+    if (!p.comments.has(end) && p.legalAt >= p.legalKeys.length) return;
+    softNewline(p);
+    printLeadingComments(p, end);
+    for (const at of p.legalKeys.slice(p.legalAt)) {
+        const orphan = p.comments.get(at);
+        if (orphan === undefined) continue;
+        p.comments.delete(at);
+        for (const text of orphan) writeComment(p, text);
+    }
+    p.legalAt = p.legalKeys.length;
+}
+
 /** A comment is emitted verbatim and always followed by a newline. Under `minify` that newline is the
  *  only whitespace kept — a `//` comment without one would swallow the code after it. */
 function writeComment(p: Printer, text: string): void {
@@ -236,7 +227,7 @@ export function finishPrinter(p: Printer): string {
 }
 
 /** The output plus its sourcemap segments, as a joinable {@link Part}-shaped value.
- *  `map` is undefined when the printer was created without `srcLines`. */
+ *  `map` is undefined when the printer was created without `sources`. */
 export function printerPart(p: Printer): { code: string; map?: Mappings } {
     const code = DECODER.decode(p.buf.subarray(0, p.len));
     return p.map === null ? { code } : { code, map: p.map };
@@ -305,11 +296,25 @@ function emit(p: Printer, s: string): void {
 /** Record a mapping from the current generated position to `node`'s source origin. No-op
  *  when the map is off, or when a segment already starts at this generated column. */
 export function mark(p: Printer, node: Node): void {
-    if (p.map === null || p.srcLines === null) return;
+    if (p.map === null || p.sources === null || node.start < 0) return;
     const segs = p.map.lines[p.map.lines.length - 1];
     if (segs.length > 0 && segs[segs.length - 1][0] === p.col) return;
-    const { line, column } = lineColOf(p.srcLines, node.start);
-    addSegment(p.map, p.col, p.sourceIdx, line - 1, column);
+    const region = regionOf(p.sources, node.start);
+    if (region.sourceIdx < 0) return;
+    const { line, column } = lineColOf(region.lines, node.start - region.start);
+    addSegment(p.map, p.col, region.sourceIdx, line - 1, column);
+}
+
+/** The last region starting at or before `position`. */
+function regionOf(sources: SourceRegion[], position: number): SourceRegion {
+    let low = 0;
+    let high = sources.length - 1;
+    while (low < high) {
+        const middle = (low + high + 1) >> 1;
+        if (sources[middle].start <= position) low = middle;
+        else high = middle - 1;
+    }
+    return sources[low];
 }
 
 /** Append a raw token verbatim. */
@@ -341,6 +346,13 @@ export function softNewline(p: Printer): void {
  */
 export function space(p: Printer): void {
     p.pendingSpace = true;
+}
+
+/** oxc's `print_soft_space` after a keyword, followed by its `print_space_before_identifier`: always a space
+ *  in readable output (`return -1`), and under minify only where the tokens would merge (`return-1`, `return x`). */
+export function keywordSpace(p: Printer): void {
+    softSpace(p);
+    space(p);
 }
 
 /** Statement terminator. */

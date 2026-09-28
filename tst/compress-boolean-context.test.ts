@@ -110,10 +110,11 @@ describe('boolean-context (compress)', () => {
 
     // ---- `const b = !!x` is NOT a boolean context: `b` must hold the BOOLEAN, so keep `!!` -----
     it('does NOT simplify `const b = !!x` (b must stay a boolean, not the raw value)', async () => {
+        // `b` is returned too: with only `typeof b` read, the dead-code pass folds it to "boolean" outright
         const src = [
-            'function typeOf(x) { const b = !!x; return typeof b; }',
-            'export const t = typeOf(3);', // typeof true  === "boolean"
-            'export const f = typeOf(0);', // typeof false === "boolean"
+            'function typeOf(x) { const b = !!x; return [typeof b, b]; }',
+            'export const t = typeOf(3)[0];', // typeof true  === "boolean"
+            'export const f = typeOf(0)[0];', // typeof false === "boolean"
         ].join('\n');
         const { compressed, q } = await parity(src, ['t', 'f']);
         expect(q.t).toBe('boolean');

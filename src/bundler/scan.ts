@@ -4,6 +4,9 @@ import { analyze, createSemantic, retireSymbol, type Semantic, symbolOf } from '
 import { isJSXNode, N, type Node, type Program, walk } from '../ast/index.ts';
 import { parse } from '../parser/index.ts';
 import { runCompress } from '../passes/compress/index.ts';
+import { eliminateDeadCode } from '../passes/dce/compressor.ts';
+import { rolldownDceOptions } from '../passes/dce/options.ts';
+import type { SourceType } from '../passes/dce/state.ts';
 import { compileDefines, makeDefine } from '../passes/define.ts';
 import { makeJsxLower } from '../passes/lower-jsx.ts';
 import { resolveEnumConsts, sawUnloweredTs, tsLower } from '../passes/lower-ts.ts';
@@ -205,6 +208,12 @@ function mergeOptions(
     if (src.moduleType !== undefined) dst.moduleType = src.moduleType;
 }
 
+/** The goal oxc's dead-code pass analyses a module under, rolldown's `pure_esm_js_oxc_source_type`:
+ *  CommonJS for `.cjs`/`.cts`, a module for everything else, an unknown format included. */
+export function dceSourceType(format: ModuleDefFormat): SourceType {
+    return format === 'cjs' || format === 'cts' ? 'commonjs' : 'module';
+}
+
 /** Resolve the final module-level side-effect flag: first-set of the merged chain, else `true`.
  *
  *  The chain is plugin hook → `package.json#sideEffects` (filled by the base resolver in
@@ -213,6 +222,13 @@ function mergeOptions(
  *  final tier — `DeterminedSideEffects::Analyzed(..)` — computes from `stmt_infos`. */
 function resolveModuleSideEffects(pending: PendingOptions, fromOption: ModuleSideEffects | null): ModuleSideEffects {
     return pending.moduleSideEffects ?? fromOption ?? true;
+}
+
+/** Whether a hook, the option or the manifest set the flag, rather than the default. rolldown's
+ *  `DeterminedSideEffects::UserDefined` against `Analyzed`: a declared `true` has side effects even
+ *  when every statement is pure. */
+function sideEffectsWereDeclared(pending: PendingOptions, fromOption: ModuleSideEffects | null): boolean {
+    return (pending.moduleSideEffects ?? fromOption) !== null;
 }
 
 /**
@@ -1434,6 +1450,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
         let topLevelThis: Node[] = [];
         let noSideEffects: ReadonlySet<number> = EMPTY_NSE;
         let sideEffects: ModuleSideEffects;
+        let sideEffectsDeclared: boolean;
         let metaVal: CustomPluginOptions;
         let moduleTypeVal: ModuleType;
         let defFormat: ModuleDefFormat = 'unknown';
@@ -1450,6 +1467,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             hasJSX = signalHit.hasJSX;
             hasImportSyntax = signalHit.hasImportSyntax;
             sideEffects = signalHit.sideEffects;
+            sideEffectsDeclared = signalHit.sideEffectsDeclared;
             metaVal = signalHit.meta;
             moduleTypeVal = signalHit.moduleType;
             // The annotated-symbol set is derived from the AST, so it must be restored with it —
@@ -1485,7 +1503,9 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             // Merge transform overrides (transform > load > resolveId precedence).
             const pending = pendingFor(id);
             mergeOptions(pending, transformed);
-            sideEffects = resolveModuleSideEffects(pending, optSideEffects?.(id, false) ?? null);
+            const optionSideEffects = optSideEffects?.(id, false) ?? null;
+            sideEffects = resolveModuleSideEffects(pending, optionSideEffects);
+            sideEffectsDeclared = sideEffectsWereDeclared(pending, optionSideEffects);
             metaVal = pending.meta;
             moduleTypeVal = pending.moduleType ?? moduleTypeOf(id, moduleTypes);
             // Declared module goal (cjs.md §7.1b): a per-build RESOLVE output. Needed BEFORE the
@@ -1764,7 +1784,10 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 // NO REBUILD after the optimize tier either — same reason. This and the one above
                 // were the last two per-module rebuilds outside the initial `analyze`.
                 void expanded;
-                if (compress !== false) {
+                if (compress === 'dce') {
+                    // rolldown's per-module dead-code pass (`pre_process_ecma_ast.rs` step 5)
+                    eliminateDeadCode(program, semantic, rolldownDceOptions(), dceSourceType(defFormat), noSideEffects);
+                } else if (compress !== false) {
                     const refreshed = runCompress(program, semantic, compress);
                     if (refreshed !== null) semantic = refreshed;
                 }
@@ -1797,6 +1820,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
             topLevelThis,
             jsxRuntime: null,
             sideEffects,
+            sideEffectsDeclared,
             meta: metaVal,
             moduleType: moduleTypeVal,
             isEntry,
@@ -1869,6 +1893,7 @@ export async function buildGraph(options: GraphOptions, pipeline?: Pipeline): Pr
                 exportSig,
                 source,
                 sideEffects,
+                sideEffectsDeclared,
                 meta: metaVal,
                 moduleType: moduleTypeVal,
                 defFormat,

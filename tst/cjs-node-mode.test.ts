@@ -32,7 +32,8 @@ describe('isNodeMode is decided per importer', () => {
             '/main.mjs',
         );
         expect(value).toEqual([{ __esModule: true, default: 'REAL', named: 'N' }, 'N']);
-        expect(code).toMatch(/__toESM\(require_d\(\), 1\)/);
+        // the wrapper's only call is substituted into `__toESM(…)` by the chunk's dead-code pass, as in rolldown
+        expect(code).toMatch(/\}\)\(\), 1\);/);
     });
 
     it('a plain .js importer keeps honouring `__esModule`', async () => {
@@ -42,7 +43,7 @@ describe('isNodeMode is decided per importer', () => {
             '/main.js',
         );
         expect(value).toEqual(['REAL', 'N']);
-        expect(code).toMatch(/__toESM\(require_d\(\)\)/);
+        expect(code).toMatch(/\}\)\(\)\);/);
     });
 
     it('a module imported BOTH ways materializes both objects', async () => {
@@ -58,7 +59,7 @@ describe('isNodeMode is decided per importer', () => {
         );
         expect(value).toEqual([{ __esModule: true, default: 'REAL', named: 'N' }, 'REAL']);
         expect(code).toMatch(/__toESM\(require_d\(\), 1\)/);
-        expect(code).toMatch(/__toESM\(require_d\(\)\);/);
+        expect(code).toMatch(/__toESM\(require_d\(\)\)/);
     });
 
     it('a CommonJS module without `__esModule` is unaffected by the mode', async () => {

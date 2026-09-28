@@ -111,7 +111,7 @@ describe('a dynamically imported chunk is never dropped for being empty', () => 
         expect(entry, 'the entry chunk exists').toBeDefined();
         expect(entry?.code, 'no unsubstituted hash placeholder').not.toContain('!~{');
         // The specifier names a chunk that was actually emitted.
-        const spec = /import\('\.\/([^']+)'\)/.exec(entry?.code ?? '')?.[1];
+        const spec = /import\("\.\/([^"]+)"\)/.exec(entry?.code ?? '')?.[1];
         expect(spec, 'the import() names a chunk').toBeDefined();
         expect(result.chunks.map((c) => c.fileName)).toContain(spec);
     });

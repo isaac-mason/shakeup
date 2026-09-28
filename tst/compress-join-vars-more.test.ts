@@ -65,7 +65,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         expect(min.order).toEqual(plain.order);
         // The two exprs fold into the return argument as one comma sequence (a `return` arg needs no
         // extra parens — `return a, b, x;` already parses as `return (a, b, x);`).
-        expect(code).toMatch(/return tag\('e-1'\), tag\('e-2'\), tag\('ret'\)/);
+        expect(code).toMatch(/return tag\("e-1"\), tag\("e-2"\), tag\("ret"\)/);
     });
 
     // A single preceding expression statement also fuses (run length 1 + return).
@@ -83,7 +83,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         expect(min.result).toBe('ret');
         expect(min.order).toEqual(['only', 'ret']);
         expect(min.order).toEqual(plain.order);
-        expect(code).toMatch(/return tag\('only'\), tag\('ret'\)/);
+        expect(code).toMatch(/return tag\("only"\), tag\("ret"\)/);
     });
 
     // FUSION #2 — expression statements immediately before a `throw <arg>` fold into the throw arg.
@@ -104,7 +104,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         expect(min.order).toEqual(['t-1', 't-2', 'err']);
         expect(min.order).toEqual(plain.order);
         // The two exprs fold into the throw argument as one comma sequence (`throw` needs no parens).
-        expect(code).toMatch(/throw tag\('t-1'\), tag\('t-2'\), tag\('err'\)/);
+        expect(code).toMatch(/throw tag\("t-1"\), tag\("t-2"\), tag\("err"\)/);
     });
 
     // FUSION #3 — an expression statement immediately before an `if` folds into the if TEST. Both the
@@ -134,7 +134,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         // The `tag('pre')` expr folds into the if-test as `(tag('pre'), cond)`. (minimize-conditions
         // may then rewrite the whole `if` into a ternary, but the fused test survives as the ternary's
         // condition — either way the fused comma sequence `(tag('pre'), cond)` appears verbatim.)
-        expect(code).toMatch(/\(tag\('pre'\), cond\)/);
+        expect(code).toMatch(/\(tag\("pre"\), cond\)/);
     });
 
     // COMPOSITION — several expr statements before an if fold as one flat comma sequence into the test
@@ -161,8 +161,8 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         // Flat, not nested: the two exprs and the test collapse into one comma list `tag('p-1'),
         // tag('p-2'), cond` — never a nested `(tag('p-1'), tag('p-2')), cond`. (Downstream passes may
         // fold the bodyless if into a ternary, but the flat fused sequence remains verbatim.)
-        expect(code).toMatch(/tag\('p-1'\), tag\('p-2'\), cond/);
-        expect(code).not.toMatch(/\(tag\('p-1'\), tag\('p-2'\)\), cond/);
+        expect(code).toMatch(/tag\("p-1"\), tag\("p-2"\), cond/);
+        expect(code).not.toMatch(/\(tag\("p-1"\), tag\("p-2"\)\), cond/);
     });
 
     // ADVERSARIAL — a bare `return;` (no argument) is NOT a fusion target in v1: we do not rewrite
@@ -183,7 +183,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         expect(min.order).toEqual(['a', 'b']);
         expect(min.order).toEqual(plain.order);
         // The exprs still comma-fold, but there is no `return (…)` fusion into a bare return.
-        expect(code).toMatch(/tag\('a'\), tag\('b'\)/);
+        expect(code).toMatch(/tag\("a"\), tag\("b"\)/);
         expect(code).not.toMatch(/return \(/);
     });
 
@@ -207,7 +207,7 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         // The directive is not swallowed into the return sequence.
         expect(code).not.toMatch(/return.*use strict/);
         // The real expr still fuses into the return.
-        expect(code).toMatch(/return tag\('x'\), tag\('ret'\)/);
+        expect(code).toMatch(/return tag\("x"\), tag\("ret"\)/);
     });
 
     // ADVERSARIAL — a declaration between an expr and the return breaks the fusion run: the `let`
@@ -228,6 +228,6 @@ describe('statement fusion (compress) — expr → return / throw / if-test', ()
         expect(min.order).toEqual(['before', 'decl']);
         expect(min.order).toEqual(plain.order);
         // `tag('before')` is separated from the return by the `let`, so it is not folded into `mid`.
-        expect(code).not.toMatch(/return \(tag\('before'\)/);
+        expect(code).not.toMatch(/return \(tag\("before"\)/);
     });
 });
