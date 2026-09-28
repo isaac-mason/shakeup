@@ -59,12 +59,31 @@ export type Environment = {
     /** an upstream edit re-transformed `id`: propagate HMR within THIS env. Assumes
      *  the shared dev server has already invalidated `id`'s transform cache. */
     applyEdit(id: string): Promise<HmrUpdate>;
+    /** stop holding `spec` as an entry. If nothing else imports it, it leaves the graph with every
+     *  module only it kept alive, each disposed and pruned as an edit's orphans are, so no later edit
+     *  can reach it. Resolves to the ids pruned.
+     *
+     *  Vite has no counterpart: it prunes only when a re-transformed importer drops an import, and an
+     *  entry has no importer. This is `pruneOrphans` entered from the root.
+     *
+     *  Waits for an in-flight `import` of the same entry, and takes turns with `applyEdit`: an edit
+     *  mid-flight has already chosen its boundaries, and pruning one under it would read as a full
+     *  reload. So a dispose callback must not await a release of its own environment. */
+    release(spec: string): Promise<string[]>;
     node(id: string): EnvNode | undefined;
 };
 
 export function createEnvironment(options: EnvironmentOptions): Environment {
     const graph = new Map<string, EnvNode>();
-    const roots = new Set<string>(); // explicitly-imported entry modules (never pruned)
+    const roots = new Set<string>(); // explicitly-imported entry modules (never pruned until released)
+    const importing = new Map<string, Promise<unknown>>(); // entry id → its in-flight import
+    // applyEdit and release take turns: each waits for the one before it to settle.
+    let turn: Promise<unknown> = Promise.resolve();
+    function exclusive<T>(work: () => Promise<T>): Promise<T> {
+        const run = turn.then(work);
+        turn = run.catch(() => {});
+        return run;
+    }
 
     // Wrap the shared fetchModule to record this env's graph as it loads modules.
     const fetchModule = async (id: string): Promise<{ code: string; map?: FetchResult['map'] }> => {
@@ -150,10 +169,12 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
         return true;
     }
 
-    async function applyEdit(id: string): Promise<HmrUpdate> {
-        const result = await propagateAndApply(id);
-        if (result.type === 'full-reload') options.onFullReload?.(id);
-        return result;
+    function applyEdit(id: string): Promise<HmrUpdate> {
+        return exclusive(async () => {
+            const result = await propagateAndApply(id);
+            if (result.type === 'full-reload') options.onFullReload?.(id);
+            return result;
+        });
     }
 
     async function propagateAndApply(id: string): Promise<HmrUpdate> {
@@ -202,7 +223,7 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
      *  importer (`updateModuleInfo`'s `noLongerImported`): a pruned module is never re-transformed, so its own deps keep
      *  it as an importer and stay loaded. Here an orphan's deps lose it as an importer too, so a dep only it
      *  imported is pruned in the same batch. */
-    async function pruneOrphans(): Promise<void> {
+    async function pruneOrphans(): Promise<string[]> {
         const orphans: string[] = [];
         let changed = true;
         while (changed) {
@@ -217,30 +238,53 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
             }
         }
         if (orphans.length > 0) await runner.prune(orphans);
+        return orphans;
+    }
+
+    /** Resolve an entry spec through the SAME resolver deps use — the entry is otherwise the one
+     *  import that bypasses resolution. A bare npm specifier ('pkg/sub') thus resolves to its real
+     *  id; a spec the resolver can't place (or externalises) falls back to the spec itself, so a
+     *  host id-scheme the resolver doesn't understand (e.g. a project-relative 'src/app.ts') still
+     *  loads as it did before.
+     *
+     *  A plugin that externalizes to a REWRITTEN target (a bare dep resolved to a served URL the
+     *  realm native-imports) is answered the way `linkFrom` answers a dep: through the evaluator.
+     *  It is not a module of this graph, so it is no root either. Only an externalization that
+     *  kept the spec verbatim (the resolver could not place it) takes the fetch-by-spec fallback. */
+    async function resolveEntry(spec: string): Promise<{ id: string } | { external: string }> {
+        const resolved = await options.resolveId(spec, null, { isEntry: true, kind: 'entry' });
+        if (typeof resolved !== 'string' && resolved.external !== spec) return { external: resolved.external };
+        return { id: typeof resolved === 'string' ? resolved : spec };
     }
 
     return {
         name: options.name,
         runner,
         import: async (spec) => {
-            // Resolve the entry spec through the SAME resolver deps use — the entry is
-            // otherwise the one import that bypasses resolution. A bare npm specifier
-            // ('pkg/sub') thus resolves to its real id; a spec the resolver can't place
-            // (or externalises) falls back to a direct fetch by the spec itself, so a
-            // host id-scheme the resolver doesn't understand (e.g. a project-relative
-            // 'src/app.ts') still loads as it did before.
-            const resolved = await options.resolveId(spec, null, { isEntry: true, kind: 'entry' });
-            // A plugin that externalizes to a REWRITTEN target (a bare dep resolved to a served URL
-            // the realm native-imports) is answered the way `linkFrom` answers a dep: through the
-            // evaluator. It is not a module of this graph, so it is no root either. Only an
-            // externalization that kept the spec verbatim (the resolver could not place it) takes
-            // the fetch-by-spec fallback below.
-            if (typeof resolved !== 'string' && resolved.external !== spec) return runner.importExternal(resolved.external);
-            const id = typeof resolved === 'string' ? resolved : spec;
-            roots.add(id); // an explicitly-imported module is a root (never orphaned)
-            return runner.importResolved(id);
+            const entry = await resolveEntry(spec);
+            if ('external' in entry) return runner.importExternal(entry.external);
+            roots.add(entry.id); // an explicitly-imported module is a root (never orphaned until released)
+            const loading = runner.importResolved(entry.id);
+            importing.set(entry.id, loading);
+            const settled = () => {
+                if (importing.get(entry.id) === loading) importing.delete(entry.id);
+            };
+            loading.then(settled, settled);
+            return loading;
         },
         applyEdit,
+        release: async (spec) => {
+            const entry = await resolveEntry(spec);
+            if ('external' in entry) return [];
+            return exclusive(async () => {
+                // an import that is still evaluating is still filling the graph under this root.
+                for (let loading = importing.get(entry.id); loading !== undefined; loading = importing.get(entry.id)) {
+                    await loading.catch(() => {});
+                }
+                if (!roots.delete(entry.id)) return [];
+                return pruneOrphans();
+            });
+        },
         node: (id) => graph.get(id),
     };
 }
