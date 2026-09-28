@@ -96,13 +96,26 @@ type ModuleRecord = {
      *  SERVER-side to decide propagation (a partially-accepting module is a boundary only for
      *  importers whose every binding is accepted), which shakeup does not implement yet. */
     acceptExports: { names: string[]; cb: (mod: unknown) => void }[];
-    disposeCallbacks: ((data: Record<string, unknown>) => void)[];
+    /** this evaluation's dispose/prune callbacks, listeners and `hot.data`. */
+    hot: HotState;
+};
+
+type HotCallback = (data: Record<string, unknown>) => void | Promise<void>;
+
+/**
+ * A module path's HMR state, kept per PATH the way vite's client keeps it (`HMRClient`'s `dataMap`, `disposeMap`,
+ * `pruneMap` and listener maps in `shared/hmr.ts`), not on the evaluation that registered it. So what a body registered
+ * before it threw stays reachable, and a module whose first evaluation failed is still disposed and pruned when it
+ * leaves the graph.
+ */
+type HotState = {
+    /** import.meta.hot.data: persists across every evaluation of the path. */
+    data: Record<string, unknown>;
+    disposeCallbacks: HotCallback[];
     /** prune(cb): fired when the module is removed from the graph (orphaned). */
-    pruneCallbacks: ((data: Record<string, unknown>) => void)[];
-    /** hot.on(event, cb) listeners; cleared on re-eval (fresh record). */
+    pruneCallbacks: HotCallback[];
+    /** hot.on(event, cb) listeners. */
     eventHandlers: Map<string, Set<(data: unknown) => void>>;
-    /** import.meta.hot.data — persists across hot updates. */
-    hotData: Record<string, unknown>;
 };
 
 /** The `__shakeup` context object injected into every module body. A custom
@@ -151,8 +164,9 @@ export type ModuleRunner = {
     applyHmr(boundary: string, acceptedPath: string): Promise<boolean>;
     /** drop a module's cached instance (next import re-evaluates it). */
     invalidate(id: string): void;
-    /** remove an orphaned module: run its prune + dispose callbacks, then drop it. */
-    prune(id: string): void;
+    /** remove orphaned modules as vite's client prunes paths: every one's dispose callbacks, then every one's prune
+     *  callbacks, each awaited, then drop them. */
+    prune(ids: readonly string[]): Promise<void>;
     /** deliver an inbound custom HMR event to every module's `hot.on(event)` listeners
      *  (the host calls this on a server → realm push). */
     emit(event: string, data?: unknown): void;
@@ -204,6 +218,7 @@ export const defaultEvaluator: ModuleEvaluator = {
 
 export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     const modules = new Map<string, ModuleRecord>();
+    const hotStates = new Map<string, HotState>();
     const evaluating = new Set<string>(); // ids currently on the evaluation stack
     // Cumulative fetch-wait: time spent awaiting fetchModule (transport RTT + server transform). The
     // rest of an import's wall is module-body eval, so `importWall − fetchMs ≈ eval`.
@@ -224,6 +239,30 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             onHotError(err, { id, phase });
         }
     }
+    /** dispose and prune callbacks may be async, and vite awaits them: a rejection is reported like a throw. */
+    async function settle(id: string, phase: 'dispose' | 'prune', callbacks: HotCallback[], data: Record<string, unknown>) {
+        await Promise.all(
+            callbacks.map(async (cb) => {
+                try {
+                    await cb(data);
+                } catch (err) {
+                    onHotError(err, { id, phase });
+                }
+            }),
+        );
+    }
+
+    /** a new evaluation's hot state: its own callbacks and listeners, the path's `data`. */
+    function beginHot(id: string): HotState {
+        const hot: HotState = {
+            data: hotStates.get(id)?.data ?? {},
+            disposeCallbacks: [],
+            pruneCallbacks: [],
+            eventHandlers: new Map(),
+        };
+        hotStates.set(id, hot);
+        return hot;
+    }
 
     let prepared = false;
     const ensurePrepared = (): void => {
@@ -233,7 +272,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     };
 
     const makeHot = (rec: ModuleRecord): HotContext => ({
-        data: rec.hotData,
+        data: rec.hot.data,
         accept(depsOrCb?: string | readonly string[] | ((mod: unknown) => void), cb?: (mods: unknown[]) => void) {
             if (depsOrCb === undefined || typeof depsOrCb === 'function') {
                 // self-accept: accept() / accept(cb)
@@ -249,25 +288,25 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             rec.acceptExports.push({ names: [...names], cb: cb ?? (() => {}) });
         },
         dispose(cb) {
-            rec.disposeCallbacks.push(cb);
+            rec.hot.disposeCallbacks.push(cb);
         },
         invalidate() {
             if (options.onInvalidate !== undefined) options.onInvalidate(rec.id);
             else invalidate(rec.id);
         },
         prune(cb) {
-            rec.pruneCallbacks.push(cb);
+            rec.hot.pruneCallbacks.push(cb);
         },
         on(event, cb) {
-            let set = rec.eventHandlers.get(event);
+            let set = rec.hot.eventHandlers.get(event);
             if (set === undefined) {
                 set = new Set();
-                rec.eventHandlers.set(event, set);
+                rec.hot.eventHandlers.set(event, set);
             }
             set.add(cb as (data: unknown) => void);
         },
         off(event, cb) {
-            rec.eventHandlers.get(event)?.delete(cb as (data: unknown) => void);
+            rec.hot.eventHandlers.get(event)?.delete(cb as (data: unknown) => void);
         },
         send(event, data) {
             options.onHotSend?.(event, data);
@@ -324,10 +363,7 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             acceptCallbacks: [],
             depAccepts: [],
             acceptExports: [],
-            disposeCallbacks: [],
-            pruneCallbacks: [],
-            eventHandlers: new Map(),
-            hotData: {},
+            hot: beginHot(id),
         };
         modules.set(id, rec);
         evaluating.add(id);
@@ -343,7 +379,8 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             await evaluator.runModule(await makeContext(rec), code, map);
         } catch (err) {
             // Don't cache a half-evaluated module — a retry (or fixed edit) must
-            // re-evaluate from scratch, not return the broken partial exports.
+            // re-evaluate from scratch, not return the broken partial exports. Its hot state
+            // stays: what it registered before the throw is still disposed and pruned.
             modules.delete(id);
             throw err;
         } finally {
@@ -362,13 +399,20 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
         modules.delete(id);
     }
 
-    /** Remove an orphaned module: run its prune + dispose callbacks, drop it. */
-    function prune(id: string): void {
-        const rec = modules.get(id);
-        if (rec === undefined) return;
-        for (const cb of rec.pruneCallbacks) fire(id, 'prune', () => cb(rec.hotData));
-        for (const cb of rec.disposeCallbacks) fire(id, 'dispose', () => cb(rec.hotData));
-        modules.delete(id);
+    /** Remove orphaned modules the way vite's client runs `prunePaths`: all their dispose callbacks, then all their
+     *  prune callbacks, then drop them. A path is pruned by its hot state, so one whose instance never finished
+     *  evaluating (or was invalidated) is pruned all the same. */
+    async function prune(ids: readonly string[]): Promise<void> {
+        const pruned = ids.flatMap((id) => {
+            const hot = hotStates.get(id);
+            return hot === undefined ? [] : [{ id, hot }];
+        });
+        await Promise.all(pruned.map(({ id, hot }) => settle(id, 'dispose', hot.disposeCallbacks, hot.data)));
+        await Promise.all(pruned.map(({ id, hot }) => settle(id, 'prune', hot.pruneCallbacks, hot.data)));
+        for (const id of ids) {
+            modules.delete(id);
+            hotStates.delete(id);
+        }
     }
 
     /** Re-evaluate a module fresh (new exports object, hot.data preserved). Disposes
@@ -377,7 +421,13 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
      *  rather than a broken partial. */
     async function reeval(id: string): Promise<Namespace> {
         const old = modules.get(id);
-        if (old !== undefined) for (const cb of old.disposeCallbacks) fire(id, 'dispose', () => cb(old.hotData));
+        const oldHot = hotStates.get(id);
+        // awaited before the new body runs, as vite's client awaits the disposer before importing the update.
+        if (oldHot !== undefined) await settle(id, 'dispose', oldHot.disposeCallbacks, oldHot.data);
+        const fetched = await options.fetchModule(id);
+        const code = typeof fetched === 'string' ? fetched : fetched.code;
+        const map = typeof fetched === 'string' ? undefined : fetched.map;
+        ensurePrepared();
         const fresh: ModuleRecord = {
             id,
             exports: createNamespace(),
@@ -385,21 +435,16 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
             acceptCallbacks: [],
             depAccepts: [],
             acceptExports: [],
-            disposeCallbacks: [],
-            pruneCallbacks: [],
-            eventHandlers: new Map(),
-            hotData: old?.hotData ?? {},
+            hot: beginHot(id),
         };
-        const fetched = await options.fetchModule(id);
-        const code = typeof fetched === 'string' ? fetched : fetched.code;
-        const map = typeof fetched === 'string' ? undefined : fetched.map;
-        ensurePrepared();
         modules.set(id, fresh); // register before eval so self-refs resolve
         try {
             await evaluator.runModule(await makeContext(fresh), code, map);
         } catch (err) {
-            if (old !== undefined) modules.set(id, old);
-            else modules.delete(id);
+            if (old !== undefined) {
+                modules.set(id, old);
+                hotStates.set(id, old.hot);
+            } else modules.delete(id);
             throw err;
         }
         return fresh.exports;
@@ -454,8 +499,8 @@ export function createModuleRunner(options: ModuleRunnerOptions): ModuleRunner {
     const applyUpdate = (id: string): Promise<boolean> => applyHmr(id, id);
 
     function emit(event: string, data?: unknown): void {
-        for (const rec of modules.values()) {
-            const set = rec.eventHandlers.get(event);
+        for (const hot of hotStates.values()) {
+            const set = hot.eventHandlers.get(event);
             if (set !== undefined) for (const cb of set) cb(data);
         }
     }

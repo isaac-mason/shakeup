@@ -288,8 +288,167 @@ import.meta.hot.dispose(() => { import.meta.env.log.push('orphan:dispose'); });`
         // drop the import: nothing reaches orphan.ts any more.
         p.files['/app.ts'] = selfAccepting('app', 'export const z = 0;');
         await p.change('/app.ts');
-        expect(p.take()).toEqual(['app:eval', 'app:accept', 'orphan:prune', 'orphan:dispose']);
+        // vite's order (`HMRClient.prunePaths`): the disposers, then the prune callbacks.
+        expect(p.take()).toEqual(['app:eval', 'app:accept', 'orphan:dispose', 'orphan:prune']);
         expect(p.env.node('/orphan.ts')).toBeUndefined();
+    });
+
+    it('awaits an async dispose before the new body evaluates', async () => {
+        const p = probe({
+            '/s.ts': `import.meta.env.log.push('s:eval');
+import.meta.hot.dispose(async () => { await null; await null; import.meta.env.log.push('s:dispose:done'); });
+import.meta.hot.accept(() => {});`,
+        });
+        await p.env.import('/s.ts');
+        p.take();
+
+        p.files['/s.ts'] = `${p.files['/s.ts']}\nexport const marker = 1;`;
+        await p.change('/s.ts');
+        expect(p.take()).toEqual(['s:dispose:done', 's:eval']);
+    });
+});
+
+/** a module that logs its evaluation, dispose and prune, so a transcript shows which were pruned and in what order. */
+const prunable = (tag: string, body = ''): string => `import.meta.env.log.push('${tag}:eval');
+${body}
+import.meta.hot.dispose(() => { import.meta.env.log.push('${tag}:dispose'); });
+import.meta.hot.prune(() => { import.meta.env.log.push('${tag}:prune'); });`;
+
+describe('hmr — prune', () => {
+    it('prunes what only the orphan imported, disposing the whole batch before pruning any of it', async () => {
+        const p = probe({
+            '/helper.ts': prunable('helper', 'export const h = 1;'),
+            '/orphan.ts': `import { h } from './helper';\n${prunable('orphan', 'export const v = h;')}`,
+            '/app.ts': `import { v } from './orphan';\n${selfAccepting('app', 'export const z = v;')}`,
+        });
+        await p.env.import('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = selfAccepting('app', 'export const z = 0;');
+        await p.change('/app.ts');
+        // vite stops at orphan.ts, the edited importer's direct dep; shakeup follows the cascade to helper.ts.
+        expect(p.take()).toEqual(['app:eval', 'app:accept', 'orphan:dispose', 'helper:dispose', 'orphan:prune', 'helper:prune']);
+        expect(p.env.node('/helper.ts')).toBeUndefined();
+    });
+
+    it('keeps a dep something else still imports', async () => {
+        const p = probe({
+            '/shared.ts': prunable('shared', 'export const s = 1;'),
+            '/orphan.ts': `import { s } from './shared';\n${prunable('orphan', 'export const v = s;')}`,
+            '/app.ts': `import { v } from './orphan';\nimport { s } from './shared';\n${selfAccepting('app', 'export const z = v + s;')}`,
+        });
+        await p.env.import('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = `import { s } from './shared';\n${selfAccepting('app', 'export const z = s;')}`;
+        await p.change('/app.ts');
+        expect(p.take()).toEqual(['app:eval', 'app:accept', 'orphan:dispose', 'orphan:prune']);
+        expect(p.env.node('/shared.ts')).toBeDefined();
+    });
+
+    it('prunes a module whose only evaluation threw, with what it registered before the throw', async () => {
+        const p = probe({
+            '/broken.ts': `${prunable('broken')}\nthrow new Error('broken module');`,
+            '/app.ts': selfAccepting('app', 'export const z = 0;'),
+        });
+        await p.env.import('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = `import './broken';\n${selfAccepting('app', 'export const z = 1;')}`;
+        await expect(p.change('/app.ts')).rejects.toThrow('broken module');
+        expect(p.take()).toEqual(['broken:eval']);
+
+        // the import goes again: broken.ts never finished evaluating, and is still disposed and pruned.
+        p.files['/app.ts'] = selfAccepting('app', 'export const z = 2;');
+        await p.change('/app.ts');
+        expect(p.take()).toEqual(['app:eval', 'app:accept', 'broken:dispose', 'broken:prune']);
+        expect(p.env.node('/broken.ts')).toBeUndefined();
+    });
+
+    it('awaits every async dispose before any prune callback runs', async () => {
+        const p = probe({
+            '/a.ts': `import.meta.hot.dispose(async () => {
+    import.meta.env.log.push('a:dispose:start');
+    await null;
+    await null;
+    import.meta.env.log.push('a:dispose:done');
+});
+import.meta.hot.prune(() => { import.meta.env.log.push('a:prune'); });`,
+            '/b.ts': prunable('b'),
+            '/app.ts': `import './a';\nimport './b';\n${selfAccepting('app', '')}`,
+        });
+        await p.env.import('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = selfAccepting('app', 'export const z = 0;');
+        await p.change('/app.ts');
+        expect(p.take()).toEqual([
+            'app:eval',
+            'app:accept',
+            'a:dispose:start',
+            'b:dispose',
+            'a:dispose:done',
+            'a:prune',
+            'b:prune',
+        ]);
+    });
+
+    it("hands the prune callback the module's hot.data", async () => {
+        const p = probe({
+            '/orphan.ts': `import.meta.hot.data.handle = 'kept';
+import.meta.hot.prune((data) => { import.meta.env.log.push('orphan:prune:' + data.handle); });`,
+            '/app.ts': `import './orphan';\n${selfAccepting('app', '')}`,
+        });
+        await p.env.import('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = selfAccepting('app', 'export const z = 0;');
+        await p.change('/app.ts');
+        expect(p.take()).toContain('orphan:prune:kept');
+    });
+
+    it('reports a throwing or rejecting callback and still runs the rest', async () => {
+        const errors: string[] = [];
+        const log: string[] = [];
+        const files: Record<string, string> = {
+            '/a.ts': `import.meta.hot.dispose(() => { throw new Error('bad dispose'); });
+import.meta.hot.prune(async () => { throw new Error('bad prune'); });`,
+            '/b.ts': prunable('b'),
+            '/app.ts': `import './a';\nimport './b';\nimport.meta.hot.accept(() => {});`,
+        };
+        const server = createDevServer({ fs: { read: (id) => files[id] ?? null, exists: (id) => id in files } });
+        const env = createEnvironment({
+            name: 'client',
+            fetchModule: server.fetchModule,
+            resolveId: server.resolveId,
+            createImportMeta: (id) => ({ url: id }),
+            env: { log },
+            onHotError: (err, ctx) => errors.push(`${ctx.phase}:${ctx.id}:${(err as Error).message}`),
+        });
+        server.register(env);
+        await env.import('/app.ts');
+
+        files['/app.ts'] = 'import.meta.hot.accept(() => {});';
+        await server.handleChange('/app.ts');
+        expect(errors).toEqual(['dispose:/a.ts:bad dispose', 'prune:/a.ts:bad prune']);
+        expect(log).toEqual(['b:eval', 'b:dispose', 'b:prune']);
+    });
+
+    it('re-evaluates a pruned module from scratch when it is imported again', async () => {
+        const p = probe({
+            '/orphan.ts': `import.meta.env.log.push('orphan:eval:' + (import.meta.hot.data.runs ?? 0));
+import.meta.hot.data.runs = (import.meta.hot.data.runs ?? 0) + 1;`,
+            '/app.ts': `import './orphan';\n${selfAccepting('app', '')}`,
+        });
+        await p.env.import('/app.ts');
+        p.files['/app.ts'] = selfAccepting('app', 'export const z = 0;');
+        await p.change('/app.ts');
+        p.take();
+
+        p.files['/app.ts'] = `import './orphan';\n${selfAccepting('app', 'export const z = 1;')}`;
+        await p.change('/app.ts');
+        // a pruned module left the graph, hot.data with it: it comes back as a first evaluation.
+        expect(p.take()).toEqual(['orphan:eval:0', 'app:eval', 'app:accept']);
     });
 });
 

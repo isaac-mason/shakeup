@@ -191,13 +191,19 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
             // any hot.invalidate() during those callbacks → bubble those modules.
             for (const inv of pendingInvalidations) queue.push({ id: inv, bubble: true });
         }
-        pruneOrphans();
+        await pruneOrphans();
         return { type: 'update', boundaries: allBoundaries };
     }
 
     /** Prune modules no longer reachable (no static/dynamic importers, not a root)
-     *  after an edit rewired the graph — fires their prune + dispose callbacks. */
-    function pruneOrphans(): void {
+     *  after an edit rewired the graph, as one batch: their dispose callbacks, then their prune callbacks.
+     *
+     *  Unlike vite, this cascades. vite's server prunes only the edited importer's direct deps left without an
+     *  importer (`updateModuleInfo`'s `noLongerImported`): a pruned module is never re-transformed, so its own deps keep
+     *  it as an importer and stay loaded. Here an orphan's deps lose it as an importer too, so a dep only it
+     *  imported is pruned in the same batch. */
+    async function pruneOrphans(): Promise<void> {
+        const orphans: string[] = [];
         let changed = true;
         while (changed) {
             changed = false;
@@ -205,11 +211,12 @@ export function createEnvironment(options: EnvironmentOptions): Environment {
                 if (node.importers.size > 0 || node.dynamicImporters.size > 0 || roots.has(id)) continue;
                 for (const d of node.deps) graph.get(d)?.importers.delete(id);
                 for (const d of node.dynamicDeps) graph.get(d)?.dynamicImporters.delete(id);
-                runner.prune(id);
+                orphans.push(id);
                 graph.delete(id);
                 changed = true;
             }
         }
+        if (orphans.length > 0) await runner.prune(orphans);
     }
 
     return {
