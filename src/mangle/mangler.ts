@@ -5,7 +5,7 @@
 // each reference's scope (`refPairs`); the rest oxc reads off nodes (declaration scopes, direct `eval`, the
 // class table) comes from one walk of the program, `collectScopingFacts`.
 import { analyze, createSemantic, type Semantic, SYM, scopeOf } from '../analysis/semantic.ts';
-import { N, type Node, walkChildren } from '../ast/index.ts';
+import { descendChildren, N, type Node, walkChildren } from '../ast/index.ts';
 import { sortUnstableBy } from '../util/rust-sort-unstable.ts';
 import { base54 } from './base54.ts';
 import { collectNameSymbols, keepNamesAllFalse, type MangleOptionsKeepNames } from './keep-names.ts';
@@ -539,6 +539,8 @@ type FactsWalk = {
     nextDeclarationOrder: number;
     /** oxc `ClassTableBuilder::current_class_id`, -1 for none. */
     currentClassId: number;
+    /** The scope the node being visited sits in: oxc's `AstNode::scope_id`. */
+    scope: number;
 };
 
 function collectScopingFacts(semantic: Semantic, program: Node): ScopingFacts {
@@ -563,7 +565,7 @@ function collectScopingFacts(semantic: Semantic, program: Node): ScopingFacts {
         shadowingDeclarationOrder: new Int32Array(symbolsLen).fill(-1),
         classes: { parentIds: [], elements: [] },
     };
-    visitFacts({ semantic, facts, nextDeclarationOrder: 0, currentClassId: -1 }, program, 0);
+    visitFacts({ semantic, facts, nextDeclarationOrder: 0, currentClassId: -1, scope: 0 }, program);
     return facts;
 }
 
@@ -574,8 +576,9 @@ function ownScopeOf(semantic: Semantic, node: Node): number {
     return scopeId !== 0 && semantic.scopes[scopeId]?.node === node ? scopeId : 0;
 }
 
-/** `scope` is the scope `node` sits in: oxc's `AstNode::scope_id`. */
-function visitFacts(walk: FactsWalk, node: Node, scope: number): void {
+/** Records `node`'s facts and descends, with `walk.scope` the scope `node` sits in; leaves `walk.scope` as found. */
+function visitFacts(walk: FactsWalk, node: Node): void {
+    const scope = walk.scope;
     const ownScope = ownScopeOf(walk.semantic, node);
     const inner = ownScope !== 0 ? ownScope : scope;
     switch (node.type) {
@@ -591,38 +594,51 @@ function visitFacts(walk: FactsWalk, node: Node, scope: number): void {
         }
         case N.FunctionDeclaration:
         case N.FunctionExpression:
-            // A function's declaration node is the function, which sits outside the scope it opens.
-            walkChildren(node, (child, field) => {
-                if (field === 'id') recordDeclaration(walk, child, scope);
-                else visitFacts(walk, child, inner);
-            });
+            visitFunctionFacts(walk, node, scope, inner);
             return;
         case N.ClassDeclaration:
-        case N.ClassExpression: {
-            // oxc declares the class when it enters the body, after the heritage.
-            let classId = -1;
-            const outerClassId = walk.currentClassId;
-            walkChildren(node, (child, field) => {
-                if (field === 'id') {
-                    recordDeclaration(walk, child, scope);
-                    return;
-                }
-                if (field === 'body' && classId === -1) classId = declareClassBody(walk, node);
-                visitFacts(walk, child, inner);
-            });
-            if (classId === -1) declareClassBody(walk, node);
-            walk.currentClassId = outerClassId;
+        case N.ClassExpression:
+            visitClassFacts(walk, node, scope, inner);
             return;
-        }
         case N.SwitchStatement:
             // The discriminant is evaluated outside the switch's scope.
-            visitFacts(walk, node.data.discriminant, scope);
-            for (const switchCase of node.data.cases) visitFacts(walk, switchCase, inner);
+            visitFacts(walk, node.data.discriminant);
+            walk.scope = inner;
+            for (const switchCase of node.data.cases) visitFacts(walk, switchCase);
+            walk.scope = scope;
             return;
     }
-    walkChildren(node, (child) => {
-        visitFacts(walk, child, inner);
+    walk.scope = inner;
+    descendChildren(walk, node, visitFacts);
+    walk.scope = scope;
+}
+
+/** A function's declaration node is the function, which sits outside the scope it opens. */
+function visitFunctionFacts(walk: FactsWalk, node: Node, scope: number, inner: number): void {
+    walk.scope = inner;
+    walkChildren(node, (child, field) => {
+        if (field === 'id') recordDeclaration(walk, child, scope);
+        else visitFacts(walk, child);
     });
+    walk.scope = scope;
+}
+
+/** oxc declares the class when it enters the body, after the heritage. */
+function visitClassFacts(walk: FactsWalk, node: Node, scope: number, inner: number): void {
+    let classId = -1;
+    const outerClassId = walk.currentClassId;
+    walk.scope = inner;
+    walkChildren(node, (child, field) => {
+        if (field === 'id') {
+            recordDeclaration(walk, child, scope);
+            return;
+        }
+        if (field === 'body' && classId === -1) classId = declareClassBody(walk, node);
+        visitFacts(walk, child);
+    });
+    walk.scope = scope;
+    if (classId === -1) declareClassBody(walk, node);
+    walk.currentClassId = outerClassId;
 }
 
 function recordDeclaration(walk: FactsWalk, ident: Node, scope: number): void {

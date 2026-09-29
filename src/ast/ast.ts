@@ -603,6 +603,35 @@ export const walkChildren = new Function('n', 'cb', buildChildrenBody()) as (
     cb: (child: Node, field: string, listIndex: number) => boolean | void,
 ) => void;
 
+function buildDescendBody(): string {
+    let s = 'const d=n.data;if(d===null)return;switch(n.type){';
+    for (const [name, fields] of Object.entries(CHILD_FIELDS) as [keyof typeof N, FieldSpec[]][]) {
+        if (fields.length === 0) continue;
+        s += `case ${N[name]}:{`;
+        for (const f of fields) {
+            const key = JSON.stringify(f.name);
+            s += f.list
+                ? `{const a=d[${key}];if(a!=null){for(let i=0;i<a.length;i++){const c=a[i];if(c!=null)V(state,c);}}}`
+                : `{const c=d[${key}];if(c!=null)V(state,c);}`;
+        }
+        s += 'return;}';
+    }
+    return `${s}}`;
+}
+
+/**
+ * Call `visit(state, child)` on each child of `n`, in schema order: the descent of a recursive visitor that
+ * threads its state through. `walkChildren(n, (c) => visit(state, c))` instead costs a closure per node, and
+ * the enclosing visitor a context for what it captures, on every call.
+ *
+ * `V` is passed in rather than closed over because a `new Function` body runs in global scope.
+ */
+export const descendChildren = new Function('state', 'n', 'V', buildDescendBody()) as <S>(
+    state: S,
+    n: Node,
+    visit: (state: S, child: Node) => void,
+) => void;
+
 // --- codegen'd read-only pre-order walk (schema-driven; replaces a ~730-line hand-switch) ---------
 // One generated `switch (n.type)` over CHILD_FIELDS, recursing via the self-ref `W` param — `new
 // Function` bodies run in global scope, so the recursion target is passed in rather than closed over.
