@@ -38,8 +38,10 @@ const TOKENS: ReadonlyArray<readonly [string, number]> = [
 /** Cheap pre-filter: does `source` mention any directive at all? Lets a caller skip the scan for the
  *  overwhelming majority of files. */
 export function anyInSource(source: string): boolean {
-    if (!source.includes('@')) return false;
-    for (const [tok] of TOKENS) if (source.includes(tok)) return true;
+    // Every token starts with `@`: one pass over the `@`s rather than a whole-source search per token,
+    // which JSDoc's `@param` in nearly every file would otherwise force.
+    for (let at = source.indexOf('@'); at !== -1; at = source.indexOf('@', at + 1))
+        for (const [tok] of TOKENS) if (source.startsWith(tok, at)) return true;
     return false;
 }
 
